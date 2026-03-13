@@ -23,6 +23,10 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work. Unknown types fall back to general-purpose with a note
 - **Fuzzy model selection** — specify models by name (`"haiku"`, `"sonnet"`) instead of full IDs, with automatic filtering to only available/configured models
 - **Context inheritance** — optionally fork the parent conversation into a sub-agent so it knows what's been discussed
+- **Persistent agent memory** — three scopes (project, local, user) with automatic read-only fallback for agents without write tools
+- **Git worktree isolation** — run agents in isolated repo copies; changes auto-committed to branches on completion
+- **Skill preloading** — inject named skill files from `.pi/skills/` into agent system prompts
+- **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
 
 ## Install
@@ -139,13 +143,17 @@ All fields are optional — sensible defaults for everything.
 | `display_name` | — | Display name for UI (e.g. widget, agent list) |
 | `tools` | all 7 | Comma-separated built-in tools: read, bash, edit, write, grep, find, ls. `none` for no tools |
 | `extensions` | `true` | Inherit MCP/extension tools. `false` to disable |
-| `skills` | `true` | Inherit skills from parent |
+| `skills` | `true` | Inherit skills from parent. Can be a comma-separated list of skill names to preload from `.pi/skills/` |
+| `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
+| `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
+| `isolation` | — | Set to `worktree` to run in an isolated git worktree |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh |
 | `max_turns` | 50 | Max agentic turns before graceful shutdown |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt. `append`: body appended to parent's prompt (agent acts as a "parent twin" with optional extra instructions) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
+| `isolation` | — | `worktree`: run in a temporary git worktree for full repo isolation |
 | `isolated` | `false` | No extension/MCP tools, only built-in |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
@@ -168,6 +176,7 @@ Launch a sub-agent.
 | `run_in_background` | boolean | no | Run without blocking |
 | `resume` | string | no | Agent ID to resume a previous session |
 | `isolated` | boolean | no | No extension/MCP tools |
+| `isolation` | `"worktree"` | no | Run in an isolated git worktree |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 | `join_mode` | `"async"` \| `"group"` | no | Override join strategy for background completion notifications (default: smart) |
 
@@ -264,6 +273,65 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:failed` | Agent errored, stopped, or aborted | same as completed + `error`, `status` |
 | `subagents:steered` | Steering message sent | `id`, `message` |
 
+## Persistent Agent Memory
+
+Agents can have persistent memory across sessions. Set `memory` in frontmatter to enable:
+
+```yaml
+---
+memory: project   # project | local | user
+---
+```
+
+| Scope | Location | Use case |
+|-------|----------|----------|
+| `project` | `.pi/agent-memory/<name>/` | Shared across the team (committed) |
+| `local` | `.pi/agent-memory-local/<name>/` | Machine-specific (gitignored) |
+| `user` | `~/.pi/agent-memory/<name>/` | Global personal memory |
+
+Memory uses a `MEMORY.md` index file and individual memory files with frontmatter. Agents with write tools get full read-write access. **Read-only agents** (no `write`/`edit` tools) automatically get read-only memory — they can consume memories written by other agents but cannot modify them. This prevents unintended tool escalation.
+
+The `disallowed_tools` field is respected when determining write capability — an agent with `tools: write` + `disallowed_tools: write` correctly gets read-only memory.
+
+## Worktree Isolation
+
+Set `isolation: worktree` to run an agent in a temporary git worktree:
+
+```
+Agent({ subagent_type: "refactor", prompt: "...", isolation: "worktree" })
+```
+
+The agent gets a full, isolated copy of the repository. On completion:
+- **No changes:** worktree is cleaned up automatically
+- **Changes made:** changes are committed to a new branch (`pi-agent-<id>`) and returned in the result
+
+If the worktree cannot be created (not a git repo, no commits), the agent falls back to the main working directory with a warning.
+
+## Skill Preloading
+
+Skills can be preloaded as named files from `.pi/skills/` or `~/.pi/skills/`:
+
+```yaml
+---
+skills: api-conventions, error-handling
+---
+```
+
+Skill files (`.md`, `.txt`, or extensionless) are read and injected into the agent's system prompt. Project-level skills take priority over global ones. Symlinked skill files are rejected for security.
+
+## Tool Denylist
+
+Block specific tools from an agent even if extensions provide them:
+
+```yaml
+---
+tools: read, bash, grep, write
+disallowed_tools: write, edit
+---
+```
+
+This is useful for creating agents that inherit extension tools but should not have write access.
+
 ## Architecture
 
 ```
@@ -276,6 +344,9 @@ src/
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
   group-join.ts       # Group join manager: batched completion notifications with timeout
   custom-agents.ts    # Load user-defined agents from .pi/agents/*.md
+  memory.ts           # Persistent agent memory (resolve, read, build prompt blocks)
+  skill-loader.ts     # Preload skill files from .pi/skills/
+  worktree.ts         # Git worktree isolation (create, cleanup, prune)
   prompts.ts          # Config-driven system prompt builder
   context.ts          # Parent conversation context for inherit_context
   env.ts              # Environment detection (git, platform)
