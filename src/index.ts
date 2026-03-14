@@ -23,6 +23,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { getAvailableTypes, getAllTypes, getDefaultAgentNames, getUserAgentNames, getAgentConfig, resolveType, registerAgents, BUILTIN_TOOL_NAMES } from "./agent-types.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { resolveModel, type ModelRegistry } from "./model-resolver.js";
+import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import {
   AgentWidget,
   SPINNER,
@@ -287,31 +288,16 @@ export default function (pi: ExtensionAPI) {
     currentCtx = ctx;
   });
 
-  // ping RPC: lets other extensions detect that subagents is loaded
-  const unsubPingRpc = pi.events.on("subagents:request:ping", (raw: unknown) => {
-    const { requestId } = raw as { requestId: string };
-    pi.events.emit("subagents:request:ping:reply", { requestId });
+  const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc } = registerRpcHandlers({
+    events: pi.events,
+    pi,
+    getCtx: () => currentCtx,
+    manager,
   });
 
   // Broadcast readiness so extensions loaded after us can observe it
+  // (after all handlers are registered so consumers can immediately use them)
   pi.events.emit("subagents:ready", {});
-
-  // spawn RPC: consumer sends config, we use our own pi/ctx
-  const unsubSpawnRpc = pi.events.on("subagents:request:spawn", async (raw: unknown) => {
-    const { requestId, type, prompt, options } = raw as {
-      requestId: string; type: string; prompt: string; options?: any;
-    };
-    if (!currentCtx) {
-      pi.events.emit("subagents:request:spawn:reply", { requestId, error: "No active session" });
-      return;
-    }
-    try {
-      const id = manager.spawn(pi, currentCtx, type, prompt, options ?? {});
-      pi.events.emit("subagents:request:spawn:reply", { requestId, id });
-    } catch (err: any) {
-      pi.events.emit("subagents:request:spawn:reply", { requestId, error: err.message });
-    }
-  });
 
   // Hold print mode open while background agents are still running.
   // The existing onComplete callbacks (sendIndividualNudge / groupJoin) handle
