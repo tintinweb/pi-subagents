@@ -10,7 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { existsSync, mkdirSync, unlinkSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
@@ -242,6 +242,13 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:completed", eventData);
     }
 
+    // Persist final record for cross-extension history reconstruction
+    pi.appendEntry("subagents:record", {
+      id: record.id, type: record.type, description: record.description,
+      status: record.status, result: record.result, error: record.error,
+      startedAt: record.startedAt, completedAt: record.completedAt,
+    });
+
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
       agentActivity.delete(record.id);
@@ -273,20 +280,54 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  // Expose manager via Symbol.for() global registry for cross-package access.
-  // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
-  const MANAGER_KEY = Symbol.for("pi-subagents:manager");
-  (globalThis as any)[MANAGER_KEY] = {
-    waitForAll: () => manager.waitForAll(),
-    hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
-    getRecord: (id: string) => manager.getRecord(id),
-  };
+  // --- Cross-extension RPC via pi.events ---
+  let currentCtx: ExtensionContext | undefined;
+
+  pi.on("session_start", async (_event, ctx) => {
+    currentCtx = ctx;
+  });
+
+  // ping RPC: lets other extensions detect that subagents is loaded
+  const unsubPingRpc = pi.events.on("subagents:request:ping", (raw: unknown) => {
+    const { requestId } = raw as { requestId: string };
+    pi.events.emit("subagents:request:ping:reply", { requestId });
+  });
+
+  // Broadcast readiness so extensions loaded after us can observe it
+  pi.events.emit("subagents:ready", {});
+
+  // spawn RPC: consumer sends config, we use our own pi/ctx
+  const unsubSpawnRpc = pi.events.on("subagents:request:spawn", async (raw: unknown) => {
+    const { requestId, type, prompt, options } = raw as {
+      requestId: string; type: string; prompt: string; options?: any;
+    };
+    if (!currentCtx) {
+      pi.events.emit("subagents:request:spawn:reply", { requestId, error: "No active session" });
+      return;
+    }
+    try {
+      const id = manager.spawn(pi, currentCtx, type, prompt, options ?? {});
+      pi.events.emit("subagents:request:spawn:reply", { requestId, id });
+    } catch (err: any) {
+      pi.events.emit("subagents:request:spawn:reply", { requestId, error: err.message });
+    }
+  });
+
+  // Hold print mode open while background agents are still running.
+  // The existing onComplete callbacks (sendIndividualNudge / groupJoin) handle
+  // delivering results via sendUserMessage — the hold condition just prevents
+  // the process from exiting before they finish.
+  pi.setHoldCondition(async () => {
+    if (!manager.hasRunning()) return [];
+    await manager.waitForAll();
+    return [];
+  });
 
   // Wait for all subagents on shutdown, then dispose the manager
   pi.on("session_shutdown", async () => {
-    delete (globalThis as any)[MANAGER_KEY];
+    unsubSpawnRpc();
+    unsubPingRpc();
+    currentCtx = undefined;
     await manager.waitForAll();
     manager.dispose();
   });
