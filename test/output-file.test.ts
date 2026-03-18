@@ -175,6 +175,8 @@ describe("output-file", () => {
       session.emit({ type: "turn_end" } as AgentSessionEvent);
 
       await waitForFileGrowth(outputPath, sizeBefore);
+      // Allow asyncFlush continuation to finish updating writtenCount
+      await new Promise(r => setTimeout(r, 10));
 
       // Cleanup should not re-write the already-flushed message
       cleanup();

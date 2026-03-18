@@ -210,8 +210,7 @@ export class AgentManager {
         if (record.status !== "stopped") {
           record.status = "error";
         }
-        const modelInfo = record.modelName ? ` [model: ${record.modelName}]` : "";
-        record.error = (err instanceof Error ? err.message : String(err)) + modelInfo;
+        record.error = (err instanceof Error ? err.message : String(err));
         record.completedAt ??= Date.now();
         this.captureStats(record);
         this.releaseRecordResources(record);
@@ -337,7 +336,9 @@ export class AgentManager {
         outputTokens: s.tokens?.output ?? 0,
         totalTokens: s.tokens?.total ?? 0,
       };
-    } catch {}
+    } catch (err) {
+      if (process.env.DEBUG) console.debug("[pi-subagents] captureStats failed:", err);
+    }
   }
 
   /** Flush output subscription and release held resources from a record. */
@@ -365,11 +366,17 @@ export class AgentManager {
   }
 
   private cleanup() {
-    const cutoff = Date.now() - this.cleanupRetentionMs;
-    for (const record of this.agents.values()) {
+    const tier1Cutoff = Date.now() - this.cleanupRetentionMs;
+    const tier2Cutoff = Date.now() - this.cleanupRetentionMs * 3;
+    for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
-      if ((record.completedAt ?? 0) >= cutoff) continue;
-      if (record.session) this.disposeRecordSession(record); // Tier 1 only
+      const completed = record.completedAt ?? 0;
+      if (completed >= tier1Cutoff) continue;
+      if (completed < tier2Cutoff) {
+        this.removeRecord(id, record); // Tier 2: full removal
+      } else if (record.session) {
+        this.disposeRecordSession(record); // Tier 1: session only
+      }
     }
   }
 

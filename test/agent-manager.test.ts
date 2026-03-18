@@ -396,20 +396,48 @@ describe("AgentManager — Two-tier cleanup", () => {
     });
     await manager.getRecord(id)!.promise;
 
-    // Manually set completedAt to the past so cleanup fires
+    // Manually set completedAt to 2 min ago — past tier1 (1 min) but before tier2 (3 min)
     const record = manager.getRecord(id)!;
-    record.completedAt = Date.now() - 15 * 60_000;
+    record.completedAt = Date.now() - 2 * 60_000;
 
     // Trigger cleanup via internal timer (call it indirectly via a new interval tick)
     // We access the private cleanup method through a workaround
     (manager as any).cleanup();
 
-    // Record should still be in the map
+    // Record should still be in the map (Tier 1: session disposed, record kept)
     expect(manager.getRecord(id)).toBeDefined();
     // Session should be disposed
     expect(record.session).toBeUndefined();
     expect(record.promise).toBeUndefined();
     expect(sess.dispose).toHaveBeenCalled();
+  });
+
+  it("Tier 2 cleanup fully removes record after 3x retention", async () => {
+    manager = new AgentManager(undefined, 4, undefined);
+    manager.setCleanupRetention(60_000); // min 1 min
+
+    const sess = { dispose: vi.fn(), getSessionStats: vi.fn(() => ({ tokens: { input: 10, output: 20, total: 30 } })) };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: sess as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    // Set completedAt to 5 min ago — well past tier2 cutoff (3 min)
+    const record = manager.getRecord(id)!;
+    record.completedAt = Date.now() - 5 * 60_000;
+
+    (manager as any).cleanup();
+
+    // Record should be fully removed from the map
+    expect(manager.getRecord(id)).toBeUndefined();
   });
 
   it("clearCompleted removes records that survived Tier 1", async () => {
@@ -581,7 +609,9 @@ describe("AgentManager — Error diagnostics", () => {
     const record = manager.getRecord(id)!;
     expect(record.status).toBe("error");
     expect(record.error).toContain("rate limit exceeded");
-    expect(record.error).toContain("[model: gemini-2.5-pro]");
+    expect(record.error).not.toContain("[model:");
+    // Model info is carried separately in record.modelName
+    expect(record.modelName).toBe("gemini-2.5-pro");
   });
 
   it("error record works without model name", async () => {

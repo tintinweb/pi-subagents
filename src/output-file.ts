@@ -8,7 +8,7 @@
  * high-throughput agent execution.
  */
 
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendFile } from "node:fs/promises";
@@ -89,9 +89,12 @@ export function streamToOutputFile(
       const { chunk, count } = serializeFrom(startIdx);
       if (chunk) {
         await appendFile(path, chunk, "utf-8");
-        writtenCount = startIdx + count; // advance only after successful write
+        // Guard: syncFlush may have run while we were awaiting
+        if (writtenCount === startIdx) {
+          writtenCount = startIdx + count;
+        }
       }
-    } catch { /* ignore write errors */ }
+    } catch { /* best-effort async write — failures expected on read-only FS */ }
     flushInProgress = false;
     if (pendingFlush) {
       pendingFlush = false;
@@ -106,7 +109,7 @@ export function streamToOutputFile(
       try {
         appendFileSync(path, chunk, "utf-8");
         writtenCount += count;
-      } catch { /* ignore write errors */ }
+      } catch { /* best-effort sync flush — failures expected on read-only FS */ }
     }
   };
 
@@ -128,7 +131,17 @@ export function parseOutputFileResult(filePath: string): string | undefined {
   if (!existsSync(filePath)) return undefined;
   let content: string;
   try {
-    content = readFileSync(filePath, "utf-8");
+    const MAX_TAIL = 256 * 1024;
+    const stat = statSync(filePath);
+    const fd = openSync(filePath, 'r');
+    try {
+      const start = Math.max(0, stat.size - MAX_TAIL);
+      const buf = Buffer.alloc(Math.min(stat.size, MAX_TAIL));
+      readSync(fd, buf, 0, buf.length, start);
+      content = buf.toString("utf-8");
+    } finally {
+      closeSync(fd);
+    }
   } catch {
     return undefined;
   }

@@ -443,8 +443,7 @@ export default function (pi: ExtensionAPI) {
     manager.clearCompleted();           // preserve existing behavior
   });
 
-  pi.on("session_switch", (_event: any, ctx?: any) => {
-    if (ctx) currentCtx = ctx;
+  pi.on("session_switch", () => {
     manager.clearCompleted();
   });
 
@@ -1070,7 +1069,12 @@ Guidelines:
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}`;
-        output += `\n\nTip: Check provider status or try a different model.`;
+        // Only show provider tip for likely API/model errors, not user-initiated stops or timeouts
+        const err = (record.error ?? "").toLowerCase();
+        const isProviderError = !err.includes("abort") && !err.includes("timeout") && !err.includes("timed out") && !err.includes("stopped");
+        if (isProviderError) {
+          output += `\n\nTip: Check provider status or try a different model.`;
+        }
       } else {
         output += record.result ?? "No output.";
       }
