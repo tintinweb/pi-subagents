@@ -479,6 +479,20 @@ Project prompt.`);
     expect(agent.source).toBe("project");
   });
 
+  it("extensions: all → true (inherit all)", () => {
+    writeAgent("extall", `---
+extensions: all
+skills: all
+---
+
+All via string.`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("extall")!;
+    expect(agent.extensions).toBe(true);
+    expect(agent.skills).toBe(true);
+  });
+
   it("handles tools: all as all built-in tools (ejected agent compat)", () => {
     writeAgent("ejected-gp", `---
 description: General-purpose agent for complex, multi-step tasks

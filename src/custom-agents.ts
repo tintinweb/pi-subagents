@@ -133,11 +133,12 @@ function parseMemory(val: unknown): MemoryScope | undefined {
 
 /**
  * Parse an inherit field (extensions, skills).
- * omitted/true → true (inherit all); false/"none"/empty → false; csv → listed names.
+ * omitted/true/"all" → true (inherit all); false/"none"/empty → false; csv → listed names.
  */
 function inheritField(val: unknown): true | string[] | false {
   if (val === undefined || val === null || val === true) return true;
   if (val === false || val === "none") return false;
+  if (typeof val === "string" && val.trim() === "all") return true;
   const items = csvList(val, []);
   return items.length > 0 ? items : false;
 }
