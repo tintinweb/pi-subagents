@@ -12,6 +12,9 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+/** 10 MB — generous limit for git output in large monorepos. */
+const MAX_BUFFER = 10 * 1024 * 1024;
+
 export interface WorktreeInfo {
   /** Absolute path to the worktree directory. */
   path: string;
@@ -51,6 +54,7 @@ export function createWorktree(cwd: string, agentId: string): WorktreeInfo | und
       cwd,
       stdio: "pipe",
       timeout: 30000,
+      maxBuffer: MAX_BUFFER,
     });
     return { path: worktreePath, branch };
   } catch {
@@ -79,6 +83,7 @@ export function cleanupWorktree(
       cwd: worktree.path,
       stdio: "pipe",
       timeout: 10000,
+      maxBuffer: MAX_BUFFER,
     }).toString().trim();
 
     if (!status) {
@@ -88,7 +93,7 @@ export function cleanupWorktree(
     }
 
     // Changes exist — stage, commit, and create a branch
-    execFileSync("git", ["add", "-A"], { cwd: worktree.path, stdio: "pipe", timeout: 10000 });
+    execFileSync("git", ["add", "-A"], { cwd: worktree.path, stdio: "pipe", timeout: 10000, maxBuffer: MAX_BUFFER });
     // Truncate description for commit message (no shell sanitization needed — execFileSync uses argv)
     const safeDesc = agentDescription.slice(0, 200);
     const commitMsg = `pi-agent: ${safeDesc}`;
@@ -96,6 +101,7 @@ export function cleanupWorktree(
       cwd: worktree.path,
       stdio: "pipe",
       timeout: 10000,
+      maxBuffer: MAX_BUFFER,
     });
 
     // Create a branch pointing to the worktree's HEAD.

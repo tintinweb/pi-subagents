@@ -33,12 +33,19 @@ export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurn
 export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = n != null ? Math.max(1, n) : undefined; }
 
 /** Additional turns allowed after the soft limit steer message. */
+/** Additional turns allowed after the soft limit steer message. */
 let graceTurns = 5;
 
 /** Get the grace turns value. */
 export function getGraceTurns(): number { return graceTurns; }
 /** Set the grace turns value (minimum 1). */
 export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
+
+/** Reset global mutable state to initial values. Called on extension reload/shutdown. */
+export function resetDefaults(): void {
+  defaultMaxTurns = undefined;
+  graceTurns = 5;
+}
 
 /**
  * Try to find the right model for an agent type.
@@ -331,6 +338,8 @@ export async function runAgent(
     unsubTurns();
     collector.unsubscribe();
     cleanupAbort();
+    // Dispose the resource loader to release any file watchers it may hold
+    (loader as any).dispose?.();
   }
 
   return { responseText: collector.getText(), session, aborted, steered: softLimitReached };

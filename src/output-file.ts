@@ -3,11 +3,15 @@
  *
  * Creates a per-agent output file that streams conversation turns as JSONL,
  * matching Claude Code's task output file format.
+ *
+ * Uses async writes with buffering to avoid blocking the event loop during
+ * high-throughput agent execution.
  */
 
 import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { appendFile } from "node:fs/promises";
 import type { AgentSession, AgentSessionEvent } from "@mariozechner/pi-coding-agent";
 
 /** Create the output file path, ensuring the directory exists.
@@ -37,7 +41,10 @@ export function writeInitialEntry(path: string, agentId: string, prompt: string,
 
 /**
  * Subscribe to session events and flush new messages to the output file on each turn_end.
- * Returns a cleanup function that does a final flush and unsubscribes.
+ * Returns a cleanup function that does a final synchronous flush and unsubscribes.
+ *
+ * Normal flushes are async (non-blocking). The final cleanup flush falls back to
+ * synchronous I/O to guarantee all data is written before the session is disposed.
  */
 export function streamToOutputFile(
   session: AgentSession,
@@ -46,9 +53,13 @@ export function streamToOutputFile(
   cwd: string,
 ): () => void {
   let writtenCount = 1; // initial user prompt already written
+  let flushInProgress = false;
+  let pendingFlush = false;
 
-  const flush = () => {
+  /** Serialize messages from writtenCount onward into a single JSONL string. */
+  const serializeNew = (): string => {
     const messages = session.messages;
+    let chunk = "";
     while (writtenCount < messages.length) {
       const msg = messages[writtenCount];
       const entry = {
@@ -59,19 +70,49 @@ export function streamToOutputFile(
         timestamp: new Date().toISOString(),
         cwd,
       };
-      try {
-        appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
-      } catch { /* ignore write errors */ }
+      chunk += JSON.stringify(entry) + "\n";
       writtenCount++;
+    }
+    return chunk;
+  };
+
+  /** Non-blocking flush — batches pending messages and writes asynchronously. */
+  const asyncFlush = async () => {
+    if (flushInProgress) {
+      pendingFlush = true;
+      return;
+    }
+    flushInProgress = true;
+    try {
+      const chunk = serializeNew();
+      if (chunk) {
+        await appendFile(path, chunk, "utf-8");
+      }
+    } catch { /* ignore write errors */ }
+    flushInProgress = false;
+    if (pendingFlush) {
+      pendingFlush = false;
+      asyncFlush();
+    }
+  };
+
+  /** Synchronous final flush — used at cleanup to guarantee all data is written. */
+  const syncFlush = () => {
+    const { appendFileSync } = require("node:fs") as typeof import("node:fs");
+    const chunk = serializeNew();
+    if (chunk) {
+      try {
+        appendFileSync(path, chunk, "utf-8");
+      } catch { /* ignore write errors */ }
     }
   };
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "turn_end") flush();
+    if (event.type === "turn_end") asyncFlush();
   });
 
   return () => {
-    flush();
+    syncFlush();
     unsubscribe();
   };
 }
