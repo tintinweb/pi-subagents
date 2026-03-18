@@ -8,7 +8,7 @@
  * high-throughput agent execution.
  */
 
-import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendFile } from "node:fs/promises";
@@ -118,4 +118,40 @@ export function streamToOutputFile(
     syncFlush();
     unsubscribe();
   };
+}
+
+/**
+ * Parse an output JSONL file and extract the last assistant message text.
+ * Returns undefined if the file doesn't exist or contains no assistant messages.
+ */
+export function parseOutputFileResult(filePath: string): string | undefined {
+  if (!existsSync(filePath)) return undefined;
+  let content: string;
+  try {
+    content = readFileSync(filePath, "utf-8");
+  } catch {
+    return undefined;
+  }
+  const lines = content.trim().split("\n");
+  let lastAssistantText: string | undefined;
+  for (const line of lines) {
+    let entry: any;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue; // skip malformed lines
+    }
+    if (entry.type !== "assistant") continue;
+    const msg = entry.message;
+    if (!msg) continue;
+    if (typeof msg.content === "string") {
+      lastAssistantText = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      const textParts = msg.content
+        .filter((c: any) => c.type === "text" && typeof c.text === "string")
+        .map((c: any) => c.text);
+      if (textParts.length > 0) lastAssistantText = textParts.join("");
+    }
+  }
+  return lastAssistantText;
 }

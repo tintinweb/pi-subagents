@@ -369,3 +369,234 @@ describe("AgentManager — waitForAll", () => {
     expect(agents.every(a => a.status === "completed")).toBe(true);
   });
 });
+
+describe("AgentManager — Two-tier cleanup", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("Tier 1 cleanup disposes session but keeps record in Map", async () => {
+    manager = new AgentManager(undefined, 4, undefined);
+    // Use very short retention so cleanup triggers immediately
+    manager.setCleanupRetention(60_000); // min 1 min
+
+    const sess = { dispose: vi.fn(), getSessionStats: vi.fn(() => ({ tokens: { input: 10, output: 20, total: 30 } })) };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: sess as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    // Manually set completedAt to the past so cleanup fires
+    const record = manager.getRecord(id)!;
+    record.completedAt = Date.now() - 15 * 60_000;
+
+    // Trigger cleanup via internal timer (call it indirectly via a new interval tick)
+    // We access the private cleanup method through a workaround
+    (manager as any).cleanup();
+
+    // Record should still be in the map
+    expect(manager.getRecord(id)).toBeDefined();
+    // Session should be disposed
+    expect(record.session).toBeUndefined();
+    expect(record.promise).toBeUndefined();
+    expect(sess.dispose).toHaveBeenCalled();
+  });
+
+  it("clearCompleted removes records that survived Tier 1", async () => {
+    manager = new AgentManager();
+    const sess = { dispose: vi.fn(), getSessionStats: vi.fn(() => ({ tokens: { input: 0, output: 0, total: 0 } })) };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: sess as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    // Tier 1: dispose session
+    const record = manager.getRecord(id)!;
+    record.completedAt = Date.now() - 15 * 60_000;
+    (manager as any).cleanup();
+    expect(manager.getRecord(id)).toBeDefined();
+    expect(record.session).toBeUndefined();
+
+    // Tier 2: full removal
+    manager.clearCompleted();
+    expect(manager.getRecord(id)).toBeUndefined();
+  });
+
+  it("Tier 1 captures stats before disposing session", async () => {
+    manager = new AgentManager();
+    const sess = {
+      dispose: vi.fn(),
+      getSessionStats: vi.fn(() => ({ tokens: { input: 100, output: 200, total: 300 } })),
+    };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: sess as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    const record = manager.getRecord(id)!;
+    // Stats should already be captured in .then handler
+    expect(record.stats).toEqual({ inputTokens: 100, outputTokens: 200, totalTokens: 300 });
+
+    // Tier 1 cleanup should not overwrite existing stats
+    record.completedAt = Date.now() - 15 * 60_000;
+    (manager as any).cleanup();
+    expect(record.stats).toEqual({ inputTokens: 100, outputTokens: 200, totalTokens: 300 });
+  });
+
+  it("Tier 1 is idempotent (double cleanup doesn't throw)", async () => {
+    manager = new AgentManager();
+    const sess = {
+      dispose: vi.fn(),
+      getSessionStats: vi.fn(() => ({ tokens: { input: 0, output: 0, total: 0 } })),
+    };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: sess as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    const record = manager.getRecord(id)!;
+    record.completedAt = Date.now() - 15 * 60_000;
+
+    // Double cleanup should not throw
+    expect(() => {
+      (manager as any).cleanup();
+      (manager as any).cleanup();
+    }).not.toThrow();
+  });
+
+  it("cleanup skips running/queued agents", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id1 = manager.spawn(mockPi, mockCtx, "general-purpose", "test1", {
+      description: "running",
+      isBackground: true,
+    });
+    const id2 = manager.spawn(mockPi, mockCtx, "general-purpose", "test2", {
+      description: "queued",
+      isBackground: true,
+    });
+
+    expect(manager.getRecord(id1)!.status).toBe("running");
+    expect(manager.getRecord(id2)!.status).toBe("queued");
+
+    (manager as any).cleanup();
+
+    expect(manager.getRecord(id1)).toBeDefined();
+    expect(manager.getRecord(id2)).toBeDefined();
+
+    manager.abortAll();
+  });
+
+  it("stats are captured in .catch handler for error agents", async () => {
+    manager = new AgentManager();
+    const sess = {
+      dispose: vi.fn(),
+      getSessionStats: vi.fn(() => ({ tokens: { input: 50, output: 60, total: 110 } })),
+    };
+    // Mock runAgent to create a session then reject
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated?.(sess);
+      throw new Error("model error");
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("error");
+    expect(record.stats).toEqual({ inputTokens: 50, outputTokens: 60, totalTokens: 110 });
+  });
+
+  it("modelName is threaded through spawn options", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      modelName: "gpt-5.4",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)!.modelName).toBe("gpt-5.4");
+  });
+});
+
+describe("AgentManager — Error diagnostics", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("error record includes model name when provided", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockRejectedValue(new Error("rate limit exceeded"));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      modelName: "gemini-2.5-pro",
+    });
+    await manager.getRecord(id)!.promise;
+
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("error");
+    expect(record.error).toContain("rate limit exceeded");
+    expect(record.error).toContain("[model: gemini-2.5-pro]");
+  });
+
+  it("error record works without model name", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockRejectedValue(new Error("connection failed"));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("error");
+    expect(record.error).toBe("connection failed");
+    expect(record.error).not.toContain("[model:");
+  });
+});

@@ -45,6 +45,8 @@ interface SpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
+  /** Human-readable model identifier for diagnostics. */
+  modelName?: string;
 }
 
 export class AgentManager {
@@ -53,6 +55,7 @@ export class AgentManager {
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private maxConcurrent: number;
+  private cleanupRetentionMs = 10 * 60_000;
 
   /** Queue of background agents waiting to start. */
   private queue: { id: string; args: SpawnArgs }[] = [];
@@ -76,6 +79,15 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  /** Update the cleanup retention period (how long completed records survive before session disposal). */
+  setCleanupRetention(ms: number) {
+    this.cleanupRetentionMs = Math.max(60_000, ms);
+  }
+
+  getCleanupRetention(): number {
+    return this.cleanupRetentionMs;
   }
 
   /**
@@ -118,6 +130,7 @@ export class AgentManager {
   private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
     record.status = "running";
     record.startedAt = Date.now();
+    if (options.modelName) record.modelName = options.modelName;
     if (options.isBackground) this.runningBackground++;
     this.onStart?.(record);
 
@@ -172,6 +185,7 @@ export class AgentManager {
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
+        this.captureStats(record);
         this.releaseRecordResources(record);
 
         // Clean up worktree if used
@@ -196,8 +210,10 @@ export class AgentManager {
         if (record.status !== "stopped") {
           record.status = "error";
         }
-        record.error = err instanceof Error ? err.message : String(err);
+        const modelInfo = record.modelName ? ` [model: ${record.modelName}]` : "";
+        record.error = (err instanceof Error ? err.message : String(err)) + modelInfo;
         record.completedAt ??= Date.now();
+        this.captureStats(record);
         this.releaseRecordResources(record);
 
         // Best-effort worktree cleanup on error
@@ -311,6 +327,19 @@ export class AgentManager {
     return true;
   }
 
+  /** Capture session token stats onto the record (idempotent). */
+  private captureStats(record: AgentRecord): void {
+    if (!record.session || record.stats) return;
+    try {
+      const s = record.session.getSessionStats();
+      record.stats = {
+        inputTokens: s.tokens?.input ?? 0,
+        outputTokens: s.tokens?.output ?? 0,
+        totalTokens: s.tokens?.total ?? 0,
+      };
+    } catch {}
+  }
+
   /** Flush output subscription and release held resources from a record. */
   private releaseRecordResources(record: AgentRecord): void {
     if (record.outputCleanup) {
@@ -320,20 +349,27 @@ export class AgentManager {
     record.abortController = undefined;
   }
 
-  /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
+  /** Tier 1 cleanup: dispose session resources but keep the record in the Map. */
+  private disposeRecordSession(record: AgentRecord): void {
+    this.captureStats(record);
     this.releaseRecordResources(record);
     record.session?.dispose?.();
     record.session = undefined;
+    record.promise = undefined;
+  }
+
+  /** Dispose a record's session and remove it from the map. */
+  private removeRecord(id: string, record: AgentRecord): void {
+    this.disposeRecordSession(record);
     this.agents.delete(id);
   }
 
   private cleanup() {
-    const cutoff = Date.now() - 10 * 60_000;
-    for (const [id, record] of this.agents) {
+    const cutoff = Date.now() - this.cleanupRetentionMs;
+    for (const record of this.agents.values()) {
       if (record.status === "running" || record.status === "queued") continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
-      this.removeRecord(id, record);
+      if (record.session) this.disposeRecordSession(record); // Tier 1 only
     }
   }
 

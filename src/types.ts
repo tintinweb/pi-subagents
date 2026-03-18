@@ -85,6 +85,10 @@ export interface AgentRecord {
   outputFile?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
+  /** Captured session stats before session disposal (survives Tier 1 cleanup). */
+  stats?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  /** Human-readable model identifier for diagnostics. */
+  modelName?: string;
 }
 
 /** Details attached to custom notification messages for visual rendering. */
@@ -100,6 +104,8 @@ export interface NotificationDetails {
   outputFile?: string;
   error?: string;
   resultPreview: string;
+  /** Human-readable model identifier for diagnostics. */
+  modelName?: string;
   /** Additional agents in a group notification. */
   others?: NotificationDetails[];
 }

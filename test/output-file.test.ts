@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   createOutputFilePath,
   writeInitialEntry,
   streamToOutputFile,
+  parseOutputFileResult,
 } from "../src/output-file.js";
 import type { AgentSession, AgentSessionEvent } from "@mariozechner/pi-coding-agent";
 
@@ -202,6 +203,86 @@ describe("output-file", () => {
       const lines = content.trim().split("\n");
       const entry = JSON.parse(lines[1]);
       expect(entry.type).toBe("toolResult");
+    });
+  });
+
+  describe("parseOutputFileResult", () => {
+    let tempDir: string;
+
+    beforeEach(() => {
+      tempDir = mkdtempSync(join(tmpdir(), "pi-parse-test-"));
+    });
+
+    afterEach(() => {
+      rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    it("extracts last assistant message from JSONL", () => {
+      const filePath = join(tempDir, "test.output");
+      const lines = [
+        JSON.stringify({ type: "user", message: { role: "user", content: "hello" } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "world" } }),
+      ].join("\n") + "\n";
+      writeFileSync(filePath, lines, "utf-8");
+
+      expect(parseOutputFileResult(filePath)).toBe("world");
+    });
+
+    it("returns undefined for non-existent file", () => {
+      expect(parseOutputFileResult(join(tempDir, "nope.output"))).toBeUndefined();
+    });
+
+    it("returns undefined for file with no assistant messages", () => {
+      const filePath = join(tempDir, "test.output");
+      const lines = [
+        JSON.stringify({ type: "user", message: { role: "user", content: "hello" } }),
+      ].join("\n") + "\n";
+      writeFileSync(filePath, lines, "utf-8");
+
+      expect(parseOutputFileResult(filePath)).toBeUndefined();
+    });
+
+    it("handles multiple assistant messages (returns last)", () => {
+      const filePath = join(tempDir, "test.output");
+      const lines = [
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "first" } }),
+        JSON.stringify({ type: "user", message: { role: "user", content: "more" } }),
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "second" } }),
+      ].join("\n") + "\n";
+      writeFileSync(filePath, lines, "utf-8");
+
+      expect(parseOutputFileResult(filePath)).toBe("second");
+    });
+
+    it("skips malformed JSONL lines", () => {
+      const filePath = join(tempDir, "test.output");
+      const lines = [
+        "not valid json",
+        JSON.stringify({ type: "assistant", message: { role: "assistant", content: "ok" } }),
+        "also broken {",
+      ].join("\n") + "\n";
+      writeFileSync(filePath, lines, "utf-8");
+
+      expect(parseOutputFileResult(filePath)).toBe("ok");
+    });
+
+    it("handles array-style message content", () => {
+      const filePath = join(tempDir, "test.output");
+      const lines = [
+        JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "hello " },
+              { type: "text", text: "world" },
+            ],
+          },
+        }),
+      ].join("\n") + "\n";
+      writeFileSync(filePath, lines, "utf-8");
+
+      expect(parseOutputFileResult(filePath)).toBe("hello world");
     });
   });
 });
