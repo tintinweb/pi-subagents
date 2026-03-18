@@ -220,7 +220,9 @@ export class AgentManager {
           try {
             const wtResult = cleanupWorktree(ctx.cwd, record.worktree, options.description);
             record.worktreeResult = wtResult;
-          } catch { /* ignore cleanup errors */ }
+          } catch (err) {
+            if (process.env.DEBUG) console.debug(`[pi-subagents] Worktree cleanup failed for ${id}:`, err);
+          }
         }
 
         if (options.isBackground) {

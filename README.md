@@ -154,9 +154,9 @@ All fields are optional — sensible defaults for everything.
 |-------|---------|-------------|
 | `description` | filename | Agent description shown in tool listings |
 | `display_name` | — | Display name for UI (e.g. widget, agent list) |
-| `tools` | all 7 | Comma-separated built-in tools: read, bash, edit, write, grep, find, ls. `none` for no tools |
-| `extensions` | `true` | Inherit MCP/extension tools. `false` to disable |
-| `skills` | `true` | Inherit skills from parent. Can be a comma-separated list of skill names to preload from `.pi/skills/` |
+| `tools` | all 7 | Comma-separated built-in tools: read, bash, edit, write, grep, find, ls. `all` for all tools, `none` for no tools |
+| `extensions` | `true` | Inherit MCP/extension tools. `true` or `all` to inherit all, `false` or `none` to disable, or comma-separated allowlist |
+| `skills` | `true` | Inherit skills from parent. `true` or `all` to inherit all, `false` or `none` to disable, or comma-separated list of skill names to preload from `.pi/skills/` |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
 | `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
 | `isolation` | — | Set to `worktree` to run in an isolated git worktree |
@@ -166,7 +166,6 @@ All fields are optional — sensible defaults for everything.
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt. `append`: body appended to parent's prompt (agent acts as a "parent twin" with optional extra instructions) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
-| `isolation` | — | `worktree`: run in a temporary git worktree for full repo isolation |
 | `isolated` | `false` | No extension/MCP tools, only built-in |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 

@@ -142,7 +142,8 @@ export function parseOutputFileResult(filePath: string): string | undefined {
     } finally {
       closeSync(fd);
     }
-  } catch {
+  } catch (err) {
+    if (process.env.DEBUG) console.debug(`[pi-subagents] Failed to read output file ${filePath}:`, err);
     return undefined;
   }
   const lines = content.trim().split("\n");

@@ -44,7 +44,8 @@ export function safeReadFile(filePath: string): string | undefined {
   if (isSymlink(filePath)) return undefined;
   try {
     return readFileSync(filePath, "utf-8");
-  } catch {
+  } catch (err) {
+    if (process.env.DEBUG) console.debug(`[pi-subagents] Failed to read memory file ${filePath}:`, err);
     return undefined;
   }
 }
