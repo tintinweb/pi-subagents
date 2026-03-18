@@ -1,19 +1,29 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+
+// Isolate from real global agents in ~/.pi/agent/agents/
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: () => globalHomeDir };
+});
+
+let globalHomeDir: string;
 
 describe("loadCustomAgents", () => {
   let tmpDir: string;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "pi-test-"));
+    globalHomeDir = mkdtempSync(join(tmpdir(), "pi-test-home-"));
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(globalHomeDir, { recursive: true, force: true });
   });
 
   function writeAgent(name: string, content: string) {
@@ -430,5 +440,20 @@ Bad isolation.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("bad-isolation")!.isolation).toBeUndefined();
+  });
+
+  it("handles tools: all as all built-in tools (ejected agent compat)", () => {
+    writeAgent("ejected-gp", `---
+description: General-purpose agent for complex, multi-step tasks
+tools: all
+prompt_mode: append
+---
+
+`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("ejected-gp")!;
+    // "all" should resolve to all built-in tools, not literally ["all"]
+    expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
   });
 });

@@ -101,10 +101,12 @@ function parseCsvField(val: unknown): string[] | undefined {
 
 /**
  * Parse a comma-separated list field with defaults.
- * omitted → defaults; "none"/empty → []; csv → listed items.
+ * omitted → defaults; "all" → defaults; "none"/empty → []; csv → listed items.
  */
 function csvList(val: unknown, defaults: string[]): string[] {
   if (val === undefined || val === null) return defaults;
+  const s = String(val).trim();
+  if (s === "all") return defaults;
   return parseCsvField(val) ?? [];
 }
 
