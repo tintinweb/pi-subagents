@@ -35,7 +35,8 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
   let files: string[];
   try {
     files = readdirSync(dir).filter(f => f.endsWith(".md"));
-  } catch {
+  } catch (err) {
+    if (process.env.DEBUG) console.debug(`[pi-subagents] Failed to read agents dir ${dir}:`, err);
     return;
   }
 
@@ -45,7 +46,8 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
     let content: string;
     try {
       content = readFileSync(join(dir, file), "utf-8");
-    } catch {
+    } catch (err) {
+      if (process.env.DEBUG) console.debug(`[pi-subagents] Failed to read agent file ${join(dir, file)}:`, err);
       continue;
     }
 
@@ -107,7 +109,9 @@ function csvList(val: unknown, defaults: string[]): string[] {
   if (val === undefined || val === null) return defaults;
   const s = String(val).trim();
   if (s === "all") return defaults;
-  return parseCsvField(val) ?? [];
+  if (!s || s === "none") return [];
+  const items = s.split(",").map(t => t.trim()).filter(Boolean);
+  return items.length > 0 ? items : [];
 }
 
 /**

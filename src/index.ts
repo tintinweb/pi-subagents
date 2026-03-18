@@ -1398,7 +1398,12 @@ Guidelines:
     const fmFields: string[] = [];
     fmFields.push(`description: ${cfg.description}`);
     if (cfg.displayName) fmFields.push(`display_name: ${cfg.displayName}`);
-    fmFields.push(`tools: ${cfg.builtinToolNames?.length ? cfg.builtinToolNames.join(", ") : BUILTIN_TOOL_NAMES.join(", ")}`);
+    const toolsValue = !cfg.builtinToolNames
+      ? BUILTIN_TOOL_NAMES.join(", ")
+      : cfg.builtinToolNames.length === 0
+        ? "none"
+        : cfg.builtinToolNames.join(", ");
+    fmFields.push(`tools: ${toolsValue}`);
     if (cfg.model) fmFields.push(`model: ${cfg.model}`);
     if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
     if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);

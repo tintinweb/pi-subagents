@@ -442,6 +442,43 @@ Bad isolation.`);
     expect(result.get("bad-isolation")!.isolation).toBeUndefined();
   });
 
+  it("loads agents from mocked global dir", () => {
+    const dir = join(globalHomeDir, ".pi", "agent", "agents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "global-agent.md"), `---
+description: Global Agent
+---
+
+Global.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("global-agent")!.description).toBe("Global Agent");
+    expect(result.get("global-agent")!.source).toBe("global");
+  });
+
+  it("project agents override global agents with same name", () => {
+    const globalDir = join(globalHomeDir, ".pi", "agent", "agents");
+    mkdirSync(globalDir, { recursive: true });
+    writeFileSync(join(globalDir, "shared.md"), `---
+description: Global version
+---
+
+Global prompt.`);
+
+    writeAgent("shared", `---
+description: Project version
+---
+
+Project prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    const agent = result.get("shared")!;
+    expect(agent.description).toBe("Project version");
+    expect(agent.source).toBe("project");
+  });
+
   it("handles tools: all as all built-in tools (ejected agent compat)", () => {
     writeAgent("ejected-gp", `---
 description: General-purpose agent for complex, multi-step tasks
