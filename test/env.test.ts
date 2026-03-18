@@ -1,10 +1,10 @@
-import { describe, it, expect } from "vitest";
 import { execSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { detectEnv } from "../src/env.js";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { describe, expect, it } from "vitest";
+import { detectEnv } from "../src/env.js";
 
 /** Minimal mock of pi.exec() that shells out via child_process. */
 function mockPi(): ExtensionAPI {
@@ -29,8 +29,22 @@ describe("detectEnv", () => {
   it("detects git repo in current project", async () => {
     const env = await detectEnv(mockPi(), process.cwd());
     expect(env.isGitRepo).toBe(true);
-    expect(env.branch).toBeTruthy();
     expect(env.platform).toBe(process.platform);
+  });
+
+  it("returns branch name when on a branch", async () => {
+    // Create a temp repo on a known branch to test branch detection
+    const tmpDir = mkdtempSync(join(tmpdir(), "pi-env-branch-"));
+    try {
+      execSync("git init && git config user.email test@test.com && git config user.name Test && git checkout -b test-branch && git commit --allow-empty -m init", {
+        cwd: tmpDir, stdio: "pipe",
+      });
+      const env = await detectEnv(mockPi(), tmpDir);
+      expect(env.isGitRepo).toBe(true);
+      expect(env.branch).toBe("test-branch");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
   });
 
   it("detects non-git directory", async () => {

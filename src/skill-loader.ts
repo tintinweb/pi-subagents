@@ -5,8 +5,8 @@
  * and returns their content for injection into the agent's system prompt.
  */
 
-import { join } from "node:path";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { isUnsafeName, safeReadFile } from "./memory.js";
 
 export interface PreloadedSkill {

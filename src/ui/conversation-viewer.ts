@@ -5,12 +5,12 @@
  * Subscribes to session events for real-time streaming updates.
  */
 
-import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component, type TUI } from "@mariozechner/pi-tui";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
-import type { Theme } from "./agent-widget.js";
-import { formatTokens, formatDuration, getDisplayName, getPromptModeLabel, describeActivity, type AgentActivity } from "./agent-widget.js";
-import type { AgentRecord } from "../types.js";
+import { type Component, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import { extractText } from "../context.js";
+import type { AgentRecord } from "../types.js";
+import type { Theme } from "./agent-widget.js";
+import { type AgentActivity, describeActivity, formatDuration, formatTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 
 /** Lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
 const CHROME_LINES = 6;

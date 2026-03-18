@@ -10,33 +10,33 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { registerRpcHandlers } from "./cross-extension-rpc.js";
-import { existsSync, mkdirSync, unlinkSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { steerAgent, getAgentConversation, getDefaultMaxTurns, setDefaultMaxTurns, getGraceTurns, setGraceTurns } from "./agent-runner.js";
-import { DEFAULT_AGENT_NAMES, type SubagentType, type ThinkingLevel, type AgentConfig, type JoinMode, type AgentRecord, type NotificationDetails } from "./types.js";
-import { GroupJoinManager } from "./group-join.js";
-import { getAvailableTypes, getAllTypes, getDefaultAgentNames, getUserAgentNames, getAgentConfig, resolveType, registerAgents, BUILTIN_TOOL_NAMES } from "./agent-types.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
+import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { resolveModel, type ModelRegistry } from "./model-resolver.js";
-import { createOutputFilePath, writeInitialEntry, streamToOutputFile } from "./output-file.js";
+import { GroupJoinManager } from "./group-join.js";
+import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ThinkingLevel } from "./types.js";
 import {
+  type AgentActivity,
+  type AgentDetails,
   AgentWidget,
-  SPINNER,
+  describeActivity,
+  formatDuration,
+  formatMs,
   formatTokens,
   formatTurns,
-  formatMs,
-  formatDuration,
   getDisplayName,
   getPromptModeLabel,
-  describeActivity,
-  type AgentDetails,
-  type AgentActivity,
+  SPINNER,
   type UICtx,
 } from "./ui/agent-widget.js";
 
@@ -1073,7 +1073,8 @@ Guidelines:
       }
       if (!record.session) {
         // Session not ready yet — queue the steer for delivery once initialized
-        (record.pendingSteers ??= []).push(params.message);
+        if (!record.pendingSteers) record.pendingSteers = [];
+        record.pendingSteers.push(params.message);
         pi.events.emit("subagents:steered", { id: record.id, message: params.message });
         return textResult(`Steering message queued for agent ${record.id}. It will be delivered once the session initializes.`);
       }

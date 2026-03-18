@@ -1,8 +1,8 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolveMemoryDir, ensureMemoryDir, readMemoryIndex, buildMemoryBlock, buildReadOnlyMemoryBlock, isUnsafeName, isSymlink, safeReadFile } from "../src/memory.js";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { buildMemoryBlock, buildReadOnlyMemoryBlock, ensureMemoryDir, isSymlink, isUnsafeName, readMemoryIndex, resolveMemoryDir, safeReadFile } from "../src/memory.js";
 
 describe("memory", () => {
   let tmpDir: string;

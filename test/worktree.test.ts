@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createWorktree, cleanupWorktree, pruneWorktrees } from "../src/worktree.js";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { cleanupWorktree, createWorktree, pruneWorktrees } from "../src/worktree.js";
 
 /**
  * Helper: create a temporary git repo with an initial commit.

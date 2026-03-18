@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { loadCustomAgents } from "../src/custom-agents.js";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 
 describe("loadCustomAgents", () => {
   let tmpDir: string;

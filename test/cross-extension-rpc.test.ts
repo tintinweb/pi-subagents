@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
-import { registerRpcHandlers, type EventBus, type SpawnCapable, type RpcDeps } from "../src/cross-extension-rpc.js";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { type EventBus, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
 
 /** Simple in-process event bus for testing. */
 function createEventBus(): EventBus {

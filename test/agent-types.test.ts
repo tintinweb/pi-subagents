@@ -1,17 +1,17 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
-  registerAgents,
+  BUILTIN_TOOL_NAMES,
   getAgentConfig,
   getAvailableTypes,
-  getUserAgentNames,
-  getDefaultAgentNames,
-  isValidType,
-  resolveType,
   getConfig,
-  getToolsForType,
+  getDefaultAgentNames,
   getMemoryTools,
   getReadOnlyMemoryTools,
-  BUILTIN_TOOL_NAMES,
+  getToolsForType,
+  getUserAgentNames,
+  isValidType,
+  registerAgents,
+  resolveType,
 } from "../src/agent-types.js";
 import type { AgentConfig } from "../src/types.js";
 

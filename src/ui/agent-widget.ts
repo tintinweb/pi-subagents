@@ -7,8 +7,8 @@
 
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
-import type { SubagentType } from "../types.js";
 import { getConfig } from "../agent-types.js";
+import type { SubagentType } from "../types.js";
 
 // ---- Constants ----
 

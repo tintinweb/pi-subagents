@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { resolveModel, type ModelRegistry } from "../src/model-resolver.js";
+import { describe, expect, it } from "vitest";
+import { type ModelRegistry, resolveModel } from "../src/model-resolver.js";
 
 // Mock model entries matching typical pi model registry shape
 const MODELS = [

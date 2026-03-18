@@ -2,8 +2,8 @@
  * types.ts — Type definitions for the subagent system.
  */
 
-import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
+import type { AgentSession } from "@mariozechner/pi-coding-agent";
 
 export type { ThinkingLevel };
 

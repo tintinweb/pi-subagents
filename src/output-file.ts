@@ -5,9 +5,9 @@
  * matching Claude Code's task output file format.
  */
 
+import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdirSync, chmodSync, appendFileSync, writeFileSync } from "node:fs";
 import type { AgentSession, AgentSessionEvent } from "@mariozechner/pi-coding-agent";
 
 /** Create the output file path, ensuring the directory exists.

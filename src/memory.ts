@@ -7,9 +7,9 @@
  *   - "local"   → .pi/agent-memory-local/{agent-name}/
  */
 
-import { existsSync, readFileSync, mkdirSync, lstatSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join, } from "node:path";
 import type { MemoryScope } from "./types.js";
 
 /** Maximum lines to read from MEMORY.md */

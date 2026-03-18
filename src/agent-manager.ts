@@ -7,12 +7,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ExtensionContext, ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { Model } from "@mariozechner/pi-ai";
-import type { AgentSession } from "@mariozechner/pi-coding-agent";
-import { runAgent, resumeAgent, type ToolActivity } from "./agent-runner.js";
-import type { SubagentType, AgentRecord, ThinkingLevel, IsolationMode } from "./types.js";
-import { createWorktree, cleanupWorktree, pruneWorktrees, type WorktreeInfo } from "./worktree.js";
+import type { AgentSession, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import type { AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;

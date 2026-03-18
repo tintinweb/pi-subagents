@@ -2,22 +2,22 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
+import type { Model } from "@mariozechner/pi-ai";
+import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import {
-  createAgentSession,
-  DefaultResourceLoader,
-  SessionManager,
-  SettingsManager,
   type AgentSession,
   type AgentSessionEvent,
+  createAgentSession,
+  DefaultResourceLoader,
   type ExtensionAPI,
+  SessionManager,
+  SettingsManager,
 } from "@mariozechner/pi-coding-agent";
-import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { Model } from "@mariozechner/pi-ai";
-import { getToolsForType, getConfig, getAgentConfig, getMemoryTools, getReadOnlyMemoryTools } from "./agent-types.js";
-import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { getAgentConfig, getConfig, getMemoryTools, getReadOnlyMemoryTools, getToolsForType } from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 
