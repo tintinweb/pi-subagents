@@ -56,12 +56,13 @@ export function streamToOutputFile(
   let flushInProgress = false;
   let pendingFlush = false;
 
-  /** Serialize messages from writtenCount onward into a single JSONL string. */
-  const serializeNew = (): string => {
+  /** Serialize messages from startIdx onward into a JSONL string and count. */
+  const serializeFrom = (startIdx: number): { chunk: string; count: number } => {
     const messages = session.messages;
     let chunk = "";
-    while (writtenCount < messages.length) {
-      const msg = messages[writtenCount];
+    let count = 0;
+    for (let i = startIdx; i < messages.length; i++) {
+      const msg = messages[i];
       const entry = {
         isSidechain: true,
         agentId,
@@ -71,9 +72,9 @@ export function streamToOutputFile(
         cwd,
       };
       chunk += JSON.stringify(entry) + "\n";
-      writtenCount++;
+      count++;
     }
-    return chunk;
+    return { chunk, count };
   };
 
   /** Non-blocking flush — batches pending messages and writes asynchronously. */
@@ -84,25 +85,27 @@ export function streamToOutputFile(
     }
     flushInProgress = true;
     try {
-      const chunk = serializeNew();
+      const startIdx = writtenCount;
+      const { chunk, count } = serializeFrom(startIdx);
       if (chunk) {
         await appendFile(path, chunk, "utf-8");
+        writtenCount = startIdx + count; // advance only after successful write
       }
     } catch { /* ignore write errors */ }
     flushInProgress = false;
     if (pendingFlush) {
       pendingFlush = false;
-      asyncFlush();
+      queueMicrotask(() => asyncFlush());
     }
   };
 
   /** Synchronous final flush — used at cleanup to guarantee all data is written. */
   const syncFlush = () => {
-    const { appendFileSync } = require("node:fs") as typeof import("node:fs");
-    const chunk = serializeNew();
+    const { chunk, count } = serializeFrom(writtenCount);
     if (chunk) {
       try {
         appendFileSync(path, chunk, "utf-8");
+        writtenCount += count;
       } catch { /* ignore write errors */ }
     }
   };

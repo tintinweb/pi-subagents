@@ -197,13 +197,9 @@ export class AgentWidget {
    * Ages finished agents and prunes those that have lingered long enough.
    */
   onTurnStart() {
-    // Age all finished agents and prune expired entries
     for (const [id, age] of this.finishedTurnAge) {
       const newAge = age + 1;
-      // Check if this entry has exceeded the max linger age for any status.
-      // Use the larger ERROR_LINGER_TURNS as the upper bound since we don't
-      // track per-entry status here — renderWidget handles exact filtering.
-      if (newAge > AgentWidget.ERROR_LINGER_TURNS) {
+      if (newAge > AgentWidget.ERROR_LINGER_TURNS) { // upper bound; renderWidget does exact filtering
         this.finishedTurnAge.delete(id);
       } else {
         this.finishedTurnAge.set(id, newAge);

@@ -33,8 +33,8 @@ export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurn
 export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = n != null ? Math.max(1, n) : undefined; }
 
 /** Additional turns allowed after the soft limit steer message. */
-/** Additional turns allowed after the soft limit steer message. */
-let graceTurns = 5;
+const GRACE_TURNS = 5;
+let graceTurns = GRACE_TURNS;
 
 /** Get the grace turns value. */
 export function getGraceTurns(): number { return graceTurns; }
@@ -44,7 +44,7 @@ export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
 /** Reset global mutable state to initial values. Called on extension reload/shutdown. */
 export function resetDefaults(): void {
   defaultMaxTurns = undefined;
-  graceTurns = 5;
+  graceTurns = GRACE_TURNS;
 }
 
 /**
@@ -339,7 +339,7 @@ export async function runAgent(
     collector.unsubscribe();
     cleanupAbort();
     // Dispose the resource loader to release any file watchers it may hold
-    (loader as any).dispose?.();
+    (loader as { dispose?(): void }).dispose?.();
   }
 
   return { responseText: collector.getText(), session, aborted, steered: softLimitReached };

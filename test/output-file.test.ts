@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -26,6 +26,17 @@ function mockSession() {
       messages.push(msg);
     },
   };
+}
+
+/** Poll until the file has more than `minBytes` bytes (async flush completed). */
+async function waitForFileGrowth(path: string, minBytes: number, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if (statSync(path).size > minBytes) return;
+    } catch { /* file may not exist yet */ }
+    await new Promise(r => setTimeout(r, 5));
+  }
 }
 
 describe("output-file", () => {
@@ -133,10 +144,11 @@ describe("output-file", () => {
       );
 
       session.pushMessage({ role: "assistant", content: [{ type: "text", text: "hi" }] });
+      const sizeBefore = statSync(outputPath).size;
       session.emit({ type: "turn_end" } as AgentSessionEvent);
 
-      // Give async appendFile a tick to complete
-      await new Promise(r => setTimeout(r, 50));
+      // Wait for async appendFile to grow the file
+      await waitForFileGrowth(outputPath, sizeBefore);
 
       const content = readFileSync(outputPath, "utf-8");
       const lines = content.trim().split("\n");
@@ -158,9 +170,10 @@ describe("output-file", () => {
       );
 
       session.pushMessage({ role: "assistant", content: [{ type: "text", text: "hi" }] });
+      const sizeBefore = statSync(outputPath).size;
       session.emit({ type: "turn_end" } as AgentSessionEvent);
 
-      await new Promise(r => setTimeout(r, 50));
+      await waitForFileGrowth(outputPath, sizeBefore);
 
       // Cleanup should not re-write the already-flushed message
       cleanup();

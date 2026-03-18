@@ -452,7 +452,10 @@ export default function (pi: ExtensionAPI) {
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
     manager.abortAll();
-    if (batchFinalizeTimer) { clearTimeout(batchFinalizeTimer); batchFinalizeTimer = undefined; }
+    if (batchFinalizeTimer) {
+      clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = undefined;
+    }
     currentBatchAgents = [];
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();

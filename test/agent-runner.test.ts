@@ -12,13 +12,19 @@ describe("agent-runner — resetDefaults", () => {
     resetDefaults();
   });
 
-  it("getDefaultMaxTurns returns 50 initially", () => {
-    expect(getDefaultMaxTurns()).toBe(50);
+  it("getDefaultMaxTurns returns undefined initially (no turn limit)", () => {
+    expect(getDefaultMaxTurns()).toBeUndefined();
   });
 
   it("setDefaultMaxTurns updates the value", () => {
     setDefaultMaxTurns(10);
     expect(getDefaultMaxTurns()).toBe(10);
+  });
+
+  it("setDefaultMaxTurns accepts undefined for unlimited", () => {
+    setDefaultMaxTurns(10);
+    setDefaultMaxTurns(undefined);
+    expect(getDefaultMaxTurns()).toBeUndefined();
   });
 
   it("setDefaultMaxTurns clamps to minimum 1", () => {
@@ -50,7 +56,7 @@ describe("agent-runner — resetDefaults", () => {
 
     resetDefaults();
 
-    expect(getDefaultMaxTurns()).toBe(50);
+    expect(getDefaultMaxTurns()).toBeUndefined();
     expect(getGraceTurns()).toBe(5);
   });
 });

@@ -172,13 +172,7 @@ export class AgentManager {
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
-        record.abortController = undefined;
-
-        // Final flush of streaming output file
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
+        this.releaseRecordResources(record);
 
         // Clean up worktree if used
         if (record.worktree) {
@@ -204,13 +198,7 @@ export class AgentManager {
         }
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
-        record.abortController = undefined;
-
-        // Final flush of streaming output file on error
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
+        this.releaseRecordResources(record);
 
         // Best-effort worktree cleanup on error
         if (record.worktree) {
@@ -323,13 +311,18 @@ export class AgentManager {
     return true;
   }
 
-  /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
+  /** Flush output subscription and release held resources from a record. */
+  private releaseRecordResources(record: AgentRecord): void {
     if (record.outputCleanup) {
       try { record.outputCleanup(); } catch { /* ignore */ }
       record.outputCleanup = undefined;
     }
     record.abortController = undefined;
+  }
+
+  /** Dispose a record's session and remove it from the map. */
+  private removeRecord(id: string, record: AgentRecord): void {
+    this.releaseRecordResources(record);
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
@@ -405,9 +398,12 @@ export class AgentManager {
       if (remaining <= 0) {
         throw new Error(`waitForAll timed out after ${timeoutMs}ms with ${pending.length} agent(s) still running`);
       }
+      let timer: ReturnType<typeof setTimeout>;
       await Promise.race([
-        Promise.allSettled(pending),
-        new Promise<void>((_, reject) => setTimeout(() => reject(new Error("waitForAll timed out")), remaining)),
+        Promise.allSettled(pending).finally(() => clearTimeout(timer)),
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("waitForAll timed out")), remaining);
+        }),
       ]);
     }
   }
@@ -417,12 +413,7 @@ export class AgentManager {
     // Clear queue
     this.queue = [];
     for (const record of this.agents.values()) {
-      // Flush and clean up output file subscriptions before disposing the session
-      if (record.outputCleanup) {
-        try { record.outputCleanup(); } catch { /* ignore */ }
-        record.outputCleanup = undefined;
-      }
-      record.abortController = undefined;
+      this.releaseRecordResources(record);
       record.session?.dispose();
     }
     this.agents.clear();
