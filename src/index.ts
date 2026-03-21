@@ -289,7 +289,7 @@ export default function (pi: ExtensionAPI) {
       content: notification + footer,
       display: true,
       details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
-    }, { deliverAs: "followUp" });
+    }, { deliverAs: "followUp", triggerTurn: true });
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -326,7 +326,7 @@ export default function (pi: ExtensionAPI) {
           content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
           display: true,
           details,
-        }, { deliverAs: "followUp" });
+        }, { deliverAs: "followUp", triggerTurn: true });
       });
       widget.update();
     },
