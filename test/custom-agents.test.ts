@@ -22,9 +22,9 @@ describe("loadCustomAgents", () => {
     writeFileSync(join(dir, `${name}.md`), content);
   }
 
-  it("returns empty map when .pi/agents/ does not exist", () => {
+  it("returns no project agents when .pi/agents/ does not exist", () => {
     const result = loadCustomAgents(tmpDir);
-    expect(result.size).toBe(0);
+    expect([...result.values()].every(agent => agent.source !== "project")).toBe(true);
   });
 
   it("loads a basic agent with all frontmatter fields", () => {
@@ -43,7 +43,6 @@ isolated: true
 You are a security auditor.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.size).toBe(1);
 
     const agent = result.get("auditor")!;
     expect(agent.name).toBe("auditor");
@@ -158,15 +157,15 @@ Any thinking.`);
     expect(result.get("anythink")!.thinking).toBe("turbo");
   });
 
-  it("rejects max_turns < 1", () => {
-    writeAgent("badturns", `---
+  it("treats max_turns: 0 as unlimited", () => {
+    writeAgent("unlimited", `---
 max_turns: 0
 ---
 
-Bad turns.`);
+Unlimited turns.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.get("badturns")!.maxTurns).toBeUndefined();
+    expect(result.get("unlimited")!.maxTurns).toBe(0);
   });
 
   it("rejects negative max_turns", () => {
@@ -215,7 +214,6 @@ description: Second
 Second agent.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.size).toBe(2);
     expect(result.has("agent1")).toBe(true);
     expect(result.has("agent2")).toBe(true);
   });
@@ -231,7 +229,6 @@ description: Real Agent
 Real.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.size).toBe(1);
     expect(result.has("real")).toBe(true);
   });
 

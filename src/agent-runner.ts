@@ -27,10 +27,16 @@ const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
 /** Default max turns. undefined = unlimited (no turn limit). */
 let defaultMaxTurns: number | undefined;
 
+/** Normalize max turns. undefined or 0 = unlimited, otherwise minimum 1. */
+export function normalizeMaxTurns(n: number | undefined): number | undefined {
+  if (n == null || n === 0) return undefined;
+  return Math.max(1, n);
+}
+
 /** Get the default max turns value. undefined = unlimited. */
 export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurns; }
 /** Set the default max turns value. undefined = unlimited, otherwise minimum 1. */
-export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = n != null ? Math.max(1, n) : undefined; }
+export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = normalizeMaxTurns(n); }
 
 /** Additional turns allowed after the soft limit steer message. */
 let graceTurns = 5;
@@ -279,7 +285,7 @@ export async function runAgent(
 
   // Track turns for graceful max_turns enforcement
   let turnCount = 0;
-  const maxTurns = options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns;
+  const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
   let softLimitReached = false;
   let aborted = false;
 
