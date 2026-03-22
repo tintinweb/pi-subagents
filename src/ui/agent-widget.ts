@@ -194,12 +194,16 @@ export class AgentWidget {
 
   /**
    * Called on each new turn (tool_execution_start).
-   * Ages finished agents and clears those that have lingered long enough.
+   * Ages finished agents and prunes those that have lingered long enough.
    */
   onTurnStart() {
-    // Age all finished agents
     for (const [id, age] of this.finishedTurnAge) {
-      this.finishedTurnAge.set(id, age + 1);
+      const newAge = age + 1;
+      if (newAge > AgentWidget.ERROR_LINGER_TURNS) { // upper bound; renderWidget does exact filtering
+        this.finishedTurnAge.delete(id);
+      } else {
+        this.finishedTurnAge.set(id, newAge);
+      }
     }
     // Trigger a widget refresh (will filter out expired agents)
     this.update();

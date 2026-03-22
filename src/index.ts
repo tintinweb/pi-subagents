@@ -17,7 +17,7 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@m
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, resetDefaults, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -429,7 +429,10 @@ export default function (pi: ExtensionAPI) {
     manager.clearCompleted();           // preserve existing behavior
   });
 
-  pi.on("session_switch", () => { manager.clearCompleted(); });
+  pi.on("session_switch", (_event: any, ctx?: any) => {
+    if (ctx) currentCtx = ctx;
+    manager.clearCompleted();
+  });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc } = registerRpcHandlers({
     events: pi.events,
@@ -449,9 +452,18 @@ export default function (pi: ExtensionAPI) {
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
     manager.abortAll();
+    if (batchFinalizeTimer) {
+      clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = undefined;
+    }
+    currentBatchAgents = [];
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    groupJoin.dispose();
+    widget.dispose();
+    agentActivity.clear();
     manager.dispose();
+    resetDefaults();
   });
 
   // Live widget: show running agents above editor
@@ -544,7 +556,9 @@ export default function (pi: ExtensionAPI) {
     return name.replace(/-\d{8}$/, "");
   }
 
-  const typeListText = buildTypeListText();
+  // NOTE: Tool descriptions are static at registration time (framework limitation).
+  // Custom agents added after registration are still usable by name — reloadCustomAgents()
+  // runs on each execute call — but the LLM won't see them in the description until restart.
 
   // ---- Agent tool ----
 
@@ -556,7 +570,7 @@ export default function (pi: ExtensionAPI) {
 The Agent tool launches specialized agents that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types:
-${typeListText}
+${buildTypeListText()}
 
 Guidelines:
 - For parallel work, use run_in_background: true on each agent. Foreground calls run sequentially — only one executes at a time.

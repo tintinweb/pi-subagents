@@ -200,3 +200,172 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     expect(manager.getRecord(id)).toBeUndefined();
   });
 });
+
+describe("AgentManager — outputCleanup", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("dispose() calls outputCleanup on all records", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+
+    const cleanupSpy = vi.fn();
+    record.outputCleanup = cleanupSpy;
+
+    await record.promise;
+    // The .then handler also calls outputCleanup on completion
+    // Reset and set it again for dispose test
+    record.outputCleanup = vi.fn();
+    const disposeSpy = record.outputCleanup as ReturnType<typeof vi.fn>;
+
+    manager.dispose();
+    expect(disposeSpy).toHaveBeenCalledOnce();
+  });
+
+  it("removeRecord (via clearCompleted) calls outputCleanup", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    // Set outputCleanup after completion (simulates it surviving the .then handler)
+    const cleanupSpy = vi.fn();
+    record.outputCleanup = cleanupSpy;
+
+    manager.clearCompleted();
+    expect(cleanupSpy).toHaveBeenCalledOnce();
+  });
+
+  it("outputCleanup errors are swallowed in dispose", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    record.outputCleanup = () => { throw new Error("cleanup failed"); };
+
+    // Should not throw
+    expect(() => manager.dispose()).not.toThrow();
+  });
+});
+
+describe("AgentManager — abortController lifecycle", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("abortController is nulled after successful completion", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.abortController).toBeDefined();
+
+    await record.promise;
+    expect(record.abortController).toBeUndefined();
+  });
+
+  it("abortController is nulled after error", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockRejectedValue(new Error("fail"));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.abortController).toBeDefined();
+
+    await record.promise;
+    expect(record.abortController).toBeUndefined();
+  });
+});
+
+describe("AgentManager — waitForAll", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("resolves immediately when no agents are running", async () => {
+    manager = new AgentManager();
+    await expect(manager.waitForAll()).resolves.toBeUndefined();
+  });
+
+  it("resolves after all agents complete", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    manager.spawn(mockPi, mockCtx, "general-purpose", "t1", {
+      description: "a",
+      isBackground: true,
+    });
+    manager.spawn(mockPi, mockCtx, "general-purpose", "t2", {
+      description: "b",
+      isBackground: true,
+    });
+
+    await expect(manager.waitForAll()).resolves.toBeUndefined();
+  });
+
+  it("rejects on timeout when agents never complete", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    manager.spawn(mockPi, mockCtx, "general-purpose", "t1", {
+      description: "hangs",
+      isBackground: true,
+    });
+
+    await expect(manager.waitForAll(50)).rejects.toThrow("timed out");
+
+    // Clean up hanging agent
+    manager.abortAll();
+  });
+
+  it("drains queued agents before resolving", async () => {
+    manager = new AgentManager(undefined, 1);
+    resolvedRun();
+
+    manager.spawn(mockPi, mockCtx, "general-purpose", "t1", {
+      description: "first",
+      isBackground: true,
+    });
+    manager.spawn(mockPi, mockCtx, "general-purpose", "t2", {
+      description: "queued",
+      isBackground: true,
+    });
+
+    await expect(manager.waitForAll()).resolves.toBeUndefined();
+
+    // Both should be completed
+    const agents = manager.listAgents();
+    expect(agents.every(a => a.status === "completed")).toBe(true);
+  });
+});

@@ -172,12 +172,7 @@ export class AgentManager {
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
-
-        // Final flush of streaming output file
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
+        this.releaseRecordResources(record);
 
         // Clean up worktree if used
         if (record.worktree) {
@@ -203,12 +198,7 @@ export class AgentManager {
         }
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
-
-        // Final flush of streaming output file on error
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
+        this.releaseRecordResources(record);
 
         // Best-effort worktree cleanup on error
         if (record.worktree) {
@@ -321,8 +311,18 @@ export class AgentManager {
     return true;
   }
 
+  /** Flush output subscription and release held resources from a record. */
+  private releaseRecordResources(record: AgentRecord): void {
+    if (record.outputCleanup) {
+      try { record.outputCleanup(); } catch { /* ignore */ }
+      record.outputCleanup = undefined;
+    }
+    record.abortController = undefined;
+  }
+
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    this.releaseRecordResources(record);
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
@@ -380,8 +380,11 @@ export class AgentManager {
     return count;
   }
 
-  /** Wait for all running and queued agents to complete (including queued ones). */
-  async waitForAll(): Promise<void> {
+  /** Wait for all running and queued agents to complete (including queued ones).
+   *  @param timeoutMs Maximum wait time (default 5 minutes). Rejects with an error on timeout.
+   */
+  async waitForAll(timeoutMs = 5 * 60_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     // Loop because drainQueue respects the concurrency limit — as running
     // agents finish they start queued ones, which need awaiting too.
     while (true) {
@@ -391,7 +394,17 @@ export class AgentManager {
         .map(r => r.promise)
         .filter(Boolean);
       if (pending.length === 0) break;
-      await Promise.allSettled(pending);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`waitForAll timed out after ${timeoutMs}ms with ${pending.length} agent(s) still running`);
+      }
+      let timer: ReturnType<typeof setTimeout>;
+      await Promise.race([
+        Promise.allSettled(pending).finally(() => clearTimeout(timer)),
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("waitForAll timed out")), remaining);
+        }),
+      ]);
     }
   }
 
@@ -400,6 +413,7 @@ export class AgentManager {
     // Clear queue
     this.queue = [];
     for (const record of this.agents.values()) {
+      this.releaseRecordResources(record);
       record.session?.dispose();
     }
     this.agents.clear();
