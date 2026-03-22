@@ -17,13 +17,13 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@m
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, resetDefaults, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { createOutputFilePath, parseOutputFileResult, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ThinkingLevel } from "./types.js";
 import {
   type AgentActivity,
@@ -124,6 +124,8 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     if (record.session) {
       const stats = record.session.getSessionStats();
       totalTokens = stats.tokens?.total ?? 0;
+    } else if (record.stats) {
+      totalTokens = record.stats.totalTokens;
     }
   } catch { /* session stats unavailable */ }
 
@@ -138,6 +140,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     `<task-id>${record.id}</task-id>`,
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
+    record.modelName ? `<model>${escapeXml(record.modelName)}</model>` : null,
     `<status>${escapeXml(status)}</status>`,
     `<summary>Agent "${escapeXml(record.description)}" ${record.status}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
@@ -149,14 +152,16 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
 /** Build AgentDetails from a base + record-specific fields. */
 function buildDetails(
   base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
-  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any },
+  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; stats?: { totalTokens: number } },
   activity?: AgentActivity,
   overrides?: Partial<AgentDetails>,
 ): AgentDetails {
+  const tokens = safeFormatTokens(record.session)
+    || (record.stats ? formatTokens(record.stats.totalTokens) : "");
   return {
     ...base,
     toolUses: record.toolUses,
-    tokens: safeFormatTokens(record.session),
+    tokens,
     turnCount: activity?.turnCount,
     maxTurns: activity?.maxTurns,
     durationMs: (record.completedAt ?? Date.now()) - record.startedAt,
@@ -172,6 +177,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
   let totalTokens = 0;
   try {
     if (record.session) totalTokens = record.session.getSessionStats().tokens?.total ?? 0;
+    else if (record.stats) totalTokens = record.stats.totalTokens;
   } catch {}
 
   return {
@@ -185,6 +191,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
     outputFile: record.outputFile,
     error: record.error,
+    modelName: record.modelName,
     resultPreview: record.result
       ? record.result.length > resultMaxLen
         ? record.result.slice(0, resultMaxLen) + "…"
@@ -213,6 +220,7 @@ export default function (pi: ExtensionAPI) {
 
         // Line 2: stats
         const parts: string[] = [];
+        if (d.modelName) parts.push(d.modelName);
         if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
         if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
         if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
@@ -345,6 +353,12 @@ export default function (pi: ExtensionAPI) {
           output: stats.tokens?.output ?? 0,
           total: stats.tokens?.total ?? 0,
         };
+      } else if (record.stats) {
+        tokens = {
+          input: record.stats.inputTokens,
+          output: record.stats.outputTokens,
+          total: record.stats.totalTokens,
+        };
       }
     } catch { /* session stats unavailable */ }
     return {
@@ -429,7 +443,9 @@ export default function (pi: ExtensionAPI) {
     manager.clearCompleted();           // preserve existing behavior
   });
 
-  pi.on("session_switch", () => { manager.clearCompleted(); });
+  pi.on("session_switch", () => {
+    manager.clearCompleted();
+  });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc } = registerRpcHandlers({
     events: pi.events,
@@ -449,9 +465,18 @@ export default function (pi: ExtensionAPI) {
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
     manager.abortAll();
+    if (batchFinalizeTimer) {
+      clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = undefined;
+    }
+    currentBatchAgents = [];
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    groupJoin.dispose();
+    widget.dispose();
+    agentActivity.clear();
     manager.dispose();
+    resetDefaults();
   });
 
   // Live widget: show running agents above editor
@@ -544,7 +569,9 @@ export default function (pi: ExtensionAPI) {
     return name.replace(/-\d{8}$/, "");
   }
 
-  const typeListText = buildTypeListText();
+  // NOTE: Tool descriptions are static at registration time (framework limitation).
+  // Custom agents added after registration are still usable by name — reloadCustomAgents()
+  // runs on each execute call — but the LLM won't see them in the description until restart.
 
   // ---- Agent tool ----
 
@@ -556,7 +583,7 @@ export default function (pi: ExtensionAPI) {
 The Agent tool launches specialized agents that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types:
-${typeListText}
+${buildTypeListText()}
 
 Guidelines:
 - For parallel work, use run_in_background: true on each agent. Foreground calls run sequentially — only one executes at a time.
@@ -831,6 +858,7 @@ Guidelines:
           thinkingLevel: thinking,
           isBackground: true,
           isolation,
+          modelName: agentModelName,
           ...bgCallbacks,
         });
 
@@ -938,6 +966,7 @@ Guidelines:
         inheritContext,
         thinkingLevel: thinking,
         isolation,
+        modelName: agentModelName,
         ...fgCallbacks,
       });
 
@@ -995,9 +1024,23 @@ Guidelines:
         }),
       ),
     }),
-    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
       const record = manager.getRecord(params.agent_id);
       if (!record) {
+        // Validate agent_id format (UUID prefix) to prevent path traversal
+        if (!/^[\w-]+$/.test(params.agent_id)) {
+          return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+        }
+        // Fallback: try to recover result from on-disk transcript.
+        // This works because createOutputFilePath is a pure function of (cwd, agentId, sessionId).
+        const fallbackPath = createOutputFilePath(ctx.cwd, params.agent_id, ctx.sessionManager.getSessionId());
+        const fallbackResult = parseOutputFileResult(fallbackPath);
+        if (fallbackResult) {
+          return textResult(
+            `Agent "${params.agent_id}" record was cleaned up, but output was recovered from transcript.\n` +
+            `Note: Stats unavailable.\n\n` + fallbackResult
+          );
+        }
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
@@ -1013,7 +1056,8 @@ Guidelines:
 
       const displayName = getDisplayName(record.type);
       const duration = formatDuration(record.startedAt, record.completedAt);
-      const tokens = safeFormatTokens(record.session);
+      const tokens = safeFormatTokens(record.session)
+        || (record.stats ? formatTokens(record.stats.totalTokens) : "");
       const toolStats = tokens ? `Tool uses: ${record.toolUses} | ${tokens}` : `Tool uses: ${record.toolUses}`;
 
       let output =
@@ -1025,6 +1069,12 @@ Guidelines:
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}`;
+        // Only show provider tip for likely API/model errors, not user-initiated stops or timeouts
+        const err = (record.error ?? "").toLowerCase();
+        const isProviderError = !err.includes("abort") && !err.includes("timeout") && !err.includes("timed out") && !err.includes("stopped");
+        if (isProviderError) {
+          output += `\n\nTip: Check provider status or try a different model.`;
+        }
       } else {
         output += record.result ?? "No output.";
       }
@@ -1348,7 +1398,12 @@ Guidelines:
     const fmFields: string[] = [];
     fmFields.push(`description: ${cfg.description}`);
     if (cfg.displayName) fmFields.push(`display_name: ${cfg.displayName}`);
-    fmFields.push(`tools: ${cfg.builtinToolNames?.join(", ") || "all"}`);
+    const toolsValue = !cfg.builtinToolNames
+      ? BUILTIN_TOOL_NAMES.join(", ")
+      : cfg.builtinToolNames.length === 0
+        ? "none"
+        : cfg.builtinToolNames.join(", ");
+    fmFields.push(`tools: ${toolsValue}`);
     if (cfg.model) fmFields.push(`model: ${cfg.model}`);
     if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
     if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
@@ -1613,8 +1668,10 @@ ${systemPrompt}
   }
 
   async function showSettings(ctx: ExtensionCommandContext) {
+    const retentionMin = Math.round(manager.getCleanupRetention() / 60_000);
     const choice = await ctx.ui.select("Settings", [
       `Max concurrency (current: ${manager.getMaxConcurrent()})`,
+      `Cleanup retention (current: ${retentionMin} min)`,
       `Default max turns (current: ${getDefaultMaxTurns() ?? "unlimited"})`,
       `Grace turns (current: ${getGraceTurns()})`,
       `Join mode (current: ${getDefaultJoinMode()})`,
@@ -1630,6 +1687,17 @@ ${systemPrompt}
           ctx.ui.notify(`Max concurrency set to ${n}`, "info");
         } else {
           ctx.ui.notify("Must be a positive integer.", "warning");
+        }
+      }
+    } else if (choice.startsWith("Cleanup retention")) {
+      const val = await ctx.ui.input("Cleanup retention in minutes (min 1)", String(retentionMin));
+      if (val) {
+        const n = parseInt(val, 10);
+        if (n >= 1) {
+          manager.setCleanupRetention(n * 60_000);
+          ctx.ui.notify(`Cleanup retention set to ${n} minute(s)`, "info");
+        } else {
+          ctx.ui.notify("Must be at least 1 minute.", "warning");
         }
       }
     } else if (choice.startsWith("Default max turns")) {

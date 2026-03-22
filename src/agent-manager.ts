@@ -45,6 +45,8 @@ interface SpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
+  /** Human-readable model identifier for diagnostics. */
+  modelName?: string;
 }
 
 export class AgentManager {
@@ -53,6 +55,7 @@ export class AgentManager {
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
   private maxConcurrent: number;
+  private cleanupRetentionMs = 10 * 60_000;
 
   /** Queue of background agents waiting to start. */
   private queue: { id: string; args: SpawnArgs }[] = [];
@@ -76,6 +79,15 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  /** Update the cleanup retention period (how long completed records survive before session disposal). */
+  setCleanupRetention(ms: number) {
+    this.cleanupRetentionMs = Math.max(60_000, ms);
+  }
+
+  getCleanupRetention(): number {
+    return this.cleanupRetentionMs;
   }
 
   /**
@@ -118,6 +130,7 @@ export class AgentManager {
   private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
     record.status = "running";
     record.startedAt = Date.now();
+    if (options.modelName) record.modelName = options.modelName;
     if (options.isBackground) this.runningBackground++;
     this.onStart?.(record);
 
@@ -172,12 +185,8 @@ export class AgentManager {
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
-
-        // Final flush of streaming output file
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
+        this.captureStats(record);
+        this.releaseRecordResources(record);
 
         // Clean up worktree if used
         if (record.worktree) {
@@ -201,21 +210,19 @@ export class AgentManager {
         if (record.status !== "stopped") {
           record.status = "error";
         }
-        record.error = err instanceof Error ? err.message : String(err);
+        record.error = (err instanceof Error ? err.message : String(err));
         record.completedAt ??= Date.now();
-
-        // Final flush of streaming output file on error
-        if (record.outputCleanup) {
-          try { record.outputCleanup(); } catch { /* ignore */ }
-          record.outputCleanup = undefined;
-        }
+        this.captureStats(record);
+        this.releaseRecordResources(record);
 
         // Best-effort worktree cleanup on error
         if (record.worktree) {
           try {
             const wtResult = cleanupWorktree(ctx.cwd, record.worktree, options.description);
             record.worktreeResult = wtResult;
-          } catch { /* ignore cleanup errors */ }
+          } catch (err) {
+            if (process.env.DEBUG) console.debug(`[pi-subagents] Worktree cleanup failed for ${id}:`, err);
+          }
         }
 
         if (options.isBackground) {
@@ -321,19 +328,57 @@ export class AgentManager {
     return true;
   }
 
-  /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
+  /** Capture session token stats onto the record (idempotent). */
+  private captureStats(record: AgentRecord): void {
+    if (!record.session || record.stats) return;
+    try {
+      const s = record.session.getSessionStats();
+      record.stats = {
+        inputTokens: s.tokens?.input ?? 0,
+        outputTokens: s.tokens?.output ?? 0,
+        totalTokens: s.tokens?.total ?? 0,
+      };
+    } catch (err) {
+      if (process.env.DEBUG) console.debug("[pi-subagents] captureStats failed:", err);
+    }
+  }
+
+  /** Flush output subscription and release held resources from a record. */
+  private releaseRecordResources(record: AgentRecord): void {
+    if (record.outputCleanup) {
+      try { record.outputCleanup(); } catch { /* ignore */ }
+      record.outputCleanup = undefined;
+    }
+    record.abortController = undefined;
+  }
+
+  /** Tier 1 cleanup: dispose session resources but keep the record in the Map. */
+  private disposeRecordSession(record: AgentRecord): void {
+    this.captureStats(record);
+    this.releaseRecordResources(record);
     record.session?.dispose?.();
     record.session = undefined;
+    record.promise = undefined;
+  }
+
+  /** Dispose a record's session and remove it from the map. */
+  private removeRecord(id: string, record: AgentRecord): void {
+    this.disposeRecordSession(record);
     this.agents.delete(id);
   }
 
   private cleanup() {
-    const cutoff = Date.now() - 10 * 60_000;
+    const tier1Cutoff = Date.now() - this.cleanupRetentionMs;
+    const tier2Cutoff = Date.now() - this.cleanupRetentionMs * 3;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
-      if ((record.completedAt ?? 0) >= cutoff) continue;
-      this.removeRecord(id, record);
+      const completed = record.completedAt ?? 0;
+      if (completed >= tier1Cutoff) continue;
+      if (completed < tier2Cutoff) {
+        this.removeRecord(id, record); // Tier 2: full removal
+      } else if (record.session) {
+        this.disposeRecordSession(record); // Tier 1: session only
+      }
     }
   }
 
@@ -380,8 +425,11 @@ export class AgentManager {
     return count;
   }
 
-  /** Wait for all running and queued agents to complete (including queued ones). */
-  async waitForAll(): Promise<void> {
+  /** Wait for all running and queued agents to complete (including queued ones).
+   *  @param timeoutMs Maximum wait time (default 5 minutes). Rejects with an error on timeout.
+   */
+  async waitForAll(timeoutMs = 5 * 60_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     // Loop because drainQueue respects the concurrency limit — as running
     // agents finish they start queued ones, which need awaiting too.
     while (true) {
@@ -391,7 +439,17 @@ export class AgentManager {
         .map(r => r.promise)
         .filter(Boolean);
       if (pending.length === 0) break;
-      await Promise.allSettled(pending);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error(`waitForAll timed out after ${timeoutMs}ms with ${pending.length} agent(s) still running`);
+      }
+      let timer: ReturnType<typeof setTimeout>;
+      await Promise.race([
+        Promise.allSettled(pending).finally(() => clearTimeout(timer)),
+        new Promise<void>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("waitForAll timed out")), remaining);
+        }),
+      ]);
     }
   }
 
@@ -400,6 +458,7 @@ export class AgentManager {
     // Clear queue
     this.queue = [];
     for (const record of this.agents.values()) {
+      this.releaseRecordResources(record);
       record.session?.dispose();
     }
     this.agents.clear();

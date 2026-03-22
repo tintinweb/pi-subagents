@@ -35,7 +35,8 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
   let files: string[];
   try {
     files = readdirSync(dir).filter(f => f.endsWith(".md"));
-  } catch {
+  } catch (err) {
+    if (process.env.DEBUG) console.debug(`[pi-subagents] Failed to read agents dir ${dir}:`, err);
     return;
   }
 
@@ -45,7 +46,8 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
     let content: string;
     try {
       content = readFileSync(join(dir, file), "utf-8");
-    } catch {
+    } catch (err) {
+      if (process.env.DEBUG) console.debug(`[pi-subagents] Failed to read agent file ${join(dir, file)}:`, err);
       continue;
     }
 
@@ -101,11 +103,15 @@ function parseCsvField(val: unknown): string[] | undefined {
 
 /**
  * Parse a comma-separated list field with defaults.
- * omitted → defaults; "none"/empty → []; csv → listed items.
+ * omitted → defaults; "all" → defaults; "none"/empty → []; csv → listed items.
  */
 function csvList(val: unknown, defaults: string[]): string[] {
   if (val === undefined || val === null) return defaults;
-  return parseCsvField(val) ?? [];
+  const s = String(val).trim();
+  if (s === "all") return defaults;
+  if (!s || s === "none") return [];
+  const items = s.split(",").map(t => t.trim()).filter(Boolean);
+  return items.length > 0 ? items : [];
 }
 
 /**
@@ -127,11 +133,12 @@ function parseMemory(val: unknown): MemoryScope | undefined {
 
 /**
  * Parse an inherit field (extensions, skills).
- * omitted/true → true (inherit all); false/"none"/empty → false; csv → listed names.
+ * omitted/true/"all" → true (inherit all); false/"none"/empty → false; csv → listed names.
  */
 function inheritField(val: unknown): true | string[] | false {
   if (val === undefined || val === null || val === true) return true;
   if (val === false || val === "none") return false;
+  if (typeof val === "string" && val.trim() === "all") return true;
   const items = csvList(val, []);
   return items.length > 0 ? items : false;
 }

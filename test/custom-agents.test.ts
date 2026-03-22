@@ -1,19 +1,29 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+
+// Isolate from real global agents in ~/.pi/agent/agents/
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: () => globalHomeDir };
+});
+
+let globalHomeDir: string;
 
 describe("loadCustomAgents", () => {
   let tmpDir: string;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "pi-test-"));
+    globalHomeDir = mkdtempSync(join(tmpdir(), "pi-test-home-"));
   });
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(globalHomeDir, { recursive: true, force: true });
   });
 
   function writeAgent(name: string, content: string) {
@@ -430,5 +440,71 @@ Bad isolation.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("bad-isolation")!.isolation).toBeUndefined();
+  });
+
+  it("loads agents from mocked global dir", () => {
+    const dir = join(globalHomeDir, ".pi", "agent", "agents");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "global-agent.md"), `---
+description: Global Agent
+---
+
+Global.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("global-agent")!.description).toBe("Global Agent");
+    expect(result.get("global-agent")!.source).toBe("global");
+  });
+
+  it("project agents override global agents with same name", () => {
+    const globalDir = join(globalHomeDir, ".pi", "agent", "agents");
+    mkdirSync(globalDir, { recursive: true });
+    writeFileSync(join(globalDir, "shared.md"), `---
+description: Global version
+---
+
+Global prompt.`);
+
+    writeAgent("shared", `---
+description: Project version
+---
+
+Project prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    const agent = result.get("shared")!;
+    expect(agent.description).toBe("Project version");
+    expect(agent.source).toBe("project");
+  });
+
+  it("extensions: all → true (inherit all)", () => {
+    writeAgent("extall", `---
+extensions: all
+skills: all
+---
+
+All via string.`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("extall")!;
+    expect(agent.extensions).toBe(true);
+    expect(agent.skills).toBe(true);
+  });
+
+  it("handles tools: all as all built-in tools (ejected agent compat)", () => {
+    writeAgent("ejected-gp", `---
+description: General-purpose agent for complex, multi-step tasks
+tools: all
+prompt_mode: append
+---
+
+`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("ejected-gp")!;
+    // "all" should resolve to all built-in tools, not literally ["all"]
+    expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
   });
 });
