@@ -17,14 +17,15 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@m
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
+import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ThinkingLevel } from "./types.js";
+import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -568,11 +569,9 @@ Guidelines:
 - Use run_in_background for work you don't need immediately. You will be notified when it completes.
 - Use resume with an agent ID to continue a previous agent's work.
 - Use steer_subagent to send mid-run messages to a running background agent.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
-- Use thinking to control extended thinking level.
-- Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).
-- Use join_mode to control how background completion notifications are delivered. By default (smart), 2+ background agents spawned in the same turn are grouped into a single notification. Use "async" for individual notifications or "group" to force grouping.`,
+- Agent frontmatter is authoritative. If an agent file sets model, thinking, max_turns, inherit_context, run_in_background, isolated, or isolation, those settings are locked for that agent.
+- Tool-call parameters only fill gaps left unspecified by the agent config.
+- Join behavior for background completion notifications is controlled by the global /agents setting. It applies only to background agents.`,
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
@@ -586,23 +585,23 @@ Guidelines:
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Optional model override. Used only when the agent config does not set model. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet").',
         }),
       ),
       thinking: Type.Optional(
         Type.String({
-          description: "Thinking level: off, minimal, low, medium, high, xhigh. Overrides agent default.",
+          description: "Thinking level: off, minimal, low, medium, high, xhigh. Used only when the agent config does not set thinking.",
         }),
       ),
       max_turns: Type.Optional(
         Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
+          description: "Maximum number of agentic turns before stopping. Used only when the agent config does not set max_turns.",
           minimum: 1,
         }),
       ),
       run_in_background: Type.Optional(
         Type.Boolean({
-          description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
+          description: "Set to true to run in background only when the agent config does not set run_in_background. Returns agent ID immediately.",
         }),
       ),
       resume: Type.Optional(
@@ -612,24 +611,18 @@ Guidelines:
       ),
       isolated: Type.Optional(
         Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
+          description: "If true, agent gets no extension/MCP tools — only built-in tools. Used only when the agent config does not set isolated.",
         }),
       ),
       inherit_context: Type.Optional(
         Type.Boolean({
-          description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
+          description: "If true, fork parent conversation into the agent. Used only when the agent config does not set inherit_context.",
         }),
       ),
       isolation: Type.Optional(
         Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+          description: 'Set to "worktree" to run the agent in a temporary git worktree. Used only when the agent config does not set isolation.',
         }),
-      ),
-      join_mode: Type.Optional(
-        Type.Union([
-          Type.Literal("async"),
-          Type.Literal("group"),
-        ], { description: "Override join behavior for background agents. async: individual nudge on completion. group: hold and send one consolidated notification when all agents in the group complete. Default: smart (auto-groups 2+ background agents spawned in the same turn)." }),
       ),
     }),
 
@@ -742,27 +735,25 @@ Guidelines:
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
-      // Resolve model if specified (supports exact "provider/modelId" or fuzzy match)
+      const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
+
+      // Resolve model from agent config first; tool-call params only fill gaps.
       let model = ctx.model;
-      const modelInput = params.model ?? customConfig?.model;
-      if (modelInput) {
-        const resolved = resolveModel(modelInput, ctx.modelRegistry);
+      if (resolvedConfig.modelInput) {
+        const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
-          if (params.model) return textResult(resolved); // user-specified: error
+          if (resolvedConfig.modelFromParams) return textResult(resolved);
           // config-specified: silent fallback to parent
         } else {
           model = resolved;
         }
       }
 
-      // Resolve thinking: explicit param > custom config > undefined
-      const thinking = (params.thinking ?? customConfig?.thinking) as ThinkingLevel | undefined;
-
-      // Resolve spawn-time defaults from custom config (caller overrides)
-      const inheritContext = params.inherit_context ?? customConfig?.inheritContext ?? false;
-      const runInBackground = params.run_in_background ?? customConfig?.runInBackground ?? false;
-      const isolated = params.isolated ?? customConfig?.isolated ?? false;
-      const isolation = params.isolation ?? customConfig?.isolation;
+      const thinking = resolvedConfig.thinking;
+      const inheritContext = resolvedConfig.inheritContext;
+      const runInBackground = resolvedConfig.runInBackground;
+      const isolated = resolvedConfig.isolated;
+      const isolation = resolvedConfig.isolation;
 
       // Build display tags for non-default config
       const parentModelId = ctx.model?.id;
@@ -776,7 +767,7 @@ Guidelines:
       if (thinking) agentTags.push(`thinking: ${thinking}`);
       if (isolated) agentTags.push("isolated");
       if (isolation === "worktree") agentTags.push("worktree");
-      const effectiveMaxTurns = params.max_turns ?? customConfig?.maxTurns ?? getDefaultMaxTurns();
+      const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       // Shared base fields for all AgentDetails in this call
       const detailBase = {
         displayName,
@@ -800,7 +791,7 @@ Guidelines:
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
         return textResult(
-          record.result ?? record.error ?? "No output.",
+          record.result?.trim() || record.error?.trim() || "No output.",
           buildDetails(detailBase, record),
         );
       }
@@ -825,7 +816,7 @@ Guidelines:
         id = manager.spawn(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           model,
-          maxTurns: params.max_turns,
+          maxTurns: effectiveMaxTurns,
           isolated,
           inheritContext,
           thinkingLevel: thinking,
@@ -836,17 +827,17 @@ Guidelines:
 
         // Set output file + join mode synchronously after spawn, before the
         // event loop yields — onSessionCreated is async so this is safe.
-        const joinMode: JoinMode = params.join_mode ?? defaultJoinMode;
+        const joinMode = resolveJoinMode(defaultJoinMode, true);
         const record = manager.getRecord(id);
-        if (record) {
+        if (record && joinMode) {
           record.joinMode = joinMode;
           record.toolCallId = toolCallId;
           record.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
           writeInitialEntry(record.outputFile, id, params.prompt, ctx.cwd);
         }
 
-        if (joinMode === 'async') {
-          // Explicit async — not part of any batch
+        if (joinMode == null || joinMode === 'async') {
+          // Foreground/no join mode or explicit async — not part of any batch
         } else {
           // smart or group — add to current batch
           currentBatchAgents.push({ id, joinMode });
@@ -933,7 +924,7 @@ Guidelines:
       const record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
         description: params.description,
         model,
-        maxTurns: params.max_turns,
+        maxTurns: effectiveMaxTurns,
         isolated,
         inheritContext,
         thinkingLevel: thinking,
@@ -967,7 +958,7 @@ Guidelines:
       if (tokenText) statsParts.push(tokenText);
       return textResult(
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getStatusNote(record.status)}.\n\n` +
-        (record.result ?? "No output."),
+        (record.result?.trim() || "No output."),
         details,
       );
     },
@@ -1026,7 +1017,7 @@ Guidelines:
       } else if (record.status === "error") {
         output += `Error: ${record.error}`;
       } else {
-        output += record.result ?? "No output.";
+        output += record.result?.trim() || "No output.";
       }
 
       // Mark result as consumed — suppresses the completion notification

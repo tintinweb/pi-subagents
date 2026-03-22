@@ -1,7 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
-  getDefaultMaxTurns, 
-  getGraceTurns, setDefaultMaxTurns,setGraceTurns,
+  getDefaultMaxTurns,
+  getGraceTurns,
+  normalizeMaxTurns,
+  setDefaultMaxTurns,
+  setGraceTurns,
 } from "../src/agent-runner.js";
 
 describe("setDefaultMaxTurns / getDefaultMaxTurns", () => {
@@ -23,9 +26,9 @@ describe("setDefaultMaxTurns / getDefaultMaxTurns", () => {
     expect(getDefaultMaxTurns()).toBe(1);
   });
 
-  it("clamps 0 to 1 (0 is not a valid turn count)", () => {
+  it("treats 0 as unlimited", () => {
     setDefaultMaxTurns(0);
-    expect(getDefaultMaxTurns()).toBe(1);
+    expect(getDefaultMaxTurns()).toBeUndefined();
   });
 
   it("clamps negative values to 1", () => {
@@ -38,6 +41,24 @@ describe("setDefaultMaxTurns / getDefaultMaxTurns", () => {
     expect(getDefaultMaxTurns()).toBe(50);
     setDefaultMaxTurns(undefined);
     expect(getDefaultMaxTurns()).toBeUndefined();
+  });
+});
+
+describe("normalizeMaxTurns", () => {
+  it("treats undefined as unlimited", () => {
+    expect(normalizeMaxTurns(undefined)).toBeUndefined();
+  });
+
+  it("treats 0 as unlimited", () => {
+    expect(normalizeMaxTurns(0)).toBeUndefined();
+  });
+
+  it("keeps positive values", () => {
+    expect(normalizeMaxTurns(7)).toBe(7);
+  });
+
+  it("clamps negative values to 1", () => {
+    expect(normalizeMaxTurns(-3)).toBe(1);
   });
 });
 

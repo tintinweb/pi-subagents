@@ -61,7 +61,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       skills: inheritField(fm.skills ?? fm.inherit_skills),
       model: str(fm.model),
       thinking: str(fm.thinking) as ThinkingLevel | undefined,
-      maxTurns: positiveInt(fm.max_turns),
+      maxTurns: nonNegativeInt(fm.max_turns),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context === true,
@@ -83,9 +83,9 @@ function str(val: unknown): string | undefined {
   return typeof val === "string" ? val : undefined;
 }
 
-/** Extract a positive integer or undefined. */
-function positiveInt(val: unknown): number | undefined {
-  return typeof val === "number" && val >= 1 ? val : undefined;
+/** Extract a non-negative integer or undefined. 0 means unlimited for max_turns. */
+function nonNegativeInt(val: unknown): number | undefined {
+  return typeof val === "number" && val >= 0 ? val : undefined;
 }
 
 /**

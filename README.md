@@ -170,7 +170,7 @@ All fields are optional — sensible defaults for everything.
 | `isolated` | `false` | No extension/MCP tools, only built-in |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-Frontmatter sets defaults. Explicit `Agent` parameters always override them.
+Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
 
 ## Tools
 
@@ -183,15 +183,14 @@ Launch a sub-agent.
 | `prompt` | string | yes | The task for the agent |
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
-| `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`) |
-| `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh |
-| `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
-| `run_in_background` | boolean | no | Run without blocking |
+| `model` | string | no | Model override used only when the agent config does not set `model` |
+| `thinking` | string | no | Thinking level used only when the agent config does not set `thinking` |
+| `max_turns` | number | no | Max agentic turns used only when the agent config does not set `max_turns` |
+| `run_in_background` | boolean | no | Background execution used only when the agent config does not set `run_in_background` |
 | `resume` | string | no | Agent ID to resume a previous session |
-| `isolated` | boolean | no | No extension/MCP tools |
-| `isolation` | `"worktree"` | no | Run in an isolated git worktree |
-| `inherit_context` | boolean | no | Fork parent conversation into agent |
-| `join_mode` | `"async"` \| `"group"` | no | Override join strategy for background completion notifications (default: smart) |
+| `isolated` | boolean | no | No extension/MCP tools; used only when the agent config does not set `isolated` |
+| `isolation` | `"worktree"` | no | Worktree isolation used only when the agent config does not set `isolation` |
+| `inherit_context` | boolean | no | Parent-context inheritance used only when the agent config does not set `inherit_context` |
 
 ### `get_subagent_result`
 
@@ -260,7 +259,7 @@ Foreground agents bypass the queue — they block the parent anyway.
 
 ## Join Strategies
 
-When background agents complete, they notify the main agent. The **join mode** controls how these notifications are delivered:
+When background agents complete, they notify the main agent. The **join mode** controls how these notifications are delivered. It applies only to background agents.
 
 | Mode | Behavior |
 |------|----------|
@@ -271,8 +270,7 @@ When background agents complete, they notify the main agent. The **join mode** c
 **Timeout behavior:** When agents are grouped, a 30-second timeout starts after the first agent completes. If not all agents finish in time, a partial notification is sent with completed results and remaining agents continue with a shorter 15-second re-batch window for stragglers.
 
 **Configuration:**
-- Per-call: `Agent({ ..., join_mode: "async" })` overrides for that agent
-- Global default: `/agents` → Settings → Join mode
+- Configure join mode in `/agents` → Settings → Join mode
 
 ## Events
 

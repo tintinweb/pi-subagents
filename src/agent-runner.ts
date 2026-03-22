@@ -27,10 +27,16 @@ const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
 /** Default max turns. undefined = unlimited (no turn limit). */
 let defaultMaxTurns: number | undefined;
 
+/** Normalize max turns. undefined or 0 = unlimited, otherwise minimum 1. */
+export function normalizeMaxTurns(n: number | undefined): number | undefined {
+  if (n == null || n === 0) return undefined;
+  return Math.max(1, n);
+}
+
 /** Get the default max turns value. undefined = unlimited. */
 export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurns; }
-/** Set the default max turns value. undefined = unlimited, otherwise minimum 1. */
-export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = n != null ? Math.max(1, n) : undefined; }
+/** Set the default max turns value. undefined or 0 = unlimited, otherwise minimum 1. */
+export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = normalizeMaxTurns(n); }
 
 /** Additional turns allowed after the soft limit steer message. */
 let graceTurns = 5;
@@ -121,6 +127,17 @@ function collectResponseText(session: AgentSession) {
     }
   });
   return { getText: () => text, unsubscribe };
+}
+
+/** Get the last assistant text from the completed session history. */
+function getLastAssistantText(session: AgentSession): string {
+  for (let i = session.messages.length - 1; i >= 0; i--) {
+    const msg = session.messages[i];
+    if (msg.role !== "assistant") continue;
+    const text = extractText(msg.content).trim();
+    if (text) return text;
+  }
+  return "";
 }
 
 /**
@@ -279,7 +296,7 @@ export async function runAgent(
 
   // Track turns for graceful max_turns enforcement
   let turnCount = 0;
-  const maxTurns = options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns;
+  const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
   let softLimitReached = false;
   let aborted = false;
 
@@ -333,7 +350,8 @@ export async function runAgent(
     cleanupAbort();
   }
 
-  return { responseText: collector.getText(), session, aborted, steered: softLimitReached };
+  const responseText = collector.getText().trim() || getLastAssistantText(session);
+  return { responseText, session, aborted, steered: softLimitReached };
 }
 
 /**
@@ -362,7 +380,7 @@ export async function resumeAgent(
     cleanupAbort();
   }
 
-  return collector.getText();
+  return collector.getText().trim() || getLastAssistantText(session);
 }
 
 /**
