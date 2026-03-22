@@ -24,7 +24,7 @@ describe("cross-extension RPC", () => {
 
   beforeEach(() => {
     events = createEventBus();
-    manager = { spawn: vi.fn().mockReturnValue("agent-42") };
+    manager = { spawn: vi.fn().mockReturnValue("agent-42"), abort: vi.fn().mockReturnValue(true) };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
   });
@@ -153,6 +153,55 @@ describe("cross-extension RPC", () => {
 
       // Give any potential async handler time to fire
       await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- stop ---
+
+  describe("stop RPC", () => {
+    it("returns success when agent is aborted", () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st1", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st1", agentId: "agent-42" });
+
+      expect(reply).toHaveBeenCalledOnce();
+      expect(reply).toHaveBeenCalledWith({ success: true });
+      expect(manager.abort).toHaveBeenCalledWith("agent-42");
+    });
+
+    it("returns false when agent not found", () => {
+      (manager.abort as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st2", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st2", agentId: "nonexistent" });
+
+      expect(reply).toHaveBeenCalledOnce();
+      expect(reply).toHaveBeenCalledWith({ success: false });
+    });
+
+    it("scopes replies — other requestIds do not receive it", () => {
+      registerRpcHandlers(deps);
+      const wrongReply = vi.fn();
+      const rightReply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-other", wrongReply);
+      events.on("subagents:rpc:stop:reply:req-st3", rightReply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st3", agentId: "agent-42" });
+
+      expect(rightReply).toHaveBeenCalledOnce();
+      expect(wrongReply).not.toHaveBeenCalled();
+    });
+
+    it("unsub stops responding to stop requests", () => {
+      const { unsubStop } = registerRpcHandlers(deps);
+      unsubStop();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st4", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st4", agentId: "agent-42" });
+
       expect(reply).not.toHaveBeenCalled();
     });
   });

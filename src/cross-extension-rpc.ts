@@ -11,9 +11,10 @@ export interface EventBus {
   emit(event: string, data: unknown): void;
 }
 
-/** Minimal AgentManager interface needed by the spawn RPC. */
+/** Minimal AgentManager interface needed by the spawn/stop RPCs. */
 export interface SpawnCapable {
   spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
+  abort(id: string): boolean;
 }
 
 export interface RpcDeps {
@@ -26,10 +27,11 @@ export interface RpcDeps {
 export interface RpcHandle {
   unsubPing: () => void;
   unsubSpawn: () => void;
+  unsubStop: () => void;
 }
 
 /**
- * Register ping and spawn RPC handlers on the event bus.
+ * Register ping, spawn, and stop RPC handlers on the event bus.
  * Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
@@ -57,5 +59,15 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     }
   });
 
-  return { unsubPing, unsubSpawn };
+  const unsubStop = events.on("subagents:rpc:stop", (raw: unknown) => {
+    const { requestId, agentId } = raw as { requestId: string; agentId: string };
+    try {
+      const success = manager.abort(agentId);
+      events.emit(`subagents:rpc:stop:reply:${requestId}`, { success });
+    } catch {
+      events.emit(`subagents:rpc:stop:reply:${requestId}`, { success: false });
+    }
+  });
+
+  return { unsubPing, unsubSpawn, unsubStop };
 }

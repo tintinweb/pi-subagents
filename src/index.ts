@@ -431,7 +431,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_switch", () => { manager.clearCompleted(); });
 
-  const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc } = registerRpcHandlers({
+  const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
     events: pi.events,
     pi,
     getCtx: () => currentCtx,
@@ -445,6 +445,7 @@ export default function (pi: ExtensionAPI) {
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
     unsubSpawnRpc();
+    unsubStopRpc();
     unsubPingRpc();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
