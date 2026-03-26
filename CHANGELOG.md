@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-03-26
+
+### Fixed
+- **Extension `session_start` handlers now fire in subagent sessions** ([#20](https://github.com/tintinweb/pi-subagents/issues/20)) — `bindExtensions()` was never called on subagent sessions, so extensions that initialize state in `session_start` (e.g. loading credentials, setting up connections) silently failed at runtime. Tools appeared registered but were non-functional. Now calls `session.bindExtensions()` after tool filtering and before prompting, matching the lifecycle used by pi's interactive, print, and RPC modes. Also triggers `extendResourcesFromExtensions("startup")` so extension-provided skills and prompts are discovered.
+
 ## [0.5.1] - 2026-03-24
 
 ### Changed
@@ -340,6 +345,8 @@ Initial release.
 - **Thinking level** — per-agent extended thinking control
 - **`/agent` and `/agents` commands**
 
+[0.5.2]: https://github.com/tintinweb/pi-subagents/compare/v0.5.1...v0.5.2
+[0.5.1]: https://github.com/tintinweb/pi-subagents/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tintinweb/pi-subagents/compare/v0.4.9...v0.5.0
 [0.4.9]: https://github.com/tintinweb/pi-subagents/compare/v0.4.8...v0.4.9
 [0.4.8]: https://github.com/tintinweb/pi-subagents/compare/v0.4.7...v0.4.8
