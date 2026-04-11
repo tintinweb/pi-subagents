@@ -10,16 +10,24 @@ import { BUILTIN_TOOL_NAMES } from "./agent-types.js";
 import type { AgentConfig, MemoryScope, ThinkingLevel } from "./types.js";
 
 /**
+ * Resolve the global agent directory, honoring $PI_CODING_AGENT_DIR if set
+ * and falling back to ~/.pi/agent otherwise.
+ */
+export function globalAgentDir(): string {
+  return process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
+}
+
+/**
  * Scan for custom agent .md files from multiple locations.
  * Discovery hierarchy (higher priority wins):
  *   1. Project: <cwd>/.pi/agents/*.md
- *   2. Global:  ~/.pi/agent/agents/*.md
+ *   2. Global:  $PI_CODING_AGENT_DIR/agents/*.md (default: ~/.pi/agent/agents/*.md)
  *
  * Project-level agents override global ones with the same name.
  * Any name is allowed — names matching defaults (e.g. "Explore") override them.
  */
 export function loadCustomAgents(cwd: string): Map<string, AgentConfig> {
-  const globalDir = join(homedir(), ".pi", "agent", "agents");
+  const globalDir = join(globalAgentDir(), "agents");
   const projectDir = join(cwd, ".pi", "agents");
 
   const agents = new Map<string, AgentConfig>();
