@@ -64,6 +64,10 @@ export interface AgentRecord {
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
   result?: string;
   error?: string;
+  /** Short resolved model name for live status display. */
+  modelName?: string;
+  /** Effective thinking level for live status display. */
+  thinkingLevel?: ThinkingLevel;
   toolUses: number;
   startedAt: number;
   completedAt?: number;

@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import type { SubagentType } from "../types.js";
+import type { SubagentType, ThinkingLevel } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -76,9 +76,11 @@ export interface AgentDetails {
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
-  /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
+  /** Short resolved model name for display (e.g. "haiku", "sonnet"). */
   modelName?: string;
-  /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
+  /** Effective explicit thinking level for display. */
+  thinkingLevel?: ThinkingLevel;
+  /** Notable config tags (e.g. ["isolated"]). */
   tags?: string[];
   /** Current turn count. */
   turnCount?: number;
@@ -140,6 +142,13 @@ export function formatMs(ms: number): string {
 export function formatDuration(startedAt: number, completedAt?: number): string {
   if (completedAt) return formatMs(completedAt - startedAt);
   return `${formatMs(Date.now() - startedAt)} (running)`;
+}
+
+export function formatAgentConfigTag(modelName?: string, thinkingLevel?: ThinkingLevel): string | undefined {
+  if (modelName && thinkingLevel) return `${modelName}:${thinkingLevel}`;
+  if (modelName) return modelName;
+  if (thinkingLevel) return `thinking:${thinkingLevel}`;
+  return undefined;
 }
 
 /** Get display name for any agent type (built-in or custom). */
@@ -341,6 +350,8 @@ export class AgentWidget {
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
 
       const parts: string[] = [];
+      const configTag = formatAgentConfigTag(a.modelName, a.thinkingLevel);
+      if (configTag) parts.push(configTag);
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);
@@ -473,6 +484,14 @@ export class AgentWidget {
       if (queuedCount > 0) statusParts.push(`${queuedCount} queued`);
       const total = runningCount + queuedCount;
       newStatusText = `${statusParts.join(", ")} agent${total === 1 ? "" : "s"}`;
+
+      if (runningCount === 1) {
+        const runningAgent = allAgents.find(a => a.status === "running");
+        const configTag = runningAgent
+          ? formatAgentConfigTag(runningAgent.modelName, runningAgent.thinkingLevel)
+          : undefined;
+        if (configTag) newStatusText += ` · ${configTag}`;
+      }
     }
     if (newStatusText !== this.lastStatusText) {
       this.uiCtx.setStatus("subagents", newStatusText);
