@@ -25,6 +25,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { applySettings, loadSettings, persistToastFor, type SubagentsSettings, saveSettings } from "./settings.js";
 import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
@@ -547,6 +548,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   const typeListText = buildTypeListText();
+
+  // Apply persisted settings on startup (global + project merged; missing → defaults;
+  // corrupt file emits a warning to stderr and falls back to defaults)
+  const loadedSettings = loadSettings();
+  applySettings(loadedSettings, {
+    setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+    setDefaultMaxTurns,
+    setGraceTurns,
+    setDefaultJoinMode,
+  });
+  pi.events.emit("subagents:settings_loaded", { settings: loadedSettings });
 
   // ---- Agent tool ----
 
@@ -1605,6 +1617,15 @@ ${systemPrompt}
     ctx.ui.notify(`Created ${targetPath}`, "info");
   }
 
+  function snapshotSettings(): SubagentsSettings {
+    return {
+      maxConcurrent: manager.getMaxConcurrent(),
+      defaultMaxTurns: getDefaultMaxTurns() ?? 0, // 0 = unlimited
+      graceTurns: getGraceTurns(),
+      defaultJoinMode: getDefaultJoinMode(),
+    };
+  }
+
   async function showSettings(ctx: ExtensionCommandContext) {
     const choice = await ctx.ui.select("Settings", [
       `Max concurrency (current: ${manager.getMaxConcurrent()})`,
@@ -1620,7 +1641,7 @@ ${systemPrompt}
         const n = parseInt(val, 10);
         if (n >= 1) {
           manager.setMaxConcurrent(n);
-          ctx.ui.notify(`Max concurrency set to ${n}`, "info");
+          notifyApplied(ctx, `Max concurrency set to ${n}`);
         } else {
           ctx.ui.notify("Must be a positive integer.", "warning");
         }
@@ -1631,10 +1652,10 @@ ${systemPrompt}
         const n = parseInt(val, 10);
         if (n === 0) {
           setDefaultMaxTurns(undefined);
-          ctx.ui.notify("Default max turns set to unlimited", "info");
+          notifyApplied(ctx, "Default max turns set to unlimited");
         } else if (n >= 1) {
           setDefaultMaxTurns(n);
-          ctx.ui.notify(`Default max turns set to ${n}`, "info");
+          notifyApplied(ctx, `Default max turns set to ${n}`);
         } else {
           ctx.ui.notify("Must be 0 (unlimited) or a positive integer.", "warning");
         }
@@ -1645,7 +1666,7 @@ ${systemPrompt}
         const n = parseInt(val, 10);
         if (n >= 1) {
           setGraceTurns(n);
-          ctx.ui.notify(`Grace turns set to ${n}`, "info");
+          notifyApplied(ctx, `Grace turns set to ${n}`);
         } else {
           ctx.ui.notify("Must be a positive integer.", "warning");
         }
@@ -1659,9 +1680,21 @@ ${systemPrompt}
       if (val) {
         const mode = val.split(" ")[0] as JoinMode;
         setDefaultJoinMode(mode);
-        ctx.ui.notify(`Default join mode set to ${mode}`, "info");
+        notifyApplied(ctx, `Default join mode set to ${mode}`);
       }
     }
+  }
+
+  // Persist current settings snapshot, emit the changed-event, and surface the
+  // right toast — successful saves show info; persistence failures downgrade to
+  // warning so users aren't silently reverted on restart. Event fires regardless
+  // of persistence outcome so listeners see the in-memory change.
+  function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
+    const snapshot = snapshotSettings();
+    const persisted = saveSettings(snapshot);
+    pi.events.emit("subagents:settings_changed", { settings: snapshot, persisted });
+    const { message, level } = persistToastFor(successMsg, persisted);
+    ctx.ui.notify(message, level);
   }
 
   pi.registerCommand("agents", {

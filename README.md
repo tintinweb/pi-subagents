@@ -272,6 +272,36 @@ When background agents complete, they notify the main agent. The **join mode** c
 **Configuration:**
 - Configure join mode in `/agents` → Settings → Join mode
 
+## Persistent Settings
+
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, default join mode) persist across pi restarts. Two files, merged on load:
+
+- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
+- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
+
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, join mode `smart`).
+
+**Example — global defaults for a beefy machine:**
+
+```bash
+mkdir -p ~/.pi/agent
+cat > ~/.pi/agent/subagents.json <<'EOF'
+{
+  "maxConcurrent": 16,
+  "graceTurns": 10
+}
+EOF
+```
+
+Every project now starts with concurrency 16 and grace 10, without ever touching the menu. Individual projects can still override via `/agents` → Settings.
+
+**Failure behavior:**
+
+- **Missing file** — silent fallback to defaults. Expected for fresh installs.
+- **Malformed JSON** — a warning is printed to stderr on startup (`[pi-subagents] Ignoring malformed settings at …`), and defaults apply.
+- **Invalid field values** (negative numbers, non-integers, unknown join modes) — silently dropped per field; remaining valid fields still apply.
+- **Save failure** (read-only FS, permission denied) — the `/agents` → Settings toast downgrades to a warning with `(session only; failed to persist)` so you know the change won't survive restart.
+
 ## Events
 
 Agent lifecycle events are emitted via `pi.events.emit()` so other extensions can react:
@@ -284,6 +314,8 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:failed` | Agent errored, stopped, or aborted | same as completed + `error`, `status` |
 | `subagents:steered` | Steering message sent | `id`, `message` |
 | `subagents:ready` | Extension loaded and RPC handlers registered | — |
+| `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
+| `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
 
 ## Cross-Extension RPC
 
