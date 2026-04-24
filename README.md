@@ -272,6 +272,31 @@ When background agents complete, they notify the main agent. The **join mode** c
 **Configuration:**
 - Configure join mode in `/agents` → Settings → Join mode
 
+## Persistent Settings
+
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, default join mode) persist across pi restarts. Two files, merged on load:
+
+- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
+- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
+
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, join mode `smart`).
+
+**Example — global defaults for a beefy machine:**
+
+```bash
+mkdir -p ~/.pi/agent
+cat > ~/.pi/agent/subagents.json <<'EOF'
+{
+  "maxConcurrent": 16,
+  "graceTurns": 10
+}
+EOF
+```
+
+Every project now starts with concurrency 16 and grace 10, without ever touching the menu. Individual projects can still override via `/agents` → Settings.
+
+**Failure behavior:** missing file is silent; malformed JSON logs a `[pi-subagents] Ignoring malformed settings at …` warning to stderr; invalid/out-of-range field values are dropped per-field; write failures downgrade the `/agents` toast to a warning with `(session only; failed to persist)`.
+
 ## Events
 
 Agent lifecycle events are emitted via `pi.events.emit()` so other extensions can react:
@@ -284,6 +309,8 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:failed` | Agent errored, stopped, or aborted | same as completed + `error`, `status` |
 | `subagents:steered` | Steering message sent | `id`, `message` |
 | `subagents:ready` | Extension loaded and RPC handlers registered | — |
+| `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
+| `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
 
 ## Cross-Extension RPC
 

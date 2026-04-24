@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Persistent `/agents` → Settings** ([#24](https://github.com/tintinweb/pi-subagents/issues/24)) — the four runtime tuning values (`maxConcurrent`, `defaultMaxTurns`, `graceTurns`, `defaultJoinMode`) now survive pi restarts via a two-file dual-scope model mirroring pi's own `SettingsManager`. Global `~/.pi/agent/subagents.json` provides machine-wide defaults (edit by hand; the menu never writes here); project `<cwd>/.pi/subagents.json` holds per-project overrides (written by `/agents` → Settings). Load merges both with project winning on conflicts. Invalid fields are silently dropped per field; malformed JSON emits a warning to stderr and falls back to defaults so startup always proceeds; write failures downgrade the settings toast to a warning with `(session only; failed to persist)` so changes aren't silently reverted on next restart.
+- **New lifecycle events** — `subagents:settings_loaded` (emitted once at extension init with the merged settings) and `subagents:settings_changed` (emitted on each `/agents` → Settings mutation with the new snapshot and a `persisted: boolean` flag so listeners can react to write failures).
+
 ## [0.6.0] - 2026-04-24
 
 > **⚠️ Breaking: drops support for `pi` < 0.68.** The upstream `pi-coding-agent` package shipped breaking API changes in v0.68 (and further ones in v0.70). This release migrates to `^0.70.2` and is **not** backward-compatible with hosts on `pi` 0.62–0.67. Users on those versions must upgrade their `pi` installation (`npm install -g @mariozechner/pi-coding-agent@latest`) before updating this extension.
