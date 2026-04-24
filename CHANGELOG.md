@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-04-24
+
+> **⚠️ Breaking: drops support for `pi` < 0.68.** The upstream `pi-coding-agent` package shipped breaking API changes in v0.68 (and further ones in v0.70). This release migrates to `^0.70.2` and is **not** backward-compatible with hosts on `pi` 0.62–0.67. Users on those versions must upgrade their `pi` installation (`npm install -g @mariozechner/pi-coding-agent@latest`) before updating this extension.
+
+### Changed
+- **Bumped peer `@mariozechner/pi-coding-agent` to `^0.70.2`** ([#28](https://github.com/tintinweb/pi-subagents/pull/28)) — crosses the v0.68 breaking-change line upstream. Specifically: tools are now passed as `string[]` (was `Tool[]`); `cwd`/`agentDir` are mandatory on `SettingsManager.create()` and `DefaultResourceLoader`; `session_switch` event renamed to `session_before_switch`; `ToolDefinition.params` widens to `unknown` under contextual typing, requiring `defineTool(...)`.
+- **Tool registrations wrapped with `defineTool(...)`** — preserves `TParams` inference so `execute` handlers get properly-typed `params` instead of `unknown`. Applies to the `Agent`, `get_subagent_result`, and `steer_subagent` tools.
+
+### Removed
+- **Cwd-bound tool factory registry** — the internal `TOOL_FACTORIES` closure table and `create{Bash,Edit,Read,Write,Grep,Find,Ls}Tool` imports are gone. Exported helpers renamed: `getToolsForType(type, cwd)` → `getToolNamesForType(type)`, `getMemoryTools(cwd, set)` → `getMemoryToolNames(set)`, `getReadOnlyMemoryTools(cwd, set)` → `getReadOnlyMemoryToolNames(set)` — all returning `string[]` instead of `Tool[]`. The host binds cwd when resolving tool names, so the extension no longer instantiates tools directly.
+
+### Fixed
+- **Subagent `SettingsManager` read wrong project settings in worktree mode** ([#30](https://github.com/tintinweb/pi-subagents/pull/30)) — `SettingsManager.create()` was called without arguments, defaulting `cwd` to `process.cwd()`. When the subagent's effective cwd differed (worktree isolation or explicit `cwd` override), its settings manager read `.pi/settings.json` from the parent's cwd rather than its own, diverging from the loader and session manager. Now passes `effectiveCwd` and `agentDir` explicitly, keeping all three managers consistent.
+
 ## [0.5.2] - 2026-03-26
 
 ### Fixed

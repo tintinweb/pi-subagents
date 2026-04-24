@@ -417,7 +417,7 @@ src/
   index.ts            # Extension entry: tool/command registration, rendering
   types.ts            # Type definitions (AgentConfig, AgentRecord, etc.)
   default-agents.ts   # Embedded default agent configs (general-purpose, Explore, Plan)
-  agent-types.ts      # Unified agent registry (defaults + user), tool factories
+  agent-types.ts      # Unified agent registry (defaults + user), tool name resolution
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events
