@@ -9,6 +9,7 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
   DefaultResourceLoader: class {
     async reload() {}
   },
+  getAgentDir: vi.fn(() => "/mock/agent/dir"),
   SessionManager: { inMemory: vi.fn(() => ({ kind: "memory-session-manager" })) },
   SettingsManager: { create: vi.fn(() => ({ kind: "settings-manager" })) },
 }));
