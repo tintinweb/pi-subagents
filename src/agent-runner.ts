@@ -10,6 +10,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
+  getAgentDir,
   SessionManager,
   SettingsManager,
 } from "@mariozechner/pi-coding-agent";
@@ -232,9 +233,12 @@ export async function runAgent(
   // Still pass noSkills: true since we don't need the skill loader to load them again.
   const noSkills = skills === false || Array.isArray(skills);
 
+  const agentDir = getAgentDir();
+
   // Load extensions/skills: true or string[] → load; false → don't
   const loader = new DefaultResourceLoader({
     cwd: effectiveCwd,
+    agentDir,
     noExtensions: extensions === false,
     noSkills,
     noPromptTemplates: true,
@@ -253,8 +257,9 @@ export async function runAgent(
 
   const sessionOpts: Record<string, unknown> = {
     cwd: effectiveCwd,
+    agentDir,
     sessionManager: SessionManager.inMemory(effectiveCwd),
-    settingsManager: SettingsManager.create(),
+    settingsManager: SettingsManager.create(effectiveCwd, agentDir),
     modelRegistry: ctx.modelRegistry,
     model,
     tools,

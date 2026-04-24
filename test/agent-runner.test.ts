@@ -1,16 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createAgentSession } = vi.hoisted(() => ({
+const {
+  createAgentSession,
+  defaultResourceLoaderCtor,
+  getAgentDir,
+  sessionManagerInMemory,
+  settingsManagerCreate,
+} = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
+  defaultResourceLoaderCtor: vi.fn(),
+  getAgentDir: vi.fn(() => "/mock/agent-dir"),
+  sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
+  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager" })),
 }));
 
 vi.mock("@mariozechner/pi-coding-agent", () => ({
   createAgentSession,
   DefaultResourceLoader: class {
+    constructor(options: any) {
+      defaultResourceLoaderCtor(options);
+    }
+
     async reload() {}
   },
-  SessionManager: { inMemory: vi.fn(() => ({ kind: "memory-session-manager" })) },
-  SettingsManager: { create: vi.fn(() => ({ kind: "settings-manager" })) },
+  getAgentDir,
+  SessionManager: { inMemory: sessionManagerInMemory },
+  SettingsManager: { create: settingsManagerCreate },
 }));
 
 vi.mock("../src/agent-types.js", () => ({
@@ -93,6 +108,10 @@ const pi = {} as any;
 
 beforeEach(() => {
   createAgentSession.mockReset();
+  defaultResourceLoaderCtor.mockClear();
+  getAgentDir.mockClear();
+  sessionManagerInMemory.mockClear();
+  settingsManagerCreate.mockClear();
 });
 
 describe("agent-runner final output capture", () => {
@@ -119,6 +138,25 @@ describe("agent-runner final output capture", () => {
     const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
     const promptOrder = session.prompt.mock.invocationCallOrder[0];
     expect(bindOrder).toBeLessThan(promptOrder);
+  });
+
+  it("passes effective cwd and agentDir to the loader and settings manager", async () => {
+    const { session } = createSession("CONFIGURED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Say CONFIGURED", { pi, cwd: "/tmp/worktree" });
+
+    expect(getAgentDir).toHaveBeenCalledTimes(1);
+    expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: "/tmp/worktree",
+      agentDir: "/mock/agent-dir",
+    }));
+    expect(settingsManagerCreate).toHaveBeenCalledWith("/tmp/worktree", "/mock/agent-dir");
+    expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp/worktree");
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: "/tmp/worktree",
+      agentDir: "/mock/agent-dir",
+    }));
   });
 
   it("resumeAgent also falls back to the final assistant message text", async () => {
