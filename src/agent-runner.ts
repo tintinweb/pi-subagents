@@ -233,7 +233,12 @@ export async function runAgent(
 
   const agentDir = getAgentDir();
 
-  // Load extensions/skills: true or string[] → load; false → don't
+  // Load extensions/skills: true or string[] → load; false → don't.
+  // Suppress AGENTS.md/CLAUDE.md and APPEND_SYSTEM.md — upstream's
+  // buildSystemPrompt() re-appends both AFTER systemPromptOverride, which
+  // would defeat prompt_mode: replace and isolated: true. Parent context, if
+  // wanted, reaches the subagent via prompt_mode: append (parentSystemPrompt
+  // is embedded in systemPromptOverride) or inherit_context (conversation).
   const loader = new DefaultResourceLoader({
     cwd: effectiveCwd,
     agentDir,
@@ -241,7 +246,9 @@ export async function runAgent(
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
+    noContextFiles: true,
     systemPromptOverride: () => systemPrompt,
+    appendSystemPromptOverride: () => [],
   });
   await loader.reload();
 
