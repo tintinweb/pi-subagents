@@ -295,12 +295,7 @@ EOF
 
 Every project now starts with concurrency 16 and grace 10, without ever touching the menu. Individual projects can still override via `/agents` → Settings.
 
-**Failure behavior:**
-
-- **Missing file** — silent fallback to defaults. Expected for fresh installs.
-- **Malformed JSON** — a warning is printed to stderr on startup (`[pi-subagents] Ignoring malformed settings at …`), and defaults apply.
-- **Invalid field values** (negative numbers, non-integers, unknown join modes) — silently dropped per field; remaining valid fields still apply.
-- **Save failure** (read-only FS, permission denied) — the `/agents` → Settings toast downgrades to a warning with `(session only; failed to persist)` so you know the change won't survive restart.
+**Failure behavior:** missing file is silent; malformed JSON logs a `[pi-subagents] Ignoring malformed settings at …` warning to stderr; invalid/out-of-range field values are dropped per-field; write failures downgrade the `/agents` toast to a warning with `(session only; failed to persist)`.
 
 ## Events
 

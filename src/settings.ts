@@ -9,7 +9,11 @@ import type { JoinMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
-  /** 0 = unlimited (matches normalizeMaxTurns in agent-runner.ts and the /agents UI). */
+  /**
+   * 0 = unlimited — the extension's single source of truth for that convention:
+   * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
+   * `/agents` → Settings input prompt explicitly says "0 = unlimited".
+   */
   defaultMaxTurns?: number;
   graceTurns?: number;
   defaultJoinMode?: JoinMode;
@@ -23,20 +27,42 @@ export interface SettingsAppliers {
   setDefaultJoinMode: (mode: JoinMode) => void;
 }
 
+/** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
+export type SettingsEmit = (event: string, payload: unknown) => void;
+
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
+
+// Sanity ceilings — prevent hand-edited configs from asking for values that
+// make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
+// that any realistic power-user setting passes through.
+const MAX_CONCURRENT_CEILING = 1024;
+const MAX_TURNS_CEILING = 10_000;
+const GRACE_TURNS_CEILING = 1_000;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
   const out: SubagentsSettings = {};
-  if (Number.isInteger(r.maxConcurrent) && (r.maxConcurrent as number) >= 1) {
+  if (
+    Number.isInteger(r.maxConcurrent) &&
+    (r.maxConcurrent as number) >= 1 &&
+    (r.maxConcurrent as number) <= MAX_CONCURRENT_CEILING
+  ) {
     out.maxConcurrent = r.maxConcurrent as number;
   }
-  if (Number.isInteger(r.defaultMaxTurns) && (r.defaultMaxTurns as number) >= 0) {
+  if (
+    Number.isInteger(r.defaultMaxTurns) &&
+    (r.defaultMaxTurns as number) >= 0 &&
+    (r.defaultMaxTurns as number) <= MAX_TURNS_CEILING
+  ) {
     out.defaultMaxTurns = r.defaultMaxTurns as number;
   }
-  if (Number.isInteger(r.graceTurns) && (r.graceTurns as number) >= 1) {
+  if (
+    Number.isInteger(r.graceTurns) &&
+    (r.graceTurns as number) >= 1 &&
+    (r.graceTurns as number) <= GRACE_TURNS_CEILING
+  ) {
     out.graceTurns = r.graceTurns as number;
   }
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
@@ -110,4 +136,37 @@ export function persistToastFor(
   return persisted
     ? { message: successMsg, level: "info" }
     : { message: `${successMsg} (session only; failed to persist)`, level: "warning" };
+}
+
+/**
+ * Load merged settings, apply them to in-memory state, and emit the
+ * `subagents:settings_loaded` lifecycle event. Returns the loaded settings so
+ * callers can log/inspect. Extension init wires this once.
+ */
+export function applyAndEmitLoaded(
+  appliers: SettingsAppliers,
+  emit: SettingsEmit,
+  cwd: string = process.cwd(),
+): SubagentsSettings {
+  const settings = loadSettings(cwd);
+  applySettings(settings, appliers);
+  emit("subagents:settings_loaded", { settings });
+  return settings;
+}
+
+/**
+ * Persist a settings snapshot, emit the `subagents:settings_changed` event
+ * (regardless of persist outcome so listeners see the in-memory change), and
+ * return the toast the UI should display. Event payload carries the `persisted`
+ * flag so listeners can react to write failures.
+ */
+export function saveAndEmitChanged(
+  snapshot: SubagentsSettings,
+  successMsg: string,
+  emit: SettingsEmit,
+  cwd: string = process.cwd(),
+): { message: string; level: "info" | "warning" } {
+  const persisted = saveSettings(snapshot, cwd);
+  emit("subagents:settings_changed", { settings: snapshot, persisted });
+  return persistToastFor(successMsg, persisted);
 }

@@ -25,7 +25,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { applySettings, loadSettings, persistToastFor, type SubagentsSettings, saveSettings } from "./settings.js";
+import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
 import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
@@ -549,16 +549,18 @@ export default function (pi: ExtensionAPI) {
 
   const typeListText = buildTypeListText();
 
-  // Apply persisted settings on startup (global + project merged; missing → defaults;
-  // corrupt file emits a warning to stderr and falls back to defaults)
-  const loadedSettings = loadSettings();
-  applySettings(loadedSettings, {
-    setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
-    setDefaultMaxTurns,
-    setGraceTurns,
-    setDefaultJoinMode,
-  });
-  pi.events.emit("subagents:settings_loaded", { settings: loadedSettings });
+  // Apply persisted settings on startup and emit `subagents:settings_loaded`.
+  // Global + project merged; missing → defaults; corrupt file emits a warning
+  // to stderr and falls back to defaults.
+  applyAndEmitLoaded(
+    {
+      setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+      setDefaultMaxTurns,
+      setGraceTurns,
+      setDefaultJoinMode,
+    },
+    (event, payload) => pi.events.emit(event, payload),
+  );
 
   // ---- Agent tool ----
 
@@ -1620,7 +1622,9 @@ ${systemPrompt}
   function snapshotSettings(): SubagentsSettings {
     return {
       maxConcurrent: manager.getMaxConcurrent(),
-      defaultMaxTurns: getDefaultMaxTurns() ?? 0, // 0 = unlimited
+      // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
+      // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
+      defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
     };
@@ -1685,15 +1689,16 @@ ${systemPrompt}
     }
   }
 
-  // Persist current settings snapshot, emit the changed-event, and surface the
-  // right toast — successful saves show info; persistence failures downgrade to
-  // warning so users aren't silently reverted on restart. Event fires regardless
-  // of persistence outcome so listeners see the in-memory change.
+  // Persist the current snapshot, emit `subagents:settings_changed`, and surface
+  // the right toast. Successful saves show info; persistence failures downgrade
+  // to warning so users aren't silently reverted on restart. Event fires regardless
+  // of outcome so listeners see the in-memory change.
   function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
-    const snapshot = snapshotSettings();
-    const persisted = saveSettings(snapshot);
-    pi.events.emit("subagents:settings_changed", { settings: snapshot, persisted });
-    const { message, level } = persistToastFor(successMsg, persisted);
+    const { message, level } = saveAndEmitChanged(
+      snapshotSettings(),
+      successMsg,
+      (event, payload) => pi.events.emit(event, payload),
+    );
     ctx.ui.notify(message, level);
   }
 

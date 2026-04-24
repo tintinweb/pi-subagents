@@ -2,7 +2,15 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applySettings, loadSettings, persistToastFor, type SettingsAppliers, saveSettings } from "../src/settings.js";
+import {
+  applyAndEmitLoaded,
+  applySettings,
+  loadSettings,
+  persistToastFor,
+  type SettingsAppliers,
+  saveAndEmitChanged,
+  saveSettings,
+} from "../src/settings.js";
 
 /**
  * Tests for persistent settings. Uses two tmp directories:
@@ -190,6 +198,29 @@ describe("settings persistence", () => {
       });
       expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 4, graceTurns: 3 });
     });
+
+    it("accepts values at the ceiling (maxConcurrent=1024, defaultMaxTurns=10000, graceTurns=1000)", () => {
+      writeProject({ maxConcurrent: 1024, defaultMaxTurns: 10_000, graceTurns: 1_000 });
+      expect(loadSettings(projectDir)).toEqual({
+        maxConcurrent: 1024,
+        defaultMaxTurns: 10_000,
+        graceTurns: 1_000,
+      });
+    });
+
+    it("drops values above the ceiling", () => {
+      writeProject({ maxConcurrent: 1025 });
+      expect(loadSettings(projectDir).maxConcurrent).toBeUndefined();
+      writeProject({ defaultMaxTurns: 10_001 });
+      expect(loadSettings(projectDir).defaultMaxTurns).toBeUndefined();
+      writeProject({ graceTurns: 1_001 });
+      expect(loadSettings(projectDir).graceTurns).toBeUndefined();
+    });
+
+    it("drops absurdly large values (e.g. 1e6)", () => {
+      writeProject({ maxConcurrent: 1_000_000, defaultMaxTurns: 1_000_000, graceTurns: 1_000_000 });
+      expect(loadSettings(projectDir)).toEqual({});
+    });
   });
 
   describe("save result + corrupt-file warning", () => {
@@ -292,6 +323,94 @@ describe("settings persistence", () => {
         message: "Max concurrency set to 7 (session only; failed to persist)",
         level: "warning",
       });
+    });
+  });
+
+  describe("applyAndEmitLoaded", () => {
+    let appliers: SettingsAppliers;
+
+    beforeEach(() => {
+      appliers = {
+        setMaxConcurrent: vi.fn(),
+        setDefaultMaxTurns: vi.fn(),
+        setGraceTurns: vi.fn(),
+        setDefaultJoinMode: vi.fn(),
+      };
+    });
+
+    it("loads, applies, and emits subagents:settings_loaded with merged settings", () => {
+      writeGlobal({ maxConcurrent: 16 });
+      writeProject({ graceTurns: 7 });
+      const emit = vi.fn();
+
+      const result = applyAndEmitLoaded(appliers, emit, projectDir);
+
+      expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(16);
+      expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
+      expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
+      expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
+
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(emit).toHaveBeenCalledWith("subagents:settings_loaded", {
+        settings: { maxConcurrent: 16, graceTurns: 7 },
+      });
+      expect(result).toEqual({ maxConcurrent: 16, graceTurns: 7 });
+    });
+
+    it("still emits the event when both files are missing (payload carries {})", () => {
+      const emit = vi.fn();
+
+      const result = applyAndEmitLoaded(appliers, emit, projectDir);
+
+      expect(emit).toHaveBeenCalledWith("subagents:settings_loaded", { settings: {} });
+      expect(result).toEqual({});
+      // No setters fired — defaults preserved
+      expect(appliers.setMaxConcurrent).not.toHaveBeenCalled();
+      expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
+      expect(appliers.setGraceTurns).not.toHaveBeenCalled();
+      expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("saveAndEmitChanged", () => {
+    it("persists, emits with persisted=true, and returns info toast on success", () => {
+      const emit = vi.fn();
+      const snapshot = { maxConcurrent: 5, graceTurns: 2 };
+
+      const toast = saveAndEmitChanged(snapshot, "Max concurrency set to 5", emit, projectDir);
+
+      expect(emit).toHaveBeenCalledTimes(1);
+      expect(emit).toHaveBeenCalledWith("subagents:settings_changed", {
+        settings: snapshot,
+        persisted: true,
+      });
+      expect(toast).toEqual({ message: "Max concurrency set to 5", level: "info" });
+      // File actually written
+      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual(snapshot);
+    });
+
+    it("emits with persisted=false and returns warning toast on save failure", () => {
+      const filePosingAsCwd = join(tmpdir(), `pi-settings-notdir-${Date.now()}`);
+      writeFileSync(filePosingAsCwd, "");
+      const emit = vi.fn();
+      try {
+        const toast = saveAndEmitChanged(
+          { maxConcurrent: 5 },
+          "Max concurrency set to 5",
+          emit,
+          filePosingAsCwd,
+        );
+        expect(emit).toHaveBeenCalledWith("subagents:settings_changed", {
+          settings: { maxConcurrent: 5 },
+          persisted: false,
+        });
+        expect(toast).toEqual({
+          message: "Max concurrency set to 5 (session only; failed to persist)",
+          level: "warning",
+        });
+      } finally {
+        rmSync(filePosingAsCwd, { force: true });
+      }
     });
   });
 });
