@@ -21,9 +21,9 @@
     "autonomous"
   ],
   "dependencies": {
-    "@mariozechner/pi-ai": "^0.68.0",
-    "@mariozechner/pi-coding-agent": "^0.68.0",
-    "@mariozechner/pi-tui": "^0.68.0",
+    "@mariozechner/pi-ai": "^0.70.2",
+    "@mariozechner/pi-coding-agent": "^0.70.2",
+    "@mariozechner/pi-tui": "^0.70.2",
     "@sinclair/typebox": "latest"
   },
   "scripts": {

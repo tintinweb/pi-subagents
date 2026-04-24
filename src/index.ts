@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
@@ -550,7 +550,7 @@ export default function (pi: ExtensionAPI) {
 
   // ---- Agent tool ----
 
-  pi.registerTool<any, AgentDetails>({
+  pi.registerTool(defineTool({
     name: "Agent",
     label: "Agent",
     description: `Launch a new agent to handle complex, multi-step tasks autonomously.
@@ -964,11 +964,11 @@ Guidelines:
         details,
       );
     },
-  });
+  }));
 
   // ---- get_subagent_result tool ----
 
-  pi.registerTool({
+  pi.registerTool(defineTool({
     name: "get_subagent_result",
     label: "Get Agent Result",
     description:
@@ -1038,11 +1038,11 @@ Guidelines:
 
       return textResult(output);
     },
-  });
+  }));
 
   // ---- steer_subagent tool ----
 
-  pi.registerTool({
+  pi.registerTool(defineTool({
     name: "steer_subagent",
     label: "Steer Agent",
     description:
@@ -1080,7 +1080,7 @@ Guidelines:
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
     },
-  });
+  }));
 
   // ---- /agents interactive menu ----
 
