@@ -49,9 +49,9 @@ vi.mock("../src/agent-types.js", () => ({
     runInBackground: false,
     isolated: false,
   })),
-  getMemoryTools: vi.fn(() => []),
-  getReadOnlyMemoryTools: vi.fn(() => []),
-  getToolsForType: vi.fn(() => [{ name: "read" }]),
+  getMemoryToolNames: vi.fn(() => []),
+  getReadOnlyMemoryToolNames: vi.fn(() => []),
+  getToolNamesForType: vi.fn(() => ["read"]),
 }));
 
 vi.mock("../src/env.js", () => ({

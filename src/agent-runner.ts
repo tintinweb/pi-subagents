@@ -234,7 +234,6 @@ export async function runAgent(
   const agentDir = getAgentDir();
 
   // Load extensions/skills: true or string[] → load; false → don't
-  const agentDir = getAgentDir();
   const loader = new DefaultResourceLoader({
     cwd: effectiveCwd,
     agentDir,
