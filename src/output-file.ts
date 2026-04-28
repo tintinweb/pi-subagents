@@ -10,13 +10,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@mariozechner/pi-coding-agent";
 
+/**
+ * Encode a cwd path as a filesystem-safe directory name. Handles:
+ *   - POSIX:   "/home/user/project"        → "home-user-project"
+ *   - Windows: "C:\Users\foo\project"      → "Users-foo-project"
+ *   - UNC:     "\\\\server\\share\\project"  → "server-share-project"
+ */
+export function encodeCwd(cwd: string): string {
+  return cwd
+    .replace(/[/\\]/g, "-")        // both separators → dash
+    .replace(/^[A-Za-z]:-/, "")    // strip Windows drive prefix ("C:-")
+    .replace(/^-+/, "");           // strip leading dashes (POSIX root, UNC)
+}
+
 /** Create the output file path, ensuring the directory exists.
  *  Mirrors Claude Code's layout: /tmp/{prefix}-{uid}/{encoded-cwd}/{sessionId}/tasks/{agentId}.output */
 export function createOutputFilePath(cwd: string, agentId: string, sessionId: string): string {
-  const encoded = cwd.replace(/\//g, "-").replace(/^-/, "");
+  const encoded = encodeCwd(cwd);
   const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  chmodSync(root, 0o700);
+  // chmod is a no-op on Windows and throws on some Windows filesystems.
+  // On Unix we still want to enforce 0o700 past umask, so only swallow on Windows.
+  try {
+    chmodSync(root, 0o700);
+  } catch (err) {
+    if (process.platform !== "win32") throw err;
+  }
   const dir = join(root, encoded, sessionId, "tasks");
   mkdirSync(dir, { recursive: true });
   return join(dir, `${agentId}.output`);

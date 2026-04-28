@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`Agent` tool fails on Windows with `ENOENT` creating output directory** ([#27](https://github.com/tintinweb/pi-subagents/issues/27) — thanks [@sixnathan](https://github.com/sixnathan) for the diagnosis). The cwd-encoding regex in `output-file.ts` only handled POSIX `/` separators, so on Windows `cwd = "C:\\Users\\foo\\project"` survived unchanged and `path.join(tmpRoot, encoded, …)` produced an invalid nested-absolute path. Now extracts a small `encodeCwd()` helper that handles both `/` and `\\` separators, strips the Windows drive-letter prefix, and preserves UNC server/share segments. Also wraps the `chmodSync(root, 0o700)` call in a try/catch since chmod is a no-op on Windows and can throw on some filesystems.
+
 ## [0.6.1] - 2026-04-25
 
 ### Added
