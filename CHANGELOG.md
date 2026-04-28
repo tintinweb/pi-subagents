@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-04-28
+
 ### Fixed
-- **`Agent` tool fails on Windows with `ENOENT` creating output directory** ([#27](https://github.com/tintinweb/pi-subagents/issues/27) — thanks [@sixnathan](https://github.com/sixnathan) for the diagnosis). The cwd-encoding regex in `output-file.ts` only handled POSIX `/` separators, so on Windows `cwd = "C:\\Users\\foo\\project"` survived unchanged and `path.join(tmpRoot, encoded, …)` produced an invalid nested-absolute path. Now extracts a small `encodeCwd()` helper that handles both `/` and `\\` separators, strips the Windows drive-letter prefix, and preserves UNC server/share segments. Also wraps the `chmodSync(root, 0o700)` call in a try/catch since chmod is a no-op on Windows and can throw on some filesystems.
+- **`Agent` tool fails on Windows with `ENOENT` creating output directory** ([#27](https://github.com/tintinweb/pi-subagents/issues/27) — thanks [@sixnathan](https://github.com/sixnathan) for the diagnosis). The cwd-encoding regex in `output-file.ts` only handled POSIX `/` separators, so on Windows `cwd = "C:\\Users\\foo\\project"` survived unchanged and `path.join(tmpRoot, encoded, …)` produced an invalid nested-absolute path. Now extracts a small `encodeCwd()` helper that handles both `/` and `\\` separators, strips the Windows drive-letter prefix, and preserves UNC server/share segments. The `chmodSync(root, 0o700)` call is also wrapped in a try/catch that swallows errors only on Windows (where chmod is a no-op and can throw on some filesystems); on Unix the error still propagates so umask-defeating `0o700` enforcement is preserved.
 
 ## [0.6.1] - 2026-04-25
 
@@ -372,6 +374,9 @@ Initial release.
 - **Thinking level** — per-agent extended thinking control
 - **`/agent` and `/agents` commands**
 
+[0.6.2]: https://github.com/tintinweb/pi-subagents/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/tintinweb/pi-subagents/compare/v0.6.0...v0.6.1
+[0.6.0]: https://github.com/tintinweb/pi-subagents/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/tintinweb/pi-subagents/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/tintinweb/pi-subagents/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/tintinweb/pi-subagents/compare/v0.4.9...v0.5.0
