@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-04-28
+
+### Fixed
+- **`run_in_background: true` (and `inherit_context`, `isolated`) silently ignored on default agents** ([#37](https://github.com/tintinweb/pi-subagents/issues/37) — thanks [@kylesnowschwartz](https://github.com/kylesnowschwartz) for the diagnosis). The three built-in defaults (`general-purpose`, `Explore`, `Plan`) baked `runInBackground: false`, `inheritContext: false`, and `isolated: false` into their configs. `resolveAgentInvocationConfig` uses `agentConfig?.field ?? params.field ?? false`, and `??` only falls through on `null`/`undefined` — so an explicit `false` from the agent config silently won over the caller's `true`. Calling `Agent({ subagent_type: "general-purpose", run_in_background: true })` returned the result inline instead of backgrounding, blocking the parent UI for the agent's full runtime. Fix drops the three lines from each default (and from the unreachable defensive fallback in `agent-runner.ts`) — the type already declared each as `field?: boolean` with JSDoc *"undefined = caller decides"*, so the runtime now matches the documented contract. **Behavior:** custom agents that explicitly set these fields in frontmatter still lock as before (the v0.5.1 "frontmatter is authoritative" guarantee is preserved); the fix only stops *defaults* from spuriously claiming an opinion on callsite-strategy fields they don't actually have. The unreachable fallback now spreads `DEFAULT_AGENTS.get("general-purpose")` instead of duplicating the config inline, so future drift is impossible.
+
 ## [0.6.2] - 2026-04-28
 
 ### Fixed
@@ -374,6 +379,7 @@ Initial release.
 - **Thinking level** — per-agent extended thinking control
 - **`/agent` and `/agents` commands**
 
+[0.6.3]: https://github.com/tintinweb/pi-subagents/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/tintinweb/pi-subagents/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/tintinweb/pi-subagents/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/tintinweb/pi-subagents/compare/v0.5.2...v0.6.0

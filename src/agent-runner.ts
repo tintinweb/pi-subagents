@@ -16,6 +16,7 @@ import {
 } from "@mariozechner/pi-coding-agent";
 import { getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
+import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
@@ -212,19 +213,11 @@ export async function runAgent(
   if (agentConfig) {
     systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
   } else {
-    // Unknown type fallback: general-purpose (defensive — unreachable in practice
-    // since index.ts resolves unknown types to "general-purpose" before calling runAgent)
-    systemPrompt = buildAgentPrompt({
-      name: type,
-      description: "General-purpose agent",
-      systemPrompt: "",
-      promptMode: "append",
-      extensions: true,
-      skills: true,
-      inheritContext: false,
-      runInBackground: false,
-      isolated: false,
-    }, effectiveCwd, env, parentSystemPrompt, extras);
+    // Unknown type fallback: spread the canonical general-purpose config (defensive —
+    // unreachable in practice since index.ts resolves unknown types before calling runAgent).
+    const fallback = DEFAULT_AGENTS.get("general-purpose");
+    if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
+    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);
   }
 
   // When skills is string[], we've already preloaded them into the prompt.
