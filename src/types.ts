@@ -85,6 +85,14 @@ export interface AgentRecord {
   outputFile?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
+  /**
+   * Lifetime usage breakdown, accumulated via `message_end` events. Survives
+   * compaction. Total = input + output + cacheWrite (cacheRead deliberately
+   * excluded — see issue #38).
+   */
+  lifetimeUsage?: { input: number; output: number; cacheWrite: number };
+  /** Number of times this agent's session has compacted. */
+  compactionCount?: number;
 }
 
 /** Details attached to custom notification messages for visual rendering. */
