@@ -410,17 +410,6 @@ export default function (pi: ExtensionAPI) {
     });
   });
 
-  // Expose manager via Symbol.for() global registry for cross-package access.
-  // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
-  const MANAGER_KEY = Symbol.for("pi-subagents:manager");
-  (globalThis as any)[MANAGER_KEY] = {
-    waitForAll: () => manager.waitForAll(),
-    hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
-    getRecord: (id: string) => manager.getRecord(id),
-  };
-
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
 
@@ -442,6 +431,13 @@ export default function (pi: ExtensionAPI) {
   // Broadcast readiness so extensions loaded after us can discover us
   pi.events.emit("subagents:ready", {});
 
+  // Hold print mode open while background agents are still running.
+  pi.setHoldCondition(async () => {
+    if (!manager.hasRunning()) return [];
+    await manager.waitForAll();
+    return [];
+  });
+
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
@@ -449,7 +445,6 @@ export default function (pi: ExtensionAPI) {
     unsubStopRpc();
     unsubPingRpc();
     currentCtx = undefined;
-    delete (globalThis as any)[MANAGER_KEY];
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
