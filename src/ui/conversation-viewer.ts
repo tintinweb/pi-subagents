@@ -10,7 +10,7 @@ import { type Component, matchesKey, type TUI, truncateToWidth, visibleWidth, wr
 import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
 import type { Theme } from "./agent-widget.js";
-import { type AgentActivity, describeActivity, formatDuration, formatTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { type AgentActivity, describeActivity, formatDuration, formatSessionTokens, getDisplayName, getLifetimeTotal, getPromptModeLabel, getSessionContextPercent } from "./agent-widget.js";
 
 /** Lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
 const CHROME_LINES = 6;
@@ -103,11 +103,10 @@ export class ConversationViewer implements Component {
     const headerParts: string[] = [duration];
     const toolUses = this.activity?.toolUses ?? this.record.toolUses;
     if (toolUses > 0) headerParts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
-    if (this.activity?.session) {
-      try {
-        const tokens = this.activity.session.getSessionStats().tokens.total;
-        if (tokens > 0) headerParts.push(formatTokens(tokens));
-      } catch { /* */ }
+    const tokens = getLifetimeTotal(this.activity?.lifetimeUsage);
+    if (tokens > 0) {
+      const percent = getSessionContextPercent(this.activity?.session);
+      headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount ?? 0));
     }
 
     lines.push(row(
