@@ -401,6 +401,37 @@ describe("ConversationViewer", () => {
       expect(getLifetimeTotal({ input: 100, output: 200, cacheWrite: 50 })).toBe(350);
     });
 
+    // getSessionTokens reads upstream session stats (resets at compaction);
+    // getLifetimeTotal reads our independent accumulator (survives compaction).
+    // They agree pre-compaction, diverge after — both legitimate signals.
+    it("getSessionTokens and getLifetimeTotal agree pre-compaction, diverge after", async () => {
+      const { getSessionTokens, getLifetimeTotal } = await import("./agent-widget.js");
+
+      // Pre-compaction: session stats and lifetime accumulator track the same components
+      let sessionStatsTokens = { input: 100, output: 200, cacheWrite: 50 };
+      const session = {
+        getSessionStats: () => ({ tokens: sessionStatsTokens }),
+      };
+      const lifetime = { input: 100, output: 200, cacheWrite: 50 };
+
+      expect(getSessionTokens(session)).toBe(350);
+      expect(getLifetimeTotal(lifetime)).toBe(350);
+
+      // Compaction: upstream replaces session.state.messages, so stats reset.
+      // Our accumulator is independent — it keeps growing.
+      sessionStatsTokens = { input: 0, output: 0, cacheWrite: 0 };
+
+      expect(getSessionTokens(session)).toBe(0);            // reset
+      expect(getLifetimeTotal(lifetime)).toBe(350);          // preserved
+
+      // Subsequent message_end events feed both: session re-fills, accumulator continues
+      sessionStatsTokens = { input: 80, output: 150, cacheWrite: 30 };
+      lifetime.input += 80; lifetime.output += 150; lifetime.cacheWrite += 30;
+
+      expect(getSessionTokens(session)).toBe(260);           // post-compaction window
+      expect(getLifetimeTotal(lifetime)).toBe(610);          // 350 + 260, monotone
+    });
+
     // The accumulator survives compaction because it lives on AgentActivity /
     // AgentRecord, not on session.state.messages (which compaction replaces).
     it("a lifetime accumulator stays monotone across simulated compaction", async () => {

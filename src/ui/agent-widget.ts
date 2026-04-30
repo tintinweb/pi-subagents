@@ -125,10 +125,17 @@ export function formatTokens(count: number): string {
 }
 
 /**
- * Tokens billed/produced over the session — Σ(input + output + cacheWrite).
- * Monotone-growing, ~proportional to spend. Avoids upstream
- * getSessionStats().tokens.total, which sums per-turn cacheRead and so
- * counts the cumulative cached prefix N times across N turns (issue #38).
+ * Session-scoped token count: input + output + cacheWrite as reported by
+ * upstream `getSessionStats().tokens` for the *current* session window.
+ *
+ * RESETS at compaction — upstream replaces `session.state.messages` and the
+ * stats are derived from that array. For a lifetime total that survives
+ * compaction, use `getLifetimeTotal(lifetimeUsage)` instead, which reads
+ * from an independent accumulator fed by `message_end` events.
+ *
+ * Avoids upstream's `tokens.total` field, which sums per-turn `cacheRead`
+ * and so counts the cumulative cached prefix N times across N turns
+ * (issue #38).
  */
 export function getSessionTokens(session: SessionLike | undefined): number {
   if (!session) return 0;
@@ -389,7 +396,7 @@ export class AgentWidget {
       const toolUses = bg?.toolUses ?? a.toolUses;
       const tokens = getLifetimeTotal(bg?.lifetimeUsage);
       const contextPercent = getSessionContextPercent(bg?.session);
-      const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount ?? 0) : "";
+      const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
 
       const parts: string[] = [];
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));

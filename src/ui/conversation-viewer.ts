@@ -106,7 +106,7 @@ export class ConversationViewer implements Component {
     const tokens = getLifetimeTotal(this.activity?.lifetimeUsage);
     if (tokens > 0) {
       const percent = getSessionContextPercent(this.activity?.session);
-      headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount ?? 0));
+      headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
     }
 
     lines.push(row(

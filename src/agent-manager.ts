@@ -113,6 +113,8 @@ export class AgentManager {
       toolUses: 0,
       startedAt: Date.now(),
       abortController,
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      compactionCount: 0,
     };
     this.agents.set(id, record);
 
@@ -167,12 +169,11 @@ export class AgentManager {
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
-        record.lifetimeUsage ??= { input: 0, output: 0, cacheWrite: 0 };
         addUsage(record.lifetimeUsage, usage);
         options.onAssistantUsage?.(usage);
       },
       onCompaction: (info) => {
-        record.compactionCount = (record.compactionCount ?? 0) + 1;
+        record.compactionCount++;
         this.onCompact?.(record, info);
         options.onCompaction?.(info);
       },
@@ -303,11 +304,10 @@ export class AgentManager {
           if (activity.type === "end") record.toolUses++;
         },
         onAssistantUsage: (usage) => {
-          record.lifetimeUsage ??= { input: 0, output: 0, cacheWrite: 0 };
           addUsage(record.lifetimeUsage, usage);
         },
         onCompaction: (info) => {
-          record.compactionCount = (record.compactionCount ?? 0) + 1;
+          record.compactionCount++;
           this.onCompact?.(record, info);
         },
         signal,

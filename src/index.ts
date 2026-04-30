@@ -52,9 +52,9 @@ function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
 }
 
-/** Format an agent's lifetime token total, or "" when unavailable / zero. */
-function formatLifetimeTokens(o: { lifetimeUsage?: LifetimeUsage } | undefined): string {
-  const t = getLifetimeTotal(o?.lifetimeUsage);
+/** Format an agent's lifetime token total, or "" when zero. */
+function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
+  const t = getLifetimeTotal(o.lifetimeUsage);
   return t > 0 ? formatTokens(t) : "";
 }
 
@@ -162,7 +162,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
 /** Build AgentDetails from a base + record-specific fields. */
 function buildDetails(
   base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
-  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage?: LifetimeUsage },
+  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage: LifetimeUsage },
   activity?: AgentActivity,
   overrides?: Partial<AgentDetails>,
 ): AgentDetails {
@@ -348,9 +348,12 @@ export default function (pi: ExtensionAPI) {
     const durationMs = record.completedAt ? record.completedAt - record.startedAt : Date.now() - record.startedAt;
     // All three fields are lifetime-accumulated (Σ over every assistant message_end),
     // so they survive compaction together — input + output ≤ total always.
+    // tokens is omitted when nothing was ever produced (e.g. agent errored before
+    // any message_end fired), preserving prior payload shape.
     const u = record.lifetimeUsage;
-    const tokens = u
-      ? { input: u.input, output: u.output, total: getLifetimeTotal(u) }
+    const total = getLifetimeTotal(u);
+    const tokens = total > 0
+      ? { input: u.input, output: u.output, total }
       : undefined;
     return {
       id: record.id,
@@ -420,7 +423,7 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
       reason: info.reason,
       tokensBefore: info.tokensBefore,
-      compactionCount: record.compactionCount ?? 1,
+      compactionCount: record.compactionCount,
     });
   });
 

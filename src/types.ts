@@ -88,11 +88,11 @@ export interface AgentRecord {
   /**
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately
-   * excluded — see issue #38).
+   * excluded — see issue #38). Initialized to zeros at spawn.
    */
-  lifetimeUsage?: { input: number; output: number; cacheWrite: number };
-  /** Number of times this agent's session has compacted. */
-  compactionCount?: number;
+  lifetimeUsage: { input: number; output: number; cacheWrite: number };
+  /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
+  compactionCount: number;
 }
 
 /** Details attached to custom notification messages for visual rendering. */
