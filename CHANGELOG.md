@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`@mariozechner/pi-{ai,coding-agent,tui}` moved from `dependencies` to `peerDependencies`.** Pi extensions are loaded by the host runtime — declaring the framework as a regular dependency installed a *second* copy under this extension's `node_modules`, producing two `runtime` instances and breaking single-instance assumptions (Symbol identity, `instanceof` checks, internal singleton state). Now declared as peers with `>=0.70.5` (permissive minimum so the extension follows whatever version the host has); npm v7+/Bun/pnpm auto-install peers for local development. Matches the shape of `pi-manage-todo-list`.
+- **`@sinclair/typebox` pinned from `latest` to `^0.34.49`.** `latest` meant every fresh install could pull a different version with breaking changes; the caret range now tracks the version actually validated against the test suite. Stays as a regular `dependency` because it's a data-only schema library — two copies in memory are harmless.
+
 ## [0.6.3] - 2026-04-28
 
 ### Fixed
