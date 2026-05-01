@@ -279,6 +279,89 @@ describe("SubagentScheduler — fire path", () => {
       type: "error", jobId: job.id, error: "no slots",
     }));
   });
+
+  // ── Status reflection from record.status (regression for bug #1) ────
+  // The real AgentManager's promise *always* resolves (its .catch returns ""),
+  // so the schedule's success/error must be inferred from `record.status`,
+  // not from promise resolution. These two tests model that contract.
+  describe("infers success vs error from record.status, not promise resolution", () => {
+    type FakeRecord = { status: string; promise: Promise<string>; resolve: () => void };
+
+    function installFaithfulMock(): Map<string, FakeRecord> {
+      const records = new Map<string, FakeRecord>();
+      manager.spawn.mockImplementation(() => {
+        const id = "agent-" + Math.random().toString(36).slice(2, 10);
+        let resolve!: () => void;
+        const promise = new Promise<string>(r => { resolve = () => r(""); });
+        records.set(id, { status: "running", promise, resolve });
+        return id;
+      });
+      manager.getRecord.mockImplementation((id: string) => records.get(id));
+      return records;
+    }
+
+    it("records lastStatus 'error' when the agent terminates with status='error'", async () => {
+      const records = installFaithfulMock();
+      const job = scheduler.addJob({
+        name: "fail-job", description: "x", schedule: "+1s",
+        subagent_type: "general-purpose", prompt: "x",
+      });
+
+      vi.advanceTimersByTime(2_000);
+      expect(manager.spawn).toHaveBeenCalledTimes(1);
+
+      // The agent ran and ended in error — same shape the real AgentManager produces.
+      const r = [...records.values()][0];
+      r.status = "error";
+      r.resolve();
+
+      // Flush microtasks so .then(finalize) runs.
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("error");
+    });
+
+    it("records lastStatus 'success' when the agent terminates with status='completed'", async () => {
+      const records = installFaithfulMock();
+      const job = scheduler.addJob({
+        name: "ok-job", description: "x", schedule: "+1s",
+        subagent_type: "general-purpose", prompt: "x",
+      });
+
+      vi.advanceTimersByTime(2_000);
+      const r = [...records.values()][0];
+      r.status = "completed";
+      r.resolve();
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("success");
+    });
+
+    it("treats aborted and stopped as errors (terminal failure states)", async () => {
+      const records = installFaithfulMock();
+      const a = scheduler.addJob({
+        name: "abort-job", description: "x", schedule: "+1s",
+        subagent_type: "general-purpose", prompt: "x",
+      });
+      const b = scheduler.addJob({
+        name: "stop-job", description: "x", schedule: "+2s",
+        subagent_type: "general-purpose", prompt: "x",
+      });
+
+      vi.advanceTimersByTime(3_000);
+      const recs = [...records.values()];
+      recs[0].status = "aborted";
+      recs[0].resolve();
+      recs[1].status = "stopped";
+      recs[1].resolve();
+
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(scheduler.list().find(j => j.id === a.id)?.lastStatus).toBe("error");
+      expect(scheduler.list().find(j => j.id === b.id)?.lastStatus).toBe("error");
+    });
+  });
 });
 
 describe("SubagentScheduler — stopped state", () => {
