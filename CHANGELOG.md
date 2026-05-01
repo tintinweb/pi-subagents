@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **ESC during a foreground `Agent` call now actually stops the subagent** ([#44](https://github.com/tintinweb/pi-subagents/pull/44) — thanks [@Zeng-Zer](https://github.com/Zeng-Zer)). Pi's interrupt path is `esc → agent.abort()` on the parent → `AbortSignal` delivered to every tool's `execute(toolCallId, params, signal, …)`, but the `Agent` tool dropped that signal on the floor: subagents ran on their own independent `AbortController` inside `AgentManager`, so the parent abort was invisible and the subagent kept running until natural completion or `max_turns`. Fix threads `signal` through `Agent.execute` → `manager.spawnAndWait()` → `SpawnOptions.signal`, and `AgentManager.startAgent()` now attaches an `{ once: true }` `"abort"` listener that calls `this.abort(id)` (which sets `status: "stopped"` and aborts the child controller). The listener is detached in both `.then` and `.catch` to avoid leaking on natural settle. **Scope:** foreground only — background agents intentionally outlive the parent tool call, so their spawn deliberately does not forward `signal`. Resume path (`AgentManager.resume()`) has the same blind spot and is tracked as a follow-up.
+
 ## [0.6.3] - 2026-04-28
 
 ### Fixed
