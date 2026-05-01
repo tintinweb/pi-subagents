@@ -30,6 +30,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
 - **Cross-extension RPC** — other pi extensions can spawn and stop subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on load
+- **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` followUp path as manual background completions; manage via `/agents → Scheduled jobs`
 
 ## Install
 
@@ -57,6 +58,35 @@ Agent({
 ```
 
 Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
+
+### Scheduling
+
+Add a `schedule` field to register the agent to fire later instead of running now:
+
+```
+Agent({
+  subagent_type: "Explore",
+  prompt: "Look at recent commits and summarize what changed since last week",
+  description: "Weekly commit review",
+  schedule: "0 0 9 * * 1",   // 9am every Monday (6-field cron)
+})
+```
+
+Schedule formats:
+
+- **Cron** — 6-field (`second minute hour day-of-month month day-of-week`), e.g. `"0 0 9 * * 1"` for 9am every Monday, `"0 */15 * * * *"` for every 15 minutes.
+- **Interval** — `"5m"`, `"1h"`, `"30s"`, `"2d"`. Fires repeatedly at that interval.
+- **One-shot relative** — `"+10m"`, `"+2h"`, `"+1d"`. Fires once at that future time.
+- **One-shot absolute** — full ISO timestamp, e.g. `"2026-12-25T09:00:00.000Z"`.
+
+When a schedule fires, the spawn runs in background and its completion notification arrives in the conversation through the same `subagent-notification` followUp path as a manually-spawned background agent — your parent agent reasons about the result the same way.
+
+Schedules are **session-scoped**: they reset on `/new` and restore on `/resume`. Manage via `/agents → Scheduled jobs` (View / Add / Toggle / Remove / Cleanup). Storage at `<cwd>/.pi/subagent-schedules/<sessionId>.json` with PID-based file locking for cross-instance safety.
+
+Restrictions:
+- `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time) or `resume` (schedules create fresh agents).
+- `run_in_background` is forced to `true`.
+- Scheduled fires bypass the `maxConcurrent` queue so a 5-minute interval cannot be deferred behind long-running manual agents.
 
 ## UI
 

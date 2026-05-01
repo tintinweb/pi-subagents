@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Schedule subagent spawns** — the `Agent` tool now accepts an optional `schedule` parameter. When set, the spawn registers a job that fires later instead of running immediately. Three formats: 6-field cron (`"0 0 9 * * 1"` — 9am every Monday), interval (`"5m"`, `"1h"`), or one-shot (`"+10m"` or ISO timestamp). Returns the job ID. Schedules are session-scoped — they reset on `/new`, restore on `/resume` (mirrors the persistence model of pi-chonky-tasks). Storage at `<cwd>/.pi/subagent-schedules/<sessionId>.json`, with PID-based file locking + atomic temp+rename for concurrent-instance safety. **Result delivery is identical to today's background-spawn completions**: when the scheduled agent finishes, the existing `subagent-notification` followUp path emits the result to the conversation — no new delivery code, no new message types. **Concurrency**: scheduled fires bypass `maxConcurrent` so a 5-minute interval can't be deferred behind 4 long-running manual agents. **Management**: `/agents` → "Scheduled jobs" submenu provides View / Add / Toggle / Remove / Cleanup actions. **Events**: `subagents:scheduled` ({ type: "added" | "removed" | "updated" | "fired" | "error", … }) and `subagents:scheduler_ready` for cross-extension consumers. **Restrictions**: `schedule` is incompatible with `inherit_context` (no parent at fire time) and `resume` (schedules create fresh agents); forces `run_in_background: true`. Scheduler engine mirrors `pi-cron-schedule` (`croner` for cron, `setInterval`/`setTimeout` for interval/once); past one-shot timestamps and invalid cron expressions are caught at create time.
+
 ## [0.6.3] - 2026-04-28
 
 ### Fixed

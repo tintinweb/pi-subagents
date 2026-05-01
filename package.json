@@ -24,7 +24,9 @@
     "@mariozechner/pi-ai": "^0.70.5",
     "@mariozechner/pi-coding-agent": "^0.70.5",
     "@mariozechner/pi-tui": "^0.70.5",
-    "@sinclair/typebox": "latest"
+    "@sinclair/typebox": "latest",
+    "croner": "^8.0.0",
+    "nanoid": "^5.0.0"
   },
   "scripts": {
     "build": "tsc",

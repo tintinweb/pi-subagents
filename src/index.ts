@@ -24,6 +24,8 @@ import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { SubagentScheduler } from "./schedule.js";
+import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
 import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
@@ -40,6 +42,7 @@ import {
   SPINNER,
   type UICtx,
 } from "./ui/agent-widget.js";
+import { showSchedulesMenu } from "./ui/schedule-menu.js";
 
 // ---- Shared helpers ----
 
@@ -424,13 +427,38 @@ export default function (pi: ExtensionAPI) {
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
 
-  // Capture ctx from session_start for RPC spawn handler
+  // ---- Subagent scheduler ----
+  // Session-scoped: store is constructed inside session_start once sessionId
+  // is available. Mirrors pi-chonky-tasks's session-scoped task store —
+  // schedules reset on /new, restore on /resume.
+  const scheduler = new SubagentScheduler();
+
+  function startScheduler(ctx: ExtensionContext) {
+    try {
+      const sessionId = ctx.sessionManager?.getSessionId?.();
+      if (!sessionId) return;  // sessionId not yet available — try again on next event
+      const path = resolveStorePath(ctx.cwd, sessionId);
+      const store = new ScheduleStore(path);
+      scheduler.start(pi, ctx, manager, store);
+      pi.events.emit("subagents:scheduler_ready", { sessionId, jobCount: store.list().length });
+    } catch (err) {
+      // Scheduling is non-essential — log and move on so the rest of the
+      // extension keeps working if e.g. .pi/ is unwritable.
+      console.warn("[pi-subagents] Failed to start scheduler:", err);
+    }
+  }
+
+  // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    manager.clearCompleted();           // preserve existing behavior
+    manager.clearCompleted();
+    if (!scheduler.isActive()) startScheduler(ctx);
   });
 
-  pi.on("session_before_switch", () => { manager.clearCompleted(); });
+  pi.on("session_before_switch", () => {
+    manager.clearCompleted();
+    scheduler.stop();
+  });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
     events: pi.events,
@@ -450,6 +478,7 @@ export default function (pi: ExtensionAPI) {
     unsubPingRpc();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
+    scheduler.stop();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -639,6 +668,15 @@ Guidelines:
           description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
         }),
       ),
+      schedule: Type.Optional(
+        Type.String({
+          description:
+            'When set, register this agent to fire on a schedule instead of running now. ' +
+            'Accepts: 6-field cron (e.g. "0 0 9 * * 1" — 9am every Monday), interval ("5m", "1h"), or one-shot ("+10m" or ISO timestamp). ' +
+            'Returns the job ID. Manage via /agents → Scheduled jobs. Schedules are session-scoped (reset on /new, restored on /resume). ' +
+            'Incompatible with `inherit_context` and `resume`. Forces `run_in_background: true`.',
+        }),
+      ),
     }),
 
     // ---- Custom rendering: Claude Code style ----
@@ -791,6 +829,44 @@ Guidelines:
         modelName: agentModelName,
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
+
+      // ---- Schedule: register a job, don't spawn now ----
+      if (params.schedule) {
+        if (params.resume) {
+          return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
+        }
+        if (params.inherit_context) {
+          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
+        }
+        if (params.run_in_background === false) {
+          return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
+        }
+        if (!scheduler.isActive()) {
+          return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
+        }
+        try {
+          const job = scheduler.addJob({
+            name: params.description as string,
+            description: params.description as string,
+            schedule: params.schedule as string,
+            subagent_type: subagentType,
+            prompt: params.prompt as string,
+            model: params.model as string | undefined,
+            thinking: thinking,
+            max_turns: effectiveMaxTurns,
+            isolated: isolated,
+            isolation: isolation,
+          });
+          const next = scheduler.getNextRun(job.id);
+          return textResult(
+            `Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
+            `Next run: ${next ?? "(unknown)"}. ` +
+            `Manage via /agents → Scheduled jobs.`,
+          );
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err));
+        }
+      }
 
       // Resume existing agent
       if (params.resume) {
@@ -1140,6 +1216,12 @@ Guidelines:
       options.push(`Agent types (${allNames.length})`);
     }
 
+    // Scheduled jobs entry (always present when scheduler is active)
+    if (scheduler.isActive()) {
+      const jobCount = scheduler.list().length;
+      options.push(`Scheduled jobs (${jobCount})`);
+    }
+
     // Actions
     options.push("Create new agent");
     options.push("Settings");
@@ -1162,6 +1244,9 @@ Guidelines:
       await showAgentsMenu(ctx);
     } else if (choice.startsWith("Agent types (")) {
       await showAllAgentsList(ctx);
+      await showAgentsMenu(ctx);
+    } else if (choice.startsWith("Scheduled jobs (")) {
+      await showSchedulesMenu(ctx, scheduler, getAllTypes());
       await showAgentsMenu(ctx);
     } else if (choice === "Create new agent") {
       await showCreateWizard(ctx);
