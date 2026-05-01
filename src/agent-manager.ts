@@ -37,6 +37,8 @@ interface SpawnOptions {
   isBackground?: boolean;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
+  /** Parent abort signal — when aborted, the subagent is also stopped. */
+  signal?: AbortSignal;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
@@ -121,6 +123,15 @@ export class AgentManager {
     if (options.isBackground) this.runningBackground++;
     this.onStart?.(record);
 
+    // Wire parent abort signal to stop the subagent when the parent is interrupted
+    let detachParentSignal: (() => void) | undefined;
+    if (options.signal) {
+      const onParentAbort = () => this.abort(id);
+      options.signal.addEventListener("abort", onParentAbort, { once: true });
+      detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
+    }
+    const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
+
     // Worktree isolation: create a temporary git worktree if requested
     let worktreeCwd: string | undefined;
     let worktreeWarning = "";
@@ -173,6 +184,8 @@ export class AgentManager {
         record.session = session;
         record.completedAt ??= Date.now();
 
+        detach();
+
         // Final flush of streaming output file
         if (record.outputCleanup) {
           try { record.outputCleanup(); } catch { /* ignore */ }
@@ -203,6 +216,8 @@ export class AgentManager {
         }
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
+
+        detach();
 
         // Final flush of streaming output file on error
         if (record.outputCleanup) {
