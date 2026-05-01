@@ -961,6 +961,7 @@ Guidelines:
         inheritContext,
         thinkingLevel: thinking,
         isolation,
+        signal,
         ...fgCallbacks,
       });
 
