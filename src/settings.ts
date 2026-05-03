@@ -18,9 +18,9 @@ export interface SubagentsSettings {
   graceTurns?: number;
   defaultJoinMode?: JoinMode;
   /**
-   * When true (default), subagent model choices are validated against the
-   * available models from the model registry. Models outside the scope are
-   * rejected with an error listing the available models.
+   * When true, subagent model choices are validated against enabledModels.
+   * Models outside the scope are rejected with an error listing allowed models.
+   * Defaults to false — subagents may use any model by default.
    */
   scopeModels?: boolean;
 }

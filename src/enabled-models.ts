@@ -6,11 +6,10 @@
  *   main.js:439  modelPatterns = parsed.models ?? settingsManager.getEnabledModels()
  *   main.js:440  scopedModels = resolveModelScope(modelPatterns, modelRegistry)
  *
- * pi only writes exact "provider/modelId" entries to enabledModels — no globs,
- * no wildcards. We do the same: exact match only.
+ * pi writes exact "provider/modelId" entries to enabledModels
  *
- * Example: enabledModels = ["llama-swap/Qwen3.6-27B-Q4:precise", "anthropic/claude-sonnet-4-6"]
- *   → resolves to {"llama-swap/qwen3.6-27b-q4:precise", "anthropic/claude-sonnet-4-6"}
+ * Example: enabledModels = ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"]
+ *   → resolves to {"anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"}
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -44,15 +43,12 @@ export function readEnabledModels(): string[] | undefined {
  *   1. Exact "provider/modelId"  (slash present, case-insensitive)
  *   2. Bare "modelId"            (no slash, exact id match)
  *
- * No fuzzy matching, no globs — pi only writes exact provider/modelId to enabledModels.
- * Colons are part of the model ID (e.g. "llama-swap/model:precise").
  *
  * Cache: keyed on settings.json mtime+size + patterns key. Re-reads only when
- * the file or patterns change. The model registry is static per session, so it
- * is not part of the cache key.
+ * the file or patterns change.
  *
- * Example: "llama-swap/Qwen3.6-27B-Q4:precise"
- *   → provider="llama-swap", modelId="Qwen3.6-27B-Q4:precise"
+ * Example: "anthropic/claude-sonnet-4-6"
+ *   → provider="anthropic", modelId="claude-sonnet-4-6"
  *
  * Returns undefined when no patterns or no matches (scope check becomes no-op).
  */
@@ -108,12 +104,7 @@ export function resolveEnabledModels(
 
 
 /**
- * Resolve exact pattern: provider/modelId only.
- *
- * Ref: pi-coding-agent writes only exact "provider/modelId" to enabledModels.
- * No bare modelId, no fuzzy — pi never writes either.
- *
- * Example: "google/gemma-4-31b-it" → exact match
+ * Resolve exact model pattern. Example: "google/gemma-4-31b-it".
  */
 function resolveExact(
   pattern: string,

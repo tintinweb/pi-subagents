@@ -7,9 +7,8 @@ import { type ModelRegistryRef, readEnabledModels, resolveEnabledModels } from "
 /** Mock models matching typical registry shape. */
 const MODELS = [
   { id: "gemma-4-31b-it", name: "Gemma 4 31B", provider: "google" },
-  { id: "speed", name: "Speed", provider: "vllm" },
-  { id: "Qwen3.6-35B-A3B-UD-IQ4_NL-mmproj:precise", name: "Qwen3.6 35B", provider: "llama-swap" },
-  { id: "Qwen3.6-27B-Q4_K_M-mmproj-ik:precise", name: "Qwen3.6 27B", provider: "llama-swap" },
+  { id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "anthropic" },
+  { id: "claude-opus-4-5", name: "Claude Opus 4.5", provider: "anthropic" },
   { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "anthropic" },
   { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic" },
 ];
@@ -109,10 +108,10 @@ describe("resolveEnabledModels", () => {
 
     it("resolves model id with colon (part of id, not split)", () => {
       const result = resolveEnabledModels(
-        ["llama-swap/Qwen3.6-35B-A3B-UD-IQ4_NL-mmproj:precise"],
+        ["anthropic/claude-opus-4-6"],
         makeRegistry(),
       );
-      expect(result).toEqual(new Set(["llama-swap/qwen3.6-35b-a3b-ud-iq4_nl-mmproj:precise"]));
+      expect(result).toEqual(new Set(["anthropic/claude-opus-4-6"]));
     });
 
     it("is case-insensitive", () => {
@@ -123,12 +122,12 @@ describe("resolveEnabledModels", () => {
 
   describe("no bare modelId or fuzzy matching", () => {
     it("returns undefined for bare id (pi always writes provider/modelId)", () => {
-      const result = resolveEnabledModels(["speed"], makeRegistry());
+      const result = resolveEnabledModels(["gemma-4-31b-it"], makeRegistry());
       expect(result).toBeUndefined();
     });
 
     it("returns undefined for bare substring patterns", () => {
-      const result = resolveEnabledModels(["Qwen"], makeRegistry());
+      const result = resolveEnabledModels(["Opus"], makeRegistry());
       expect(result).toBeUndefined();
     });
   });
@@ -144,8 +143,8 @@ describe("resolveEnabledModels", () => {
       expect(result!.has("google/gemma-4-31b-it".toLowerCase())).toBe(true);
       expect(result!.has("anthropic/claude-haiku-4-5".toLowerCase())).toBe(true);
       expect(result!.has("anthropic/claude-sonnet-4-6".toLowerCase())).toBe(true);
-      expect(result!.has("vllm/speed".toLowerCase())).toBe(false);
-      expect(result!.has("llama-swap/qwen3.6-35b-a3b-ud-iq4_nl-mmproj:precise".toLowerCase())).toBe(false);
+      expect(result!.has("google/gemini-2.5-pro".toLowerCase())).toBe(false);
+      expect(result!.has("anthropic/claude-opus-4-6".toLowerCase())).toBe(false);
     });
   });
 

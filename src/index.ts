@@ -775,7 +775,7 @@ Guidelines:
 
       // Scope validation: check resolved model against enabledModels from ~/.pi/agent/settings.json
       // Ref: pi-coding-agent main.js:439-440 — resolveModelScope(enabledModels, registry) → scopedModels
-      // User params → hard error with list. Config/frontmatter → warn + fallback to parent.
+      // Main agent calls out-of-scope → hard error with list. Config/frontmatter → warn + fallback to parent.
       if (isScopeModelsEnabled() && model) {
         const patterns = readEnabledModels();
         const allowed = resolveEnabledModels(patterns, ctx.modelRegistry);
@@ -1680,21 +1680,21 @@ ${systemPrompt}
         {
           id: "maxConcurrent",
           label: "Max concurrency",
-          description: "Max concurrent background agents (Enter to type, Space to cycle)",
+          description: "Max concurrent background agents (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
         },
         {
           id: "defaultMaxTurns",
           label: "Default max turns",
-          description: "Default max turns before wrap-up (0 = unlimited, Enter to type, Space to cycle)",
+          description: "Default max turns before wrap-up (0 = unlimited, Enter to type)",
           currentValue: String(dmt),
           values: [String(dmt)],
         },
         {
           id: "graceTurns",
           label: "Grace turns",
-          description: "Grace turns after wrap-up steer (Enter to type, Space to cycle)",
+          description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
         },
@@ -1708,7 +1708,7 @@ ${systemPrompt}
         {
           id: "scopeModels",
           label: "Scope models",
-          description: "Validate subagent models against enabledModels from settings",
+          description: "Validate subagent models against scoped models (/scoped-models)",
           currentValue: isScopeModelsEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
