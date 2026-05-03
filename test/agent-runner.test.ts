@@ -186,3 +186,117 @@ describe("agent-runner final output capture", () => {
     expect(result).toBe("RESUMED");
   });
 });
+
+// ─── message_end → onAssistantUsage wiring (issue #38) ─────────────────
+// Both runAgent and resumeAgent dispatch usage to the caller via this
+// callback. The callback feeds the AgentRecord lifetime accumulator, which
+// is the source of truth for total tokens (survives compaction).
+describe("agent-runner usage callback wiring", () => {
+  function emitMessageEnd(listeners: Array<(e: any) => void>, usage: any) {
+    const event = { type: "message_end", message: { role: "assistant", usage } };
+    for (const l of listeners) l(event);
+  }
+
+  it("runAgent forwards full usage from message_end events", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    const seen: Array<{ input: number; output: number; cacheWrite: number }> = [];
+    session.prompt = vi.fn(async () => {
+      // Two assistant messages over the run
+      emitMessageEnd(listeners, { input: 100, output: 50, cacheWrite: 10 });
+      emitMessageEnd(listeners, { input: 200, output: 80, cacheWrite: 20 });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      onAssistantUsage: (u) => seen.push(u),
+    });
+
+    expect(seen).toEqual([
+      { input: 100, output: 50, cacheWrite: 10 },
+      { input: 200, output: 80, cacheWrite: 20 },
+    ]);
+  });
+
+  it("runAgent normalizes partial usage objects to 0 for missing fields", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    const seen: any[] = [];
+    session.prompt = vi.fn(async () => {
+      emitMessageEnd(listeners, { input: 50 }); // output, cacheWrite missing
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      onAssistantUsage: (u) => seen.push(u),
+    });
+
+    expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0 }]);
+  });
+
+  it("runAgent skips the callback when message_end has no usage field", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    const cb = vi.fn();
+    session.prompt = vi.fn(async () => {
+      emitMessageEnd(listeners, undefined);
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", { pi, onAssistantUsage: cb });
+
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it("resumeAgent forwards usage on message_end the same way", async () => {
+    const { session, listeners } = createSession("RESUMED");
+    const seen: any[] = [];
+
+    session.prompt = vi.fn(async () => {
+      emitMessageEnd(listeners, { input: 10, output: 20, cacheWrite: 5 });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED" }] });
+    });
+
+    await resumeAgent(session as any, "continue", {
+      onAssistantUsage: (u) => seen.push(u),
+    });
+
+    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5 }]);
+  });
+
+  it("forwards compaction_end events to onCompaction (only when not aborted)", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    const seen: any[] = [];
+    session.prompt = vi.fn(async () => {
+      // Successful compaction — should fire
+      for (const l of listeners) l({
+        type: "compaction_end",
+        aborted: false,
+        reason: "threshold",
+        result: { tokensBefore: 12345 },
+      });
+      // Aborted compaction — should NOT fire
+      for (const l of listeners) l({
+        type: "compaction_end",
+        aborted: true,
+        reason: "manual",
+        result: { tokensBefore: 99999 },
+      });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      onCompaction: (info) => seen.push(info),
+    });
+
+    expect(seen).toEqual([{ reason: "threshold", tokensBefore: 12345 }]);
+  });
+});

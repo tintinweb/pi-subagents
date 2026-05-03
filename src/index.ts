@@ -43,6 +43,7 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
+import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
 
@@ -51,10 +52,10 @@ function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
 }
 
-/** Safe token formatting — wraps session.getSessionStats() in try-catch. */
-function safeFormatTokens(session: { getSessionStats(): { tokens: { total: number } } } | undefined): string {
-  if (!session) return "";
-  try { return formatTokens(session.getSessionStats().tokens.total); } catch { return ""; }
+/** Format an agent's lifetime token total, or "" when zero. */
+function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
+  const t = getLifetimeTotal(o.lifetimeUsage);
+  return t > 0 ? formatTokens(t) : "";
 }
 
 /**
@@ -62,7 +63,15 @@ function safeFormatTokens(session: { getSessionStats(): { tokens: { total: numbe
  * Used by both foreground and background paths to avoid duplication.
  */
 function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
-  const state: AgentActivity = { activeTools: new Map(), toolUses: 0, turnCount: 1, maxTurns, tokens: "", responseText: "", session: undefined };
+  const state: AgentActivity = {
+    activeTools: new Map(),
+    toolUses: 0,
+    turnCount: 1,
+    maxTurns,
+    responseText: "",
+    session: undefined,
+    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+  };
 
   const callbacks = {
     onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => {
@@ -74,7 +83,6 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
         }
         state.toolUses++;
       }
-      state.tokens = safeFormatTokens(state.session);
       onStreamUpdate?.();
     },
     onTextDelta: (_delta: string, fullText: string) => {
@@ -87,6 +95,10 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     },
     onSessionCreated: (session: any) => {
       state.session = session;
+    },
+    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number }) => {
+      addUsage(state.lifetimeUsage, usage);
+      onStreamUpdate?.();
     },
   };
 
@@ -123,13 +135,10 @@ function escapeXml(s: string): string {
 function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
-  let totalTokens = 0;
-  try {
-    if (record.session) {
-      const stats = record.session.getSessionStats();
-      totalTokens = stats.tokens?.total ?? 0;
-    }
-  } catch { /* session stats unavailable */ }
+  const totalTokens = getLifetimeTotal(record.lifetimeUsage);
+  const contextPercent = getSessionContextPercent(record.session);
+  const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
+  const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
 
   const resultPreview = record.result
     ? record.result.length > resultMaxLen
@@ -145,7 +154,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     `<status>${escapeXml(status)}</status>`,
     `<summary>Agent "${escapeXml(record.description)}" ${record.status}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
-    `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses><duration_ms>${durationMs}</duration_ms></usage>`,
+    `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join('\n');
 }
@@ -153,14 +162,14 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
 /** Build AgentDetails from a base + record-specific fields. */
 function buildDetails(
   base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
-  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any },
+  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage: LifetimeUsage },
   activity?: AgentActivity,
   overrides?: Partial<AgentDetails>,
 ): AgentDetails {
   return {
     ...base,
     toolUses: record.toolUses,
-    tokens: safeFormatTokens(record.session),
+    tokens: formatLifetimeTokens(record),
     turnCount: activity?.turnCount,
     maxTurns: activity?.maxTurns,
     durationMs: (record.completedAt ?? Date.now()) - record.startedAt,
@@ -173,10 +182,7 @@ function buildDetails(
 
 /** Build notification details for the custom message renderer. */
 function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, activity?: AgentActivity): NotificationDetails {
-  let totalTokens = 0;
-  try {
-    if (record.session) totalTokens = record.session.getSessionStats().tokens?.total ?? 0;
-  } catch {}
+  const totalTokens = getLifetimeTotal(record.lifetimeUsage);
 
   return {
     id: record.id,
@@ -340,17 +346,15 @@ export default function (pi: ExtensionAPI) {
   /** Helper: build event data for lifecycle events from an AgentRecord. */
   function buildEventData(record: AgentRecord) {
     const durationMs = record.completedAt ? record.completedAt - record.startedAt : Date.now() - record.startedAt;
-    let tokens: { input: number; output: number; total: number } | undefined;
-    try {
-      if (record.session) {
-        const stats = record.session.getSessionStats();
-        tokens = {
-          input: stats.tokens?.input ?? 0,
-          output: stats.tokens?.output ?? 0,
-          total: stats.tokens?.total ?? 0,
-        };
-      }
-    } catch { /* session stats unavailable */ }
+    // All three fields are lifetime-accumulated (Σ over every assistant message_end),
+    // so they survive compaction together — input + output ≤ total always.
+    // tokens is omitted when nothing was ever produced (e.g. agent errored before
+    // any message_end fired), preserving prior payload shape.
+    const u = record.lifetimeUsage;
+    const total = getLifetimeTotal(u);
+    const tokens = total > 0
+      ? { input: u.input, output: u.output, total }
+      : undefined;
     return {
       id: record.id,
       type: record.type,
@@ -410,6 +414,16 @@ export default function (pi: ExtensionAPI) {
       id: record.id,
       type: record.type,
       description: record.description,
+    });
+  }, (record, info) => {
+    // Emit compacted event when agent's session compacts (preserves count on record).
+    pi.events.emit("subagents:compacted", {
+      id: record.id,
+      type: record.type,
+      description: record.description,
+      reason: info.reason,
+      tokensBefore: info.tokensBefore,
+      compactionCount: record.compactionCount,
     });
   });
 
@@ -974,7 +988,7 @@ Guidelines:
         const details: AgentDetails = {
           ...detailBase,
           toolUses: fgState.toolUses,
-          tokens: fgState.tokens,
+          tokens: formatLifetimeTokens(fgState),
           turnCount: fgState.turnCount,
           maxTurns: fgState.maxTurns,
           durationMs: Date.now() - startedAt,
@@ -1020,6 +1034,7 @@ Guidelines:
         inheritContext,
         thinkingLevel: thinking,
         isolation,
+        signal,
         ...fgCallbacks,
       });
 
@@ -1032,7 +1047,7 @@ Guidelines:
       }
 
       // Get final token count
-      const tokenText = safeFormatTokens(fgState.session);
+      const tokenText = formatLifetimeTokens(fgState);
 
       const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
 
@@ -1095,12 +1110,17 @@ Guidelines:
 
       const displayName = getDisplayName(record.type);
       const duration = formatDuration(record.startedAt, record.completedAt);
-      const tokens = safeFormatTokens(record.session);
-      const toolStats = tokens ? `Tool uses: ${record.toolUses} | ${tokens}` : `Tool uses: ${record.toolUses}`;
+      const tokens = formatLifetimeTokens(record);
+      const contextPercent = getSessionContextPercent(record.session);
+      const statsParts = [`Tool uses: ${record.toolUses}`];
+      if (tokens) statsParts.push(tokens);
+      if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
+      if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
+      statsParts.push(`Duration: ${duration}`);
 
       let output =
         `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status} | ${toolStats} | Duration: ${duration}\n` +
+        `Type: ${displayName} | Status: ${record.status} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
       if (record.status === "running") {
@@ -1164,7 +1184,17 @@ Guidelines:
       try {
         await steerAgent(record.session, params.message);
         pi.events.emit("subagents:steered", { id: record.id, message: params.message });
-        return textResult(`Steering message sent to agent ${record.id}. The agent will process it after its current tool execution.`);
+        const tokens = formatLifetimeTokens(record);
+        const contextPercent = getSessionContextPercent(record.session);
+        const stateParts: string[] = [];
+        if (tokens) stateParts.push(tokens);
+        stateParts.push(`${record.toolUses} tool ${record.toolUses === 1 ? "use" : "uses"}`);
+        if (contextPercent !== null) stateParts.push(`context ${Math.round(contextPercent)}% full`);
+        if (record.compactionCount) stateParts.push(`${record.compactionCount} compaction${record.compactionCount === 1 ? "" : "s"}`);
+        return textResult(
+          `Steering message sent to agent ${record.id}. The agent will process it after its current tool execution.\n` +
+          `Current state: ${stateParts.join(" · ")}`,
+        );
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }

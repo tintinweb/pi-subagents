@@ -9,6 +9,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { SubagentType } from "../types.js";
+import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
 
@@ -52,13 +53,14 @@ export type UICtx = {
 export interface AgentActivity {
   activeTools: Map<string, string>;
   toolUses: number;
-  tokens: string;
   responseText: string;
-  session?: { getSessionStats(): { tokens: { total: number } } };
+  session?: SessionLike;
   /** Current turn count. */
   turnCount: number;
   /** Effective max turns for this agent (undefined = unlimited). */
   maxTurns?: number;
+  /** Lifetime usage breakdown — see LifetimeUsage docs. */
+  lifetimeUsage: LifetimeUsage;
 }
 
 /** Metadata attached to Agent tool results for custom rendering. */
@@ -93,6 +95,35 @@ export function formatTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M token`;
   if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k token`;
   return `${count} token`;
+}
+
+/**
+ * Token count with optional context-fill % and compaction-count annotations.
+ * Thresholds for percent: <70% dim, 70–85% warning, ≥85% error.
+ * Compaction count rendered as `↻N` in dim.
+ *
+ *   "12.3k token"               — no annotations
+ *   "12.3k token (45%)"         — percent only
+ *   "12.3k token (↻2)"          — compactions only (e.g. right after compact)
+ *   "12.3k token (45% · ↻2)"    — both
+ */
+export function formatSessionTokens(
+  tokens: number,
+  percent: number | null,
+  theme: Theme,
+  compactions = 0,
+): string {
+  const tokenStr = formatTokens(tokens);
+  const annot: string[] = [];
+  if (percent !== null) {
+    const color = percent >= 85 ? "error" : percent >= 70 ? "warning" : "dim";
+    annot.push(theme.fg(color, `${Math.round(percent)}%`));
+  }
+  if (compactions > 0) {
+    annot.push(theme.fg("dim", `↻${compactions}`));
+  }
+  if (annot.length === 0) return tokenStr;
+  return `${tokenStr} (${annot.join(" · ")})`;
 }
 
 /** Format turn count with optional max limit: "⟳5≤30" or "⟳5". */
@@ -305,10 +336,9 @@ export class AgentWidget {
 
       const bg = this.agentActivity.get(a.id);
       const toolUses = bg?.toolUses ?? a.toolUses;
-      let tokenText = "";
-      if (bg?.session) {
-        try { tokenText = formatTokens(bg.session.getSessionStats().tokens.total); } catch { /* */ }
-      }
+      const tokens = getLifetimeTotal(bg?.lifetimeUsage);
+      const contextPercent = getSessionContextPercent(bg?.session);
+      const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
 
       const parts: string[] = [];
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
