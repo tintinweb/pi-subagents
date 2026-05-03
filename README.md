@@ -89,6 +89,7 @@ Restrictions:
 - `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time) or `resume` (schedules create fresh agents).
 - `run_in_background` is forced to `true`.
 - Scheduled fires bypass the `maxConcurrent` queue so a 5-minute interval cannot be deferred behind long-running manual agents.
+- **Headless `pi -p` doesn't wait for scheduled subagents.**
 
 ## UI
 
