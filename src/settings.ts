@@ -17,6 +17,15 @@ export interface SubagentsSettings {
   defaultMaxTurns?: number;
   graceTurns?: number;
   defaultJoinMode?: JoinMode;
+  /**
+   * Master switch for the schedule subagent feature. Defaults to `true`.
+   * When `false`: the `Agent` tool's `schedule` param + its guideline are
+   * stripped from the tool spec at registration (zero LLM-context cost), the
+   * scheduler doesn't bind to the session, and the `/agents → Scheduled jobs`
+   * menu entry is hidden. Schema-level removal applies at extension load
+   * (next pi session); runtime menu/runtime-fire short-circuit is immediate.
+   */
+  schedulingEnabled?: boolean;
 }
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -25,6 +34,7 @@ export interface SettingsAppliers {
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
+  setSchedulingEnabled: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -67,6 +77,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode as JoinMode;
+  }
+  if (typeof r.schedulingEnabled === "boolean") {
+    out.schedulingEnabled = r.schedulingEnabled;
   }
   return out;
 }
@@ -122,6 +135,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
+  if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
 }
 
 /**

@@ -466,7 +466,7 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
     manager.clearCompleted();
-    if (!scheduler.isActive()) startScheduler(ctx);
+    if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
   pi.on("session_before_switch", () => {
@@ -506,6 +506,16 @@ export default function (pi: ExtensionAPI) {
   let defaultJoinMode: JoinMode = 'smart';
   function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
   function setDefaultJoinMode(mode: JoinMode) { defaultJoinMode = mode; }
+
+  // Master switch for the schedule subagent feature. Defaults to enabled.
+  // Read once at extension init (before tool registration) so the Agent tool's
+  // param schema reflects the persisted setting. Runtime toggles via /agents
+  // → Settings short-circuit the menu entry + the execute-time addJob path
+  // immediately, but the schema-level removal only takes effect on next
+  // extension load (next pi session). Documented in CHANGELOG/README.
+  let schedulingEnabled = true;
+  function isSchedulingEnabled(): boolean { return schedulingEnabled; }
+  function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
@@ -600,11 +610,34 @@ export default function (pi: ExtensionAPI) {
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
+      setSchedulingEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
 
   // ---- Agent tool ----
+
+  // Schedule param + its guideline are gated on `schedulingEnabled` (read once
+  // at registration; flipping the setting later requires next pi session for
+  // the schema to update). Defining the shape once and spreading it via Partial
+  // preserves Type.Object's inference when present and produces a
+  // `schedule`-free schema when absent — zero LLM-context cost in disabled mode.
+  const scheduleParamShape = {
+    schedule: Type.Optional(
+      Type.String({
+        description:
+          'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
+          'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
+          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+      }),
+    ),
+  };
+  const scheduleParam: Partial<typeof scheduleParamShape> =
+    isSchedulingEnabled() ? scheduleParamShape : {};
+
+  const scheduleGuideline = isSchedulingEnabled()
+    ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
+    : "";
 
   pi.registerTool(defineTool({
     name: "Agent",
@@ -629,8 +662,7 @@ Guidelines:
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).
-- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`,
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).${scheduleGuideline}`,
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
@@ -683,14 +715,7 @@ Guidelines:
           description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
         }),
       ),
-      schedule: Type.Optional(
-        Type.String({
-          description:
-            'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
-            'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
-            'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
-        }),
-      ),
+      ...scheduleParam,
     }),
 
     // ---- Custom rendering: Claude Code style ----
@@ -846,6 +871,9 @@ Guidelines:
 
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
+        if (!isSchedulingEnabled()) {
+          return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
+        }
         if (params.resume) {
           return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
         }
@@ -1741,6 +1769,7 @@ ${systemPrompt}
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
+      schedulingEnabled: isSchedulingEnabled(),
     };
   }
 
@@ -1750,6 +1779,7 @@ ${systemPrompt}
       `Default max turns (current: ${getDefaultMaxTurns() ?? "unlimited"})`,
       `Grace turns (current: ${getGraceTurns()})`,
       `Join mode (current: ${getDefaultJoinMode()})`,
+      `Scheduling (current: ${isSchedulingEnabled() ? "enabled" : "disabled"})`,
     ]);
     if (!choice) return;
 
@@ -1799,6 +1829,27 @@ ${systemPrompt}
         const mode = val.split(" ")[0] as JoinMode;
         setDefaultJoinMode(mode);
         notifyApplied(ctx, `Default join mode set to ${mode}`);
+      }
+    } else if (choice.startsWith("Scheduling")) {
+      const val = await ctx.ui.select(
+        "Schedule subagent feature",
+        [
+          "enabled — Agent tool accepts a `schedule` param; /agents → Scheduled jobs visible",
+          "disabled — `schedule` removed from Agent tool spec (no LLM-context cost); menu hidden",
+        ],
+      );
+      if (val) {
+        const enabled = val.startsWith("enabled");
+        if (enabled === isSchedulingEnabled()) {
+          ctx.ui.notify(`Scheduling already ${enabled ? "enabled" : "disabled"}.`, "info");
+        } else {
+          setSchedulingEnabled(enabled);
+          if (!enabled) scheduler.stop();  // immediate kill — outstanding fires stop ticking
+          notifyApplied(
+            ctx,
+            `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
+          );
+        }
       }
     }
   }
