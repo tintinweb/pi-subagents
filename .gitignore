@@ -30,3 +30,10 @@ Thumbs.db
 .pi/readcache
 .claude
 .vscode
+.gitnexus
+.pi/subagents.json
+
+# Pi internal files
+progress.md
+AGENTS.md
+CLAUDE.md

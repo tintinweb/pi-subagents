@@ -179,6 +179,22 @@ describe("settings persistence", () => {
       }
     });
 
+    it("accepts scopeModels boolean (true and false)", () => {
+      writeProject({ scopeModels: true });
+      expect(loadSettings(projectDir)).toEqual({ scopeModels: true });
+      writeProject({ scopeModels: false });
+      expect(loadSettings(projectDir)).toEqual({ scopeModels: false });
+    });
+
+    it("drops non-boolean scopeModels", () => {
+      writeProject({ scopeModels: "yes" });
+      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
+      writeProject({ scopeModels: 1 });
+      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
+      writeProject({ scopeModels: null });
+      expect(loadSettings(projectDir).scopeModels).toBeUndefined();
+    });
+
     it("returns {} when the JSON root is not an object (array, string, null)", () => {
       mkdirSync(join(projectDir, ".pi"), { recursive: true });
       writeFileSync(projectFile(), '["not", "an", "object"]');
@@ -274,6 +290,7 @@ describe("settings persistence", () => {
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
+        setScopeModels: vi.fn(),
       };
     });
 
@@ -283,6 +300,7 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
+      expect(appliers.setScopeModels).not.toHaveBeenCalled();
     });
 
     it("applies only the fields that are present", () => {
@@ -291,17 +309,30 @@ describe("settings persistence", () => {
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(3);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
+      expect(appliers.setScopeModels).not.toHaveBeenCalled();
     });
 
-    it("applies all four fields when all are present", () => {
+    it("applies all fields when all are present", () => {
       applySettings(
-        { maxConcurrent: 8, defaultMaxTurns: 50, graceTurns: 7, defaultJoinMode: "group" },
+        {
+          maxConcurrent: 8,
+          defaultMaxTurns: 50,
+          graceTurns: 7,
+          defaultJoinMode: "group",
+          scopeModels: true,
+        },
         appliers,
       );
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(8);
       expect(appliers.setDefaultMaxTurns).toHaveBeenCalledWith(50);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
       expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
+      expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
+    });
+
+    it("applies scopeModels: false", () => {
+      applySettings({ scopeModels: false }, appliers);
+      expect(appliers.setScopeModels).toHaveBeenCalledWith(false);
     });
 
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {
@@ -335,6 +366,7 @@ describe("settings persistence", () => {
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
+        setScopeModels: vi.fn(),
       };
     });
 
