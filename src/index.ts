@@ -629,7 +629,8 @@ Guidelines:
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).`,
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).
+- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`,
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
@@ -685,10 +686,9 @@ Guidelines:
       schedule: Type.Optional(
         Type.String({
           description:
-            'When set, register this agent to fire on a schedule instead of running now. ' +
-            'Accepts: 6-field cron (e.g. "0 0 9 * * 1" — 9am every Monday), interval ("5m", "1h"), or one-shot ("+10m" or ISO timestamp). ' +
-            'Returns the job ID. Manage via /agents → Scheduled jobs. Schedules are session-scoped (reset on /new, restored on /resume). ' +
-            'Incompatible with `inherit_context` and `resume`. Forces `run_in_background: true`.',
+            'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
+            'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
+            'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
         }),
       ),
     }),
@@ -1276,7 +1276,7 @@ Guidelines:
       await showAllAgentsList(ctx);
       await showAgentsMenu(ctx);
     } else if (choice.startsWith("Scheduled jobs (")) {
-      await showSchedulesMenu(ctx, scheduler, getAllTypes());
+      await showSchedulesMenu(ctx, scheduler);
       await showAgentsMenu(ctx);
     } else if (choice === "Create new agent") {
       await showCreateWizard(ctx);

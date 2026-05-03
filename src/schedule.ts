@@ -145,22 +145,6 @@ export class SubagentScheduler {
     return updated;
   }
 
-  /** Cleanup all disabled jobs. Returns count removed. */
-  cleanupDisabled(): number {
-    const store = this.requireStore();
-    let count = 0;
-    for (const job of store.list()) {
-      if (!job.enabled) {
-        this.unscheduleJob(job.id);
-        if (store.remove(job.id)) {
-          count++;
-          this.emit({ type: "removed", jobId: job.id });
-        }
-      }
-    }
-    return count;
-  }
-
   /** Next-run time as ISO, or undefined if not currently armed. */
   getNextRun(jobId: string): string | undefined {
     const cron = this.jobs.get(jobId);
@@ -168,8 +152,12 @@ export class SubagentScheduler {
     const job = this.store?.get(jobId);
     if (!job?.enabled) return undefined;
     if (job.scheduleType === "once") return job.schedule;
-    if (job.scheduleType === "interval" && job.lastRun && job.intervalMs) {
-      return new Date(new Date(job.lastRun).getTime() + job.intervalMs).toISOString();
+    if (job.scheduleType === "interval" && job.intervalMs) {
+      // Before the first fire there's no `lastRun`, so fall back to "now" —
+      // accurate at create time (setInterval was just armed) and within
+      // intervalMs of correct in any pre-first-fire view.
+      const base = job.lastRun ? new Date(job.lastRun).getTime() : Date.now();
+      return new Date(base + job.intervalMs).toISOString();
     }
     return undefined;
   }
@@ -322,16 +310,23 @@ export class SubagentScheduler {
     // "5m" — interval
     const ivl = SubagentScheduler.parseInterval(trimmed);
     if (ivl !== null) return { type: "interval", intervalMs: ivl, normalized: trimmed };
-    // ISO timestamp — one-shot
+    // ISO timestamp — one-shot. Reject past timestamps upfront so we never
+    // create a dead-on-arrival record (scheduleJob's safety net still catches
+    // micro-races from `+0s`-style relatives).
     if (/^\d{4}-\d{2}-\d{2}T/.test(trimmed)) {
       const d = new Date(trimmed);
-      if (!Number.isNaN(d.getTime())) return { type: "once", normalized: d.toISOString() };
+      if (!Number.isNaN(d.getTime())) {
+        if (d.getTime() <= Date.now()) {
+          throw new Error(`Scheduled time ${d.toISOString()} is in the past.`);
+        }
+        return { type: "once", normalized: d.toISOString() };
+      }
     }
     // Cron — 6-field
     const cronCheck = SubagentScheduler.validateCronExpression(trimmed);
     if (cronCheck.valid) return { type: "cron", normalized: trimmed };
     throw new Error(
-      `Invalid schedule "${s}". Use 6-field cron (e.g. "0 9 * * 1 *"), interval ("5m"/"1h"), or one-shot ("+10m" / ISO).`
+      `Invalid schedule "${s}". Use 6-field cron (e.g. "0 0 9 * * 1" — 9am every Monday), interval ("5m"/"1h"), or one-shot ("+10m" / ISO).`
     );
   }
 

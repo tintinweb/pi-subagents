@@ -154,24 +154,74 @@ describe("SubagentScheduler — lifecycle", () => {
     expect(scheduler.getNextRun(job.id)).toBeUndefined();
   });
 
-  it("cleanupDisabled removes only disabled jobs", () => {
-    const a = scheduler.addJob({ name: "a", description: "a", schedule: "1h", subagent_type: "general-purpose", prompt: "p" });
-    const b = scheduler.addJob({ name: "b", description: "b", schedule: "2h", subagent_type: "general-purpose", prompt: "p" });
-    scheduler.updateJob(a.id, { enabled: false });
-    expect(scheduler.cleanupDisabled()).toBe(1);
-    expect(scheduler.list().map(j => j.id)).toEqual([b.id]);
+  // Regression: getNextRun on a freshly-created interval used to return undefined
+  // (the lastRun-based branch needs lastRun, which is undefined before first fire),
+  // surfacing as "Next run: (unknown)" in the agent's create-response.
+  it("getNextRun returns an approximate future time for a fresh interval (no lastRun yet)", () => {
+    const before = Date.now();
+    const job = scheduler.addJob({
+      name: "fresh-interval", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "p",
+    });
+    const next = scheduler.getNextRun(job.id);
+    expect(next).toBeDefined();
+    const t = new Date(next!).getTime();
+    // Should be ~now + 1h, with a small tolerance for the time spent in the call
+    expect(t - before).toBeGreaterThanOrEqual(3_600_000 - 1_000);
+    expect(t - before).toBeLessThanOrEqual(3_600_000 + 1_000);
   });
 
-  it("rejects past one-shot timestamps and disables the job", () => {
-    const past = new Date(Date.now() - 60_000).toISOString();
+  // Once a fire happens and `lastRun` is set, getNextRun should pivot to it.
+  it("getNextRun uses lastRun when present for interval jobs", () => {
     const job = scheduler.addJob({
-      name: "past", description: "x", schedule: past, subagent_type: "general-purpose", prompt: "p",
+      name: "ran-once", description: "x", schedule: "1h",
+      subagent_type: "general-purpose", prompt: "p",
     });
-    // The job is added but immediately disabled by scheduleJob's past-timestamp branch.
-    expect(scheduler.list()[0].enabled).toBe(false);
-    expect(scheduler.list()[0].lastStatus).toBe("error");
+    const lastRun = new Date(Date.now() - 30 * 60_000).toISOString(); // 30m ago
+    scheduler.updateJob(job.id, { lastRun });
+    const next = scheduler.getNextRun(job.id);
+    expect(next).toBe(new Date(new Date(lastRun).getTime() + 3_600_000).toISOString());
+  });
+
+  it("rejects past one-shot timestamps upfront — no record created", () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    expect(() => scheduler.addJob({
+      name: "past", description: "x", schedule: past, subagent_type: "general-purpose", prompt: "p",
+    })).toThrow(/in the past/);
+    // No dead-on-arrival record left behind
+    expect(scheduler.list()).toEqual([]);
+  });
+
+  // The safety net in scheduleJob's past-branch only fires on store reload —
+  // a once-job persisted with a future ISO whose time has now passed (process
+  // restart after the trigger window). detectSchedule rejects past timestamps
+  // at create time, so this is the only remaining production path.
+  it("disables a previously-enabled one-shot reloaded from disk past its time", () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    // Direct store insert bypasses addJob's upfront validation, mimicking a
+    // record that was valid when written but is now stale on reload.
+    store.add({
+      id: "reload-test",
+      name: "reload",
+      description: "reload",
+      schedule: past,
+      scheduleType: "once",
+      subagent_type: "general-purpose",
+      prompt: "x",
+      enabled: true,
+      createdAt: past,
+      runCount: 0,
+    });
+    // Re-arm: stop drops timers, start re-reads store.list() and calls scheduleJob
+    // for every enabled job → the past-branch fires for our seeded record.
+    scheduler.stop();
+    scheduler.start(pi, ctx, manager, store);
+
+    const reloaded = scheduler.list().find(j => j.id === "reload-test");
+    expect(reloaded?.enabled).toBe(false);
+    expect(reloaded?.lastStatus).toBe("error");
     expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
-      type: "error", jobId: job.id, error: expect.stringMatching(/in the past/),
+      type: "error", jobId: "reload-test", error: expect.stringMatching(/in the past/),
     }));
   });
 });

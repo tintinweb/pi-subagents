@@ -1,17 +1,18 @@
 /**
- * schedule-menu.ts — Interactive sub-menu under `/agents` for managing
- * scheduled subagent jobs. View / Add / Toggle / Remove / Cleanup.
+ * schedule-menu.ts — `/agents → Scheduled jobs` submenu.
  *
- * Mirrors the menu shape of pi-cron-schedule's `/schedule-prompt` command,
- * but uses the same `ctx.ui.*` patterns already used by `showAgentsMenu`
- * and `showCreateWizard` in src/index.ts.
+ * Minimal v1 surface: list scheduled jobs, select one to inspect details +
+ * confirm cancellation. No create wizard (the `Agent` tool's `schedule` param
+ * is the canonical creation path), no toggle/cleanup (cancel is enough for
+ * "I scheduled something dumb, get rid of it"). Add management surfaces here
+ * if real demand emerges.
  */
 
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import type { SubagentScheduler } from "../schedule.js";
-import type { ScheduledSubagent, SubagentType } from "../types.js";
+import type { ScheduledSubagent } from "../types.js";
 
-/** Format an ISO timestamp as relative time ("in 4h 12m", "yesterday", "—"). */
+/** Format an ISO timestamp as relative time ("in 4h", "2d ago", "—"). */
 function relTime(iso: string | undefined, now = Date.now()): string {
   if (!iso) return "—";
   const t = new Date(iso).getTime();
@@ -36,10 +37,10 @@ function statusIcon(j: ScheduledSubagent): string {
   return "✓";
 }
 
-/** Compact line for the listing — name, schedule, agent type, next/last run, count. */
+/** Compact selectable row — name, schedule, agent type, next/last run, count. */
 function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id);
-  const fields = [
+  return [
     statusIcon(j),
     j.name.padEnd(18).slice(0, 18),
     j.schedule.padEnd(14).slice(0, 14),
@@ -47,14 +48,31 @@ function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
     `next ${relTime(next)}`,
     `last ${relTime(j.lastRun)}`,
     `runs ${j.runCount}`,
-  ];
-  return fields.join("  ");
+  ].join("  ");
 }
 
+/** Multi-line details block for the cancel confirm. */
+function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
+  const next = scheduler.getNextRun(j.id) ?? "—";
+  return [
+    `name:      ${j.name}`,
+    `schedule:  ${j.schedule} (${j.scheduleType})`,
+    `agent:     ${j.subagent_type}`,
+    `prompt:    ${j.prompt.slice(0, 200)}${j.prompt.length > 200 ? "…" : ""}`,
+    `created:   ${j.createdAt}`,
+    `last run:  ${j.lastRun ?? "—"} (${j.lastStatus ?? "—"})`,
+    `next run:  ${next}`,
+    `runs:      ${j.runCount}`,
+  ].join("\n");
+}
+
+/**
+ * List scheduled jobs; selecting one opens a cancel-confirm with details.
+ * Returns when the user backs out or after a cancellation.
+ */
 export async function showSchedulesMenu(
   ctx: ExtensionCommandContext,
   scheduler: SubagentScheduler,
-  agentTypes: readonly string[],
 ): Promise<void> {
   if (!scheduler.isActive()) {
     ctx.ui.notify("Scheduler is not active in this session.", "warning");
@@ -62,139 +80,25 @@ export async function showSchedulesMenu(
   }
 
   const jobs = scheduler.list();
-  const summary = jobs.length === 0
-    ? "No scheduled jobs."
-    : `${jobs.length} job${jobs.length === 1 ? "" : "s"}`;
-
-  const options = [
-    `View all jobs (${jobs.length})`,
-    "Add new job",
-  ];
-  if (jobs.length > 0) {
-    options.push("Toggle enabled");
-    options.push("Remove job");
-    if (jobs.some(j => !j.enabled)) options.push("Cleanup disabled");
-  }
-
-  const choice = await ctx.ui.select(`Scheduled jobs — ${summary}`, options);
-  if (!choice) return;
-
-  if (choice.startsWith("View all jobs")) {
-    await viewJobs(ctx, scheduler);
-    await showSchedulesMenu(ctx, scheduler, agentTypes);
-  } else if (choice === "Add new job") {
-    await addJobWizard(ctx, scheduler, agentTypes);
-    await showSchedulesMenu(ctx, scheduler, agentTypes);
-  } else if (choice === "Toggle enabled") {
-    await toggleJob(ctx, scheduler);
-    await showSchedulesMenu(ctx, scheduler, agentTypes);
-  } else if (choice === "Remove job") {
-    await removeJob(ctx, scheduler);
-    await showSchedulesMenu(ctx, scheduler, agentTypes);
-  } else if (choice === "Cleanup disabled") {
-    const removed = scheduler.cleanupDisabled();
-    ctx.ui.notify(`Removed ${removed} disabled job${removed === 1 ? "" : "s"}.`, "info");
-    await showSchedulesMenu(ctx, scheduler, agentTypes);
-  }
-}
-
-async function viewJobs(ctx: ExtensionCommandContext, scheduler: SubagentScheduler): Promise<void> {
-  const jobs = scheduler.list();
   if (jobs.length === 0) {
     ctx.ui.notify("No scheduled jobs.", "info");
     return;
   }
-  // Use a select to display the list — selection navigates to detail.
+
+  const labels = jobs.map(j => formatJob(j, scheduler));
   const choice = await ctx.ui.select(
-    "Scheduled jobs (select for details)",
-    jobs.map(j => formatJob(j, scheduler)),
+    `Scheduled jobs (${jobs.length}) — select to cancel`,
+    labels,
   );
   if (!choice) return;
-  const idx = jobs.map(j => formatJob(j, scheduler)).indexOf(choice);
-  if (idx < 0) return;
-  const j = jobs[idx];
-  const next = scheduler.getNextRun(j.id) ?? "—";
-  const lines = [
-    `id:        ${j.id}`,
-    `name:      ${j.name}`,
-    `desc:      ${j.description}`,
-    `enabled:   ${j.enabled}`,
-    `schedule:  ${j.schedule} (${j.scheduleType})`,
-    `agent:     ${j.subagent_type}`,
-    `prompt:    ${j.prompt.slice(0, 200)}${j.prompt.length > 200 ? "…" : ""}`,
-    `model:     ${j.model ?? "(default)"}`,
-    `isolation: ${j.isolation ?? "—"}`,
-    `created:   ${j.createdAt}`,
-    `last run:  ${j.lastRun ?? "—"} (${j.lastStatus ?? "—"})`,
-    `next run:  ${next}`,
-    `runs:      ${j.runCount}`,
-  ];
-  ctx.ui.notify(lines.join("\n"), "info");
-}
 
-async function addJobWizard(
-  ctx: ExtensionCommandContext,
-  scheduler: SubagentScheduler,
-  agentTypes: readonly string[],
-): Promise<void> {
-  const name = await ctx.ui.input("Job name (must be unique)", "");
-  if (!name) return;
-
-  const description = await ctx.ui.input("Short description (3–5 words)", name);
-  if (!description) return;
-
-  if (agentTypes.length === 0) {
-    ctx.ui.notify("No agent types available — create one first.", "warning");
-    return;
-  }
-  const subagent_type = await ctx.ui.select("Agent type", [...agentTypes]) as SubagentType | undefined;
-  if (!subagent_type) return;
-
-  const prompt = await ctx.ui.input("Prompt for the agent", "");
-  if (!prompt) return;
-
-  const schedule = await ctx.ui.input(
-    'Schedule — cron (e.g. "0 0 9 * * 1"), interval ("5m"), or one-shot ("+10m" / ISO)',
-    "",
-  );
-  if (!schedule) return;
-
-  try {
-    const job = scheduler.addJob({ name, description, schedule, subagent_type, prompt });
-    const next = scheduler.getNextRun(job.id);
-    ctx.ui.notify(
-      `Scheduled "${job.name}" (id: ${job.id}). Next run: ${next ? relTime(next) : "—"}.`,
-      "info",
-    );
-  } catch (err) {
-    ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
-  }
-}
-
-async function toggleJob(ctx: ExtensionCommandContext, scheduler: SubagentScheduler): Promise<void> {
-  const jobs = scheduler.list();
-  if (jobs.length === 0) return;
-  const labels = jobs.map(j => `${j.enabled ? "✓" : "✗"} ${j.name} (${j.schedule})`);
-  const choice = await ctx.ui.select("Toggle which job?", labels);
-  if (!choice) return;
   const idx = labels.indexOf(choice);
   if (idx < 0) return;
-  const j = jobs[idx];
-  scheduler.updateJob(j.id, { enabled: !j.enabled });
-  ctx.ui.notify(`${j.name} is now ${!j.enabled ? "enabled" : "disabled"}.`, "info");
-}
+  const job = jobs[idx];
 
-async function removeJob(ctx: ExtensionCommandContext, scheduler: SubagentScheduler): Promise<void> {
-  const jobs = scheduler.list();
-  if (jobs.length === 0) return;
-  const labels = jobs.map(j => `${j.name} (${j.schedule}) — ${j.subagent_type}`);
-  const choice = await ctx.ui.select("Remove which job?", labels);
-  if (!choice) return;
-  const idx = labels.indexOf(choice);
-  if (idx < 0) return;
-  const j = jobs[idx];
-  const ok = await ctx.ui.confirm("Remove scheduled job", `Remove "${j.name}"?`);
+  const ok = await ctx.ui.confirm(`Cancel "${job.name}"?`, formatDetails(job, scheduler));
   if (!ok) return;
-  scheduler.removeJob(j.id);
-  ctx.ui.notify(`Removed "${j.name}".`, "info");
+
+  scheduler.removeJob(job.id);
+  ctx.ui.notify(`Cancelled "${job.name}".`, "info");
 }
