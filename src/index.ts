@@ -30,20 +30,17 @@ import {
   type AgentActivity,
   type AgentDetails,
   AgentWidget,
-  addUsage,
   describeActivity,
   formatDuration,
   formatMs,
   formatTokens,
   formatTurns,
   getDisplayName,
-  getLifetimeTotal,
   getPromptModeLabel,
-  getSessionContextPercent,
-  type LifetimeUsage,
   SPINNER,
   type UICtx,
 } from "./ui/agent-widget.js";
+import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
 

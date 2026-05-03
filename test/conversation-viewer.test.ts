@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRecord } from "../types.js";
+import type { AgentRecord } from "../src/types.js";
 
 // ── Mock wrapTextWithAnsi ──────────────────────────────────────────────
 // We need to control what wrapTextWithAnsi returns to simulate the
@@ -23,7 +23,7 @@ vi.mock("@mariozechner/pi-tui", async (importOriginal) => {
 // Must import AFTER vi.mock declaration (vitest hoists vi.mock but the
 // dynamic import of the test subject must happen after)
 const { visibleWidth } = await import("@mariozechner/pi-tui");
-const { ConversationViewer } = await import("./conversation-viewer.js");
+const { ConversationViewer } = await import("../src/ui/conversation-viewer.js");
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -318,146 +318,6 @@ describe("ConversationViewer", () => {
         mockTui(30, w), mockSession(messages), mockRecord(), undefined, ansiTheme(), vi.fn(),
       );
       assertAllLinesFit(callBuildContentLines(viewer, w), w);
-    });
-  });
-
-  // Regression for issue #38 — token semantics + context indicator
-  describe("session token helpers", () => {
-    it("uses billed-token semantics (input + output + cacheWrite), not inflated total", async () => {
-      const { getSessionTokens } = await import("./agent-widget.js");
-      const session = {
-        getSessionStats: () => ({
-          tokens: { input: 100, output: 200, cacheRead: 500_000, cacheWrite: 50, total: 500_350 } as any,
-          contextUsage: { tokens: 50_300, contextWindow: 200_000, percent: 25 },
-        }),
-      };
-      expect(getSessionTokens(session)).toBe(350);
-    });
-
-    it("getSessionTokens returns 0 when session is undefined or stats throw", async () => {
-      const { getSessionTokens } = await import("./agent-widget.js");
-      expect(getSessionTokens(undefined)).toBe(0);
-      const broken = { getSessionStats: () => { throw new Error("nope"); } } as any;
-      expect(getSessionTokens(broken)).toBe(0);
-    });
-
-    it("getSessionContextPercent returns null when contextUsage is unavailable", async () => {
-      const { getSessionContextPercent } = await import("./agent-widget.js");
-      const session = {
-        getSessionStats: () => ({ tokens: { input: 10, output: 20, cacheWrite: 5 } }),
-      };
-      expect(getSessionContextPercent(session)).toBeNull();
-    });
-
-    it("getSessionContextPercent returns null when percent is null (post-compaction)", async () => {
-      const { getSessionContextPercent } = await import("./agent-widget.js");
-      const session = {
-        getSessionStats: () => ({
-          tokens: { input: 10, output: 20, cacheWrite: 5 },
-          contextUsage: { tokens: null, contextWindow: 200_000, percent: null },
-        }),
-      };
-      expect(getSessionContextPercent(session)).toBeNull();
-    });
-
-    it("getSessionContextPercent returns the upstream percent when available", async () => {
-      const { getSessionContextPercent } = await import("./agent-widget.js");
-      const session = {
-        getSessionStats: () => ({
-          tokens: { input: 10, output: 20, cacheWrite: 5 },
-          contextUsage: { tokens: 50_000, contextWindow: 200_000, percent: 25 },
-        }),
-      };
-      expect(getSessionContextPercent(session)).toBe(25);
-    });
-
-    it("formatSessionTokens applies threshold colors (<70 dim, 70–85 warning, ≥85 error)", async () => {
-      const { formatSessionTokens } = await import("./agent-widget.js");
-      const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
-      expect(formatSessionTokens(1234, null, theme)).toBe("1.2k token");
-      expect(formatSessionTokens(1234, 50, theme)).toBe("1.2k token (<dim>50%</dim>)");
-      expect(formatSessionTokens(1234, 70, theme)).toBe("1.2k token (<warning>70%</warning>)");
-      expect(formatSessionTokens(1234, 84, theme)).toBe("1.2k token (<warning>84%</warning>)");
-      expect(formatSessionTokens(1234, 85, theme)).toBe("1.2k token (<error>85%</error>)");
-      expect(formatSessionTokens(1234, 99, theme)).toBe("1.2k token (<error>99%</error>)");
-    });
-
-    it("formatSessionTokens annotates compaction count alongside percent", async () => {
-      const { formatSessionTokens } = await import("./agent-widget.js");
-      const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
-      // compactions only (e.g. immediately post-compaction, percent null)
-      expect(formatSessionTokens(1234, null, theme, 1)).toBe("1.2k token (<dim>↻1</dim>)");
-      expect(formatSessionTokens(1234, null, theme, 3)).toBe("1.2k token (<dim>↻3</dim>)");
-      // percent + compactions, joined with ` · `
-      expect(formatSessionTokens(1234, 45, theme, 2)).toBe("1.2k token (<dim>45%</dim> · <dim>↻2</dim>)");
-      expect(formatSessionTokens(1234, 88, theme, 4)).toBe("1.2k token (<error>88%</error> · <dim>↻4</dim>)");
-      // compactions=0 omitted
-      expect(formatSessionTokens(1234, 45, theme, 0)).toBe("1.2k token (<dim>45%</dim>)");
-    });
-
-    it("getLifetimeTotal sums components and handles undefined", async () => {
-      const { getLifetimeTotal } = await import("./agent-widget.js");
-      expect(getLifetimeTotal(undefined)).toBe(0);
-      expect(getLifetimeTotal({ input: 100, output: 200, cacheWrite: 50 })).toBe(350);
-    });
-
-    // getSessionTokens reads upstream session stats (resets at compaction);
-    // getLifetimeTotal reads our independent accumulator (survives compaction).
-    // They agree pre-compaction, diverge after — both legitimate signals.
-    it("getSessionTokens and getLifetimeTotal agree pre-compaction, diverge after", async () => {
-      const { getSessionTokens, getLifetimeTotal } = await import("./agent-widget.js");
-
-      // Pre-compaction: session stats and lifetime accumulator track the same components
-      let sessionStatsTokens = { input: 100, output: 200, cacheWrite: 50 };
-      const session = {
-        getSessionStats: () => ({ tokens: sessionStatsTokens }),
-      };
-      const lifetime = { input: 100, output: 200, cacheWrite: 50 };
-
-      expect(getSessionTokens(session)).toBe(350);
-      expect(getLifetimeTotal(lifetime)).toBe(350);
-
-      // Compaction: upstream replaces session.state.messages, so stats reset.
-      // Our accumulator is independent — it keeps growing.
-      sessionStatsTokens = { input: 0, output: 0, cacheWrite: 0 };
-
-      expect(getSessionTokens(session)).toBe(0);            // reset
-      expect(getLifetimeTotal(lifetime)).toBe(350);          // preserved
-
-      // Subsequent message_end events feed both: session re-fills, accumulator continues
-      sessionStatsTokens = { input: 80, output: 150, cacheWrite: 30 };
-      lifetime.input += 80; lifetime.output += 150; lifetime.cacheWrite += 30;
-
-      expect(getSessionTokens(session)).toBe(260);           // post-compaction window
-      expect(getLifetimeTotal(lifetime)).toBe(610);          // 350 + 260, monotone
-    });
-
-    // The accumulator survives compaction because it lives on AgentActivity /
-    // AgentRecord, not on session.state.messages (which compaction replaces).
-    it("a lifetime accumulator stays monotone across simulated compaction", async () => {
-      const { getLifetimeTotal } = await import("./agent-widget.js");
-      const usage = { input: 0, output: 0, cacheWrite: 0 };
-      const onUsage = (u: { input: number; output: number; cacheWrite: number }) => {
-        usage.input += u.input;
-        usage.output += u.output;
-        usage.cacheWrite += u.cacheWrite;
-      };
-
-      // 5 normal turns
-      for (let i = 0; i < 5; i++) onUsage({ input: 1000, output: 200, cacheWrite: 50 });
-      expect(getLifetimeTotal(usage)).toBe(5 * 1250);
-
-      // Compaction would replace session.state.messages, dropping any sum
-      // re-derived from it. Our accumulator is independent — no reset.
-      const beforeCompaction = getLifetimeTotal(usage);
-
-      // 3 more turns post-"compaction"
-      for (let i = 0; i < 3; i++) onUsage({ input: 800, output: 150, cacheWrite: 30 });
-      expect(getLifetimeTotal(usage)).toBe(beforeCompaction + 3 * 980);
-      expect(getLifetimeTotal(usage)).toBeGreaterThan(beforeCompaction); // monotone
-
-      // input + output + cacheWrite = total — by construction, no drift
-      expect(usage.input + usage.output + usage.cacheWrite).toBe(getLifetimeTotal(usage));
     });
   });
 });

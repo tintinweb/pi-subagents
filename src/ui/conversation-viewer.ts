@@ -9,8 +9,9 @@ import type { AgentSession } from "@mariozechner/pi-coding-agent";
 import { type Component, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@mariozechner/pi-tui";
 import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
+import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
-import { type AgentActivity, describeActivity, formatDuration, formatSessionTokens, getDisplayName, getLifetimeTotal, getPromptModeLabel, getSessionContextPercent } from "./agent-widget.js";
+import { type AgentActivity, describeActivity, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 
 /** Lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
 const CHROME_LINES = 6;

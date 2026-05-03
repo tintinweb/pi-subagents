@@ -4,6 +4,7 @@
 
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { AgentSession } from "@mariozechner/pi-coding-agent";
+import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
 
@@ -90,7 +91,7 @@ export interface AgentRecord {
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately
    * excluded — see issue #38). Initialized to zeros at spawn.
    */
-  lifetimeUsage: { input: number; output: number; cacheWrite: number };
+  lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
 }
