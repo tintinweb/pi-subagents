@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRecord } from "../types.js";
+import type { AgentRecord } from "../src/types.js";
 
 // ── Mock wrapTextWithAnsi ──────────────────────────────────────────────
 // We need to control what wrapTextWithAnsi returns to simulate the
@@ -23,7 +23,7 @@ vi.mock("@mariozechner/pi-tui", async (importOriginal) => {
 // Must import AFTER vi.mock declaration (vitest hoists vi.mock but the
 // dynamic import of the test subject must happen after)
 const { visibleWidth } = await import("@mariozechner/pi-tui");
-const { ConversationViewer } = await import("./conversation-viewer.js");
+const { ConversationViewer } = await import("../src/ui/conversation-viewer.js");
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -39,7 +39,7 @@ function mockSession(messages: any[] = []) {
     messages,
     subscribe: vi.fn(() => vi.fn()),
     dispose: vi.fn(),
-    getSessionStats: () => ({ tokens: { total: 0 } }),
+    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
   } as any;
 }
 

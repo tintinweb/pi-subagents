@@ -200,3 +200,120 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     expect(manager.getRecord(id)).toBeUndefined();
   });
 });
+
+// Eager init removes the optional/required asymmetry that previously required
+// `??=` defaults at the callback sites and `?? 0` / `?? 1` at the read sites.
+describe("AgentManager — lifetime usage + compaction count are eagerly initialized", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("spawn initializes lifetimeUsage to zeros and compactionCount to 0", () => {
+    manager = new AgentManager();
+    // Don't resolve the run — we just want to inspect the record at spawn time.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+    expect(record.compactionCount).toBe(0);
+
+    manager.abort(id);
+  });
+
+  it("onAssistantUsage from runAgent accumulates into record.lifetimeUsage", async () => {
+    manager = new AgentManager();
+
+    // Capture the options passed to runAgent so we can drive callbacks
+    let captured: any;
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      captured = opts;
+      // Two assistant messages with usage
+      opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 10 });
+      opts.onAssistantUsage?.({ input: 200, output: 80, cacheWrite: 20 });
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(captured).toBeDefined();
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({
+      input: 300, output: 130, cacheWrite: 30,
+    });
+  });
+
+  it("onCompaction from runAgent increments record.compactionCount", async () => {
+    manager = new AgentManager();
+    const compactSeen: any[] = [];
+
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      // Compaction fires while the agent is still running — the record passed to
+      // onCompact should reflect the just-incremented count.
+      opts.onCompaction?.({ reason: "threshold", tokensBefore: 12345 });
+      opts.onCompaction?.({ reason: "manual", tokensBefore: 22222 });
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+
+    manager = new AgentManager(undefined, undefined, undefined, (record, info) => {
+      compactSeen.push({ count: record.compactionCount, reason: info.reason });
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(compactSeen).toEqual([
+      { count: 1, reason: "threshold" },
+      { count: 2, reason: "manual" },
+    ]);
+    expect(manager.getRecord(id)!.compactionCount).toBe(2);
+  });
+
+  it("resume() also accumulates usage and increments compactions on the same record", async () => {
+    manager = new AgentManager();
+
+    // First, spawn with a session that resume can latch onto
+    const session = { ...mockSession() };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first",
+      session: session as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    // Pre-resume: lifetimeUsage from spawn was zero (mock didn't call onAssistantUsage)
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+    expect(manager.getRecord(id)!.compactionCount).toBe(0);
+
+    // Now resume — drive callbacks via the mocked resumeAgent
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
+      opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
+      return "second";
+    });
+
+    await manager.resume(id, "more");
+
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
+    expect(manager.getRecord(id)!.compactionCount).toBe(1);
+  });
+});

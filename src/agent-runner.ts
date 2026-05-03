@@ -103,6 +103,17 @@ export interface RunOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
+  /**
+   * Called once per assistant message_end with that message's usage delta.
+   * Lets callers maintain a lifetime accumulator that survives compaction
+   * (which replaces session.state.messages and resets stats-derived sums).
+   */
+  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /**
+   * Called when the session successfully compacts. `tokensBefore` is upstream's
+   * pre-compaction context size estimate. Aborted compactions don't fire.
+   */
+  onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
 }
 
 export interface RunResult {
@@ -343,6 +354,17 @@ export async function runAgent(
     if (event.type === "tool_execution_end") {
       options.onToolActivity?.({ type: "end", toolName: event.toolName });
     }
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      const u = (event.message as any).usage;
+      if (u) options.onAssistantUsage?.({
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        cacheWrite: u.cacheWrite ?? 0,
+      });
+    }
+    if (event.type === "compaction_end" && !event.aborted && event.result) {
+      options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+    }
   });
 
   const collector = collectResponseText(session);
@@ -375,15 +397,31 @@ export async function runAgent(
 export async function resumeAgent(
   session: AgentSession,
   prompt: string,
-  options: { onToolActivity?: (activity: ToolActivity) => void; signal?: AbortSignal } = {},
+  options: {
+    onToolActivity?: (activity: ToolActivity) => void;
+    onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+    onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+    signal?: AbortSignal;
+  } = {},
 ): Promise<string> {
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubToolUse = options.onToolActivity
+  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
-        if (event.type === "tool_execution_start") options.onToolActivity!({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity!({ type: "end", toolName: event.toolName });
+        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
+        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
+        if (event.type === "message_end" && event.message.role === "assistant") {
+          const u = (event.message as any).usage;
+          if (u) options.onAssistantUsage?.({
+            input: u.input ?? 0,
+            output: u.output ?? 0,
+            cacheWrite: u.cacheWrite ?? 0,
+          });
+        }
+        if (event.type === "compaction_end" && !event.aborted && event.result) {
+          options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+        }
       })
     : () => {};
 
@@ -391,7 +429,7 @@ export async function resumeAgent(
     await session.prompt(prompt);
   } finally {
     collector.unsubscribe();
-    unsubToolUse();
+    unsubEvents();
     cleanupAbort();
   }
 
