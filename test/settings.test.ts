@@ -366,6 +366,7 @@ describe("settings persistence", () => {
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
+        setScopeModels: vi.fn(),
       };
     });
 

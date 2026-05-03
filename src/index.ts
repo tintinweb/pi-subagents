@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@mariozechner/pi-coding-agent";
-import { Container, type SettingItem, SettingsList, Spacer, Text } from "@mariozechner/pi-tui";
+import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
@@ -1668,100 +1668,99 @@ ${systemPrompt}
     };
   }
 
+  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns"]);
+
   async function showSettings(ctx: ExtensionCommandContext) {
-    const items: SettingItem[] = [
-      {
-        id: "maxConcurrent",
-        label: "Max concurrency",
-        description: "Max concurrent background agents (press Enter to change)",
-        currentValue: String(manager.getMaxConcurrent()),
-      },
-      {
-        id: "defaultMaxTurns",
-        label: "Default max turns",
-        description: "Default max turns before wrap-up (0 = unlimited, Enter to change)",
-        currentValue: String(getDefaultMaxTurns() ?? 0),
-      },
-      {
-        id: "graceTurns",
-        label: "Grace turns",
-        description: "Grace turns after wrap-up steer (Enter to change)",
-        currentValue: String(getGraceTurns()),
-      },
-      {
-        id: "joinMode",
-        label: "Join mode",
-        description: "Default join mode for background agents",
-        currentValue: getDefaultJoinMode(),
-        values: ["smart", "async", "group"],
-      },
-      {
-        id: "scopeModels",
-        label: "Scope models",
-        description: "Validate subagent models against enabledModels from settings",
-        currentValue: isScopeModelsEnabled() ? "on" : "off",
-        values: ["on", "off"],
-      },
-    ];
+    function buildItems(): SettingItem[] {
+      const mc = manager.getMaxConcurrent();
+      const dmt = getDefaultMaxTurns() ?? 0;
+      const gt = getGraceTurns();
+
+      return [
+        {
+          id: "maxConcurrent",
+          label: "Max concurrency",
+          description: "Max concurrent background agents (Enter to type, Space to cycle)",
+          currentValue: String(mc),
+          values: [String(mc)],
+        },
+        {
+          id: "defaultMaxTurns",
+          label: "Default max turns",
+          description: "Default max turns before wrap-up (0 = unlimited, Enter to type, Space to cycle)",
+          currentValue: String(dmt),
+          values: [String(dmt)],
+        },
+        {
+          id: "graceTurns",
+          label: "Grace turns",
+          description: "Grace turns after wrap-up steer (Enter to type, Space to cycle)",
+          currentValue: String(gt),
+          values: [String(gt)],
+        },
+        {
+          id: "joinMode",
+          label: "Join mode",
+          description: "Default join mode for background agents",
+          currentValue: getDefaultJoinMode(),
+          values: ["smart", "async", "group"],
+        },
+        {
+          id: "scopeModels",
+          label: "Scope models",
+          description: "Validate subagent models against enabledModels from settings",
+          currentValue: isScopeModelsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+      ];
+    }
+
+    function applyValue(id: string, value: string) {
+      if (id === "maxConcurrent") {
+        const n = parseInt(value, 10);
+        if (n >= 1) {
+          manager.setMaxConcurrent(n);
+          notifyApplied(ctx, `Max concurrency set to ${n}`);
+        }
+      } else if (id === "defaultMaxTurns") {
+        const n = parseInt(value, 10);
+        if (n === 0) {
+          setDefaultMaxTurns(undefined);
+          notifyApplied(ctx, "Default max turns set to unlimited");
+        } else if (n >= 1) {
+          setDefaultMaxTurns(n);
+          notifyApplied(ctx, `Default max turns set to ${n}`);
+        }
+      } else if (id === "graceTurns") {
+        const n = parseInt(value, 10);
+        if (n >= 1) {
+          setGraceTurns(n);
+          notifyApplied(ctx, `Grace turns set to ${n}`);
+        }
+      } else if (id === "joinMode") {
+        setDefaultJoinMode(value as JoinMode);
+        notifyApplied(ctx, `Default join mode set to ${value}`);
+      } else if (id === "scopeModels") {
+        const enabled = value === "on";
+        setScopeModelsEnabled(enabled);
+        notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      }
+    }
 
     let list: SettingsList;
+    // Track current selection index directly (SettingsList doesn't expose it).
+    // Updated on arrow keys so Enter knows which field is selected immediately.
+    let currentIndex = 0;
 
-    await ctx.ui.custom((_tui, _theme, _kb, done) => {
+    const result = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
+      const items = buildItems();
+
       list = new SettingsList(
         items,
         items.length + 2,
         getSettingsListTheme(),
-        async (id, newValue) => {
-          if (id === "maxConcurrent") {
-            const val = await ctx.ui.input("Max concurrent background agents", newValue);
-            if (val) {
-              const n = parseInt(val, 10);
-              if (n >= 1) {
-                manager.setMaxConcurrent(n);
-                list.updateValue(id, String(n));
-                notifyApplied(ctx, `Max concurrency set to ${n}`);
-              } else {
-                ctx.ui.notify("Must be a positive integer.", "warning");
-              }
-            }
-          } else if (id === "defaultMaxTurns") {
-            const val = await ctx.ui.input("Default max turns (0 = unlimited)", newValue);
-            if (val) {
-              const n = parseInt(val, 10);
-              if (n === 0) {
-                setDefaultMaxTurns(undefined);
-                list.updateValue(id, "0");
-                notifyApplied(ctx, "Default max turns set to unlimited");
-              } else if (n >= 1) {
-                setDefaultMaxTurns(n);
-                list.updateValue(id, String(n));
-                notifyApplied(ctx, `Default max turns set to ${n}`);
-              } else {
-                ctx.ui.notify("Must be 0 (unlimited) or a positive integer.", "warning");
-              }
-            }
-          } else if (id === "graceTurns") {
-            const val = await ctx.ui.input("Grace turns after wrap-up steer", newValue);
-            if (val) {
-              const n = parseInt(val, 10);
-              if (n >= 1) {
-                setGraceTurns(n);
-                list.updateValue(id, String(n));
-                notifyApplied(ctx, `Grace turns set to ${n}`);
-              } else {
-                ctx.ui.notify("Must be a positive integer.", "warning");
-              }
-            }
-          } else if (id === "joinMode") {
-            setDefaultJoinMode(newValue as JoinMode);
-            list.updateValue("joinMode", newValue);
-            notifyApplied(ctx, `Default join mode set to ${newValue}`);
-          } else if (id === "scopeModels") {
-            const enabled = newValue === "on";
-            setScopeModelsEnabled(enabled);
-            list.updateValue("scopeModels", newValue);
-            notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
-          }
+        (id, newValue) => {
+          applyValue(id, newValue);
         },
         () => done(undefined as undefined),
       );
@@ -1774,9 +1773,53 @@ ${systemPrompt}
       return {
         render: (w: number) => container.render(w),
         invalidate: () => container.invalidate(),
-        handleInput: (data: string) => list.handleInput?.(data),
+        handleInput: (data: string) => {
+          // Track navigation so Enter knows the current field
+          if (matchesKey(data, "up")) {
+            currentIndex = Math.max(0, currentIndex - 1);
+          } else if (matchesKey(data, "down")) {
+            currentIndex = Math.min(items.length - 1, currentIndex + 1);
+          }
+
+          // Enter on numeric field → close and prompt for typed input
+          if (matchesKey(data, Key.enter) && NUMERIC_IDS.has(items[currentIndex].id)) {
+            done(items[currentIndex].id);
+            return;
+          }
+          list.handleInput?.(data);
+        },
       };
     });
+
+    // If a numeric field ID was returned, prompt for typed input
+    if (result && NUMERIC_IDS.has(result)) {
+      const current = result === "maxConcurrent"
+        ? String(manager.getMaxConcurrent())
+        : result === "defaultMaxTurns"
+          ? String(getDefaultMaxTurns() ?? 0)
+          : String(getGraceTurns());
+
+      const label = result === "maxConcurrent"
+        ? "Max concurrency (1+)"
+        : result === "defaultMaxTurns"
+          ? "Default max turns (0 = unlimited)"
+          : "Grace turns (1+)";
+
+      // Loop until user enters a valid integer or cancels (Esc / null).
+      // Silently trims whitespace; rejects non-numeric input by re-prompting.
+      let input: string | undefined = await ctx.ui.input(label, current);
+      while (input != null) {
+        const trimmed = input.trim();
+        const n = Number(trimmed);
+        if (trimmed !== "" && Number.isInteger(n)) {
+          applyValue(result, String(n));
+          await showSettings(ctx);
+          return;
+        }
+        // Invalid — re-prompt with the user's last entry so they can edit it
+        input = await ctx.ui.input(label, trimmed);
+      }
+    }
   }
 
   // Persist the current snapshot, emit `subagents:settings_changed`, and surface
