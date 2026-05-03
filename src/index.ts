@@ -12,14 +12,15 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@mariozechner/pi-coding-agent";
+import { Container, type SettingItem, SettingsList, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -464,6 +465,13 @@ export default function (pi: ExtensionAPI) {
   function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
   function setDefaultJoinMode(mode: JoinMode) { defaultJoinMode = mode; }
 
+  // ---- Scope models configuration ----
+  // When enabled, subagent model choices are validated against enabledModels
+  // from ~/.pi/agent/settings.json. Off by default — not standardised behaviour.
+  let scopeModelsEnabled = false;
+  function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
+  function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
+
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -557,6 +565,7 @@ export default function (pi: ExtensionAPI) {
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
+      setScopeModels: setScopeModelsEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -761,6 +770,34 @@ Guidelines:
           // config-specified: silent fallback to parent
         } else {
           model = resolved;
+        }
+      }
+
+      // Scope validation: check resolved model against enabledModels from ~/.pi/agent/settings.json
+      // Ref: pi-coding-agent main.js:439-440 — resolveModelScope(enabledModels, registry) → scopedModels
+      // User params → hard error with list. Config/frontmatter → warn + fallback to parent.
+      if (isScopeModelsEnabled() && model) {
+        const patterns = readEnabledModels();
+        const allowed = resolveEnabledModels(patterns, ctx.modelRegistry);
+        if (allowed) {
+          const modelKey = `${model.provider}/${model.id}`.toLowerCase();
+          const isInScope = allowed.has(modelKey);  // O(1) — keys stored lowercase
+          if (!isInScope) {
+            if (resolvedConfig.modelFromParams) {
+              const list = [...allowed].sort().map(m => `  ${m}`).join("\n");
+              return textResult(
+                `Model not in scope: "${resolvedConfig.modelInput}".\n\n` +
+                `Allowed models (from enabledModels):\n${list}`,
+              );
+            }
+            // config/frontmatter-specified: warn + fallback to parent model
+            const agentLabel = customConfig?.displayName ?? subagentType;
+            ctx.ui.notify(
+              `Agent "${agentLabel}" model "${resolvedConfig.modelInput}" not in scope — using parent model`,
+              "warning",
+            );
+            model = ctx.model;
+          }
         }
       }
 
@@ -1627,66 +1664,119 @@ ${systemPrompt}
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
+      scopeModels: isScopeModelsEnabled(),
     };
   }
 
   async function showSettings(ctx: ExtensionCommandContext) {
-    const choice = await ctx.ui.select("Settings", [
-      `Max concurrency (current: ${manager.getMaxConcurrent()})`,
-      `Default max turns (current: ${getDefaultMaxTurns() ?? "unlimited"})`,
-      `Grace turns (current: ${getGraceTurns()})`,
-      `Join mode (current: ${getDefaultJoinMode()})`,
-    ]);
-    if (!choice) return;
+    const items: SettingItem[] = [
+      {
+        id: "maxConcurrent",
+        label: "Max concurrency",
+        description: "Max concurrent background agents (press Enter to change)",
+        currentValue: String(manager.getMaxConcurrent()),
+      },
+      {
+        id: "defaultMaxTurns",
+        label: "Default max turns",
+        description: "Default max turns before wrap-up (0 = unlimited, Enter to change)",
+        currentValue: String(getDefaultMaxTurns() ?? 0),
+      },
+      {
+        id: "graceTurns",
+        label: "Grace turns",
+        description: "Grace turns after wrap-up steer (Enter to change)",
+        currentValue: String(getGraceTurns()),
+      },
+      {
+        id: "joinMode",
+        label: "Join mode",
+        description: "Default join mode for background agents",
+        currentValue: getDefaultJoinMode(),
+        values: ["smart", "async", "group"],
+      },
+      {
+        id: "scopeModels",
+        label: "Scope models",
+        description: "Validate subagent models against enabledModels from settings",
+        currentValue: isScopeModelsEnabled() ? "on" : "off",
+        values: ["on", "off"],
+      },
+    ];
 
-    if (choice.startsWith("Max concurrency")) {
-      const val = await ctx.ui.input("Max concurrent background agents", String(manager.getMaxConcurrent()));
-      if (val) {
-        const n = parseInt(val, 10);
-        if (n >= 1) {
-          manager.setMaxConcurrent(n);
-          notifyApplied(ctx, `Max concurrency set to ${n}`);
-        } else {
-          ctx.ui.notify("Must be a positive integer.", "warning");
-        }
-      }
-    } else if (choice.startsWith("Default max turns")) {
-      const val = await ctx.ui.input("Default max turns before wrap-up (0 = unlimited)", String(getDefaultMaxTurns() ?? 0));
-      if (val) {
-        const n = parseInt(val, 10);
-        if (n === 0) {
-          setDefaultMaxTurns(undefined);
-          notifyApplied(ctx, "Default max turns set to unlimited");
-        } else if (n >= 1) {
-          setDefaultMaxTurns(n);
-          notifyApplied(ctx, `Default max turns set to ${n}`);
-        } else {
-          ctx.ui.notify("Must be 0 (unlimited) or a positive integer.", "warning");
-        }
-      }
-    } else if (choice.startsWith("Grace turns")) {
-      const val = await ctx.ui.input("Grace turns after wrap-up steer", String(getGraceTurns()));
-      if (val) {
-        const n = parseInt(val, 10);
-        if (n >= 1) {
-          setGraceTurns(n);
-          notifyApplied(ctx, `Grace turns set to ${n}`);
-        } else {
-          ctx.ui.notify("Must be a positive integer.", "warning");
-        }
-      }
-    } else if (choice.startsWith("Join mode")) {
-      const val = await ctx.ui.select("Default join mode for background agents", [
-        "smart — auto-group 2+ agents in same turn (default)",
-        "async — always notify individually",
-        "group — always group background agents",
-      ]);
-      if (val) {
-        const mode = val.split(" ")[0] as JoinMode;
-        setDefaultJoinMode(mode);
-        notifyApplied(ctx, `Default join mode set to ${mode}`);
-      }
-    }
+    let list: SettingsList;
+
+    await ctx.ui.custom((_tui, _theme, _kb, done) => {
+      list = new SettingsList(
+        items,
+        items.length + 2,
+        getSettingsListTheme(),
+        async (id, newValue) => {
+          if (id === "maxConcurrent") {
+            const val = await ctx.ui.input("Max concurrent background agents", newValue);
+            if (val) {
+              const n = parseInt(val, 10);
+              if (n >= 1) {
+                manager.setMaxConcurrent(n);
+                list.updateValue(id, String(n));
+                notifyApplied(ctx, `Max concurrency set to ${n}`);
+              } else {
+                ctx.ui.notify("Must be a positive integer.", "warning");
+              }
+            }
+          } else if (id === "defaultMaxTurns") {
+            const val = await ctx.ui.input("Default max turns (0 = unlimited)", newValue);
+            if (val) {
+              const n = parseInt(val, 10);
+              if (n === 0) {
+                setDefaultMaxTurns(undefined);
+                list.updateValue(id, "0");
+                notifyApplied(ctx, "Default max turns set to unlimited");
+              } else if (n >= 1) {
+                setDefaultMaxTurns(n);
+                list.updateValue(id, String(n));
+                notifyApplied(ctx, `Default max turns set to ${n}`);
+              } else {
+                ctx.ui.notify("Must be 0 (unlimited) or a positive integer.", "warning");
+              }
+            }
+          } else if (id === "graceTurns") {
+            const val = await ctx.ui.input("Grace turns after wrap-up steer", newValue);
+            if (val) {
+              const n = parseInt(val, 10);
+              if (n >= 1) {
+                setGraceTurns(n);
+                list.updateValue(id, String(n));
+                notifyApplied(ctx, `Grace turns set to ${n}`);
+              } else {
+                ctx.ui.notify("Must be a positive integer.", "warning");
+              }
+            }
+          } else if (id === "joinMode") {
+            setDefaultJoinMode(newValue as JoinMode);
+            list.updateValue("joinMode", newValue);
+            notifyApplied(ctx, `Default join mode set to ${newValue}`);
+          } else if (id === "scopeModels") {
+            const enabled = newValue === "on";
+            setScopeModelsEnabled(enabled);
+            list.updateValue("scopeModels", newValue);
+            notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+          }
+        },
+        () => done(undefined as undefined),
+      );
+
+      const container = new Container();
+      container.addChild(new Text("⚙  Subagent Settings", 0, 0));
+      container.addChild(new Spacer(1));
+      container.addChild(list);
+
+      return {
+        render: (w: number) => container.render(w),
+        invalidate: () => container.invalidate(),
+        handleInput: (data: string) => list.handleInput?.(data),
+      };
+    });
   }
 
   // Persist the current snapshot, emit `subagents:settings_changed`, and surface
