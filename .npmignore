@@ -24,3 +24,5 @@ tests/
 .pi
 .claude
 .vscode
+.github/
+biome.json
