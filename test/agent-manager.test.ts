@@ -317,3 +317,31 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
   });
 });
+
+// Regression: `isolation: "worktree"` MUST fail loud when the cwd can't host
+// a worktree. The previous behavior silently fell back to the main tree and
+// injected a warning into the LLM's prompt — invisible to the caller.
+describe("AgentManager — isolation: worktree fails loud, no silent fallback", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("spawn() throws when createWorktree returns undefined; no orphan record left behind", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce(undefined);
+    vi.mocked(runAgent).mockClear();
+
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    })).toThrow(/isolation: "worktree"/);
+
+    // Cleaned up — no orphan in listAgents()
+    expect(manager.listAgents()).toEqual([]);
+    // runAgent never invoked — strict, no silent fallback
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+});
