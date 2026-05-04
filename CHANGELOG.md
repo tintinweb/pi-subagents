@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-05-04
+
+> **Heads-up — behavior changes:**
+> - `subagents:completed`/`failed` event `tokens.total` now excludes `cacheRead` (previously double-counted across turns) — see Fixed [#38].
+> - Cron `?` is now a wildcard (same as `*`), not "current time value" — affects Quartz-style expressions only.
+
 ### Changed
-- **`@mariozechner/pi-{ai,coding-agent,tui}` moved from `dependencies` to `peerDependencies`.** Pi extensions are loaded by the host runtime — declaring the framework as a regular dependency installed a *second* copy under this extension's `node_modules`, producing two `runtime` instances and breaking single-instance assumptions (Symbol identity, `instanceof` checks, internal singleton state). Now declared as peers with `>=0.70.5` (permissive minimum so the extension follows whatever version the host has); npm v7+/Bun/pnpm auto-install peers for local development. Matches the shape of `pi-manage-todo-list`.
-- **`@sinclair/typebox` pinned from `latest` to `^0.34.49`.** `latest` meant every fresh install could pull a different version with breaking changes; the caret range now tracks the version actually validated against the test suite. Stays as a regular `dependency` because it's a data-only schema library — two copies in memory are harmless.
+- **`@mariozechner/pi-{ai,coding-agent,tui}` moved to `peerDependencies` (`>=0.70.5`).** Avoids duplicate framework instances when the host loads this extension.
+- **`@sinclair/typebox` pinned from `latest` to `^0.34.49`** so installs are reproducible.
+- **`croner` bumped 8 → 10.** Heads-up: in cron strings, `?` now means wildcard (same as `*`) instead of "current time value" — affects Quartz-style expressions only.
 
 ### Added
 - **Master switch for scheduling** — new `schedulingEnabled` setting (default `true`) under `/agents → Settings → Scheduling`. When set to `false`: the `schedule` parameter and its guideline are stripped from the `Agent` tool spec at registration (zero LLM-context cost), the scheduler does not bind to the session, the `/agents → Scheduled jobs` menu entry is hidden, and any in-flight scheduler is stopped immediately. The schema-level removal applies on next pi session; the runtime kill (menu, fire path) takes effect immediately. Persisted at `<cwd>/.pi/subagents.json`.
