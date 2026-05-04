@@ -118,3 +118,46 @@ export interface EnvInfo {
   branch: string;
   platform: string;
 }
+
+/**
+ * A subagent spawn registered to fire on a schedule.
+ *
+ * Stored at `<cwd>/.pi/subagent-schedules/<sessionId>.json`. Session-scoped:
+ * survives `/resume` but resets on `/new`, mirroring pi-chonky-tasks.
+ */
+export interface ScheduledSubagent {
+  id: string;
+  /** Unique within store. Defaults to `description`. */
+  name: string;
+  description: string;
+  /** Raw user input — cron expr | "+10m" | ISO | "5m". */
+  schedule: string;
+  scheduleType: "cron" | "once" | "interval";
+  /** Computed at create time for interval/once. */
+  intervalMs?: number;
+
+  // spawn params (subset of Agent tool params; no inherit_context, no resume)
+  subagent_type: SubagentType;
+  prompt: string;
+  model?: string;
+  thinking?: ThinkingLevel;
+  max_turns?: number;
+  isolated?: boolean;
+  isolation?: IsolationMode;
+
+  // state
+  enabled: boolean;
+  /** ISO timestamp. */
+  createdAt: string;
+  lastRun?: string;
+  lastStatus?: "success" | "error" | "running";
+  /** Refreshed on every fire and on store load. */
+  nextRun?: string;
+  runCount: number;
+}
+
+export interface ScheduleStoreData {
+  /** For future migrations. */
+  version: 1;
+  jobs: ScheduledSubagent[];
+}

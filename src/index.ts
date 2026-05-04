@@ -24,6 +24,8 @@ import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { SubagentScheduler } from "./schedule.js";
+import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
 import { type AgentConfig, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
@@ -40,6 +42,7 @@ import {
   SPINNER,
   type UICtx,
 } from "./ui/agent-widget.js";
+import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
@@ -438,13 +441,38 @@ export default function (pi: ExtensionAPI) {
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
 
-  // Capture ctx from session_start for RPC spawn handler
+  // ---- Subagent scheduler ----
+  // Session-scoped: store is constructed inside session_start once sessionId
+  // is available. Mirrors pi-chonky-tasks's session-scoped task store —
+  // schedules reset on /new, restore on /resume.
+  const scheduler = new SubagentScheduler();
+
+  function startScheduler(ctx: ExtensionContext) {
+    try {
+      const sessionId = ctx.sessionManager?.getSessionId?.();
+      if (!sessionId) return;  // sessionId not yet available — try again on next event
+      const path = resolveStorePath(ctx.cwd, sessionId);
+      const store = new ScheduleStore(path);
+      scheduler.start(pi, ctx, manager, store);
+      pi.events.emit("subagents:scheduler_ready", { sessionId, jobCount: store.list().length });
+    } catch (err) {
+      // Scheduling is non-essential — log and move on so the rest of the
+      // extension keeps working if e.g. .pi/ is unwritable.
+      console.warn("[pi-subagents] Failed to start scheduler:", err);
+    }
+  }
+
+  // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    manager.clearCompleted();           // preserve existing behavior
+    manager.clearCompleted();
+    if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
-  pi.on("session_before_switch", () => { manager.clearCompleted(); });
+  pi.on("session_before_switch", () => {
+    manager.clearCompleted();
+    scheduler.stop();
+  });
 
   const { unsubPing: unsubPingRpc, unsubSpawn: unsubSpawnRpc, unsubStop: unsubStopRpc } = registerRpcHandlers({
     events: pi.events,
@@ -464,6 +492,7 @@ export default function (pi: ExtensionAPI) {
     unsubPingRpc();
     currentCtx = undefined;
     delete (globalThis as any)[MANAGER_KEY];
+    scheduler.stop();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
@@ -477,6 +506,16 @@ export default function (pi: ExtensionAPI) {
   let defaultJoinMode: JoinMode = 'smart';
   function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
   function setDefaultJoinMode(mode: JoinMode) { defaultJoinMode = mode; }
+
+  // Master switch for the schedule subagent feature. Defaults to enabled.
+  // Read once at extension init (before tool registration) so the Agent tool's
+  // param schema reflects the persisted setting. Runtime toggles via /agents
+  // → Settings short-circuit the menu entry + the execute-time addJob path
+  // immediately, but the schema-level removal only takes effect on next
+  // extension load (next pi session). Documented in CHANGELOG/README.
+  let schedulingEnabled = true;
+  function isSchedulingEnabled(): boolean { return schedulingEnabled; }
+  function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
@@ -571,11 +610,34 @@ export default function (pi: ExtensionAPI) {
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
+      setSchedulingEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
 
   // ---- Agent tool ----
+
+  // Schedule param + its guideline are gated on `schedulingEnabled` (read once
+  // at registration; flipping the setting later requires next pi session for
+  // the schema to update). Defining the shape once and spreading it via Partial
+  // preserves Type.Object's inference when present and produces a
+  // `schedule`-free schema when absent — zero LLM-context cost in disabled mode.
+  const scheduleParamShape = {
+    schedule: Type.Optional(
+      Type.String({
+        description:
+          'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
+          'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
+          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+      }),
+    ),
+  };
+  const scheduleParam: Partial<typeof scheduleParamShape> =
+    isSchedulingEnabled() ? scheduleParamShape : {};
+
+  const scheduleGuideline = isSchedulingEnabled()
+    ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
+    : "";
 
   pi.registerTool(defineTool({
     name: "Agent",
@@ -600,7 +662,7 @@ Guidelines:
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).`,
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).${scheduleGuideline}`,
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
@@ -653,6 +715,7 @@ Guidelines:
           description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
         }),
       ),
+      ...scheduleParam,
     }),
 
     // ---- Custom rendering: Claude Code style ----
@@ -805,6 +868,47 @@ Guidelines:
         modelName: agentModelName,
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
+
+      // ---- Schedule: register a job, don't spawn now ----
+      if (params.schedule) {
+        if (!isSchedulingEnabled()) {
+          return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
+        }
+        if (params.resume) {
+          return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
+        }
+        if (params.inherit_context) {
+          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
+        }
+        if (params.run_in_background === false) {
+          return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
+        }
+        if (!scheduler.isActive()) {
+          return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
+        }
+        try {
+          const job = scheduler.addJob({
+            name: params.description as string,
+            description: params.description as string,
+            schedule: params.schedule as string,
+            subagent_type: subagentType,
+            prompt: params.prompt as string,
+            model: params.model as string | undefined,
+            thinking: thinking,
+            max_turns: effectiveMaxTurns,
+            isolated: isolated,
+            isolation: isolation,
+          });
+          const next = scheduler.getNextRun(job.id);
+          return textResult(
+            `Scheduled "${job.name}" (id: ${job.id}, type: ${job.scheduleType}). ` +
+            `Next run: ${next ?? "(unknown)"}. ` +
+            `Manage via /agents → Scheduled jobs.`,
+          );
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err));
+        }
+      }
 
       // Resume existing agent
       if (params.resume) {
@@ -1170,6 +1274,12 @@ Guidelines:
       options.push(`Agent types (${allNames.length})`);
     }
 
+    // Scheduled jobs entry (always present when scheduler is active)
+    if (scheduler.isActive()) {
+      const jobCount = scheduler.list().length;
+      options.push(`Scheduled jobs (${jobCount})`);
+    }
+
     // Actions
     options.push("Create new agent");
     options.push("Settings");
@@ -1192,6 +1302,9 @@ Guidelines:
       await showAgentsMenu(ctx);
     } else if (choice.startsWith("Agent types (")) {
       await showAllAgentsList(ctx);
+      await showAgentsMenu(ctx);
+    } else if (choice.startsWith("Scheduled jobs (")) {
+      await showSchedulesMenu(ctx, scheduler);
       await showAgentsMenu(ctx);
     } else if (choice === "Create new agent") {
       await showCreateWizard(ctx);
@@ -1656,6 +1769,7 @@ ${systemPrompt}
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
+      schedulingEnabled: isSchedulingEnabled(),
     };
   }
 
@@ -1665,6 +1779,7 @@ ${systemPrompt}
       `Default max turns (current: ${getDefaultMaxTurns() ?? "unlimited"})`,
       `Grace turns (current: ${getGraceTurns()})`,
       `Join mode (current: ${getDefaultJoinMode()})`,
+      `Scheduling (current: ${isSchedulingEnabled() ? "enabled" : "disabled"})`,
     ]);
     if (!choice) return;
 
@@ -1714,6 +1829,27 @@ ${systemPrompt}
         const mode = val.split(" ")[0] as JoinMode;
         setDefaultJoinMode(mode);
         notifyApplied(ctx, `Default join mode set to ${mode}`);
+      }
+    } else if (choice.startsWith("Scheduling")) {
+      const val = await ctx.ui.select(
+        "Schedule subagent feature",
+        [
+          "enabled — Agent tool accepts a `schedule` param; /agents → Scheduled jobs visible",
+          "disabled — `schedule` removed from Agent tool spec (no LLM-context cost); menu hidden",
+        ],
+      );
+      if (val) {
+        const enabled = val.startsWith("enabled");
+        if (enabled === isSchedulingEnabled()) {
+          ctx.ui.notify(`Scheduling already ${enabled ? "enabled" : "disabled"}.`, "info");
+        } else {
+          setSchedulingEnabled(enabled);
+          if (!enabled) scheduler.stop();  // immediate kill — outstanding fires stop ticking
+          notifyApplied(
+            ctx,
+            `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
+          );
+        }
       }
     }
   }

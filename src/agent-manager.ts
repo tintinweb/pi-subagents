@@ -38,6 +38,12 @@ interface SpawnOptions {
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isBackground?: boolean;
+  /**
+   * Skip the maxConcurrent queue check for this spawn — start immediately even
+   * if the configured concurrency limit would otherwise queue it. Used by the
+   * scheduler so a fired job can't be deferred past its trigger window.
+   */
+  bypassQueue?: boolean;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
@@ -122,7 +128,7 @@ export class AgentManager {
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (options.isBackground && this.runningBackground >= this.maxConcurrent) {
+    if (options.isBackground && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
       this.queue.push({ id, args });
       return id;

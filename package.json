@@ -26,7 +26,9 @@
     "@mariozechner/pi-tui": ">=0.70.5"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.49"
+    "@sinclair/typebox": "^0.34.49",
+    "croner": "^8.0.0",
+    "nanoid": "^5.0.0"
   },
   "scripts": {
     "build": "tsc",
