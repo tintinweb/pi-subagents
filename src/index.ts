@@ -946,17 +946,21 @@ Guidelines:
           }
         };
 
-        id = manager.spawn(pi, ctx, subagentType, params.prompt, {
-          description: params.description,
-          model,
-          maxTurns: effectiveMaxTurns,
-          isolated,
-          inheritContext,
-          thinkingLevel: thinking,
-          isBackground: true,
-          isolation,
-          ...bgCallbacks,
-        });
+        try {
+          id = manager.spawn(pi, ctx, subagentType, params.prompt, {
+            description: params.description,
+            model,
+            maxTurns: effectiveMaxTurns,
+            isolated,
+            inheritContext,
+            thinkingLevel: thinking,
+            isBackground: true,
+            isolation,
+            ...bgCallbacks,
+          });
+        } catch (err) {
+          return textResult(err instanceof Error ? err.message : String(err));
+        }
 
         // Set output file + join mode synchronously after spawn, before the
         // event loop yields — onSessionCreated is async so this is safe.
@@ -1054,17 +1058,23 @@ Guidelines:
 
       streamUpdate();
 
-      const record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
-        description: params.description,
-        model,
-        maxTurns: effectiveMaxTurns,
-        isolated,
-        inheritContext,
-        thinkingLevel: thinking,
-        isolation,
-        signal,
-        ...fgCallbacks,
-      });
+      let record: AgentRecord;
+      try {
+        record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
+          description: params.description,
+          model,
+          maxTurns: effectiveMaxTurns,
+          isolated,
+          inheritContext,
+          thinkingLevel: thinking,
+          isolation,
+          signal,
+          ...fgCallbacks,
+        });
+      } catch (err) {
+        clearInterval(spinnerInterval);
+        return textResult(err instanceof Error ? err.message : String(err));
+      }
 
       clearInterval(spinnerInterval);
 

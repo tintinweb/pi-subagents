@@ -453,7 +453,7 @@ The agent gets a full, isolated copy of the repository. On completion:
 - **No changes:** worktree is cleaned up automatically
 - **Changes made:** changes are committed to a new branch (`pi-agent-<id>`) and returned in the result
 
-If the worktree cannot be created (not a git repo, no commits), the agent falls back to the main working directory with a warning.
+If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` tool returns a clear error instead of running unisolated — `isolation: "worktree"` is a strict guarantee, not a hint. Initialize git and commit at least once, or omit `isolation`.
 
 ## Skill Preloading
 
