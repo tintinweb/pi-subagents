@@ -108,6 +108,20 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
   });
 });
 
+describe("AgentManager — cleanup timer", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("does not keep the process alive on its own", () => {
+    manager = new AgentManager();
+
+    expect((manager as any).cleanupInterval.hasRef()).toBe(false);
+  });
+});
+
 describe("AgentManager — Bug 3 clearCompleted", () => {
   let manager: AgentManager;
 
