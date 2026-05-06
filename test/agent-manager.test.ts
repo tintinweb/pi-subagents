@@ -108,6 +108,29 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
   });
 });
 
+describe("AgentManager — completion callbacks", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  it("does not let onComplete errors turn a completed agent into a failed run", async () => {
+    manager = new AgentManager(() => {
+      throw new Error("stale extension context");
+    });
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await expect(manager.getRecord(id)!.promise).resolves.toBe("done");
+
+    expect(manager.getRecord(id)!.status).toBe("completed");
+  });
+});
+
 describe("AgentManager — cleanup timer", () => {
   let manager: AgentManager;
 

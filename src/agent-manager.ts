@@ -243,7 +243,7 @@ export class AgentManager {
 
         if (options.isBackground) {
           this.runningBackground--;
-          this.onComplete?.(record);
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
           this.drainQueue();
         }
         return responseText;
