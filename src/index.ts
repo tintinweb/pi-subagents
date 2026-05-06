@@ -275,7 +275,7 @@ export default function (pi: ExtensionAPI) {
     cancelNudge(key);
     pendingNudges.set(key, setTimeout(() => {
       pendingNudges.delete(key);
-      send();
+      try { send(); } catch { /* ignore stale completion side-effect errors */ }
     }, delay));
   }
 

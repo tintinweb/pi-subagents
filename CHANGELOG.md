@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **`isolation: "worktree"` now fails loud instead of silently falling back.** Previously when `createWorktree` returned undefined (not a git repo, no commits yet, or `git worktree add` failed), the agent ran in the main `cwd` with a `[WARNING: ...]` block prepended to its prompt — visible only to the LLM, never surfaced to the caller. Now the failure throws a structured error that propagates back to the `Agent` tool response; no agent record is created. Failed scheduled fires are recorded as `lastStatus: "error"` with the reason in the `subagents:scheduled` error event. Queued background spawns whose worktree creation fails when they dequeue are marked terminal-error and don't block the rest of the queue.
 
+### Fixed
+
+- **Headless `pi --print` runs no longer hang or crash after background
+subagents complete.** Cleanup timers no longer keep the process alive, and
+stale completion notifications are treated as best-effort shutdown side
+effects.
+
 ## [0.7.0] - 2026-05-04
 
 > **Heads-up — behavior changes:**
