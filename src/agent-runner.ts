@@ -280,6 +280,8 @@ export async function runAgent(
 
   const { session } = await createAgentSession(sessionOpts);
 
+  session.setSessionName(agentConfig?.name ?? type);
+
   // Build disallowed tools set from agent config
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
