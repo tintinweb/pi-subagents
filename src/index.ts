@@ -41,6 +41,7 @@ import {
   getPromptModeLabel,
   SPINNER,
   type UICtx,
+  type WidgetDisplayMode,
 } from "./ui/agent-widget.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
@@ -1880,5 +1881,15 @@ ${systemPrompt}
   pi.registerCommand("agents", {
     description: "Manage agents",
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
+  });
+
+  pi.registerCommand("agents-view", {
+    description: "Toggle agent widget display between cards and tree",
+    handler: async (_args, ctx) => {
+      const next: WidgetDisplayMode =
+        widget.getDisplayMode() === "cards" ? "tree" : "cards";
+      widget.setDisplayMode(next);
+      ctx.ui.notify(`Agent view: ${next}`, "info");
+    },
   });
 }
