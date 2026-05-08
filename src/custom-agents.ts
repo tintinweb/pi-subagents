@@ -3,6 +3,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { getAgentDir, parseFrontmatter } from "@mariozechner/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES } from "./agent-types.js";
@@ -70,6 +71,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       isolation: fm.isolation === "worktree" ? "worktree" : undefined,
       enabled: fm.enabled !== false,  // default true; explicitly false disables
       source,
+      additionalExtensionPaths: parseExtensionPaths(fm.additional_extensions),
     });
   }
 }
@@ -122,6 +124,15 @@ function csvListOptional(val: unknown): string[] | undefined {
 function parseMemory(val: unknown): MemoryScope | undefined {
   if (val === "user" || val === "project" || val === "local") return val;
   return undefined;
+}
+
+/**
+ * Parse additional_extensions field: CSV of paths, ~ expanded to homedir.
+ */
+function parseExtensionPaths(val: unknown): string[] | undefined {
+  const items = parseCsvField(val);
+  if (!items) return undefined;
+  return items.map(p => p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
 }
 
 /**
