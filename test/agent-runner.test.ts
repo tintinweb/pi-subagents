@@ -91,6 +91,7 @@ function createSession(finalText: string) {
     steer: vi.fn(),
     getActiveToolNames: vi.fn(() => ["read"]),
     setActiveToolsByName: vi.fn(),
+    setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
   };
   return { session, listeners };
