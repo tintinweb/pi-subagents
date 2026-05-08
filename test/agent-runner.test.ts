@@ -200,8 +200,6 @@ describe("agent-runner final output capture", () => {
   });
 });
 
-
-
 // ─── message_end → onAssistantUsage wiring (issue #38) ─────────────────
 // Both runAgent and resumeAgent dispatch usage to the caller via this
 // callback. The callback feeds the AgentRecord lifetime accumulator, which
