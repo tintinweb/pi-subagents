@@ -9,6 +9,7 @@ import { truncateToWidth } from "@mariozechner/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { SubagentType } from "../types.js";
+import { CARD_THEMES, formatElapsed, renderCard } from "../ui/tui-draw.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -190,10 +191,13 @@ export function describeActivity(activeTools: Map<string, string>, responseText?
 
 // ---- Widget manager ----
 
+export type WidgetDisplayMode = "cards" | "tree";
+
 export class AgentWidget {
   private uiCtx: UICtx | undefined;
   private widgetFrame = 0;
   private widgetInterval: ReturnType<typeof setInterval> | undefined;
+  private displayMode: WidgetDisplayMode = "cards";
   /** Tracks how many turns each finished agent has survived. Key: agent ID, Value: turns since finished. */
   private finishedTurnAge = new Map<string, number>();
   /** How many extra turns errors/aborted agents linger (completed agents clear after 1 turn). */
@@ -210,6 +214,16 @@ export class AgentWidget {
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
   ) {}
+
+  /** Toggle or set the running-agent display mode and force a widget refresh. */
+  setDisplayMode(mode: WidgetDisplayMode): void {
+    this.displayMode = mode;
+    this.update();
+  }
+
+  getDisplayMode(): WidgetDisplayMode {
+    return this.displayMode;
+  }
 
   /** Set the UI context (grabbed from first tool execution). */
   setUICtx(ctx: UICtx) {
@@ -248,6 +262,62 @@ export class AgentWidget {
     const age = this.finishedTurnAge.get(agentId) ?? 0;
     const maxAge = ERROR_STATUSES.has(status) ? AgentWidget.ERROR_LINGER_TURNS : 1;
     return age < maxAge;
+  }
+
+  /** Render running agents as a card grid. */
+  private renderAgentCards(
+    running: Array<{
+      id: string;
+      type: SubagentType;
+      status: string;
+      description: string;
+      toolUses: number;
+      startedAt: number;
+    }>,
+    agentActivity: Map<string, AgentActivity>,
+    theme: Theme,
+    width: number
+  ): string[] {
+    if (running.length === 0) {
+      return [];
+    }
+
+    const cols = Math.max(1, Math.min(3, running.length));
+    const gap = 1;
+    const colWidth = Math.max(2, Math.floor((width - gap * (cols - 1)) / cols));
+    const phase = Math.floor((Date.now() / 2000) % 3);
+    const linesByCard: string[][] = [];
+
+    for (let i = 0; i < running.length; i++) {
+      const a = running[i];
+      const bg = agentActivity.get(a.id);
+      const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking...";
+      const status = `\u26a1 working${"." .repeat(phase + 1)}`;
+      const elapsed = formatElapsed(a.startedAt);
+      const name = getDisplayName(a.type);
+      const card = renderCard({
+        title: a.description,
+        badge: `#${i + 1}`,
+        content: activity,
+        footer: `${status} ${elapsed}`,
+        footerRight: name,
+        colWidth,
+        theme,
+        cardTheme: CARD_THEMES[i % CARD_THEMES.length],
+      });
+      linesByCard.push(card);
+    }
+
+    const rows: string[] = [];
+    for (let i = 0; i < linesByCard.length; i += cols) {
+      const chunk = linesByCard.slice(i, i + cols);
+      const rowHeight = Math.max(...chunk.map((card) => card.length));
+      for (let lineIdx = 0; lineIdx < rowHeight; lineIdx++) {
+        const parts = chunk.map((card) => card[lineIdx] ?? " ".repeat(colWidth));
+        rows.push(parts.join(" ".repeat(gap)));
+      }
+    }
+    return rows;
   }
 
   /** Record an agent as finished (call when agent completes). */
@@ -361,70 +431,94 @@ export class AgentWidget {
 
     // Assemble with overflow cap (heading + overflow indicator = 2 reserved lines).
     const maxBody = MAX_WIDGET_LINES - 1; // heading takes 1 line
-    const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
 
     const lines: string[] = [truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"))];
 
-    if (totalBody <= maxBody) {
-      // Everything fits — add all lines and fix up connectors for the last item.
-      lines.push(...finishedLines);
-      for (const pair of runningLines) lines.push(...pair);
-      if (queuedLine) lines.push(queuedLine);
+    if (this.displayMode === "cards") {
+      // Cards mode: running agents as colored card grid, finished as tree rows below
+      const runningCards = this.renderAgentCards(running, this.agentActivity, theme, w);
+      const bodyLines = running.length > 0
+        ? [...runningCards, ...finishedLines]
+        : [...finishedLines, ...(queuedLine ? [queuedLine] : [])];
 
-      // Fix last connector: swap ├─ → └─ and │ → space for activity lines.
-      if (lines.length > 1) {
-        const last = lines.length - 1;
-        lines[last] = lines[last].replace("├─", "└─");
-        // If last item is a running agent activity line, fix indent of that line
-        // and fix the header line above it.
-        if (runningLines.length > 0 && !queuedLine) {
-          // The last two lines are the last running agent's header + activity.
-          if (last >= 2) {
-            lines[last - 1] = lines[last - 1].replace("├─", "└─");
-            lines[last] = lines[last].replace("│  ", "   ");
-          }
+      if (bodyLines.length <= maxBody) {
+        lines.push(...bodyLines);
+        if (lines.length > 1) {
+          lines[lines.length - 1] = lines[lines.length - 1].replace("├─", "└─");
         }
+      } else {
+        let budget = maxBody - 1;
+        let hiddenCount = 0;
+        for (const line of bodyLines) {
+          if (budget >= 1) { lines.push(line); budget--; }
+          else { hiddenCount++; }
+        }
+        lines.push(truncate(`${theme.fg("dim", "└─")} ${theme.fg("dim", `+${hiddenCount} more`)}`));
       }
     } else {
-      // Overflow — prioritize: running > queued > finished.
-      // Reserve 1 line for overflow indicator.
-      let budget = maxBody - 1;
-      let hiddenRunning = 0;
-      let hiddenFinished = 0;
+      // Tree mode — running agents as two-line spinner rows
+      const totalBody = finishedLines.length + runningLines.length * 2 + (queuedLine ? 1 : 0);
 
-      // 1. Running agents (2 lines each)
-      for (const pair of runningLines) {
-        if (budget >= 2) {
-          lines.push(...pair);
-          budget -= 2;
-        } else {
-          hiddenRunning++;
+      if (totalBody <= maxBody) {
+        // Everything fits — add all lines and fix up connectors for the last item.
+        lines.push(...finishedLines);
+        for (const pair of runningLines) lines.push(...pair);
+        if (queuedLine) lines.push(queuedLine);
+
+        // Fix last connector: swap ├─ → └─ and │ → space for activity lines.
+        if (lines.length > 1) {
+          const last = lines.length - 1;
+          lines[last] = lines[last].replace("├─", "└─");
+          // If last item is a running agent activity line, fix indent of that line
+          // and fix the header line above it.
+          if (runningLines.length > 0 && !queuedLine) {
+            // The last two lines are the last running agent's header + activity.
+            if (last >= 2) {
+              lines[last - 1] = lines[last - 1].replace("├─", "└─");
+              lines[last] = lines[last].replace("│  ", "   ");
+            }
+          }
         }
-      }
+      } else {
+        // Overflow — prioritize: running > queued > finished.
+        // Reserve 1 line for overflow indicator.
+        let budget = maxBody - 1;
+        let hiddenRunning = 0;
+        let hiddenFinished = 0;
 
-      // 2. Queued line
-      if (queuedLine && budget >= 1) {
-        lines.push(queuedLine);
-        budget--;
-      }
+        // 1. Running agents (2 lines each)
+        for (const pair of runningLines) {
+          if (budget >= 2) {
+            lines.push(...pair);
+            budget -= 2;
+          } else {
+            hiddenRunning++;
+          }
+        }
 
-      // 3. Finished agents
-      for (const fl of finishedLines) {
-        if (budget >= 1) {
-          lines.push(fl);
+        // 2. Queued line
+        if (queuedLine && budget >= 1) {
+          lines.push(queuedLine);
           budget--;
-        } else {
-          hiddenFinished++;
         }
-      }
 
-      // Overflow summary
-      const overflowParts: string[] = [];
-      if (hiddenRunning > 0) overflowParts.push(`${hiddenRunning} running`);
-      if (hiddenFinished > 0) overflowParts.push(`${hiddenFinished} finished`);
-      const overflowText = overflowParts.join(", ");
-      lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`)
-      );
+        // 3. Finished agents
+        for (const fl of finishedLines) {
+          if (budget >= 1) {
+            lines.push(fl);
+            budget--;
+          } else {
+            hiddenFinished++;
+          }
+        }
+
+        // Overflow summary
+        const overflowParts: string[] = [];
+        if (hiddenRunning > 0) overflowParts.push(`${hiddenRunning} running`);
+        if (hiddenFinished > 0) overflowParts.push(`${hiddenFinished} finished`);
+        const overflowText = overflowParts.join(", ");
+        lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`));
+      }
     }
 
     return lines;
