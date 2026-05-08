@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
@@ -446,8 +446,7 @@ Agent with additional extensions.`);
 
     const result = loadCustomAgents(tmpDir);
     const agent = result.get("ext-agent")!;
-    const home = require("node:os").homedir();
-    expect(agent.additionalExtensionPaths).toEqual([`${home}/extensions/my-guard.ts`]);
+    expect(agent.additionalExtensionPaths).toEqual([`${homedir()}/extensions/my-guard.ts`]);
   });
 
   it("parses multiple additional_extensions via CSV", () => {
@@ -459,10 +458,9 @@ Multiple extensions.`);
 
     const result = loadCustomAgents(tmpDir);
     const agent = result.get("multi-ext")!;
-    const home = require("node:os").homedir();
     expect(agent.additionalExtensionPaths).toEqual([
-      `${home}/extensions/a.ts`,
-      `${home}/extensions/b.ts`,
+      `${homedir()}/extensions/a.ts`,
+      `${homedir()}/extensions/b.ts`,
     ]);
   });
 

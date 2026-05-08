@@ -128,11 +128,16 @@ function parseMemory(val: unknown): MemoryScope | undefined {
 
 /**
  * Parse additional_extensions field: CSV of paths, ~ expanded to homedir.
+ * Relative paths (neither absolute nor tilde-prefixed) are passed through
+ * as-is; the upstream DefaultResourceLoader resolves them relative to cwd.
  */
 function parseExtensionPaths(val: unknown): string[] | undefined {
   const items = parseCsvField(val);
   if (!items) return undefined;
-  return items.map(p => p.startsWith("~/") ? join(homedir(), p.slice(2)) : p);
+  return items.map(p => {
+    if (p.startsWith("~/")) return join(homedir(), p.slice(2));
+    return p;
+  });
 }
 
 /**
