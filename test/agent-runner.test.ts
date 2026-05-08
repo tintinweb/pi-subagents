@@ -186,7 +186,21 @@ describe("agent-runner final output capture", () => {
 
     expect(result).toBe("RESUMED");
   });
+
+  it("sets the agent name as session name before binding extensions", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(session.setSessionName).toHaveBeenCalledWith("Explore");
+    const setOrder = session.setSessionName.mock.invocationCallOrder[0];
+    const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
+    expect(setOrder).toBeLessThan(bindOrder);
+  });
 });
+
+
 
 // ─── message_end → onAssistantUsage wiring (issue #38) ─────────────────
 // Both runAgent and resumeAgent dispatch usage to the caller via this
