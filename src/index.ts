@@ -601,6 +601,19 @@ export default function (pi: ExtensionAPI) {
 
   const typeListText = buildTypeListText();
 
+  /** Build routing guidelines dynamically from all available agent descriptions. */
+  const buildGuidelinesText = (): string => {
+    const allNames = [...getDefaultAgentNames(), ...getUserAgentNames()];
+    const routingLines = allNames.map((name) => {
+      const cfg = getAgentConfig(name);
+      const desc = cfg?.description ?? name;
+      return `- Use ${name} for: ${desc.replace(/\.$/, "").toLowerCase()}`;
+    });
+    return routingLines.join("\n");
+  };
+
+  const guidelinesText = buildGuidelinesText();
+
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
@@ -650,10 +663,10 @@ Available agent types:
 ${typeListText}
 
 Guidelines:
+Agent selection — pick the most specific type for the task:
+${guidelinesText}
+
 - For parallel work, use run_in_background: true on each agent. Foreground calls run sequentially — only one executes at a time.
-- Use Explore for codebase searches and code understanding.
-- Use Plan for architecture and implementation planning.
-- Use general-purpose for complex tasks that need file editing.
 - Provide clear, detailed prompts so the agent can work autonomously.
 - Agent results are returned as text — summarize them for the user.
 - Use run_in_background for work you don't need immediately. You will be notified when it completes.
