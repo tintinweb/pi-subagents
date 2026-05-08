@@ -829,7 +829,7 @@ Guidelines:
 
       const resolvedConfig = resolveAgentInvocationConfig(customConfig, params);
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
+      // Resolve model: explicit tool-call param wins, agent config is fallback.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
