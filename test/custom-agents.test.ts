@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
@@ -435,6 +435,55 @@ Bad isolation.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("bad-isolation")!.isolation).toBeUndefined();
+  });
+
+  it("parses additional_extensions with ~ expansion", () => {
+    writeAgent("ext-agent", `---
+additional_extensions: ~/extensions/my-guard.ts
+---
+
+Agent with additional extensions.`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("ext-agent")!;
+    expect(agent.additionalExtensionPaths).toEqual([`${homedir()}/extensions/my-guard.ts`]);
+  });
+
+  it("parses multiple additional_extensions via CSV", () => {
+    writeAgent("multi-ext", `---
+additional_extensions: ~/extensions/a.ts, ~/extensions/b.ts
+---
+
+Multiple extensions.`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("multi-ext")!;
+    expect(agent.additionalExtensionPaths).toEqual([
+      `${homedir()}/extensions/a.ts`,
+      `${homedir()}/extensions/b.ts`,
+    ]);
+  });
+
+  it("returns undefined for additionalExtensionPaths when field is omitted", () => {
+    writeAgent("no-ext", `---
+description: No extra extensions
+---
+
+No additional extensions.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("no-ext")!.additionalExtensionPaths).toBeUndefined();
+  });
+
+  it("passes through absolute paths in additional_extensions unchanged", () => {
+    writeAgent("abs-ext", `---
+additional_extensions: /absolute/path/ext.ts
+---
+
+Absolute extension path.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("abs-ext")!.additionalExtensionPaths).toEqual(["/absolute/path/ext.ts"]);
   });
 
   it("honors PI_CODING_AGENT_DIR for global custom agent discovery", () => {

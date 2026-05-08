@@ -247,6 +247,9 @@ export async function runAgent(
     cwd: effectiveCwd,
     agentDir,
     noExtensions: extensions === false,
+    additionalExtensionPaths: extensions !== false
+      ? agentConfig?.additionalExtensionPaths
+      : undefined,
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
