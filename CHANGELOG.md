@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Automatic commits in isolated worktrees skip local Git hooks.** When an
+  `isolation: "worktree"` subagent makes its automatic commit, use
+  `--no-verify` so local hooks cannot block preserving the agent's work.
+
 ## [0.7.2] - 2026-05-12
 
 > **Heads-up — behavior changes in skill preloading:**

@@ -92,7 +92,7 @@ export function cleanupWorktree(
     // Truncate description for commit message (no shell sanitization needed — execFileSync uses argv)
     const safeDesc = agentDescription.slice(0, 200);
     const commitMsg = `pi-agent: ${safeDesc}`;
-    execFileSync("git", ["commit", "-m", commitMsg], {
+    execFileSync("git", ["commit", "--no-verify", "-m", commitMsg], {
       cwd: worktree.path,
       stdio: "pipe",
       timeout: 10000,
