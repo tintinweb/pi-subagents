@@ -1,79 +1,102 @@
 /**
- * skill-loader.ts — Preload specific skill files and inject their content into the system prompt.
+ * skill-loader.ts — Preload named skills.
  *
- * When skills is a string[], reads each named skill from .pi/skills/ or ~/.pi/skills/
- * and returns their content for injection into the agent's system prompt.
+ * Roots, in precedence order:
+ *   - <cwd>/.pi/skills           (project, Pi's standard)
+ *   - <cwd>/.agents/skills       (project, cross-tool Agent Skills spec — https://agentskills.io)
+ *   - getAgentDir()/skills       (user, default ~/.pi/agent/skills — Pi's standard)
+ *   - ~/.agents/skills           (user, cross-tool Agent Skills spec)
+ *   - ~/.pi/skills               (legacy global, pre-Pi)
+ *
+ * Layout per root:
+ *   - <root>/<name>.md            (flat file at the top level)
+ *   - <root>/.../<name>/SKILL.md  (directory skill, may be nested — Pi's standard)
+ *
+ * Recursion skips dotfile entries and node_modules. A directory that itself contains
+ * SKILL.md is a skill — we don't descend into it (Pi: skills don't nest).
+ *
+ * Symlinks are rejected for security (deviation from Pi, which follows them).
  */
 
+import type { Dirent } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { isUnsafeName, safeReadFile } from "./memory.js";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { isSymlink, isUnsafeName, safeReadFile } from "./memory.js";
 
 export interface PreloadedSkill {
   name: string;
   content: string;
 }
 
-/**
- * Attempt to load named skills from project and global skill directories.
- * Looks for: <dir>/<name>.md, <dir>/<name>.txt, <dir>/<name>
- *
- * @param skillNames  List of skill names to preload.
- * @param cwd         Working directory for project-level skills.
- * @returns Array of loaded skills (missing skills are skipped with a warning comment).
- */
 export function preloadSkills(skillNames: string[], cwd: string): PreloadedSkill[] {
-  const results: PreloadedSkill[] = [];
-
-  for (const name of skillNames) {
-    // Unlike memory (which throws on unsafe names because it's part of agent setup),
-    // skills are optional — skip gracefully to avoid blocking agent startup.
-    if (isUnsafeName(name)) {
-      results.push({ name, content: `(Skill "${name}" skipped: name contains path traversal characters)` });
-      continue;
-    }
-    const content = findAndReadSkill(name, cwd);
-    if (content !== undefined) {
-      results.push({ name, content });
-    } else {
-      // Include a note about missing skills so the agent knows it was requested but not found
-      results.push({ name, content: `(Skill "${name}" not found in .pi/skills/ or ~/.pi/skills/)` });
-    }
-  }
-
-  return results;
+  return skillNames.map((name) => ({ name, content: loadSkillContent(name, cwd) }));
 }
 
-/**
- * Search for a skill file in project and global directories.
- * Project-level takes priority over global.
- */
-function findAndReadSkill(name: string, cwd: string): string | undefined {
-  const projectDir = join(cwd, ".pi", "skills");
-  const globalDir = join(homedir(), ".pi", "skills");
-
-  // Try project first, then global
-  for (const dir of [projectDir, globalDir]) {
-    const content = tryReadSkillFile(dir, name);
+function loadSkillContent(name: string, cwd: string): string {
+  if (isUnsafeName(name)) {
+    return `(Skill "${name}" skipped: name contains path traversal characters)`;
+  }
+  const roots = [
+    join(cwd, ".pi", "skills"), // project — Pi standard
+    join(cwd, ".agents", "skills"), // project — Agent Skills spec
+    join(getAgentDir(), "skills"), // user — Pi standard
+    join(homedir(), ".agents", "skills"), // user — Agent Skills spec
+    join(homedir(), ".pi", "skills"), // legacy global, pre-Pi
+  ];
+  for (const root of roots) {
+    const content = findInRoot(root, name);
     if (content !== undefined) return content;
   }
-
-  return undefined;
+  return `(Skill "${name}" not found in .pi/skills/, .agents/skills/, or global skill locations)`;
 }
 
-/**
- * Try to read a skill file from a directory.
- * Tries extensions in order: .md, .txt, (no extension)
- */
-function tryReadSkillFile(dir: string, name: string): string | undefined {
-  const extensions = [".md", ".txt", ""];
+function findInRoot(root: string, name: string): string | undefined {
+  if (isSymlink(root)) return undefined; // reject symlinked roots entirely
+  const flat = safeReadFile(join(root, `${name}.md`))?.trim();
+  if (flat !== undefined) return flat;
+  return findSkillDirectory(root, name);
+}
 
-  for (const ext of extensions) {
-    const path = join(dir, name + ext);
-    // safeReadFile rejects symlinks to prevent reading arbitrary files
-    const content = safeReadFile(path);
-    if (content !== undefined) return content.trim();
+/** BFS under `root` for a directory named `name` containing `SKILL.md`. Pi-conforming filters. */
+function findSkillDirectory(root: string, name: string): string | undefined {
+  if (!existsSync(root)) return undefined;
+  const queue: string[] = [root];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (current === undefined) continue;
+
+    let entries: Dirent<string>[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    // Deterministic byte-order traversal — locale-independent.
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name.startsWith(".") || entry.name === "node_modules") continue;
+
+      // Symlinked dirs already filtered by entry.isDirectory() — Dirent uses lstat semantics.
+      const path = join(current, entry.name);
+      const skillMd = join(path, "SKILL.md");
+      const isSkillDir = existsSync(skillMd);
+
+      if (isSkillDir) {
+        if (entry.name === name) {
+          const content = safeReadFile(skillMd)?.trim();
+          if (content !== undefined) return content;
+        }
+        continue; // Pi rule: skills don't nest — don't descend into a skill dir
+      }
+
+      queue.push(path);
+    }
   }
-
   return undefined;
 }
