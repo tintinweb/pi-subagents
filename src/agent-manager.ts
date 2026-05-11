@@ -14,6 +14,11 @@ import type { AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
+function getModelName(model?: Model<any>): string | undefined {
+  const label = model?.name ?? model?.id;
+  return label ? label.replace(/^Claude\s+/i, "").toLowerCase() : undefined;
+}
+
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
@@ -119,6 +124,8 @@ export class AgentManager {
       type,
       description: options.description,
       status: options.isBackground ? "queued" : "running",
+      modelName: getModelName(options.model),
+      thinkingLevel: options.thinkingLevel,
       toolUses: 0,
       startedAt: Date.now(),
       abortController,
