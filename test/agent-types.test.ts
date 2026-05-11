@@ -13,6 +13,7 @@ import {
   registerAgents,
   resolveType,
 } from "../src/agent-types.js";
+import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import type { AgentConfig } from "../src/types.js";
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
@@ -205,7 +206,7 @@ describe("agent type registry", () => {
     it("getConfig falls back to general-purpose for unknown types", () => {
       const config = getConfig("nonexistent");
       expect(config.displayName).toBe("Agent");
-      expect(config.description).toBe("General-purpose agent for complex, multi-step tasks");
+      expect(config.description).toBe(DEFAULT_AGENTS.get("general-purpose")?.description);
     });
 
     it("clearing user agents works (defaults remain)", () => {

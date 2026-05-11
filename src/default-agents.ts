@@ -14,7 +14,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
     {
       name: "general-purpose",
       displayName: "Agent",
-      description: "General-purpose agent for complex, multi-step tasks",
+      description: "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
       // builtinToolNames omitted — means "all available tools" (resolved at lookup time)
       // inheritContext / runInBackground / isolated omitted — strategy fields, callers decide per-call.
       // Setting them to false would lock callsite intent (see resolveAgentInvocationConfig in invocation-config.ts).
@@ -30,7 +30,7 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
     {
       name: "Explore",
       displayName: "Explore",
-      description: "Fast codebase exploration agent (read-only)",
+      description: "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis — it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions.",
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
@@ -72,7 +72,7 @@ Use Bash ONLY for read-only operations: ls, git status, git log, git diff, find,
     {
       name: "Plan",
       displayName: "Plan",
-      description: "Software architect for implementation planning (read-only)",
+      description: "Software architect agent for designing implementation plans. Use this when you need to plan the implementation strategy for a task. Returns step-by-step plans, identifies critical files, and considers architectural trade-offs.",
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
