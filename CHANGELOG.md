@@ -55,6 +55,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`/agents → Settings` UI rewritten to inline-editable `SettingsList`.** Replaces the previous modal `ctx.ui.select` chain. All settings visible at once; `↑`/`↓` to navigate, `Space` to cycle preset values on numerics (`Max concurrency`, `Default max turns`, `Grace turns`), `Enter` to type a custom value, `Esc` to exit. Functionally equivalent — same fields, same valid ranges, same persistence behavior — but the interaction model is different. Users scripting against the old screen flow may notice.
 - **`.gitignore` additions.** Added `.pi/subagents.json` (project-local subagents settings — written by `/agents → Settings`, shouldn't be committed) plus pi-runtime working files (`progress.md`, `AGENTS.md`, `CLAUDE.md`). **Migration:** if you previously committed `.pi/subagents.json` to your repo, run `git rm --cached .pi/subagents.json` to untrack — gitignore only blocks new additions.
 
+### Fixed
+- **Automatic commits in isolated worktrees skip local Git hooks.** When an
+  `isolation: "worktree"` subagent makes its automatic commit, use
+  `--no-verify` so local hooks cannot block preserving the agent's work.
+
 ## [0.8.0] - 2026-05-26
 
 > **⚠️ Breaking: peer dependencies moved from `@mariozechner/pi-*` to `@earendil-works/pi-*`.** The upstream Pi runtime relocated npm scopes on 2026-05-07; the `@mariozechner/pi-*` packages are deprecated. This release pins `@earendil-works/pi-{ai,coding-agent,tui}` at `>=0.74.0`. Hosts on the old scope must update their pi installation first (`pi update --self` handles the rename automatically) before installing this version.
