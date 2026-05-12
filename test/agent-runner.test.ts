@@ -14,7 +14,7 @@ const {
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager" })),
 }));
 
-vi.mock("@mariozechner/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
   DefaultResourceLoader: class {
     constructor(options: any) {
