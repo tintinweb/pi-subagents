@@ -26,6 +26,42 @@ import type { SubagentType, ThinkingLevel } from "./types.js";
 /** Names of tools registered by this extension that subagents must NOT inherit. */
 const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
 
+/**
+ * Filter the session's active tool names according to extension/denylist rules.
+ *
+ * Run twice — once before `bindExtensions` (filters built-in tools) and once after
+ * (filters extension-registered tools, which only join the active set during
+ * `bindExtensions`). Extracting this keeps the two callsites consistent and makes
+ * the post-bind re-filter trivial.
+ *
+ * @param activeTools  Names currently active on the session.
+ * @param toolNames    The built-in tool name allowlist for this agent type.
+ * @param extensions   Agent config `extensions` field: false | true | string[] (allowlist).
+ * @param disallowedSet  Optional denylist from agent config.
+ */
+function filterActiveTools(
+  activeTools: string[],
+  toolNames: string[],
+  extensions: boolean | string[],
+  disallowedSet: Set<string> | undefined,
+): string[] {
+  if (extensions === false) {
+    // Extensions disabled: only apply the denylist to built-in tools.
+    if (!disallowedSet) return activeTools;
+    return activeTools.filter((t) => !disallowedSet.has(t));
+  }
+  const builtinToolNameSet = new Set(toolNames);
+  return activeTools.filter((t) => {
+    if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
+    if (disallowedSet?.has(t)) return false;
+    if (builtinToolNameSet.has(t)) return true;
+    if (Array.isArray(extensions)) {
+      return extensions.some(ext => t.startsWith(ext) || t.includes(ext));
+    }
+    return true;
+  });
+}
+
 /** Default max turns. undefined = unlimited (no turn limit). */
 let defaultMaxTurns: number | undefined;
 
@@ -285,30 +321,16 @@ export async function runAgent(
     ? new Set(agentConfig.disallowedTools)
     : undefined;
 
-  // Filter active tools: remove our own tools to prevent nesting,
-  // apply extension allowlist if specified, and apply disallowedTools denylist
-  if (extensions !== false) {
-    const builtinToolNameSet = new Set(toolNames);
-    const activeTools = session.getActiveToolNames().filter((t) => {
-      if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
-      if (disallowedSet?.has(t)) return false;
-      if (builtinToolNameSet.has(t)) return true;
-      if (Array.isArray(extensions)) {
-        return extensions.some(ext => t.startsWith(ext) || t.includes(ext));
-      }
-      return true;
-    });
-    session.setActiveToolsByName(activeTools);
-  } else if (disallowedSet) {
-    // Even with extensions disabled, apply denylist to built-in tools
-    const activeTools = session.getActiveToolNames().filter(t => !disallowedSet.has(t));
-    session.setActiveToolsByName(activeTools);
+  // Pre-bind filter: remove our own tools, apply extension allowlist/denylist
+  // to built-in tools that are already active.
+  if (extensions !== false || disallowedSet) {
+    const preBind = filterActiveTools(session.getActiveToolNames(), toolNames, extensions, disallowedSet);
+    session.setActiveToolsByName(preBind);
   }
 
   // Bind extensions so that session_start fires and extensions can initialize
-  // (e.g. loading credentials, setting up state). Placed after tool filtering
-  // so extension-provided skills/prompts from extendResourcesFromExtensions()
-  // respect the active tool set. All ExtensionBindings fields are optional.
+  // (e.g. loading credentials, setting up state). Extension-registered tools
+  // join the active set during this call.
   await session.bindExtensions({
     onError: (err) => {
       options.onToolActivity?.({
@@ -317,6 +339,13 @@ export async function runAgent(
       });
     },
   });
+
+  // Post-bind re-filter: extension tools are now in the active set, so re-run
+  // the same rules to gate them by the extensions config and denylist.
+  if (extensions !== false || disallowedSet) {
+    const postBind = filterActiveTools(session.getActiveToolNames(), toolNames, extensions, disallowedSet);
+    session.setActiveToolsByName(postBind);
+  }
 
   options.onSessionCreated?.(session);
 
