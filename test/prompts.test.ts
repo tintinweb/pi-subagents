@@ -308,4 +308,78 @@ describe("buildAgentPrompt", () => {
     expect(prompt).not.toContain("Agent Memory");
     expect(prompt).not.toContain("Preloaded Skill");
   });
+
+  describe("active_agent tag", () => {
+    it("tag is present at start of prompt in replace mode", () => {
+      const config: AgentConfig = {
+        name: "my-agent",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "You are a test agent.",
+        promptMode: "replace",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const prompt = buildAgentPrompt(config, "/workspace", env);
+      expect(prompt).toMatch(/^<active_agent name="my-agent"\/>/);
+    });
+
+    it("tag is present at start of prompt in append mode", () => {
+      const config: AgentConfig = {
+        name: "my-agent",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "Custom instructions.",
+        promptMode: "append",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
+      expect(prompt).toMatch(/^<active_agent name="my-agent"\/>/);
+    });
+
+    it("tag uses agent name verbatim", () => {
+      const config: AgentConfig = {
+        name: "Some Agent With Spaces",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "Test.",
+        promptMode: "replace",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const prompt = buildAgentPrompt(config, "/workspace", env);
+      expect(prompt).toContain('<active_agent name="Some Agent With Spaces"/>');
+    });
+
+    it("tag appears before the env block in both modes", () => {
+      for (const promptMode of ["replace", "append"] as const) {
+        const config: AgentConfig = {
+          name: "test-agent",
+          description: "Test",
+          builtinToolNames: [],
+          extensions: true,
+          skills: true,
+          systemPrompt: "Test.",
+          promptMode,
+          inheritContext: false,
+          runInBackground: false,
+          isolated: false,
+        };
+        const prompt = buildAgentPrompt(config, "/workspace", env, "Parent.");
+        const tagIndex = prompt.indexOf('<active_agent name="test-agent"/>');
+        const envIndex = prompt.indexOf("# Environment");
+        expect(tagIndex).toBeLessThan(envIndex);
+      }
+    });
+  });
 });

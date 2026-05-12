@@ -19,6 +19,10 @@ export interface PromptExtras {
  * - "append" mode: env header + parent system prompt + sub-agent context + config.systemPrompt
  * - "append" with empty systemPrompt: pure parent clone
  *
+ * Both modes prepend an `<active_agent name="${config.name}"/>` tag so downstream
+ * extensions (e.g. permission/policy systems) can resolve per-agent policy
+ * inside the child session by parsing the system prompt.
+ *
  * @param parentSystemPrompt  The parent agent's effective system prompt (for append mode).
  * @param extras  Optional extra sections to inject (memory, preloaded skills).
  */
@@ -29,6 +33,8 @@ export function buildAgentPrompt(
   parentSystemPrompt?: string,
   extras?: PromptExtras,
 ): string {
+  const activeAgentTag = `<active_agent name="${config.name}"/>\n\n`;
+
   const envBlock = `# Environment
 Working directory: ${cwd}
 ${env.isGitRepo ? `Git repository: yes\nBranch: ${env.branch}` : "Not a git repository"}
@@ -66,7 +72,7 @@ You are operating as a sub-agent invoked to handle a specific task.
       ? `\n\n<agent_instructions>\n${config.systemPrompt}\n</agent_instructions>`
       : "";
 
-    return envBlock + "\n\n<inherited_system_prompt>\n" + identity + "\n</inherited_system_prompt>\n\n" + bridge + customSection + extrasSuffix;
+    return activeAgentTag + envBlock + "\n\n<inherited_system_prompt>\n" + identity + "\n</inherited_system_prompt>\n\n" + bridge + customSection + extrasSuffix;
   }
 
   // "replace" mode — env header + the config's full system prompt
@@ -75,7 +81,7 @@ You have been invoked to handle a specific task autonomously.
 
 ${envBlock}`;
 
-  return replaceHeader + "\n\n" + config.systemPrompt + extrasSuffix;
+  return activeAgentTag + replaceHeader + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */
