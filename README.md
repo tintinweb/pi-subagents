@@ -406,6 +406,8 @@ pi.events.emit("subagents:rpc:spawn", {
 });
 ```
 
+`options.model` accepts either a `Model` object (e.g. `ctx.model`) or a `"provider/modelId"` string — strings are resolved against `ctx.modelRegistry` at the RPC boundary, so cross-extension callers can forward serializable values without losing auth context.
+
 ### Stop
 
 Stop a running agent by ID:

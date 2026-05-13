@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Cross-extension spawn RPC now accepts a string `options.model`** ([#59](https://github.com/tintinweb/pi-subagents/pull/59), fixes [#60](https://github.com/tintinweb/pi-subagents/issues/60)). Cross-extension callers (e.g. `@tintinweb/pi-tasks@>=0.4.3`'s `TaskExecute`) naturally forward `model` as a serializable `"provider/modelId"` string. Previously the spawn handler passed strings straight through to `runAgent()`, which expects a `Model` object — the spawned agent then crashed with `No API key found for undefined`. The handler now resolves strings via the same `resolveModel(ctx.modelRegistry)` path the scheduler uses; `Model` objects pass through unchanged. Unresolved strings surface the human-readable `Model not found: "…"` error instead of the auth-lookup crash. Thanks @any-victor.
+
 ## [0.7.2] - 2026-05-12
 
 > **Heads-up — behavior changes in skill preloading:**
