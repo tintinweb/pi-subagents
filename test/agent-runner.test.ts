@@ -198,6 +198,15 @@ describe("agent-runner final output capture", () => {
     const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
     expect(setOrder).toBeLessThan(bindOrder);
   });
+
+  it("suffixes the session name with a short agentId so parallel spawns are distinguishable", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, agentId: "a1b2c3d4e5f6" });
+
+    expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
+  });
 });
 
 // ─── message_end → onAssistantUsage wiring (issue #38) ─────────────────
