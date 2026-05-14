@@ -151,6 +151,54 @@ Custom tools.`);
     expect(result.get("custom-tools")!.builtinToolNames).toEqual(["read", "my_custom_tool", "grep"]);
   });
 
+  it("partitions tools: ext: entries out of builtinToolNames into extSelectors", () => {
+    writeAgent("ext-agent", `---
+tools: read, ext:foo, ext:bar/x
+---
+
+Extension selectors.`);
+
+    const agent = loadCustomAgents(tmpDir).get("ext-agent")!;
+    expect(agent.builtinToolNames).toEqual(["read"]);
+    expect(agent.extSelectors).toEqual(["ext:foo", "ext:bar/x"]);
+  });
+
+  it("tools: with only ext: entries yields zero built-ins", () => {
+    writeAgent("ext-only", `---
+tools: ext:foo/bar
+---
+
+Ext only.`);
+
+    const agent = loadCustomAgents(tmpDir).get("ext-only")!;
+    expect(agent.builtinToolNames).toEqual([]);
+    expect(agent.extSelectors).toEqual(["ext:foo/bar"]);
+  });
+
+  it("tools: '*' expands to all built-ins and composes with ext: selectors", () => {
+    writeAgent("wild", `---
+tools: "*, ext:foo"
+---
+
+Wildcard plus ext.`);
+
+    const agent = loadCustomAgents(tmpDir).get("wild")!;
+    expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+    expect(agent.extSelectors).toEqual(["ext:foo"]);
+  });
+
+  it("leaves extSelectors undefined when tools: has no ext: entries", () => {
+    writeAgent("plain", `---
+tools: read, bash
+---
+
+Plain tools.`);
+
+    const agent = loadCustomAgents(tmpDir).get("plain")!;
+    expect(agent.builtinToolNames).toEqual(["read", "bash"]);
+    expect(agent.extSelectors).toBeUndefined();
+  });
+
   it("passes through thinking level as-is (no validation)", () => {
     writeAgent("anythink", `---
 thinking: turbo
