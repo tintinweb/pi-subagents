@@ -6,11 +6,13 @@ import {
   buildReadsBlock,
   createChainDir,
   injectOutputInstruction,
+  isAgentReadOnly,
   persistStepOutput,
   resolveOutputPath,
   resolveStepOutput,
   snapshotOutputFile,
   substituteChainPlaceholders,
+  validateChainFileOnlyHandoff,
   validateStepIO,
 } from "../src/chain-io.js";
 
@@ -333,6 +335,113 @@ describe("buildReadsBlock", () => {
     );
     expect(result).toContain("AAA");
     expect(result).toContain("BBB");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isAgentReadOnly
+// ---------------------------------------------------------------------------
+
+describe("isAgentReadOnly", () => {
+  it("returns false when builtinToolNames is undefined (no explicit list)", () => {
+    expect(isAgentReadOnly(undefined)).toBe(false);
+  });
+
+  it("returns false when the list includes 'edit'", () => {
+    expect(isAgentReadOnly(["read", "bash", "edit", "grep", "find", "ls"])).toBe(false);
+  });
+
+  it("returns false when the list includes 'write'", () => {
+    expect(isAgentReadOnly(["read", "bash", "write"])).toBe(false);
+  });
+
+  it("returns false when the list includes both 'edit' and 'write'", () => {
+    expect(isAgentReadOnly(["read", "bash", "edit", "write", "grep", "find", "ls"])).toBe(false);
+  });
+
+  it("returns true when the list contains neither 'edit' nor 'write'", () => {
+    expect(isAgentReadOnly(["read", "bash", "grep", "find", "ls"])).toBe(true);
+  });
+
+  it("is case-insensitive (Read, BASH, GREP do not count as edit/write)", () => {
+    expect(isAgentReadOnly(["Read", "Bash", "Grep", "Find", "Ls"])).toBe(true);
+  });
+
+  it("returns true when the list is empty (no edit or write present)", () => {
+    // An empty explicit tool list has neither 'edit' nor 'write', so it is
+    // treated as read-only — the agent cannot write files.
+    expect(isAgentReadOnly([])).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateChainFileOnlyHandoff
+// ---------------------------------------------------------------------------
+
+describe("validateChainFileOnlyHandoff", () => {
+  it("returns no warnings for a chain with no file-only steps", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker" },
+      { prompt: "step 2", subagent_type: "worker" },
+    ];
+    expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
+  });
+
+  it("returns no warnings when file-only step is followed by a matching reads entry", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/step1.md", output_mode: "file-only" },
+      { prompt: "step 2", subagent_type: "worker", reads: ["{chain_dir}/step1.md"] },
+    ];
+    expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
+  });
+
+  it("warns when file-only step is not followed by any reads at all", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/review.md", output_mode: "file-only" },
+      { prompt: "step 2", subagent_type: "worker" },
+    ];
+    const warnings = validateChainFileOnlyHandoff(chain);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Step 1");
+    expect(warnings[0]).toContain("step 2");
+    expect(warnings[0]).toContain("file-only");
+    expect(warnings[0]).toContain("{chain_dir}/review.md");
+  });
+
+  it("warns when file-only step is followed by reads that don't match the output path", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/step1.md", output_mode: "file-only" },
+      { prompt: "step 2", subagent_type: "worker", reads: ["{chain_dir}/other.md"] },
+    ];
+    const warnings = validateChainFileOnlyHandoff(chain);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("{chain_dir}/step1.md");
+  });
+
+  it("returns no warnings when the last step uses file-only (no following step to check)", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker" },
+      { prompt: "step 2", subagent_type: "worker", output: "{chain_dir}/last.md", output_mode: "file-only" },
+    ];
+    expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
+  });
+
+  it("returns multiple warnings for multiple mismatched file-only steps", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/a.md", output_mode: "file-only" },
+      { prompt: "step 2", subagent_type: "worker", output: "{chain_dir}/b.md", output_mode: "file-only" },
+      { prompt: "step 3", subagent_type: "worker" },
+    ];
+    const warnings = validateChainFileOnlyHandoff(chain);
+    expect(warnings).toHaveLength(2);
+  });
+
+  it("returns no warnings when inline mode step is followed by a step without reads", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/a.md", output_mode: "inline" },
+      { prompt: "step 2", subagent_type: "worker" },
+    ];
+    expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
   });
 });
 

@@ -228,6 +228,24 @@ export function buildReadsBlock(
 }
 
 // ---------------------------------------------------------------------------
+// Read-only agent detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Return true if the agent is considered read-only based on its explicit tool list.
+ *
+ * Detection rule:
+ *  - If `builtinToolNames` is undefined (no explicit list) → assume writable → false.
+ *  - If `builtinToolNames` is set but includes neither "edit" nor "write" → read-only → true.
+ *  - Otherwise → writable → false.
+ */
+export function isAgentReadOnly(builtinToolNames: string[] | undefined): boolean {
+  if (!builtinToolNames) return false;
+  const tools = new Set(builtinToolNames.map((t) => t.toLowerCase()));
+  return !tools.has("edit") && !tools.has("write");
+}
+
+// ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------
 
@@ -246,4 +264,42 @@ export function validateStepIO(
     );
   }
   return undefined;
+}
+
+/**
+ * Validate that every `file-only` step is followed by a step that declares a
+ * matching `reads` entry.
+ *
+ * When `output_mode: "file-only"` is used without a corresponding `reads` on the
+ * next step, the next step receives only the raw file path string in `{previous}`
+ * rather than the actual file content — a common footgun.
+ *
+ * Comparison is done on the raw (pre-substitution) path strings so validation
+ * can run before `chainDir` is created.
+ *
+ * Returns an array of human-readable warning strings (empty = no issues found).
+ */
+export function validateChainFileOnlyHandoff(
+  chain: ReadonlyArray<{
+    output?: string;
+    output_mode?: string;
+    reads?: string[];
+  }>,
+): string[] {
+  const warnings: string[] = [];
+  for (let i = 0; i < chain.length - 1; i++) {
+    const step = chain[i];
+    if (step.output_mode !== "file-only" || !step.output) continue;
+    const nextStep = chain[i + 1];
+    const nextReads = nextStep.reads ?? [];
+    if (!nextReads.includes(step.output)) {
+      warnings.push(
+        `⚠ Step ${i + 1} uses output_mode "file-only" but step ${i + 2} does not declare ` +
+        `a matching reads entry for "${step.output}". ` +
+        `Step ${i + 2} will receive only the file path in {previous}, not the file content. ` +
+        `Add \`reads: ["${step.output}"]\` to step ${i + 2} to pass the content through.`,
+      );
+    }
+  }
+  return warnings;
 }

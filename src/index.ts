@@ -23,7 +23,7 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { buildReadsBlock, createChainDir, injectOutputInstruction, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateStepIO } from "./chain-io.js";
+import { buildReadsBlock, createChainDir, injectOutputInstruction, isAgentReadOnly, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateStepIO } from "./chain-io.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -1275,6 +1275,9 @@ ${guidelinesText}
       if (ioError) return textResult(ioError);
     }
 
+    // Warn (visibly, in chain result) when a file-only step is not matched by reads on the next step
+    const chainWarnings: string[] = validateChainFileOnlyHandoff(chain);
+
     // Create a per-run scratch directory (shared across all steps)
     const chainDir = createChainDir();
 
@@ -1327,10 +1330,15 @@ ${guidelinesText}
         stepPrompt = readsBlock + stepPrompt;
       }
 
-      // Append output instruction if an output path is configured
-      stepPrompt = injectOutputInstruction(stepPrompt, resolvedOutputPath);
-
       const customConfig = getAgentConfig(resolvedStepType);
+
+      // Append output instruction only for agents that can write files.
+      // Read-only agents (builtinToolNames set but lacking "edit"/"write") cannot
+      // act on the instruction; the orchestrator fallback will persist output instead.
+      const readOnly = isAgentReadOnly(customConfig?.builtinToolNames);
+      if (!readOnly) {
+        stepPrompt = injectOutputInstruction(stepPrompt, resolvedOutputPath);
+      }
       const stepParams = {
         subagent_type: resolvedStepType,
         description: step.description,
@@ -1454,9 +1462,19 @@ ${guidelinesText}
         durationMs: stepDurationMs,
       });
 
-      // Warn about save errors without aborting the chain
+      // Annotate chain result (and log) when the orchestrator fallback fired.
+      // This makes read-only agent handoffs visible to the caller instead of
+      // silently swallowing the mismatch in console.warn only.
       if (saveError) {
         console.warn(`[pi-subagents] Chain step ${i + 1} output file warning: ${saveError}`);
+        const fallbackMsg = readOnly
+          ? `ℹ Step ${i + 1} used a read-only agent; output was saved by the orchestrator to ${
+              savedPath ?? resolvedOutputPath
+            }.`
+          : `ℹ Step ${i + 1}: agent did not write to the output file; in-memory output was saved by the orchestrator to ${
+              savedPath ?? resolvedOutputPath
+            }.`;
+        chainWarnings.push(fallbackMsg);
       }
     }
 
@@ -1470,8 +1488,13 @@ ${guidelinesText}
       )
       .join("\n\n---\n\n");
 
+    const warningsBlock =
+      chainWarnings.length > 0
+        ? `\n\n**Warnings:**\n${chainWarnings.map((w) => `  ${w}`).join("\n")}`
+        : "";
+
     return textResult(
-      `Chain completed in ${formatMs(totalMs)} (${chain.length} steps). Chain directory: ${chainDir}\n\n${summary}`
+      `Chain completed in ${formatMs(totalMs)} (${chain.length} steps). Chain directory: ${chainDir}\n\n${summary}${warningsBlock}`
     );
   }
 
