@@ -239,10 +239,27 @@ export function buildReadsBlock(
  *  - If `builtinToolNames` is set but includes neither "edit" nor "write" → read-only → true.
  *  - Otherwise → writable → false.
  */
-export function isAgentReadOnly(builtinToolNames: string[] | undefined): boolean {
-  if (!builtinToolNames) return false;
-  const tools = new Set(builtinToolNames.map((t) => t.toLowerCase()));
-  return !tools.has("edit") && !tools.has("write");
+export function isAgentReadOnly(
+  builtinToolNames: string[] | undefined,
+  disallowedTools?: string[],
+): boolean {
+  const denied = disallowedTools
+    ? new Set(disallowedTools.map((t) => t.toLowerCase()))
+    : undefined;
+
+  if (!builtinToolNames) {
+    // No explicit allowlist ⟹ all tools are available by default.
+    // The agent is only read-only if both edit AND write are explicitly denied.
+    if (!denied) return false;
+    return denied.has("edit") && denied.has("write");
+  }
+
+  // Start from the explicit allowlist, then remove denylisted tools.
+  const effective = new Set(builtinToolNames.map((t) => t.toLowerCase()));
+  if (denied) {
+    for (const t of denied) effective.delete(t);
+  }
+  return !effective.has("edit") && !effective.has("write");
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +309,7 @@ export function validateChainFileOnlyHandoff(
     if (step.output_mode !== "file-only" || !step.output) continue;
     const nextStep = chain[i + 1];
     const nextReads = nextStep.reads ?? [];
-    if (!nextReads.includes(step.output)) {
+    if (!nextReads.includes(step.output) && !nextReads.includes("{previous}")) {
       warnings.push(
         `⚠ Step ${i + 1} uses output_mode "file-only" but step ${i + 2} does not declare ` +
         `a matching reads entry for "${step.output}". ` +

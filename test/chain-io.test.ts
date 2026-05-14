@@ -372,6 +372,34 @@ describe("isAgentReadOnly", () => {
     // treated as read-only — the agent cannot write files.
     expect(isAgentReadOnly([])).toBe(true);
   });
+
+  // disallowedTools
+
+  it("returns true when edit and write are present but both are denylisted", () => {
+    expect(
+      isAgentReadOnly(["read", "bash", "edit", "write"], ["edit", "write"])
+    ).toBe(true);
+  });
+
+  it("returns false when only edit is denylisted but write is still available", () => {
+    expect(
+      isAgentReadOnly(["read", "bash", "edit", "write"], ["edit"])
+    ).toBe(false);
+  });
+
+  it("returns false when builtinToolNames is undefined and only edit is denied (write still default-available)", () => {
+    expect(isAgentReadOnly(undefined, ["edit"])).toBe(false);
+  });
+
+  it("returns true when builtinToolNames is undefined but both edit AND write are denied", () => {
+    expect(isAgentReadOnly(undefined, ["edit", "write"])).toBe(true);
+  });
+
+  it("is case-insensitive for disallowedTools (Edit/Write match)", () => {
+    expect(
+      isAgentReadOnly(["read", "bash", "edit", "write"], ["Edit", "Write"])
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -440,6 +468,17 @@ describe("validateChainFileOnlyHandoff", () => {
     const chain = [
       { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/a.md", output_mode: "inline" },
       { prompt: "step 2", subagent_type: "worker" },
+    ];
+    expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
+  });
+
+  it("returns no warnings when file-only output is consumed via reads: ['{previous}']", () => {
+    // {previous} is the magic placeholder that the runtime substitutes with the
+    // prior step's output path when output_mode is file-only. It is a valid way
+    // to thread the output through without hardcoding the chain_dir path.
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/review.md", output_mode: "file-only" },
+      { prompt: "step 2", subagent_type: "worker", reads: ["{previous}"] },
     ];
     expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
   });

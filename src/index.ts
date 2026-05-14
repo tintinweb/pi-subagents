@@ -1333,9 +1333,10 @@ ${guidelinesText}
       const customConfig = getAgentConfig(resolvedStepType);
 
       // Append output instruction only for agents that can write files.
-      // Read-only agents (builtinToolNames set but lacking "edit"/"write") cannot
-      // act on the instruction; the orchestrator fallback will persist output instead.
-      const readOnly = isAgentReadOnly(customConfig?.builtinToolNames);
+      // An agent is read-only when its effective tool set (builtinToolNames minus
+      // disallowedTools) lacks both "edit" and "write". Read-only agents cannot
+      // act on the instruction; the orchestrator fallback persists their output instead.
+      const readOnly = isAgentReadOnly(customConfig?.builtinToolNames, customConfig?.disallowedTools);
       if (!readOnly) {
         stepPrompt = injectOutputInstruction(stepPrompt, resolvedOutputPath);
       }
