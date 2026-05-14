@@ -55,7 +55,7 @@ describe("AgentWidget", () => {
     ]);
 
     let statusText: string | undefined;
-    let widgetFactory: ((tui: any, theme: Theme) => { render(): string[]; invalidate(): void }) | undefined;
+    let widgetFactory: ((tui: any, theme: Theme) => { render(width: number): string[]; invalidate(): void }) | undefined;
 
     const uiCtx: UICtx = {
       setStatus: (_key: string, text: string | undefined) => {
@@ -78,7 +78,7 @@ describe("AgentWidget", () => {
     expect(statusText).toBe("1 running agent · haiku:high");
 
     expect(widgetFactory).toBeDefined();
-    const rendered = widgetFactory!({ terminal: { columns: 200 } }, theme).render();
+    const rendered = widgetFactory!({ terminal: { columns: 200 } }, theme).render(200);
     // In tree mode, the running agent line contains model:thinking in the stats
     const runningLine = rendered.find((l: string) => l.includes("Investigate bug"));
     expect(runningLine).toContain("haiku:high");

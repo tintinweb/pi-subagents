@@ -45,7 +45,7 @@ export type UICtx = {
   setStatus(key: string, text: string | undefined): void;
   setWidget(
     key: string,
-    content: undefined | ((tui: any, theme: Theme) => { render(): string[]; invalidate(): void }),
+    content: undefined | ((tui: any, theme: Theme) => { render(width: number): string[]; invalidate(): void }),
     options?: { placement?: "aboveEditor" | "belowEditor" },
   ): void;
 };
@@ -396,7 +396,7 @@ export class AgentWidget {
    * Render the widget content. Called from the registered widget's render() callback,
    * reading live state each time instead of capturing it in a closure.
    */
-  private renderWidget(tui: any, theme: Theme): string[] {
+  private renderWidget(tui: any, theme: Theme, width?: number): string[] {
     const allAgents = this.manager.listAgents();
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
@@ -411,7 +411,7 @@ export class AgentWidget {
     // Nothing to show — return empty (widget will be unregistered by update())
     if (!hasActive && !hasFinished) return [];
 
-    const w = tui.terminal.columns;
+    const w = width ?? tui.terminal.columns;
     const truncate = (line: string) => truncateToWidth(line, w);
     const headingColor = hasActive ? "accent" : "dim";
     const headingIcon = hasActive ? "●" : "○";
@@ -619,7 +619,7 @@ export class AgentWidget {
       this.uiCtx.setWidget("agents", (tui, theme) => {
         this.tui = tui;
         return {
-          render: () => this.renderWidget(tui, theme),
+          render: (width: number) => this.renderWidget(tui, theme, width),
           invalidate: () => {
             // Theme changed — force re-registration so factory captures fresh theme.
             this.widgetRegistered = false;

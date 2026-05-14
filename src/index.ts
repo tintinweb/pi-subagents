@@ -18,13 +18,14 @@ import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
+import { buildReadsBlock, createChainDir, createChainOutputTool, injectOutputInstruction, isAgentReadOnly, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateStepIO } from "./chain-io.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { buildReadsBlock, createChainDir, createChainOutputTool, injectOutputInstruction, isAgentReadOnly, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateStepIO } from "./chain-io.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { buildRecoveryPrompt, CHECKPOINT_PROTOCOL, extractCheckpoint, SOFT_LIMIT_STEER, safeExec } from "./recovery.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
@@ -48,11 +49,10 @@ import {
 } from "./ui/agent-widget.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
-import { buildRecoveryPrompt, CHECKPOINT_PROTOCOL, extractCheckpoint, safeExec, SOFT_LIMIT_STEER } from "./recovery.js";
 
-export { formatAgentConfigTag };
-export { spawnWithRecovery, buildRecoveryPrompt, extractCheckpoint } from "./recovery.js";
 export type { RecoveryContext } from "./recovery.js";
+export { buildRecoveryPrompt, extractCheckpoint, spawnWithRecovery } from "./recovery.js";
+export { formatAgentConfigTag };
 
 // ---- Shared helpers ----
 
@@ -517,7 +517,8 @@ export default function (pi: ExtensionAPI) {
     currentCtx = ctx;
     if (ctx.isIdle?.() === true && queuedCompletionNudges.length > 0) {
       for (const nudge of queuedCompletionNudges.splice(0)) {
-        deliverCompletionNudge(nudge.content, nudge.details);
+        try { deliverCompletionNudge(nudge.content, nudge.details); }
+        catch { /* ignore stale completion side-effect errors */ }
       }
     }
   });

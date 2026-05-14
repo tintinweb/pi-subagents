@@ -99,6 +99,10 @@ describe("print mode background notifications", () => {
     await vi.advanceTimersByTimeAsync(100); // smart-join batch debounce
     await vi.advanceTimersByTimeAsync(200); // notification hold window
 
+    // Fire agent_end with idle context so queued nudges flush and hit sendMessage
+    const idleCtx = { ...makeHeadlessCtx(), isIdle: () => true };
+    await handlers.get("agent_end")?.({}, idleCtx);
+
     expect(pi.sendMessage).toHaveBeenCalled();
 
     await handlers.get("session_shutdown")?.({}, makeHeadlessCtx());

@@ -12,8 +12,7 @@
 
 import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, resolve } from "node:path";
-import { join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { defineTool, type ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { nanoid } from "nanoid";
