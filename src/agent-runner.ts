@@ -122,6 +122,11 @@ export interface RunOptions {
    * Used by chain execution to provide a scoped `write_output` tool.
    */
   customTools?: ToolDefinition[];
+  /**
+   * Custom message to use for the soft-limit steer (fired when turnCount >= maxTurns).
+   * When omitted, the default wrap-up message is used.
+   */
+  softLimitSteer?: string;
 }
 
 export interface RunResult {
@@ -355,7 +360,7 @@ export async function runAgent(
       if (maxTurns != null) {
         if (!softLimitReached && turnCount >= maxTurns) {
           softLimitReached = true;
-          session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+          session.steer(options.softLimitSteer ?? "You have reached your turn limit. Wrap up immediately — provide your final answer now.");
         } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
           aborted = true;
           session.abort();

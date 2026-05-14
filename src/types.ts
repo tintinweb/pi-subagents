@@ -51,6 +51,8 @@ export interface AgentConfig {
   isDefault?: boolean;
   /** false = agent is hidden from the registry */
   enabled?: boolean;
+  /** true = automatically attempt recovery when the agent aborts (max turns exceeded) */
+  recoverOnAbort?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
 }

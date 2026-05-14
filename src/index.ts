@@ -48,8 +48,11 @@ import {
 } from "./ui/agent-widget.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { buildRecoveryPrompt, CHECKPOINT_PROTOCOL, extractCheckpoint, safeExec, SOFT_LIMIT_STEER } from "./recovery.js";
 
 export { formatAgentConfigTag };
+export { spawnWithRecovery, buildRecoveryPrompt, extractCheckpoint } from "./recovery.js";
+export type { RecoveryContext } from "./recovery.js";
 
 // ---- Shared helpers ----
 
@@ -1208,9 +1211,14 @@ ${guidelinesText}
 
       streamUpdate();
 
+      const recoverOnAbort = customConfig?.recoverOnAbort ?? false;
+      const effectivePrompt = recoverOnAbort
+        ? params.prompt + CHECKPOINT_PROTOCOL
+        : params.prompt;
+
       let record: AgentRecord;
       try {
-        record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
+        record = await manager.spawnAndWait(pi, ctx, subagentType, effectivePrompt, {
           description: params.description,
           model,
           maxTurns: effectiveMaxTurns,
@@ -1220,6 +1228,7 @@ ${guidelinesText}
           isolation,
           invocation: agentInvocation,
           signal,
+          ...(recoverOnAbort ? { softLimitSteer: SOFT_LIMIT_STEER } : {}),
           ...fgCallbacks,
         });
       } catch (err) {
@@ -1233,6 +1242,51 @@ ${guidelinesText}
       if (fgId) {
         agentActivity.delete(fgId);
         widget.markFinished(fgId);
+      }
+
+      // Recovery: if aborted and recoverOnAbort, attempt session resume then fresh spawn.
+      if (record.status === "aborted" && recoverOnAbort) {
+        onUpdate?.({ content: [{ type: "text", text: "↻ Recovering from abort…" }], details: buildDetails(detailBase, record, fgState) as any });
+        const checkpoint = extractCheckpoint(record.result ?? "");
+        const contextPressure = record.lifetimeUsage.input > 150_000;
+
+        // Strategy 4: try session resume if session is alive and context is not exhausted.
+        if (record.session && !contextPressure) {
+          const resumeContext = checkpoint ?? record.result ?? "";
+          try {
+            const resumed = await manager.resume(
+              record.id,
+              `You were aborted before finishing.${
+                resumeContext ? `\n\nYour last output:\n\n${resumeContext}` : ""
+              }\n\nContinue from where you left off.`,
+            );
+            if (resumed && resumed.status !== "error") record = resumed;
+          } catch { /* fall through to fresh spawn */ }
+        }
+
+        // Strategy 3: fresh spawn with git diff + checkpoint if still aborted.
+        if (record.status === "aborted") {
+          const recoveryPrompt = buildRecoveryPrompt({
+            originalPrompt: params.prompt,
+            abortedResult: checkpoint ?? record.result ?? "",
+            gitDiff: safeExec("git diff HEAD", ctx.cwd),
+            gitStatus: safeExec("git status --short", ctx.cwd),
+          });
+          try {
+            record = await manager.spawnAndWait(pi, ctx, subagentType, recoveryPrompt, {
+              description: params.description,
+              model,
+              maxTurns: effectiveMaxTurns,
+              isolated,
+              inheritContext,
+              thinkingLevel: thinking,
+              isolation,
+              invocation: agentInvocation,
+              signal,
+              ...fgCallbacks,
+            });
+          } catch { /* keep original record on recovery failure */ }
+        }
       }
 
       // Get final token count

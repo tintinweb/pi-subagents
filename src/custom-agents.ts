@@ -69,6 +69,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       memory: parseMemory(fm.memory),
       isolation: fm.isolation === "worktree" ? "worktree" : undefined,
       enabled: fm.enabled !== false,  // default true; explicitly false disables
+      recoverOnAbort: fm.recover_on_abort != null ? fm.recover_on_abort === true : undefined,
       source,
     });
   }

@@ -72,6 +72,11 @@ interface SpawnOptions {
    * Used by chain execution to provide a scoped `write_output` tool.
    */
   customTools?: ToolDefinition[];
+  /**
+   * Custom message to use for the soft-limit steer (fired when turnCount >= maxTurns).
+   * When omitted, the default wrap-up message is used.
+   */
+  softLimitSteer?: string;
 }
 
 export class AgentManager {
@@ -219,6 +224,7 @@ export class AgentManager {
         options.onCompaction?.(info);
       },
       customTools: options.customTools,
+      softLimitSteer: options.softLimitSteer,
       onSessionCreated: (session) => {
         record.session = session;
         // Flush any steers that arrived before the session was ready
