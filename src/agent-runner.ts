@@ -13,6 +13,7 @@ import {
   getAgentDir,
   SessionManager,
   SettingsManager,
+  type ToolDefinition,
 } from "@mariozechner/pi-coding-agent";
 import { getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
@@ -114,6 +115,11 @@ export interface RunOptions {
    * pre-compaction context size estimate. Aborted compactions don't fire.
    */
   onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+  /**
+   * Custom tools to inject into the agent session.
+   * Used by chain execution to provide a scoped `write_output` tool.
+   */
+  customTools?: ToolDefinition[];
 }
 
 export interface RunResult {
@@ -273,6 +279,9 @@ export async function runAgent(
     model,
     tools: toolNames,
     resourceLoader: loader,
+    ...(options.customTools && options.customTools.length > 0
+      ? { customTools: options.customTools }
+      : {}),
   };
   if (thinkingLevel) {
     sessionOpts.thinkingLevel = thinkingLevel;
@@ -288,7 +297,12 @@ export async function runAgent(
   // Filter active tools: remove our own tools to prevent nesting,
   // apply extension allowlist if specified, and apply disallowedTools denylist
   if (extensions !== false) {
-    const builtinToolNameSet = new Set(toolNames);
+    const builtinToolNameSet = new Set([
+      ...toolNames,
+      // Custom tools injected via options (e.g. chain-scoped write_output) must
+      // survive the active-tool filter even for read-only agent types.
+      ...(options.customTools?.map(t => t.name) ?? []),
+    ]);
     const activeTools = session.getActiveToolNames().filter((t) => {
       if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
       if (disallowedSet?.has(t)) return false;

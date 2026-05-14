@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildReadsBlock,
   createChainDir,
+  createChainOutputTool,
   injectOutputInstruction,
   isAgentReadOnly,
   persistStepOutput,
@@ -481,6 +482,83 @@ describe("validateChainFileOnlyHandoff", () => {
       { prompt: "step 2", subagent_type: "worker", reads: ["{previous}"] },
     ];
     expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createChainOutputTool
+// ---------------------------------------------------------------------------
+
+describe("createChainOutputTool", () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = join(tmpdir(), `chain-tool-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  it("returns a ToolDefinition with name 'write_output'", () => {
+    const outputPath = join(testDir, "out.md");
+    const tool = createChainOutputTool(outputPath);
+    expect(tool.name).toBe("write_output");
+  });
+
+  it("description contains the exact output path", () => {
+    const outputPath = join(testDir, "result.md");
+    const tool = createChainOutputTool(outputPath);
+    expect(tool.description).toContain(outputPath);
+  });
+
+  it("execute writes content to the exact output path", async () => {
+    const outputPath = join(testDir, "out.txt");
+    const tool = createChainOutputTool(outputPath);
+    const result = await tool.execute("", { content: "hello world" } as any, undefined, undefined, {} as any);
+    expect(readFileSync(outputPath, "utf-8")).toBe("hello world");
+    const text = result.content[0];
+    expect(text.type).toBe("text");
+    expect((text as any).text).toContain("written");
+    expect((text as any).text).toContain(outputPath);
+  });
+
+  it("execute appends content when append: true", async () => {
+    const outputPath = join(testDir, "out.txt");
+    writeFileSync(outputPath, "first\n");
+    const tool = createChainOutputTool(outputPath);
+    await tool.execute("", { content: "second\n", append: true } as any, undefined, undefined, {} as any);
+    expect(readFileSync(outputPath, "utf-8")).toBe("first\nsecond\n");
+  });
+
+  it("execute creates parent directories if they do not exist", async () => {
+    const outputPath = join(testDir, "nested", "deep", "out.txt");
+    const tool = createChainOutputTool(outputPath);
+    await tool.execute("", { content: "deep content" } as any, undefined, undefined, {} as any);
+    expect(existsSync(outputPath)).toBe(true);
+    expect(readFileSync(outputPath, "utf-8")).toBe("deep content");
+  });
+
+  it("execute returns error message on unwritable path", async () => {
+    const outputPath = "/dev/null/impossible\0/path";
+    const tool = createChainOutputTool(outputPath);
+    const result = await tool.execute("", { content: "content" } as any, undefined, undefined, {} as any);
+    const text = result.content[0];
+    expect((text as any).text).toContain("Error");
+  });
+
+  it("execute overwrites existing content when append is false (default)", async () => {
+    const outputPath = join(testDir, "overwrite.txt");
+    writeFileSync(outputPath, "old content");
+    const tool = createChainOutputTool(outputPath);
+    await tool.execute("", { content: "new content" } as any, undefined, undefined, {} as any);
+    expect(readFileSync(outputPath, "utf-8")).toBe("new content");
+  });
+
+  it("result text mentions byte count", async () => {
+    const outputPath = join(testDir, "bytes.txt");
+    const content = "hello";
+    const tool = createChainOutputTool(outputPath);
+    const result = await tool.execute("", { content } as any, undefined, undefined, {} as any);
+    const text = (result.content[0] as any).text as string;
+    expect(text).toContain(String(Buffer.byteLength(content, "utf-8")));
   });
 });
 

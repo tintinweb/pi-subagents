@@ -3,16 +3,19 @@
  *
  * Imitates the file-based output-input chaining pattern from nicobailon/pi-subagents:
  *   - Each chain run gets a unique scratch directory under $TMPDIR.
- *   - Steps can write output to a named file (via `output` + injected instruction).
+ *   - Steps can write output to a named file via a chain-scoped `write_output` tool
+ *     injected into the agent session (orchestrator fallback saves in-memory output if unused).
  *   - Steps can read input from previously-written files (via `reads`).
  *   - Prompts support {previous} and {chain_dir} placeholder substitution.
  *   - outputMode "inline" (default) includes content in results; "file-only" omits it.
  */
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { join } from "node:path";
+import { defineTool, type ToolDefinition } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
 import { nanoid } from "nanoid";
 
 // ---------------------------------------------------------------------------
@@ -225,6 +228,65 @@ export function buildReadsBlock(
   if (sections.length === 0) return "";
 
   return `<context>\n${sections.join("\n")}\n</context>\n\n`;
+}
+
+// ---------------------------------------------------------------------------
+// Chain output tool
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a `write_output` custom tool scoped to the given `outputPath`.
+ *
+ * Injecting this tool into a chain step's agent session guarantees that the
+ * agent can persist its findings incrementally — even across multi-turn sessions
+ * and even for agents that lack general write/edit tools (read-only agents).
+ *
+ * Security: the tool rejects any attempt to write to a path other than the
+ * exact `outputPath` it was created with.
+ */
+export function createChainOutputTool(outputPath: string): ToolDefinition {
+  return defineTool({
+    name: "write_output",
+    label: "Write Output",
+    description:
+      `Write your complete findings, analysis, or result to the designated output file: ${outputPath}\n\n` +
+      `This is the ONLY supported way to persist your output for this chain step. ` +
+      `Subsequent steps in the chain will read this file directly.\n\n` +
+      `Guidelines:\n` +
+      `- Write complete, self-contained output — do not assume the next step has prior context.\n` +
+      `- Call this once with all your findings, or use append: true to build the file incrementally.\n` +
+      `- Calling this with append: false overwrites any previous content.`,
+    parameters: Type.Object({
+      content: Type.String({ description: "The content to write to the output file." }),
+      append: Type.Optional(
+        Type.Boolean({
+          description: "If true, append to existing content instead of overwriting. Default: false.",
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      try {
+        mkdirSync(dirname(outputPath), { recursive: true });
+        if (params.append) {
+          appendFileSync(outputPath, params.content, "utf-8");
+        } else {
+          writeFileSync(outputPath, params.content, "utf-8");
+        }
+        const bytes = Buffer.byteLength(params.content, "utf-8");
+        const mode = params.append ? "appended" : "written";
+        return {
+          content: [{ type: "text" as const, text: `Output ${mode}: ${bytes} bytes saved to ${outputPath}` }],
+          details: undefined as any,
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: "text" as const, text: `Error writing output: ${msg}` }],
+          details: undefined as any,
+        };
+      }
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------

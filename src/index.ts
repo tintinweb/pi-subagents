@@ -23,7 +23,7 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { buildReadsBlock, createChainDir, injectOutputInstruction, isAgentReadOnly, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateStepIO } from "./chain-io.js";
+import { buildReadsBlock, createChainDir, createChainOutputTool, isAgentReadOnly, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateStepIO } from "./chain-io.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -1332,14 +1332,17 @@ ${guidelinesText}
 
       const customConfig = getAgentConfig(resolvedStepType);
 
-      // Append output instruction only for agents that can write files.
-      // An agent is read-only when its effective tool set (builtinToolNames minus
-      // disallowedTools) lacks both "edit" and "write". Read-only agents cannot
-      // act on the instruction; the orchestrator fallback persists their output instead.
+      // Build the chain-scoped write_output tool when this step has an output path.
+      // The tool is injected into the agent's session so it can write findings
+      // incrementally — even for read-only agents that lack general write/edit tools.
+      // The orchestrator fallback in resolveStepOutput still fires as a safety net.
+      const chainOutputTool = resolvedOutputPath
+        ? createChainOutputTool(resolvedOutputPath)
+        : undefined;
+
+      // Determine if the agent is read-only so we can surface the right diagnostic
+      // message when the fallback fires.
       const readOnly = isAgentReadOnly(customConfig?.builtinToolNames, customConfig?.disallowedTools);
-      if (!readOnly) {
-        stepPrompt = injectOutputInstruction(stepPrompt, resolvedOutputPath);
-      }
       const stepParams = {
         subagent_type: resolvedStepType,
         description: step.description,
@@ -1409,6 +1412,7 @@ ${guidelinesText}
             inheritContext: resolvedConfig.inheritContext,
             thinkingLevel: resolvedConfig.thinking,
             signal,
+            customTools: chainOutputTool ? [chainOutputTool] : undefined,
             ...stepCallbacks,
           }
         );

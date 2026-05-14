@@ -8,7 +8,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Model } from "@mariozechner/pi-ai";
-import type { AgentSession, ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { AgentSession, ExtensionAPI, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import type { AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
@@ -65,6 +65,11 @@ interface SpawnOptions {
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
+  /**
+   * Custom tools to inject into the agent session.
+   * Used by chain execution to provide a scoped `write_output` tool.
+   */
+  customTools?: ToolDefinition[];
 }
 
 export class AgentManager {
@@ -209,6 +214,7 @@ export class AgentManager {
         this.onCompact?.(record, info);
         options.onCompaction?.(info);
       },
+      customTools: options.customTools,
       onSessionCreated: (session) => {
         record.session = session;
         // Flush any steers that arrived before the session was ready
