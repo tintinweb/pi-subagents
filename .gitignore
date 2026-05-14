@@ -30,3 +30,11 @@ Thumbs.db
 .pi/readcache
 .claude
 .vscode
+
+# Pi runtime directories
+.pi/
+.pi-lens/
+
+# Lockfiles from other package managers
+pnpm-lock.yaml
+yarn.lock
