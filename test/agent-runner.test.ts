@@ -72,6 +72,7 @@ vi.mock("../src/skill-loader.js", () => ({
 }));
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { getAgentConfig, getConfig } from "../src/agent-types.js";
 
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
@@ -320,5 +321,73 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     expect(seen).toEqual([{ reason: "threshold", tokensBefore: 12345 }]);
+  });
+});
+
+// ─── additionalExtensionPaths wiring ────────────────────────────────────────
+describe("agent-runner additionalExtensionPaths wiring", () => {
+  it("passes additionalExtensionPaths from agentConfig to DefaultResourceLoader when extensions are enabled", async () => {
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    // Provide an agentConfig with extensions enabled and additionalExtensionPaths set
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      name: "Explore",
+      description: "Explore",
+      builtinToolNames: ["read"],
+      extensions: true,
+      skills: false,
+      systemPrompt: "You are Explore.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+      additionalExtensionPaths: ["/home/user/extensions/guard.ts"],
+    } as any);
+    // getConfig must also reflect extensions: true so that extensions !== false
+    vi.mocked(getConfig).mockReturnValueOnce({
+      displayName: "Explore",
+      description: "Explore",
+      builtinToolNames: ["read"],
+      extensions: true,
+      skills: false,
+      promptMode: "replace",
+    } as any);
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(
+      expect.objectContaining({
+        noExtensions: false,
+        additionalExtensionPaths: ["/home/user/extensions/guard.ts"],
+      }),
+    );
+  });
+
+  it("sets noExtensions: true and suppresses additionalExtensionPaths when isolated: true", async () => {
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    // Give the agentConfig a non-empty additionalExtensionPaths so the guard
+    // is actually exercised, not just vacuously true.
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      name: "Explore",
+      description: "Explore",
+      builtinToolNames: ["read"],
+      extensions: true,
+      skills: false,
+      systemPrompt: "You are Explore.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+      additionalExtensionPaths: ["/home/user/extensions/guard.ts"],
+    } as any);
+
+    await runAgent(ctx, "Explore", "go", { pi, isolated: true });
+
+    const ctorArgs = defaultResourceLoaderCtor.mock.calls[0][0];
+    expect(ctorArgs.noExtensions).toBe(true);
+    expect(ctorArgs.additionalExtensionPaths).toBeUndefined();
   });
 });

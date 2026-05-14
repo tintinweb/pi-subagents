@@ -53,6 +53,8 @@ export interface AgentConfig {
   enabled?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
+  /** Additional extension paths loaded only for this agent (e.g. ~/extensions/my-guard.ts). */
+  additionalExtensionPaths?: string[];
 }
 
 export type JoinMode = 'async' | 'group' | 'smart';
