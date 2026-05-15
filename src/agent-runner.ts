@@ -273,7 +273,10 @@ export async function runAgent(
     settingsManager: SettingsManager.create(effectiveCwd, agentDir),
     modelRegistry: ctx.modelRegistry,
     model,
-    tools: toolNames,
+    // When extensions are enabled, omit the tools allowlist so extension-registered
+    // tools (MCP, LSP, etc.) in the registry can be activated. Otherwise they would
+    // be filtered out by allowedToolNames in pi-mono's AgentSession constructor.
+    tools: extensions === false ? toolNames : undefined,
     resourceLoader: loader,
   };
   if (thinkingLevel) {
