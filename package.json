@@ -21,9 +21,9 @@
     "autonomous"
   ],
   "peerDependencies": {
-    "@mariozechner/pi-ai": ">=0.70.5",
-    "@mariozechner/pi-coding-agent": ">=0.70.5",
-    "@mariozechner/pi-tui": ">=0.70.5"
+    "@earendil-works/pi-ai": ">=0.74.0",
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-tui": ">=0.74.0"
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.49",

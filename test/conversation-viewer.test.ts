@@ -9,8 +9,8 @@ import type { AgentRecord } from "../src/types.js";
 
 let wrapOverride: ((text: string, width: number) => string[]) | null = null;
 
-vi.mock("@mariozechner/pi-tui", async (importOriginal) => {
-  const original = await importOriginal<typeof import("@mariozechner/pi-tui")>();
+vi.mock("@earendil-works/pi-tui", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@earendil-works/pi-tui")>();
   return {
     ...original,
     wrapTextWithAnsi: (...args: [string, number]) => {
@@ -22,7 +22,7 @@ vi.mock("@mariozechner/pi-tui", async (importOriginal) => {
 
 // Must import AFTER vi.mock declaration (vitest hoists vi.mock but the
 // dynamic import of the test subject must happen after)
-const { visibleWidth } = await import("@mariozechner/pi-tui");
+const { visibleWidth } = await import("@earendil-works/pi-tui");
 const { ConversationViewer } = await import("../src/ui/conversation-viewer.js");
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -248,7 +248,7 @@ describe("ConversationViewer", () => {
     }
 
     it("mock is intercepting wrapTextWithAnsi", async () => {
-      const { wrapTextWithAnsi } = await import("@mariozechner/pi-tui");
+      const { wrapTextWithAnsi } = await import("@earendil-works/pi-tui");
       wrapOverride = () => ["MOCK_SENTINEL"];
       expect(wrapTextWithAnsi("anything", 10)).toEqual(["MOCK_SENTINEL"]);
       wrapOverride = null;
