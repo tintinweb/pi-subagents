@@ -663,7 +663,8 @@ Guidelines:
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).${scheduleGuideline}`,
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).
+- Use chain to run multiple agents sequentially, passing each step's output to the next via {previous}.${scheduleGuideline}`,
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
@@ -701,6 +702,43 @@ Guidelines:
           description: "Optional agent ID to resume from. Continues from previous context.",
         }),
       ),
+      chain: Type.Optional(
+        Type.Array(
+          Type.Object({
+            subagent_type: Type.String({
+              description: "The type of specialized agent to use for this step.",
+            }),
+            prompt: Type.String({
+              description: "Task prompt. Use {previous} to inject output from the prior step.",
+            }),
+            description: Type.Optional(
+              Type.String({
+                description: "Short description of this step (shown in UI).",
+              })
+            ),
+            model: Type.Optional(
+              Type.String({
+                description: "Optional model override for this step.",
+              })
+            ),
+            thinking: Type.Optional(
+              Type.String({
+                description: "Thinking level override for this step.",
+              })
+            ),
+            max_turns: Type.Optional(
+              Type.Number({
+                description: "Max turns for this step.",
+                minimum: 1,
+              })
+            ),
+          }),
+          {
+            description: "Sequential chain of agents. Each step receives the prior step output via {previous}.",
+            minItems: 2,
+          }
+        )
+      ),
       isolated: Type.Optional(
         Type.Boolean({
           description: "If true, agent gets no extension/MCP tools — only built-in tools.",
@@ -722,6 +760,37 @@ Guidelines:
     // ---- Custom rendering: Claude Code style ----
 
     renderCall(args, theme) {
+      // Chain mode
+      if (args.chain && args.chain.length > 0) {
+        const steps = args.chain as Array<{
+          subagent_type: string;
+          prompt: string;
+          description?: string;
+        }>;
+        let text =
+          "▸ " +
+          theme.fg("toolTitle", theme.bold("chain")) +
+          theme.fg("muted", ` (${steps.length} steps)`);
+        for (let i = 0; i < Math.min(steps.length, 4); i++) {
+          const step = steps[i];
+          const name = getDisplayName(
+            resolveType(step.subagent_type) ?? "general-purpose"
+          );
+          const cleanPrompt = step.prompt.replace(/\{previous\}/g, "").trim();
+          const preview =
+            cleanPrompt.length > 45
+              ? `${cleanPrompt.slice(0, 45)}…`
+              : cleanPrompt;
+          text +=
+            `\n  ${theme.fg("muted", `${i + 1}.`)} ` +
+            `${theme.fg("accent", name)} ` +
+            theme.fg("dim", step.description ?? preview);
+        }
+        if (steps.length > 4) {
+          text += `\n  ${theme.fg("muted", `…and ${steps.length - 4} more steps`)}`;
+        }
+        return new Text(text, 0, 0);
+      }
       const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
       const desc = args.description ?? "";
       return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
@@ -817,6 +886,10 @@ Guidelines:
 
       // Reload custom agents so new .pi/agents/*.md files are picked up without restart
       reloadCustomAgents();
+
+      if (params.chain && params.chain.length > 0) {
+        return await executeChain(params.chain, params, signal, onUpdate, ctx);
+      }
 
       const rawType = params.subagent_type as SubagentType;
       const resolved = resolveType(rawType);
@@ -1117,6 +1190,160 @@ Guidelines:
       );
     },
   }));
+
+  async function executeChain(
+    chain: Array<{
+      subagent_type: string;
+      prompt: string;
+      description?: string;
+      model?: string;
+      thinking?: string;
+      max_turns?: number;
+    }>,
+    topParams: any,
+    signal: AbortSignal | undefined,
+    onUpdate: any,
+    ctx: any
+  ) {
+    let previousOutput = "";
+    const results: Array<{
+      step: number;
+      agent: string;
+      output: string;
+      durationMs: number;
+    }> = [];
+
+    for (let i = 0; i < chain.length; i++) {
+      const step = chain[i];
+      if (signal?.aborted) {
+        return textResult(`Chain stopped at step ${i + 1}: aborted.`);
+      }
+
+      const resolvedStepType =
+        resolveType(step.subagent_type) ?? "general-purpose";
+      const stepDisplayName = getDisplayName(resolvedStepType);
+      const stepPrompt = step.prompt.replace(/\{previous\}/g, previousOutput);
+
+      const customConfig = getAgentConfig(resolvedStepType);
+      const stepParams = {
+        subagent_type: resolvedStepType,
+        description: step.description,
+        model: step.model ?? topParams.model,
+        thinking: step.thinking ?? topParams.thinking,
+        max_turns: step.max_turns ?? topParams.max_turns,
+      };
+      const resolvedConfig = resolveAgentInvocationConfig(
+        customConfig,
+        stepParams
+      );
+
+      let model = ctx.model;
+      if (resolvedConfig.modelInput) {
+        const resolved = resolveModel(
+          resolvedConfig.modelInput,
+          ctx.modelRegistry
+        );
+        if (typeof resolved !== "string") {
+          model = resolved;
+        }
+      }
+
+      const effectiveMaxTurns = normalizeMaxTurns(
+        resolvedConfig.maxTurns ?? getDefaultMaxTurns()
+      );
+
+      const { state: stepState, callbacks: stepCallbacks } =
+        createActivityTracker(effectiveMaxTurns, () => {
+          onUpdate?.({
+            content: [
+              {
+                type: "text",
+                text: `Chain step ${i + 1}/${chain.length}: ${stepState.toolUses} tool uses…`,
+              },
+            ],
+          });
+        });
+
+      let _spinnerFrame = 0;
+      const stepStartedAt = Date.now();
+      const spinnerInterval = setInterval(() => {
+        _spinnerFrame++;
+        onUpdate?.({
+          content: [
+            {
+              type: "text",
+              text: `Chain step ${i + 1}/${chain.length} — ${stepDisplayName}: ${describeActivity(stepState.activeTools, stepState.responseText)}`,
+            },
+          ],
+        });
+      }, 80);
+
+      let record: AgentRecord;
+      try {
+        record = await manager.spawnAndWait(
+          pi,
+          ctx,
+          resolvedStepType,
+          stepPrompt,
+          {
+            description:
+              step.description ?? `Chain step ${i + 1}: ${stepDisplayName}`,
+            model,
+            maxTurns: effectiveMaxTurns,
+            isolated: resolvedConfig.isolated,
+            inheritContext: resolvedConfig.inheritContext,
+            thinkingLevel: resolvedConfig.thinking,
+            signal,
+            ...stepCallbacks,
+          }
+        );
+      } finally {
+        clearInterval(spinnerInterval);
+      }
+
+      const stepDurationMs = (record.completedAt ?? Date.now()) - stepStartedAt;
+
+      if (record.status === "error") {
+        return textResult(
+          `Chain failed at step ${i + 1}/${chain.length} (${stepDisplayName}): ${record.error}\n\n` +
+            (results.length > 0
+              ? `Completed steps:\n${results.map((r) => `  ${r.step}. ${r.agent}: ${r.output.slice(0, 100)}…`).join("\n")}`
+              : "")
+        );
+      }
+
+      if (record.status === "stopped") {
+        return textResult(
+          `Chain stopped at step ${i + 1}/${chain.length} (${stepDisplayName}): agent was stopped.`
+        );
+      }
+
+      if (record.status === "aborted") {
+        return textResult(`Chain aborted at step ${i + 1}/${chain.length}.`);
+      }
+
+      const stepOutput = record.result?.trim() ?? "";
+      previousOutput = stepOutput;
+      results.push({
+        step: i + 1,
+        agent: stepDisplayName,
+        output: stepOutput,
+        durationMs: stepDurationMs,
+      });
+    }
+
+    const totalMs = results.reduce((s, r) => s + r.durationMs, 0);
+    const summary = results
+      .map(
+        (r) =>
+          `Step ${r.step} (${r.agent}) — ${formatMs(r.durationMs)}:\n${r.output.slice(0, 200)}${r.output.length > 200 ? "…" : ""}`
+      )
+      .join("\n\n---\n\n");
+
+    return textResult(
+      `Chain completed in ${formatMs(totalMs)} (${chain.length} steps).\n\n${summary}`
+    );
+  }
 
   // ---- get_subagent_result tool ----
 
