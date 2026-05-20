@@ -94,8 +94,9 @@ export interface AgentRecord {
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
-  /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Whether the agent was spawned in background mode. */
+  isBackground?: boolean;
 }
 
 export interface AgentInvocation {
