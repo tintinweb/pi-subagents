@@ -567,6 +567,15 @@ export default function (pi: ExtensionAPI) {
     widget.onTurnStart();
   });
 
+  // Wire UI context for agents spawned via cross-extension RPC (no main-session tool call)
+  pi.events.on("subagents:started", () => {
+    if (currentCtx) {
+      widget.setUICtx(currentCtx.ui as UICtx);
+      widget.ensureTimer();
+      widget.update();
+    }
+  });
+
   /** Build the full type list text dynamically from the unified registry. */
   const buildTypeListText = () => {
     const defaultNames = getDefaultAgentNames();
