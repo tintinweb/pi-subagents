@@ -125,8 +125,8 @@ export class AgentManager {
       startedAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
-      compactionCount: 0,
       invocation: options.invocation,
+      isBackground: options.isBackground ?? false,
     };
     this.agents.set(id, record);
 
@@ -247,9 +247,9 @@ export class AgentManager {
 
         if (options.isBackground) {
           this.runningBackground--;
-          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-          this.drainQueue();
         }
+        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        this.drainQueue();
         return responseText;
       })
       .catch((err) => {
@@ -278,9 +278,9 @@ export class AgentManager {
 
         if (options.isBackground) {
           this.runningBackground--;
-          this.onComplete?.(record);
-          this.drainQueue();
         }
+        this.onComplete?.(record);
+        this.drainQueue();
         return "";
       });
 

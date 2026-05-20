@@ -389,25 +389,33 @@ export default function (pi: ExtensionAPI) {
 
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
+      // For foreground agents: just update widget (they stream inline)
       agentActivity.delete(record.id);
       widget.markFinished(record.id);
       widget.update();
       return;
     }
 
-    // If this agent is pending batch finalization (debounce window still open),
-    // don't send an individual nudge — finalizeBatch will pick it up retroactively.
-    if (currentBatchAgents.some(a => a.id === record.id)) {
-      widget.update();
-      return;
+    // Only background agents participate in batching and get notifications
+    if (record.isBackground) {
+      // If this agent is pending batch finalization (debounce window still open),
+      // don't send an individual nudge — finalizeBatch will pick it up retroactively.
+      if (currentBatchAgents.some(a => a.id === record.id)) {
+        widget.update();
+        return;
+      }
+
+      const result = groupJoin.onAgentComplete(record);
+      if (result === 'pass') {
+        sendIndividualNudge(record);
+      }
+      // 'held' → do nothing, group will fire later
+      // 'delivered' → group callback already fired
     }
 
-    const result = groupJoin.onAgentComplete(record);
-    if (result === 'pass') {
-      sendIndividualNudge(record);
-    }
-    // 'held' → do nothing, group will fire later
-    // 'delivered' → group callback already fired
+    // Always update widget for ALL agents (foreground and background)
+    agentActivity.delete(record.id);
+    widget.markFinished(record.id);
     widget.update();
   }, undefined, (record) => {
     // Emit started event when agent transitions to running (including from queue)
