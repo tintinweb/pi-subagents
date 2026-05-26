@@ -20,7 +20,7 @@ import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTu
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
-import { readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
+import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -520,8 +520,10 @@ export default function (pi: ExtensionAPI) {
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
   // ---- Scope models configuration ----
-  // When enabled, subagent model choices are validated against enabledModels
-  // from ~/.pi/agent/settings.json. Off by default — not standardised behaviour.
+  // When enabled, subagent model choices are validated against `enabledModels`
+  // in pi's global `~/.pi/agent/settings.json`. Off by default; opt-in via
+  // `/agents → Settings`. See docstring on SubagentsSettings.scopeModels for
+  // the hard-error vs warn-and-proceed policy and its rationale.
   let scopeModelsEnabled = false;
   function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
   function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
@@ -869,31 +871,32 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      // Scope validation: check resolved model against enabledModels from ~/.pi/agent/settings.json
-      // Ref: pi-coding-agent main.js:439-440 — resolveModelScope(enabledModels, registry) → scopedModels
-      // Main agent calls out-of-scope → hard error with list. Config/frontmatter → warn + fallback to parent.
+      // Scope validation: the effective resolved model is checked against the
+      // user's enabledModels list (read in `enabled-models.ts`).
+      //
+      // Design: scopeModels guards against *runtime* LLM choices, not user-level config.
+      //   - Caller-supplied out-of-scope → hard error (the orchestrator made an explicit
+      //     out-of-scope choice; surface it so it picks differently).
+      //   - Frontmatter-pinned or parent-inherited out-of-scope → warn but proceed (the
+      //     user authored/installed this agent or chose the parent's model; trust it).
+      // See SubagentsSettings.scopeModels docstring for the full policy.
       if (isScopeModelsEnabled() && model) {
-        const patterns = readEnabledModels();
-        const allowed = resolveEnabledModels(patterns, ctx.modelRegistry);
-        if (allowed) {
-          const modelKey = `${model.provider}/${model.id}`.toLowerCase();
-          const isInScope = allowed.has(modelKey);  // O(1) — keys stored lowercase
-          if (!isInScope) {
-            if (resolvedConfig.modelFromParams) {
-              const list = [...allowed].sort().map(m => `  ${m}`).join("\n");
-              return textResult(
-                `Model not in scope: "${resolvedConfig.modelInput}".\n\n` +
-                `Allowed models (from enabledModels):\n${list}`,
-              );
-            }
-            // config/frontmatter-specified: warn + fallback to parent model
-            const agentLabel = customConfig?.displayName ?? subagentType;
-            ctx.ui.notify(
-              `Agent "${agentLabel}" model "${resolvedConfig.modelInput}" not in scope — using parent model`,
-              "warning",
+        const allowed = resolveEnabledModels(readEnabledModels(), ctx.modelRegistry);
+        if (allowed && !isModelInScope(model, allowed)) {
+          if (resolvedConfig.modelFromParams) {
+            const list = [...allowed].sort().map(m => `  ${m}`).join("\n");
+            return textResult(
+              `Model not in scope: "${resolvedConfig.modelInput}".\n\n` +
+              `Allowed models (from enabledModels):\n${list}`,
             );
-            model = ctx.model;
           }
+          // Frontmatter-pinned or parent-inherited: warn + proceed.
+          const agentLabel = customConfig?.displayName ?? subagentType;
+          const modelLabel = resolvedConfig.modelInput ?? `${model.provider}/${model.id}`;
+          ctx.ui.notify(
+            `Agent "${agentLabel}" using out-of-scope model "${modelLabel}"`,
+            "warning",
+          );
         }
       }
 

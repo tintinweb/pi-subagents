@@ -1,15 +1,22 @@
 /**
- * Reads enabledModels from ~/.pi/agent/settings.json and resolves
- * exact model strings to concrete model IDs for scope validation.
+ * Reads enabledModels from pi's global settings (`~/.pi/agent/settings.json`)
+ * and resolves entries to concrete `provider/modelId` keys for scope validation.
  *
- * Ref: pi-coding-agent resolves enabledModels at startup via:
- *   main.js:439  modelPatterns = parsed.models ?? settingsManager.getEnabledModels()
- *   main.js:440  scopedModels = resolveModelScope(modelPatterns, modelRegistry)
+ * **Limited subset of upstream's resolveModelScope.** We support exact
+ * `provider/modelId` matching only. Upstream (pi-coding-agent's
+ * `core/model-resolver.ts`) additionally supports glob patterns
+ * (`*sonnet*`, `anthropic/*`), bare model IDs without provider, and
+ * thinking-level suffixes (`provider/*:high`). Those forms are silently
+ * ignored here.
  *
- * pi writes exact "provider/modelId" entries to enabledModels
+ * In practice, pi's `/scoped-models` picker writes exact `provider/modelId`
+ * entries, so the limitation is invisible for users who configure scope
+ * through pi's UI. Hand-edited settings using globs or bare IDs will
+ * produce an empty allowed set (scope check becomes a no-op).
  *
- * Example: enabledModels = ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"]
- *   → resolves to {"anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"}
+ * Example:
+ *   enabledModels = ["anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6"]
+ *   → resolves to { "anthropic/claude-sonnet-4-6", "anthropic/claude-opus-4-6" }
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -39,18 +46,15 @@ export function readEnabledModels(): string[] | undefined {
 /**
  * Resolve enabledModels patterns → Set<"provider/modelId"> (lowercase keys).
  *
- * Matching (mirrors pi-coding-agent resolveModelScope → tryMatchModel):
- *   1. Exact "provider/modelId"  (slash present, case-insensitive)
- *   2. Bare "modelId"            (no slash, exact id match)
+ * Only exact `provider/modelId` patterns are matched (case-insensitive).
+ * Patterns without a slash, with glob characters, or with a `:thinking`
+ * suffix are silently dropped. See module-level docstring for rationale.
  *
+ * Cache: keyed on settings.json mtime+size + JSON.stringify(patterns).
+ * Re-resolves only when the file changes or the patterns argument differs.
  *
- * Cache: keyed on settings.json mtime+size + patterns key. Re-reads only when
- * the file or patterns change.
- *
- * Example: "anthropic/claude-sonnet-4-6"
- *   → provider="anthropic", modelId="claude-sonnet-4-6"
- *
- * Returns undefined when no patterns or no matches (scope check becomes no-op).
+ * Returns undefined when no patterns are provided or no patterns match
+ * (scope check becomes a no-op at the call site).
  */
 
 // Module-level cache — invalidated when settings.json changes or patterns differ.
@@ -104,6 +108,23 @@ export function resolveEnabledModels(
 
 
 /**
+ * True when `model` is in the allowed set. Centralizes the key format
+ * (`provider/id` lowercase) so callers don't have to reproduce it —
+ * both set-building (resolveExact) and lookup go through `modelKey`.
+ */
+export function isModelInScope(
+  model: { provider: string; id: string },
+  allowed: Set<string>,
+): boolean {
+  return allowed.has(modelKey(model));
+}
+
+/** Canonical lowercase `provider/id` key for the allowed set. */
+function modelKey(model: { provider: string; id: string }): string {
+  return `${model.provider}/${model.id}`.toLowerCase();
+}
+
+/**
  * Resolve exact model pattern. Example: "google/gemma-4-31b-it".
  */
 function resolveExact(
@@ -121,7 +142,7 @@ function resolveExact(
     m => m.provider.toLowerCase() === provider && m.id.toLowerCase() === modelId,
   );
   if (exact) {
-    allowed.add(`${exact.provider}/${exact.id}`.toLowerCase());
+    allowed.add(modelKey(exact));
   }
 }
 
