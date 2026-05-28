@@ -141,6 +141,7 @@ const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII. Mirrors the default in src/settings.ts; redeclared here for the call-site fallback when settings.failurePreviewMaxChars is undefined.
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
+/** @internal */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
@@ -193,6 +194,7 @@ function buildDetails(
 }
 
 /** Build notification details for the custom message renderer. */
+/** @internal */
 export function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
 
