@@ -220,98 +220,105 @@ export function buildNotificationDetails(record: AgentRecord, settings: Subagent
   };
 }
 
+/** Render notification header with icon, description, status, and stats. */
+export function subagentNotificationRenderHeader(d: NotificationDetails, theme: any): any {
+  const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
+  const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+  const statusText = isError ? d.status
+    : d.status === "steered" ? "completed (steered)"
+    : "completed";
+
+  // Line 1: icon + agent description + status
+  let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
+
+  // Line 2: stats
+  const parts: string[] = [];
+  if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
+  if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
+  if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
+  if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
+  if (parts.length) {
+    line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
+  }
+
+  return new Text(line, 0, 0);
+}
+
+/** Render notification body with markdown or plain mode. */
+export function subagentNotificationRenderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
+  if (mode === "markdown") {
+    let body = d.resultPreview;
+    if (!expanded) {
+      const lines = body.split("\n");
+      if (lines.length > COLLAPSED_PREVIEW_LINES) {
+        const remaining = lines.length - COLLAPSED_PREVIEW_LINES;
+        body = lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") + `\n… (${remaining} more lines, ctrl+O to expand)`;
+      }
+    }
+    
+    const container = new Container();
+    if (body.trim()) {
+      container.addChild(new Markdown(body, 2, 0, getMarkdownTheme()));
+    }
+    if (d.outputFile) {
+      container.addChild(new Text(theme.fg("muted", `  transcript: ${d.outputFile}`), 0, 0));
+    }
+    return container;
+  } else {
+    // Plain mode - original behavior
+    let bodyText = "";
+    if (expanded) {
+      const lines = d.resultPreview.split("\n").slice(0, PLAIN_MODE_EXPANDED_LINE_CAP);
+      for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
+    } else {
+      const preview = d.resultPreview.split("\n")[0]?.slice(0, PLAIN_MODE_COLLAPSED_CHAR_CAP) ?? "";
+      bodyText = theme.fg("dim", `  ⎿  ${preview}`);
+    }
+
+    if (d.outputFile) {
+      bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
+    }
+
+    return new Text(bodyText, 0, 0);
+  }
+}
+
+/** Main subagent notification renderer. */
+export function subagentNotificationRenderer(message: { details?: NotificationDetails }, options: { expanded: boolean }, theme: any, resultPreviewMode: ResultPreviewMode, resultPreviewExpanded: boolean): any {
+  const d = message.details;
+  if (!d) return undefined;
+
+  // Honor resultPreviewExpanded setting - bypass pi's expanded flag when true
+  const effectiveExpanded = resultPreviewExpanded ? true : options.expanded;
+
+  function renderOne(d: NotificationDetails): any {
+    const header = subagentNotificationRenderHeader(d, theme);
+    const body = subagentNotificationRenderBody(d, effectiveExpanded, resultPreviewMode, theme);
+    const container = new Container();
+    container.addChild(header);
+    container.addChild(body);
+    return container;
+  }
+
+  const all = [d, ...(d.others ?? [])];
+  if (all.length === 1) {
+    return renderOne(all[0]);
+  } else {
+    const container = new Container();
+    for (let i = 0; i < all.length; i++) {
+      if (i > 0) container.addChild(new Spacer());
+      container.addChild(renderOne(all[i]));
+    }
+    return container;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
     "subagent-notification",
     (message, { expanded }, theme) => {
-      const d = message.details;
-      if (!d) return undefined;
-
-      function renderHeader(d: NotificationDetails, theme: any): any {
-        const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
-        const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-        const statusText = isError ? d.status
-          : d.status === "steered" ? "completed (steered)"
-          : "completed";
-
-        // Line 1: icon + agent description + status
-        let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
-
-        // Line 2: stats
-        const parts: string[] = [];
-        if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
-        if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-        if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
-        if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
-        if (parts.length) {
-          line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
-        }
-
-        return new Text(line, 0, 0);
-      }
-
-      function renderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
-        if (mode === "markdown") {
-          let body = d.resultPreview;
-          if (!expanded) {
-            const lines = body.split("\n");
-            if (lines.length > COLLAPSED_PREVIEW_LINES) {
-              const remaining = lines.length - COLLAPSED_PREVIEW_LINES;
-              body = lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") + `\n… (${remaining} more lines, ctrl+O to expand)`;
-            }
-          }
-          
-          const container = new Container();
-          if (body.trim()) {
-            container.addChild(new Markdown(body, 2, 0, getMarkdownTheme()));
-          }
-          if (d.outputFile) {
-            container.addChild(new Text(theme.fg("muted", `  transcript: ${d.outputFile}`), 0, 0));
-          }
-          return container;
-        } else {
-          // Plain mode - original behavior
-          let bodyText = "";
-          if (expanded) {
-            const lines = d.resultPreview.split("\n").slice(0, PLAIN_MODE_EXPANDED_LINE_CAP);
-            for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
-          } else {
-            const preview = d.resultPreview.split("\n")[0]?.slice(0, PLAIN_MODE_COLLAPSED_CHAR_CAP) ?? "";
-            bodyText = theme.fg("dim", `  ⎿  ${preview}`);
-          }
-
-          if (d.outputFile) {
-            bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
-          }
-
-          return new Text(bodyText, 0, 0);
-        }
-      }
-
-      // Honor resultPreviewExpanded setting - bypass pi's expanded flag when true
-      const effectiveExpanded = resultPreviewExpanded ? true : expanded;
-
-      function renderOne(d: NotificationDetails): any {
-        const header = renderHeader(d, theme);
-        const body = renderBody(d, effectiveExpanded, resultPreviewMode, theme);
-        const container = new Container();
-        container.addChild(header);
-        container.addChild(body);
-        return container;
-      }
-
-      const all = [d, ...(d.others ?? [])];
-      if (all.length === 1) {
-        return renderOne(all[0]);
-      } else {
-        const container = new Container();
-        for (let i = 0; i < all.length; i++) {
-          if (i > 0) container.addChild(new Spacer());
-          container.addChild(renderOne(all[i]));
-        }
-        return container;
-      }
+      return subagentNotificationRenderer(message, { expanded }, theme, resultPreviewMode, resultPreviewExpanded);
     }
   );
 

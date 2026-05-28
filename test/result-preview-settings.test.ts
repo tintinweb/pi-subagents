@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadSettings, saveSettings } from "../src/settings.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { loadSettings, saveSettings, applySettings, type SettingsAppliers } from "../src/settings.js";
 
 describe("result preview settings sanitizer + persistence", () => {
   let globalDir: string;
@@ -151,6 +151,32 @@ describe("result preview settings sanitizer + persistence", () => {
       expect(merged.resultPreviewMode).toBe("markdown");
       expect(merged.resultPreviewExpanded).toBe(false);
       expect(merged.failurePreviewMaxChars).toBe(2000);
+    });
+  });
+
+  describe("applySettings wiring", () => {
+    it("applySettings calls correct setter functions", () => {
+      const mockAppliers: SettingsAppliers = {
+        setMaxConcurrent: vi.fn(),
+        setDefaultMaxTurns: vi.fn(),
+        setGraceTurns: vi.fn(),
+        setDefaultJoinMode: vi.fn(),
+        setSchedulingEnabled: vi.fn(),
+        setScopeModels: vi.fn(),
+        setResultPreviewMode: vi.fn(),
+        setResultPreviewExpanded: vi.fn(),
+        setFailurePreviewMaxChars: vi.fn(),
+      };
+      
+      applySettings({
+        resultPreviewMode: "plain",
+        resultPreviewExpanded: false,
+        failurePreviewMaxChars: 1000,
+      }, mockAppliers);
+      
+      expect(mockAppliers.setResultPreviewMode).toHaveBeenCalledWith("plain");
+      expect(mockAppliers.setResultPreviewExpanded).toHaveBeenCalledWith(false);
+      expect(mockAppliers.setFailurePreviewMaxChars).toHaveBeenCalledWith(1000);
     });
   });
 });

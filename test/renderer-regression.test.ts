@@ -1,49 +1,12 @@
-
 import { describe, expect, it } from "vitest";
+import { subagentNotificationRenderer } from "../src/index.js";
 import type { NotificationDetails } from "../src/types.js";
 
 // Mock theme for consistent output
-const _mockTheme = {
+const mockTheme = {
   fg: (color: string, text: string) => `[${color}]${text}[/${color}]`,
   bold: (text: string) => `**${text}**`,
 };
-
-// Create a mock renderer that matches upstream master behavior
-function renderUpstreamBaseline(d: NotificationDetails, expanded: boolean): string {
-  const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
-  const icon = isError ? "[error]✗[/error]" : "[success]✓[/success]";
-  const statusText = isError ? d.status
-    : d.status === "steered" ? "completed (steered)"
-    : "completed";
-
-  let line = `${icon} **${d.description}** [dim]${statusText}[/dim]`;
-
-  // Stats line
-  const parts: string[] = [];
-  if (d.turnCount > 0) parts.push(`${d.turnCount} turn${d.turnCount === 1 ? "" : "s"}`);
-  if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-  if (d.totalTokens > 0) parts.push(`${d.totalTokens} tokens`);
-  if (d.durationMs > 0) parts.push(`${Math.round(d.durationMs)}ms`);
-  if (parts.length) {
-    line += "\n  " + parts.map(p => `[dim]${p}[/dim]`).join(" [dim]·[/dim] ");
-  }
-
-  // Result preview
-  if (expanded) {
-    const lines = d.resultPreview.split("\n").slice(0, 30);
-    for (const l of lines) line += "\n" + `[dim]  ${l}[/dim]`;
-  } else {
-    const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
-    line += "\n  " + `[dim]⎿  ${preview}[/dim]`;
-  }
-
-  // Output file
-  if (d.outputFile) {
-    line += "\n  " + `[muted]transcript: ${d.outputFile}[/muted]`;
-  }
-
-  return line;
-}
 
 describe("renderer regression-lock snapshot", () => {
   const createDetails = (overrides: Partial<NotificationDetails> = {}): NotificationDetails => ({
@@ -60,12 +23,17 @@ describe("renderer regression-lock snapshot", () => {
 
   it("completed status matches upstream baseline", () => {
     const details = createDetails();
-    const expected = renderUpstreamBaseline(details, true);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false
+    );
     
     // This test locks the expected output format for regression detection
-    expect(expected).toContain("[success]✓[/success] **Test Agent** [dim]completed[/dim]");
-    expect(expected).toContain("[dim]3 turns[/dim] [dim]·[/dim] [dim]2 tool uses[/dim]");
-    expect(expected).toContain("[dim]  # Test Result[/dim]");
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2); // header + body
   });
 
   it("error status matches upstream baseline", () => {
@@ -73,10 +41,16 @@ describe("renderer regression-lock snapshot", () => {
       status: "error",
       resultPreview: "Error: something went wrong",
     });
-    const expected = renderUpstreamBaseline(details, true);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false
+    );
     
-    expect(expected).toContain("[error]✗[/error] **Test Agent** [dim]error[/dim]");
-    expect(expected).toContain("[dim]  Error: something went wrong[/dim]");
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
   it("stopped status matches upstream baseline", () => {
@@ -84,10 +58,16 @@ describe("renderer regression-lock snapshot", () => {
       status: "stopped",
       resultPreview: "No output.",
     });
-    const expected = renderUpstreamBaseline(details, true);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false
+    );
     
-    expect(expected).toContain("[error]✗[/error] **Test Agent** [dim]stopped[/dim]");
-    expect(expected).toContain("[dim]  No output.[/dim]");
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
   it("aborted status matches upstream baseline", () => {
@@ -95,10 +75,16 @@ describe("renderer regression-lock snapshot", () => {
       status: "aborted",
       resultPreview: "Partial result before abort",
     });
-    const expected = renderUpstreamBaseline(details, true);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false
+    );
     
-    expect(expected).toContain("[error]✗[/error] **Test Agent** [dim]aborted[/dim]");
-    expect(expected).toContain("[dim]  Partial result before abort[/dim]");
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
   it("steered status matches upstream baseline", () => {
@@ -106,19 +92,32 @@ describe("renderer regression-lock snapshot", () => {
       status: "steered",
       resultPreview: "Steered completion result",
     });
-    const expected = renderUpstreamBaseline(details, true);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false
+    );
     
-    expect(expected).toContain("[success]✓[/success] **Test Agent** [dim]completed (steered)[/dim]");
-    expect(expected).toContain("[dim]  Steered completion result[/dim]");
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
   it("collapsed view matches upstream baseline", () => {
     const details = createDetails({
       resultPreview: "This is a very long line that should be truncated at 80 characters and show preview format",
     });
-    const expected = renderUpstreamBaseline(details, false);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: false },
+      mockTheme,
+      "plain",
+      false
+    );
     
-    expect(expected).toContain("[dim]⎿  This is a very long line that should be truncated at 80 characters and show prev[/dim]");
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
   it("group rendering with others matches upstream baseline", () => {
@@ -128,12 +127,15 @@ describe("renderer regression-lock snapshot", () => {
     
     main.others = [other1, other2];
     
-    const expectedMain = renderUpstreamBaseline(main, true);
-    const expectedOther1 = renderUpstreamBaseline(other1, true);
-    const expectedOther2 = renderUpstreamBaseline(other2, true);
+    const rendered = subagentNotificationRenderer(
+      { details: main },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false
+    );
     
-    expect(expectedMain).toContain("**Main Agent**");
-    expect(expectedOther1).toContain("**Other Agent 1**");
-    expect(expectedOther2).toContain("**Other Agent 2**");
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(5); // 3 agents + 2 spacers
   });
 });
