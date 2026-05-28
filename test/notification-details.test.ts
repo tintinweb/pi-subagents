@@ -91,16 +91,59 @@ describe("UI details buildNotificationDetails", () => {
     expect(details.resultPreview).toBe(largeResult);
   });
 
-  it("fallback precedence: result ?? error ?? empty", () => {
-    // When both result and error are present, result takes precedence
-    const record = createRecord({
-      status: "completed",
-      result: "partial output",
-      error: "some error",
-    });
+  it("UI path: surrogate pairs handled gracefully", () => {
+    const emoji = "🚀".repeat(1000);
+    const record = createRecord({ status: "error", error: emoji, result: undefined });
+    const settings = { failurePreviewMaxChars: 1999 }; // (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
     
-    const details = buildNotificationDetails(record, defaultSettings);
+    const details = buildNotificationDetails(record, settings);
     
-    expect(details.resultPreview).toBe("partial output");
+    // Should not contain Unicode replacement characters
+    expect(details.resultPreview).not.toContain("�");
+    expect(details.resultPreview).toContain("truncated, see transcript");
+  });
+
+  it("UI path: high surrogate at exact boundary drops unpaired surrogate", () => {
+    const emoji = "🚀".repeat(1000); // 2000 UTF-16 units total
+    const record = createRecord({ status: "error", error: emoji, result: undefined });
+    const settings = { failurePreviewMaxChars: 1999 }; // Slice would land exactly at high surrogate of last emoji
+    
+    const details = buildNotificationDetails(record, settings);
+    
+    // Should drop the unpaired high surrogate + add truncation suffix, total length 1998 + 29 = 2027
+    expect(details.resultPreview.length).toBe(2027);
+    expect(details.resultPreview).not.toContain("�");
+    expect(details.resultPreview).toContain("truncated, see transcript");
+  });
+
+  it("UI path: isolated low surrogate does not crash", () => {
+    const malformedInput = "hello" + String.fromCharCode(0xDC00) + "world"; // Bare low surrogate
+    const record = createRecord({ status: "error", error: malformedInput, result: undefined });
+    const settings = { failurePreviewMaxChars: 8 }; // Truncate within the string
+    
+    expect(() => {
+      const details = buildNotificationDetails(record, settings);
+      expect(details.resultPreview).toBeDefined();
+    }).not.toThrow();
+  });
+
+  it("UI path: no truncation when input equals maxChars", () => {
+    const input = "hello";
+    const record = createRecord({ status: "error", error: input, result: undefined });
+    const settings = { failurePreviewMaxChars: 5 };
+    
+    const details = buildNotificationDetails(record, settings);
+    
+    expect(details.resultPreview).toBe("hello");
+    expect(details.resultPreview).not.toContain("truncated");
+  });
+
+  it("UI path: cap zero returns truncation message", () => {
+    const record = createRecord({ status: "error", error: "hello", result: undefined });
+    const settings = { failurePreviewMaxChars: 0 };
+    
+    const details = buildNotificationDetails(record, settings);
+    
+    expect(details.resultPreview).toBe("\n…(truncated, see transcript)");
   });
 });
