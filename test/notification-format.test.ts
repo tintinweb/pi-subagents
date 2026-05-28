@@ -18,7 +18,7 @@ describe("notification format edge cases", () => {
   it("failure truncation handles surrogate pairs gracefully", () => {
     const emoji = "🚀".repeat(1000); // Each emoji is 2 UTF-16 code units
     const record = createRecord({ status: "error", error: emoji, result: undefined });
-    const settings = { failurePreviewMaxChars: 1999 }; // Odd boundary that could split surrogate pair
+    const settings = { failurePreviewMaxChars: 1999 }; // (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
     
     const xml = formatTaskNotification(record, settings);
     
@@ -27,16 +27,110 @@ describe("notification format edge cases", () => {
     expect(xml).toContain("truncated, see transcript");
   });
 
+  it("high surrogate at exact boundary drops unpaired surrogate", () => {
+    const emoji = "🚀".repeat(1000); // 2000 UTF-16 units total
+    const record = createRecord({ status: "error", error: emoji, result: undefined });
+    const settings = { failurePreviewMaxChars: 1999 }; // Slice would land exactly at high surrogate of last emoji
+    
+    const xml = formatTaskNotification(record, settings);
+    const resultMatch = xml.match(/<result>(.*?)<\/result>/s);
+    const resultContent = resultMatch?.[1] || "";
+    
+    // Should drop the unpaired high surrogate + add truncation suffix, total length 1998 + 29 = 2027
+    expect(resultContent.length).toBe(2027);
+    expect(resultContent).not.toContain("�");
+    expect(resultContent).toContain("truncated, see transcript");
+  });
+
+  it("isolated low surrogate does not crash", () => {
+    const malformedInput = "hello" + String.fromCharCode(0xDC00) + "world"; // Bare low surrogate
+    const record = createRecord({ status: "error", error: malformedInput, result: undefined });
+    const settings = { failurePreviewMaxChars: 8 }; // Truncate within the string
+    
+    expect(() => {
+      const xml = formatTaskNotification(record, settings);
+      expect(xml).toBeDefined();
+    }).not.toThrow();
+  });
+
+  it("no truncation when input equals maxChars", () => {
+    const input = "hello";
+    const record = createRecord({ status: "error", error: input, result: undefined });
+    const settings = { failurePreviewMaxChars: 5 };
+    
+    const xml = formatTaskNotification(record, settings);
+    const resultMatch = xml.match(/<result>(.*?)<\/result>/s);
+    const resultContent = resultMatch?.[1] || "";
+    
+    expect(resultContent).toBe("hello");
+    expect(resultContent).not.toContain("truncated");
+  });
+
+  it("cap zero returns empty string", () => {
+    const record = createRecord({ status: "error", error: "hello", result: undefined });
+    const settings = { failurePreviewMaxChars: 0 };
+    
+    const xml = formatTaskNotification(record, settings);
+    const resultMatch = xml.match(/<result>(.*?)<\/result>/s);
+    const resultContent = resultMatch?.[1] || "";
+    
+    expect(resultContent).toBe("\n…(truncated, see transcript)");
+  });
+
   it("buildNotificationDetails handles surrogate pairs in UI path", () => {
     const emoji = "🚀".repeat(1000);
     const record = createRecord({ status: "error", error: emoji, result: undefined });
-    const settings = { failurePreviewMaxChars: 1999 };
+    const settings = { failurePreviewMaxChars: 1999 }; // (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
     
     const details = buildNotificationDetails(record, settings);
     
     // Should not contain Unicode replacement characters
     expect(details.resultPreview).not.toContain("�");
     expect(details.resultPreview).toContain("truncated, see transcript");
+  });
+
+  it("UI path: high surrogate at exact boundary drops unpaired surrogate", () => {
+    const emoji = "🚀".repeat(1000); // 2000 UTF-16 units total
+    const record = createRecord({ status: "error", error: emoji, result: undefined });
+    const settings = { failurePreviewMaxChars: 1999 }; // Slice would land exactly at high surrogate of last emoji
+    
+    const details = buildNotificationDetails(record, settings);
+    
+    // Should drop the unpaired high surrogate + add truncation suffix, total length 1998 + 29 = 2027
+    expect(details.resultPreview.length).toBe(2027);
+    expect(details.resultPreview).not.toContain("�");
+    expect(details.resultPreview).toContain("truncated, see transcript");
+  });
+
+  it("UI path: isolated low surrogate does not crash", () => {
+    const malformedInput = "hello" + String.fromCharCode(0xDC00) + "world"; // Bare low surrogate
+    const record = createRecord({ status: "error", error: malformedInput, result: undefined });
+    const settings = { failurePreviewMaxChars: 8 }; // Truncate within the string
+    
+    expect(() => {
+      const details = buildNotificationDetails(record, settings);
+      expect(details.resultPreview).toBeDefined();
+    }).not.toThrow();
+  });
+
+  it("UI path: no truncation when input equals maxChars", () => {
+    const input = "hello";
+    const record = createRecord({ status: "error", error: input, result: undefined });
+    const settings = { failurePreviewMaxChars: 5 };
+    
+    const details = buildNotificationDetails(record, settings);
+    
+    expect(details.resultPreview).toBe("hello");
+    expect(details.resultPreview).not.toContain("truncated");
+  });
+
+  it("UI path: cap zero returns truncation message", () => {
+    const record = createRecord({ status: "error", error: "hello", result: undefined });
+    const settings = { failurePreviewMaxChars: 0 };
+    
+    const details = buildNotificationDetails(record, settings);
+    
+    expect(details.resultPreview).toBe("\n…(truncated, see transcript)");
   });
 
   it("empty body renders sensibly", () => {
