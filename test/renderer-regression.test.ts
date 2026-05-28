@@ -68,27 +68,52 @@ describe("renderer regression-lock snapshot", () => {
     `);
   });
 
-  it("group rendering with others produces consistent output", () => {
-    const main = createDetails({ description: "Main Agent", resultPreview: "Main result" });
-    const other1 = createDetails({ description: "Other Agent 1", id: "test-2", resultPreview: "Other 1 result" });
-    const other2 = createDetails({ description: "Other Agent 2", id: "test-3", resultPreview: "Other 2 result" });
-    
-    main.others = [other1, other2];
-    
-    const rendered = subagentNotificationRenderer(
-      { details: main },
-      { expanded: true },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    const output = extractRenderedText(rendered);
-    expect(output).toMatchInlineSnapshot(`
+  it("snapshot: group rendering with d.others populated", () => {
+    // 2 agents: completed + completed
+    const completedCompleted = createDetails({
+      description: "Main Agent",
+      resultPreview: "Main result",
+      others: [
+        { id: "agent-2", description: "Second Agent", status: "completed" as const, toolUses: 1, turnCount: 2, totalTokens: 100, durationMs: 3000, resultPreview: "Second result" }
+      ]
+    });
+    const rendered1 = subagentNotificationRenderer({ details: completedCompleted }, { expanded: true }, mockTheme, "plain", false);
+    expect(extractRenderedText(rendered1)).toMatchInlineSnapshot(`
       "[success]✓[/success] **Main Agent** [dim]completed[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Other Agent 1** [dim]completed[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Other 1 result[/dim][success]✓[/success] **Other Agent 2** [dim]completed[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Other 2 result[/dim]"
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Second Agent** [dim]completed[/dim]
+        [dim]⟳2[/dim] [dim]·[/dim] [dim]1 tool use[/dim] [dim]·[/dim] [dim]100 token[/dim] [dim]·[/dim] [dim]3.0s[/dim][dim]  Second result[/dim]"
+    `);
+
+    // 2 agents: completed + error (mixed)
+    const completedError = createDetails({
+      description: "Main Agent",
+      resultPreview: "Main result",
+      others: [
+        { id: "agent-2", description: "Failed Agent", status: "error" as const, toolUses: 0, turnCount: 1, totalTokens: 50, durationMs: 1000, resultPreview: "Error occurred" }
+      ]
+    });
+    const rendered2 = subagentNotificationRenderer({ details: completedError }, { expanded: true }, mockTheme, "plain", false);
+    expect(extractRenderedText(rendered2)).toMatchInlineSnapshot(`
+      "[success]✓[/success] **Main Agent** [dim]completed[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][error]✗[/error] **Failed Agent** [dim]error[/dim]
+        [dim]⟳1[/dim] [dim]·[/dim] [dim]50 token[/dim] [dim]·[/dim] [dim]1.0s[/dim][dim]  Error occurred[/dim]"
+    `);
+
+    // 3 agents: completed + steered + aborted (all success-ish)
+    const mixedSuccess = createDetails({
+      description: "Main Agent",
+      resultPreview: "Main result",
+      others: [
+        { id: "agent-2", description: "Steered Agent", status: "steered" as const, toolUses: 3, turnCount: 4, totalTokens: 200, durationMs: 6000, resultPreview: "Steered result" },
+        { id: "agent-3", description: "Aborted Agent", status: "aborted" as const, toolUses: 1, turnCount: 2, totalTokens: 75, durationMs: 2000, resultPreview: "Partial result" }
+      ]
+    });
+    const rendered3 = subagentNotificationRenderer({ details: mixedSuccess }, { expanded: true }, mockTheme, "plain", false);
+    expect(extractRenderedText(rendered3)).toMatchInlineSnapshot(`
+      "[success]✓[/success] **Main Agent** [dim]completed[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Steered Agent** [dim]completed (steered)[/dim]
+        [dim]⟳4[/dim] [dim]·[/dim] [dim]3 tool uses[/dim] [dim]·[/dim] [dim]200 token[/dim] [dim]·[/dim] [dim]6.0s[/dim][dim]  Steered result[/dim][error]✗[/error] **Aborted Agent** [dim]aborted[/dim]
+        [dim]⟳2[/dim] [dim]·[/dim] [dim]1 tool use[/dim] [dim]·[/dim] [dim]75 token[/dim] [dim]·[/dim] [dim]2.0s[/dim][dim]  Partial result[/dim]"
     `);
   });
 
