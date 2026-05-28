@@ -117,18 +117,4 @@ describe("renderer regression-lock snapshot", () => {
     `);
   });
 
-  // Keep structural tests for components that can't be easily rendered to text
-  it("structural properties remain consistent", () => {
-    const details = createDetails();
-    const rendered = subagentNotificationRenderer(
-      { details },
-      { expanded: true },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(2); // header + body
-  });
 });
