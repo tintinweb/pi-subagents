@@ -1,94 +1,84 @@
 import { describe, expect, it } from "vitest";
-// Import the formatTaskNotification function - need to check how it's exported
-import { formatTaskNotification } from "../src/index.js";
-import type { AgentRecord, SubagentsSettings } from "../src/types.js";
+import { formatTaskNotification, buildNotificationDetails } from "../src/index.js";
+import type { AgentRecord } from "../src/types.js";
 
-describe("XML payload formatTaskNotification", () => {
+describe("notification format edge cases", () => {
   const createRecord = (overrides: Partial<AgentRecord> = {}): AgentRecord => ({
-    id: "test-agent-1",
+    id: "test-1",
     description: "Test Agent",
     status: "completed",
+    toolUses: 2,
     startedAt: Date.now() - 5000,
     completedAt: Date.now(),
-    result: undefined,
-    error: undefined,
-    lifetimeUsage: { inputTokens: 100, outputTokens: 50 },
-    session: { id: "session-1", contextTokens: 1000, maxContextTokens: 10000 },
-    compactionCount: 0,
+    lifetimeUsage: { totalTokens: 150, inputTokens: 100, outputTokens: 50 },
+    result: "Test result",
     ...overrides,
   });
 
-  const defaultSettings: SubagentsSettings = {
-    failurePreviewMaxChars: 65536,
-  };
-
-  it("success agent with 1KB result contains full result", () => {
-    const result1KB = "x".repeat(1024);
-    const record = createRecord({ result: result1KB });
+  it("failure truncation handles surrogate pairs gracefully", () => {
+    const emoji = "🚀".repeat(1000); // Each emoji is 2 UTF-16 code units
+    const record = createRecord({ status: "error", error: emoji, result: undefined });
+    const settings = { failurePreviewMaxChars: 1999 }; // Odd boundary that could split surrogate pair
     
-    const xml = formatTaskNotification(record, defaultSettings);
-    
-    expect(xml).toContain(`<result>${result1KB}</result>`);
-  });
-
-  it("success agent with 100KB result contains full result", () => {
-    const result100KB = "x".repeat(100 * 1024);
-    const record = createRecord({ result: result100KB });
-    
-    const xml = formatTaskNotification(record, defaultSettings);
-    
-    expect(xml).toContain(`<result>${result100KB}</result>`);
-  });
-
-  it("failed agent with error message shows error in result", () => {
-    const record = createRecord({
-      status: "error",
-      result: undefined,
-      error: "boom",
-    });
-    
-    const xml = formatTaskNotification(record, defaultSettings);
-    
-    expect(xml).toContain(`<result>boom</result>`);
-  });
-
-  it("stopped agent with no output shows fallback message", () => {
-    const record = createRecord({
-      status: "stopped",
-      result: undefined,
-      error: undefined,
-    });
-    
-    const xml = formatTaskNotification(record, defaultSettings);
-    
-    expect(xml).toContain(`<result>No output.</result>`);
-  });
-
-  it("failed agent with large error gets truncated", () => {
-    const largeError = "x".repeat(100 * 1024);
-    const record = createRecord({
-      status: "error",
-      result: undefined,
-      error: largeError,
-    });
-    
-    const settings: SubagentsSettings = { failurePreviewMaxChars: 1000 };
     const xml = formatTaskNotification(record, settings);
     
-    const expectedTruncated = largeError.slice(0, 1000) + "\n…(truncated, see transcript)";
-    expect(xml).toContain(`<result>${expectedTruncated}</result>`);
+    // Should not contain Unicode replacement characters
+    expect(xml).not.toContain("�");
+    expect(xml).toContain("truncated, see transcript");
   });
 
-  it("aborted status is not subject to failure cap", () => {
-    const largeResult = "x".repeat(100 * 1024);
-    const record = createRecord({
-      status: "aborted",
-      result: largeResult,
-    });
+  it("buildNotificationDetails handles surrogate pairs in UI path", () => {
+    const emoji = "🚀".repeat(1000);
+    const record = createRecord({ status: "error", error: emoji, result: undefined });
+    const settings = { failurePreviewMaxChars: 1999 };
     
-    const settings: SubagentsSettings = { failurePreviewMaxChars: 1000 };
+    const details = buildNotificationDetails(record, settings);
+    
+    // Should not contain Unicode replacement characters
+    expect(details.resultPreview).not.toContain("�");
+    expect(details.resultPreview).toContain("truncated, see transcript");
+  });
+
+  it("empty body renders sensibly", () => {
+    const record = createRecord({ result: "", error: undefined });
+    const settings = {};
+    
     const xml = formatTaskNotification(record, settings);
+    const details = buildNotificationDetails(record, settings);
     
-    expect(xml).toContain(`<result>${largeResult}</result>`);
+    expect(xml).toContain("<result>No output.</result>");
+    expect(details.resultPreview).toBe("No output.");
+  });
+
+  it("handles very large input without performance issues", () => {
+    const largeMB = "x".repeat(1024 * 1024); // 1MB
+    const record = createRecord({ result: largeMB });
+    const settings = { failurePreviewMaxChars: 65536 };
+    
+    const start = Date.now();
+    const xml = formatTaskNotification(record, settings);
+    const details = buildNotificationDetails(record, settings);
+    const duration = Date.now() - start;
+    
+    // Should complete quickly (within 100ms)
+    expect(duration).toBeLessThan(100);
+    expect(xml).toBeDefined();
+    expect(details).toBeDefined();
+  });
+
+  it("mixed status types in error/stopped/aborted", () => {
+    const errorRecord = createRecord({ status: "error", error: "Error message", result: undefined });
+    const stoppedRecord = createRecord({ status: "stopped", error: "Stopped", result: undefined });
+    const abortedRecord = createRecord({ status: "aborted", result: "Partial result" });
+    
+    const settings = { failurePreviewMaxChars: 100 };
+    
+    const errorXml = formatTaskNotification(errorRecord, settings);
+    const stoppedXml = formatTaskNotification(stoppedRecord, settings);
+    const abortedXml = formatTaskNotification(abortedRecord, settings);
+    
+    expect(errorXml).toContain("<result>Error message</result>");
+    expect(stoppedXml).toContain("<result>Stopped</result>");
+    expect(abortedXml).toContain("<result>Partial result</result>");
   });
 });

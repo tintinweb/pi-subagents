@@ -1,77 +1,13 @@
 import { Container, Markdown, Text } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
+import { subagentNotificationRenderBody, subagentNotificationRenderHeader, subagentNotificationRenderer } from "../src/index.js";
 import type { NotificationDetails, ResultPreviewMode } from "../src/types.js";
 
-// Mock theme and getMarkdownTheme
+// Mock theme
 const mockTheme = {
   fg: (color: string, text: string) => `[${color}]${text}[/${color}]`,
   bold: (text: string) => `**${text}**`,
 };
-
-// Mock getMarkdownTheme
-const mockGetMarkdownTheme = () => mockTheme;
-
-// Mock the renderer functions based on the current implementation
-function renderHeader(d: NotificationDetails, theme: any): Text {
-  const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
-  const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-  const statusText = isError ? d.status
-    : d.status === "steered" ? "completed (steered)"
-    : "completed";
-
-  let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
-
-  const parts: string[] = [];
-  if (d.turnCount > 0) parts.push(`${d.turnCount} turn${d.turnCount === 1 ? "" : "s"}`);
-  if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-  if (d.totalTokens > 0) parts.push(`${d.totalTokens} tokens`);
-  if (d.durationMs > 0) parts.push(`${Math.round(d.durationMs)}ms`);
-  if (parts.length) {
-    line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
-  }
-
-  return new Text(line, 0, 0);
-}
-
-function renderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): Container | Text {
-  const COLLAPSED_PREVIEW_LINES = 10;
-  
-  if (mode === "markdown") {
-    let body = d.resultPreview;
-    if (!expanded) {
-      const lines = body.split("\n");
-      if (lines.length > COLLAPSED_PREVIEW_LINES) {
-        const remaining = lines.length - COLLAPSED_PREVIEW_LINES;
-        body = lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") + `\n… (${remaining} more lines, ctrl+O to expand)`;
-      }
-    }
-    
-    const container = new Container();
-    if (body.trim()) {
-      container.addChild(new Markdown(body, 2, 0, mockGetMarkdownTheme()));
-    }
-    if (d.outputFile) {
-      container.addChild(new Text(theme.fg("muted", `  transcript: ${d.outputFile}`), 0, 0));
-    }
-    return container;
-  } else {
-    // Plain mode - original behavior
-    let bodyText = "";
-    if (expanded) {
-      const lines = d.resultPreview.split("\n").slice(0, 30);
-      for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
-    } else {
-      const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
-      bodyText = theme.fg("dim", `  ⎿  ${preview}`);
-    }
-
-    if (d.outputFile) {
-      bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
-    }
-
-    return new Text(bodyText, 0, 0);
-  }
-}
 
 describe("markdown rendering branch", () => {
   const createDetails = (overrides: Partial<NotificationDetails> = {}): NotificationDetails => ({
@@ -88,7 +24,7 @@ describe("markdown rendering branch", () => {
 
   it("markdown mode + expanded produces Markdown component", () => {
     const details = createDetails();
-    const body = renderBody(details, true, "markdown", mockTheme);
+    const body = subagentNotificationRenderBody(details, true, "markdown", mockTheme);
     
     expect(body).toBeInstanceOf(Container);
     const container = body as Container;
@@ -100,7 +36,7 @@ describe("markdown rendering branch", () => {
     const fiftyLines = Array.from({ length: 50 }, (_, i) => `Line ${i + 1}`).join("\n");
     const details = createDetails({ resultPreview: fiftyLines });
     
-    const body = renderBody(details, false, "markdown", mockTheme);
+    const body = subagentNotificationRenderBody(details, false, "markdown", mockTheme);
     const container = body as Container;
     const markdown = container.children[0] as Markdown;
     
@@ -110,7 +46,7 @@ describe("markdown rendering branch", () => {
 
   it("plain mode expanded produces byte-equivalent to baseline", () => {
     const details = createDetails();
-    const body = renderBody(details, true, "plain", mockTheme);
+    const body = subagentNotificationRenderBody(details, true, "plain", mockTheme);
     
     expect(body).toBeInstanceOf(Text);
     const text = body as Text;
@@ -122,7 +58,7 @@ describe("markdown rendering branch", () => {
     const details = createDetails({
       resultPreview: "This is a long line that should be truncated at 80 characters for preview",
     });
-    const body = renderBody(details, false, "plain", mockTheme);
+    const body = subagentNotificationRenderBody(details, false, "plain", mockTheme);
     
     expect(body).toBeInstanceOf(Text);
     const text = body as Text;
@@ -131,7 +67,7 @@ describe("markdown rendering branch", () => {
 
   it("empty body + markdown mode renders sensibly", () => {
     const details = createDetails({ resultPreview: "" });
-    const body = renderBody(details, true, "markdown", mockTheme);
+    const body = subagentNotificationRenderBody(details, true, "markdown", mockTheme);
     
     expect(body).toBeInstanceOf(Container);
     const container = body as Container;
@@ -146,20 +82,53 @@ describe("markdown rendering branch", () => {
     
     main.others = [other1, other2];
     
-    // Simulate group rendering logic
-    const all = [main, ...(main.others ?? [])];
-    const rendered = all.map(d => {
-      const header = renderHeader(d, mockTheme);
-      const body = renderBody(d, true, "markdown", mockTheme);
-      const container = new Container();
-      container.addChild(header);
-      container.addChild(body);
-      return container;
-    });
+    const rendered = subagentNotificationRenderer(
+      { details: main },
+      { expanded: true },
+      mockTheme,
+      "markdown",
+      false
+    );
     
-    expect(rendered).toHaveLength(3);
-    expect(rendered[0]).toBeInstanceOf(Container);
-    expect(rendered[1]).toBeInstanceOf(Container);
-    expect(rendered[2]).toBeInstanceOf(Container);
+    expect(rendered).toBeInstanceOf(Container);
+    expect(rendered.children).toHaveLength(5); // 3 agents + 2 spacers
+  });
+
+  it("collapsed markdown with code fence cut mid-block renders gracefully", () => {
+    const lines = ["# Header", "```typescript", "function foo() {", "  return 42;", "}", "```"];
+    const fifteenLines = [...lines, ...Array(9).fill("more content")];
+    const details = createDetails({ resultPreview: fifteenLines.join("\n") });
+    
+    const body = subagentNotificationRenderBody(details, false, "markdown", mockTheme);
+    
+    // Should not crash, markdown component should handle partial fence gracefully
+    expect(body).toBeInstanceOf(Container);
+  });
+
+  it("mixed success/failure in d.others renders correctly", () => {
+    const main = createDetails({ status: "completed" });
+    const failed = createDetails({ status: "error", id: "test-2", resultPreview: "Error occurred" });
+    const stopped = createDetails({ status: "stopped", id: "test-3", resultPreview: "No output." });
+    main.others = [failed, stopped];
+    
+    const rendered = subagentNotificationRenderer(
+      { details: main },
+      { expanded: true },
+      mockTheme,
+      "markdown",
+      false
+    );
+    
+    expect(rendered).toBeInstanceOf(Container);
+    expect(rendered.children).toHaveLength(5); // 3 agents + 2 spacers
+    
+    // Verify each renders appropriately for its status
+    const mainContainer = rendered.children[0] as Container;
+    const failedContainer = rendered.children[2] as Container;
+    const stoppedContainer = rendered.children[4] as Container;
+    
+    expect(mainContainer).toBeInstanceOf(Container);
+    expect(failedContainer).toBeInstanceOf(Container);
+    expect(stoppedContainer).toBeInstanceOf(Container);
   });
 });

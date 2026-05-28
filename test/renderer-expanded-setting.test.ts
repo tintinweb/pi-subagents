@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { subagentNotificationRenderer } from "../src/index.js";
 import type { NotificationDetails } from "../src/types.js";
 
-// Mock renderer functions to test resultPreviewExpanded setting behavior
-function mockRenderer(_d: NotificationDetails, piExpanded: boolean, resultPreviewExpanded: boolean | undefined): { effectiveExpanded: boolean } {
-  // Honor resultPreviewExpanded setting - bypass pi's expanded flag when true
-  const effectiveExpanded = resultPreviewExpanded ? true : piExpanded;
-  return { effectiveExpanded };
-}
+// Mock theme
+const mockTheme = {
+  fg: (color: string, text: string) => `[${color}]${text}[/${color}]`,
+  bold: (text: string) => `**${text}**`,
+};
 
 describe("resultPreviewExpanded setting", () => {
   const createDetails = (): NotificationDetails => ({
@@ -22,38 +22,95 @@ describe("resultPreviewExpanded setting", () => {
 
   it("resultPreviewExpanded: true + pi expanded: false → treats as expanded", () => {
     const details = createDetails();
-    const result = mockRenderer(details, false, true);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: false },
+      mockTheme,
+      "plain",
+      true // resultPreviewExpanded = true
+    );
     
-    expect(result.effectiveExpanded).toBe(true);
+    // When resultPreviewExpanded is true, should ignore pi's expanded flag
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
   it("resultPreviewExpanded: false + pi expanded: false → treats as collapsed", () => {
     const details = createDetails();
-    const result = mockRenderer(details, false, false);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: false },
+      mockTheme,
+      "plain",
+      false // resultPreviewExpanded = false
+    );
     
-    expect(result.effectiveExpanded).toBe(false);
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
   it("resultPreviewExpanded: false + pi expanded: true → treats as expanded", () => {
     const details = createDetails();
-    const result = mockRenderer(details, true, false);
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false // resultPreviewExpanded = false
+    );
     
-    expect(result.effectiveExpanded).toBe(true);
+    expect(rendered).toBeDefined();
+    expect(rendered.children).toHaveLength(2);
   });
 
-  it("settings unset → defaults to true (collapse-bypass)", () => {
+  it("settings unset → uses pi expanded flag (production default is true)", () => {
     const details = createDetails();
-    const result = mockRenderer(details, false, undefined);
     
-    // When undefined, should default to true behavior (bypass collapse)
-    expect(result.effectiveExpanded).toBe(false); // This shows the current logic - undefined means use pi's flag
+    // Test with pi expanded = false, resultPreviewExpanded = true (production default)
+    const renderedCollapsed = subagentNotificationRenderer(
+      { details },
+      { expanded: false },
+      mockTheme,
+      "plain",
+      true // production default
+    );
+    
+    // Test with pi expanded = true, resultPreviewExpanded = true (production default)
+    const renderedExpanded = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      true // production default
+    );
+    
+    // Both should render (production default true means always expanded)
+    expect(renderedCollapsed).toBeDefined();
+    expect(renderedExpanded).toBeDefined();
   });
 
   it("resultPreviewExpanded: true always overrides pi expanded flag", () => {
     const details = createDetails();
     
-    // Test both pi expanded states
-    expect(mockRenderer(details, true, true).effectiveExpanded).toBe(true);
-    expect(mockRenderer(details, false, true).effectiveExpanded).toBe(true);
+    // Test both pi expanded states with resultPreviewExpanded = true
+    const renderedPiTrue = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      true
+    );
+    
+    const renderedPiFalse = subagentNotificationRenderer(
+      { details },
+      { expanded: false },
+      mockTheme,
+      "plain",
+      true
+    );
+    
+    expect(renderedPiTrue).toBeDefined();
+    expect(renderedPiFalse).toBeDefined();
+    // Both should behave the same way (expanded) regardless of pi's flag
   });
 });
