@@ -135,7 +135,6 @@ function escapeXml(s: string): string {
 
 // Collapsed preview line limit - matches pi's read/write tool precedent
 const COLLAPSED_PREVIEW_LINES = 10;
-// Plain mode backward-compatibility constants - preserve upstream renderer behavior
 const PLAIN_MODE_EXPANDED_LINE_CAP = 30; // Preserves upstream renderer's expanded-mode line cap. Plain mode is the backward-compatibility path; markdown mode is uncapped per spec.
 const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first-line preview char cap. Plain mode is the backward-compatibility path.
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII. Module-scope initializer; mirrors settings.ts default until applySettings runs.
