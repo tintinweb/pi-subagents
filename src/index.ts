@@ -137,7 +137,7 @@ function escapeXml(s: string): string {
 const COLLAPSED_PREVIEW_LINES = 10;
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
-function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
+export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
