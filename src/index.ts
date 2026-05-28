@@ -1927,10 +1927,13 @@ ${systemPrompt}
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      resultPreviewMode,
+      resultPreviewExpanded,
+      failurePreviewMaxChars,
     };
   }
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "failurePreviewMaxChars"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
@@ -1981,6 +1984,27 @@ ${systemPrompt}
           currentValue: isScopeModelsEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
+        {
+          id: "resultPreviewMode",
+          label: "Result preview mode",
+          description: "Render result body as markdown or plain text",
+          currentValue: resultPreviewMode,
+          values: ["markdown", "plain"],
+        },
+        {
+          id: "resultPreviewExpanded",
+          label: "Result preview expanded by default",
+          description: "Always show expanded result preview, ignoring pi's expanded flag",
+          currentValue: resultPreviewExpanded ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "failurePreviewMaxChars",
+          label: "Failure preview max chars",
+          description: "Max chars for failure preview before truncation (Enter to type)",
+          currentValue: String(failurePreviewMaxChars),
+          values: [String(failurePreviewMaxChars)],
+        },
       ];
     }
 
@@ -2025,6 +2049,19 @@ ${systemPrompt}
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "resultPreviewMode") {
+        setResultPreviewMode(value as ResultPreviewMode);
+        notifyApplied(ctx, `Result preview mode set to ${value}`);
+      } else if (id === "resultPreviewExpanded") {
+        const expanded = value === "on";
+        setResultPreviewExpanded(expanded);
+        notifyApplied(ctx, `Result preview expanded by default ${expanded ? "enabled" : "disabled"}`);
+      } else if (id === "failurePreviewMaxChars") {
+        const n = parseInt(value, 10);
+        if (n >= 1 && n <= 1048576) {
+          setFailurePreviewMaxChars(n);
+          notifyApplied(ctx, `Failure preview max chars set to ${n}`);
+        }
       }
     }
 
