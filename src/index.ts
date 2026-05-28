@@ -147,16 +147,7 @@ function safeTruncate(s: string, maxChars: number): string {
   return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
 }
 
-/**
- * Build the result preview body from an agent record + settings.
- * Used by both XML payload formatter and UI details builder for symmetry.
- *
- * Fallback chain: record.result preferred (success path), then record.error
- * (failure with diagnostic), then "No output." (manual stop with no signal).
- *
- * Failure-mode cap (failurePreviewMaxChars) applies only on error/stopped status;
- * aborted is grace-period completion and stays uncapped per spec.
- */
+/** Build the preview body shared by XML payload + UI details. Caps failure-mode bodies; success/aborted/steered uncapped. */
 function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
   const body = record.result ?? record.error ?? "";
   if (!body) return "No output.";
