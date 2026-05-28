@@ -138,7 +138,7 @@ const COLLAPSED_PREVIEW_LINES = 10;
 // Plain mode backward-compatibility constants - preserve upstream renderer behavior
 const PLAIN_MODE_EXPANDED_LINE_CAP = 30; // Preserves upstream renderer's expanded-mode line cap. Plain mode is the backward-compatibility path; markdown mode is uncapped per spec.
 const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first-line preview char cap. Plain mode is the backward-compatibility path.
-const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII. Mirrors the default in src/settings.ts; redeclared here for the call-site fallback when settings.failurePreviewMaxChars is undefined.
+const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII. Module-scope initializer; mirrors settings.ts default until applySettings runs.
 
 /**
  * Truncate a string to at most `maxChars` UTF-16 code units, snapping back one
@@ -168,7 +168,7 @@ function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): s
   const body = record.result ?? record.error ?? "";
   if (!body) return "No output.";
   const isFailure = record.status === "error" || record.status === "stopped";
-  const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
+  const cap = isFailure ? (settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS) : Number.POSITIVE_INFINITY;
   return body.length > cap
     ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
     : body;
