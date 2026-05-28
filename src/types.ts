@@ -60,6 +60,8 @@ export interface AgentConfig {
 
 export type JoinMode = 'async' | 'group' | 'smart';
 
+export type ResultPreviewMode = "plain" | "markdown";
+
 export interface AgentRecord {
   id: string;
   type: SubagentType;
