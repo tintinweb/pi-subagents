@@ -1,7 +1,7 @@
 import { Container, Markdown, Text } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { subagentNotificationRenderBody, subagentNotificationRenderHeader, subagentNotificationRenderer } from "../src/index.js";
-import type { NotificationDetails, ResultPreviewMode } from "../src/types.js";
+import { subagentNotificationRenderBody, subagentNotificationRenderer } from "../src/index.js";
+import type { NotificationDetails } from "../src/types.js";
 
 // Mock theme
 const mockTheme = {
