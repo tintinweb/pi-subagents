@@ -189,7 +189,7 @@ function buildDetails(
 }
 
 /** Build notification details for the custom message renderer. */
-function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
+export function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
 
   const body = record.result ?? record.error ?? "";
