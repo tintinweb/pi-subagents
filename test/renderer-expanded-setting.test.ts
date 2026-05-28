@@ -87,10 +87,6 @@ describe("resultPreviewExpanded setting", () => {
     // Both should render (production default true means always expanded)
     expect(renderedCollapsed).toBeDefined();
     expect(renderedExpanded).toBeDefined();
-    
-    // Verify the production default is actually true
-    // This checks that src/index.ts:621 has `let resultPreviewExpanded = true;`
-    expect(true).toBe(true); // Production default verified by grep: resultPreviewExpanded = true
   });
 
   it("resultPreviewExpanded: true always overrides pi expanded flag", () => {
