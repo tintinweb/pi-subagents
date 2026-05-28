@@ -1,8 +1,7 @@
 import { describe, expect, it } from "vitest";
-import type { AgentRecord, SubagentsSettings } from "../src/types.js";
-
 // Import the formatTaskNotification function - need to check how it's exported
 import { formatTaskNotification } from "../src/index.js";
+import type { AgentRecord, SubagentsSettings } from "../src/types.js";
 
 describe("XML payload formatTaskNotification", () => {
   const createRecord = (overrides: Partial<AgentRecord> = {}): AgentRecord => ({
