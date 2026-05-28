@@ -151,7 +151,10 @@ function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): s
   const body = record.result ?? record.error ?? "";
   if (!body) return "No output.";
   const isFailure = record.status === "error" || record.status === "stopped";
-  const cap = isFailure ? (settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS) : Number.POSITIVE_INFINITY;
+  if (isFailure && typeof settings.failurePreviewMaxChars !== "number") {
+    throw new Error("buildResultPreview: failurePreviewMaxChars must be a number on failure status");
+  }
+  const cap = isFailure ? (settings.failurePreviewMaxChars as number) : Number.POSITIVE_INFINITY;
   return body.length > cap
     ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
     : body;
