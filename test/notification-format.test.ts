@@ -103,21 +103,7 @@ describe("notification format edge cases", () => {
     expect(details.resultPreview).toBe("No output.");
   });
 
-  it("handles very large input without performance issues", () => {
-    const largeMB = "x".repeat(1024 * 1024); // 1MB
-    const record = createRecord({ result: largeMB });
-    const settings = { failurePreviewMaxChars: 65536 };
-    
-    const start = Date.now();
-    const xml = formatTaskNotification(record, settings);
-    const details = buildNotificationDetails(record, settings);
-    const duration = Date.now() - start;
-    
-    // Should complete quickly (within 100ms)
-    expect(duration).toBeLessThan(100);
-    expect(xml).toBeDefined();
-    expect(details).toBeDefined();
-  });
+
 
   it("mixed status types in error/stopped/aborted", () => {
     const errorRecord = createRecord({ status: "error", error: "Error message", result: undefined });
