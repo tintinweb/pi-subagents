@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import { Container, Markdown, Text } from "@earendil-works/pi-tui";
+import { describe, expect, it } from "vitest";
 import type { NotificationDetails, ResultPreviewMode } from "../src/types.js";
 
 // Mock theme and getMarkdownTheme

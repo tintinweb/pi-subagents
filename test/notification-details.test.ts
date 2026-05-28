@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { AgentRecord, SubagentsSettings } from "../src/types.js";
 import { buildNotificationDetails } from "../src/index.js";
+import type { AgentRecord, SubagentsSettings } from "../src/types.js";
 
 describe("UI details buildNotificationDetails", () => {
   const createRecord = (overrides: Partial<AgentRecord> = {}): AgentRecord => ({

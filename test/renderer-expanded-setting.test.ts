@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { NotificationDetails } from "../src/types.js";
 
 // Mock renderer functions to test resultPreviewExpanded setting behavior
-function mockRenderer(d: NotificationDetails, piExpanded: boolean, resultPreviewExpanded: boolean | undefined): { effectiveExpanded: boolean } {
+function mockRenderer(_d: NotificationDetails, piExpanded: boolean, resultPreviewExpanded: boolean | undefined): { effectiveExpanded: boolean } {
   // Honor resultPreviewExpanded setting - bypass pi's expanded flag when true
   const effectiveExpanded = resultPreviewExpanded ? true : piExpanded;
   return { effectiveExpanded };

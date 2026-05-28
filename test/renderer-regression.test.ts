@@ -1,9 +1,9 @@
+
 import { describe, expect, it } from "vitest";
-import { Text } from "@earendil-works/pi-tui";
 import type { NotificationDetails } from "../src/types.js";
 
 // Mock theme for consistent output
-const mockTheme = {
+const _mockTheme = {
   fg: (color: string, text: string) => `[${color}]${text}[/${color}]`,
   bold: (text: string) => `**${text}**`,
 };
