@@ -27,7 +27,7 @@ import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
+import { applyAndEmitLoaded, RESULT_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type ResultPreviewMode, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
@@ -135,6 +135,10 @@ function escapeXml(s: string): string {
 
 // Collapsed preview line limit - matches pi's read/write tool precedent
 const COLLAPSED_PREVIEW_LINES = 10;
+// Plain mode backward-compatibility constants - preserve upstream renderer behavior
+const PLAIN_MODE_EXPANDED_LINE_CAP = 30; // Preserves upstream renderer's expanded-mode line cap. Plain mode is the backward-compatibility path; markdown mode is uncapped per spec.
+const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first-line preview char cap. Plain mode is the backward-compatibility path.
+const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII. Mirrors the default in src/settings.ts; redeclared here for the call-site fallback when settings.failurePreviewMaxChars is undefined.
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
@@ -147,7 +151,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
 
   const body = record.result ?? record.error ?? "";
   const isFailure = record.status === "error" || record.status === "stopped";
-  const cap = isFailure ? settings.failurePreviewMaxChars ?? 65536 : Number.POSITIVE_INFINITY;
+  const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
   const resultPreview = body
     ? body.length > cap
       ? body.slice(0, cap) + "\n…(truncated, see transcript)"
@@ -194,7 +198,7 @@ export function buildNotificationDetails(record: AgentRecord, settings: Subagent
 
   const body = record.result ?? record.error ?? "";
   const isFailure = record.status === "error" || record.status === "stopped";
-  const cap = isFailure ? settings.failurePreviewMaxChars ?? 65536 : Number.POSITIVE_INFINITY;
+  const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
   const resultPreview = body
     ? body.length > cap
       ? body.slice(0, cap) + "\n…(truncated, see transcript)"
@@ -270,10 +274,10 @@ export default function (pi: ExtensionAPI) {
           // Plain mode - original behavior
           let bodyText = "";
           if (expanded) {
-            const lines = d.resultPreview.split("\n").slice(0, 30);
+            const lines = d.resultPreview.split("\n").slice(0, PLAIN_MODE_EXPANDED_LINE_CAP);
             for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
           } else {
-            const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
+            const preview = d.resultPreview.split("\n")[0]?.slice(0, PLAIN_MODE_COLLAPSED_CHAR_CAP) ?? "";
             bodyText = theme.fg("dim", `  ⎿  ${preview}`);
           }
 
@@ -2058,7 +2062,7 @@ ${systemPrompt}
         notifyApplied(ctx, `Result preview expanded by default ${expanded ? "enabled" : "disabled"}`);
       } else if (id === "failurePreviewMaxChars") {
         const n = parseInt(value, 10);
-        if (n >= 1 && n <= 1048576) {
+        if (n >= 1 && n <= RESULT_PREVIEW_MAX_CHARS_CEILING) {
           setFailurePreviewMaxChars(n);
           notifyApplied(ctx, `Failure preview max chars set to ${n}`);
         }

@@ -81,7 +81,7 @@ const VALID_RESULT_PREVIEW_MODES: ReadonlySet<string> = new Set<ResultPreviewMod
 const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
-const RESULT_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
+export const RESULT_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
