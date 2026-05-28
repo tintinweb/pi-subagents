@@ -158,8 +158,7 @@ function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): s
     : body;
 }
 
-/** Format a structured task notification matching Claude Code's <task-notification> XML. */
-/** @internal */
+/** @internal Format a structured task notification matching Claude Code's <task-notification> XML. */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
@@ -204,8 +203,7 @@ function buildDetails(
   };
 }
 
-/** Build notification details for the custom message renderer. */
-/** @internal */
+/** @internal Build notification details for the custom message renderer. */
 export function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
 
@@ -226,7 +224,6 @@ export function buildNotificationDetails(record: AgentRecord, settings: Subagent
   };
 }
 
-/** Render notification header with icon, description, status, and stats. */
 /** @internal */
 export function subagentNotificationRenderHeader(d: NotificationDetails, theme: any): any {
   const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
@@ -251,7 +248,6 @@ export function subagentNotificationRenderHeader(d: NotificationDetails, theme: 
   return new Text(line, 0, 0);
 }
 
-/** Render notification body with markdown or plain mode. */
 /** @internal */
 export function subagentNotificationRenderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
   if (mode === "markdown") {
@@ -291,8 +287,7 @@ export function subagentNotificationRenderBody(d: NotificationDetails, expanded:
   }
 }
 
-/** Main subagent notification renderer. */
-/** @internal */
+/** @internal Main subagent notification renderer. */
 export function subagentNotificationRenderer(message: { details?: NotificationDetails }, options: { expanded: boolean }, theme: any, resultPreviewMode: ResultPreviewMode, resultPreviewExpanded: boolean): any {
   const d = message.details;
   if (!d) return undefined;
