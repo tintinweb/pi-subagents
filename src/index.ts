@@ -290,7 +290,6 @@ export function subagentNotificationRenderer(message: { details?: NotificationDe
   const d = message.details;
   if (!d) return undefined;
 
-  // Honor resultPreviewExpanded setting - bypass pi's expanded flag when true
   const effectiveExpanded = resultPreviewExpanded ? true : options.expanded;
 
   function renderOne(d: NotificationDetails): any {
