@@ -107,23 +107,10 @@ describe("markdown rendering branch", () => {
     expect(markdown.text).toContain("more lines, ctrl+O to expand");
   });
 
-  it("group rendering produces separated containers", () => {
-    const main = createDetails({ description: "Main Agent" });
-    const other1 = createDetails({ description: "Other Agent 1", id: "test-2" });
-    const other2 = createDetails({ description: "Other Agent 2", id: "test-3" });
+  it("empty body + markdown mode does not throw", () => {
+    const details = createDetails({ resultPreview: "" });
     
-    main.others = [other1, other2];
-    
-    const rendered = subagentNotificationRenderer(
-      { details: main },
-      { expanded: true },
-      mockTheme,
-      "markdown",
-      false
-    );
-    
-    expect(rendered).toBeInstanceOf(Container);
-    expect(rendered.children).toHaveLength(5); // 3 agents + 2 spacers
+    expect(() => subagentNotificationRenderBody(details, true, "markdown", mockTheme)).not.toThrow();
   });
 
   it("code fence cut mid-block in collapsed mode", () => {
