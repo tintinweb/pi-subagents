@@ -226,7 +226,7 @@ export function buildNotificationDetails(record: AgentRecord, settings: Subagent
   };
 }
 
-/** @internal */
+/** @internal Render notification header with icon, description, status, and stats. */
 export function subagentNotificationRenderHeader(d: NotificationDetails, theme: any): any {
   const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
   const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
@@ -250,7 +250,7 @@ export function subagentNotificationRenderHeader(d: NotificationDetails, theme: 
   return new Text(line, 0, 0);
 }
 
-/** @internal */
+/** @internal Render notification body with markdown or plain mode dispatch. */
 export function subagentNotificationRenderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
   if (mode === "markdown") {
     let body = d.resultPreview;
