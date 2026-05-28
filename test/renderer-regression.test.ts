@@ -21,109 +21,57 @@ describe("renderer regression-lock snapshot", () => {
     ...overrides,
   });
 
-  it("completed status matches upstream baseline", () => {
-    const details = createDetails();
-    const rendered = subagentNotificationRenderer(
-      { details },
-      { expanded: true },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    // This test locks the expected output format for regression detection
-    expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(2); // header + body
-  });
+  // Helper to extract rendered text from Container/Text components
+  function extractRenderedText(component: any): string {
+    if (!component) return "";
+    if (typeof component.text === "string") return component.text;
+    if (component.children && Array.isArray(component.children)) {
+      return component.children.map(extractRenderedText).join("");
+    }
+    return "";
+  }
 
-  it("error status matches upstream baseline", () => {
-    const details = createDetails({
-      status: "error",
-      resultPreview: "Error: something went wrong",
+  it("plain mode rendering produces consistent ANSI output", () => {
+    const testCases = [
+      { status: "completed", preview: "Success result" },
+      { status: "error", preview: "Error: failed" },
+      { status: "stopped", preview: "No output." },
+      { status: "aborted", preview: "Partial result" },
+      { status: "steered", preview: "Steered result" },
+    ];
+
+    const outputs = testCases.map(({ status, preview }) => {
+      const details = createDetails({ status: status as any, resultPreview: preview });
+      const rendered = subagentNotificationRenderer(
+        { details },
+        { expanded: true },
+        mockTheme,
+        "plain",
+        false
+      );
+      return `${status}: ${extractRenderedText(rendered)}`;
     });
-    const rendered = subagentNotificationRenderer(
-      { details },
-      { expanded: true },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(2);
+
+    expect(outputs).toMatchInlineSnapshot(`
+      [
+        "completed: [success]✓[/success] **Test Agent** [dim]completed[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Success result[/dim]",
+        "error: [error]✗[/error] **Test Agent** [dim]error[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Error: failed[/dim]",
+        "stopped: [error]✗[/error] **Test Agent** [dim]stopped[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  No output.[/dim]",
+        "aborted: [error]✗[/error] **Test Agent** [dim]aborted[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Partial result[/dim]",
+        "steered: [success]✓[/success] **Test Agent** [dim]completed (steered)[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Steered result[/dim]",
+      ]
+    `);
   });
 
-  it("stopped status matches upstream baseline", () => {
-    const details = createDetails({
-      status: "stopped",
-      resultPreview: "No output.",
-    });
-    const rendered = subagentNotificationRenderer(
-      { details },
-      { expanded: true },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(2);
-  });
-
-  it("aborted status matches upstream baseline", () => {
-    const details = createDetails({
-      status: "aborted",
-      resultPreview: "Partial result before abort",
-    });
-    const rendered = subagentNotificationRenderer(
-      { details },
-      { expanded: true },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(2);
-  });
-
-  it("steered status matches upstream baseline", () => {
-    const details = createDetails({
-      status: "steered",
-      resultPreview: "Steered completion result",
-    });
-    const rendered = subagentNotificationRenderer(
-      { details },
-      { expanded: true },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(2);
-  });
-
-  it("collapsed view matches upstream baseline", () => {
-    const details = createDetails({
-      resultPreview: "This is a very long line that should be truncated at 80 characters and show preview format",
-    });
-    const rendered = subagentNotificationRenderer(
-      { details },
-      { expanded: false },
-      mockTheme,
-      "plain",
-      false
-    );
-    
-    expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(2);
-  });
-
-  it("group rendering with others matches upstream baseline", () => {
-    const main = createDetails({ description: "Main Agent" });
-    const other1 = createDetails({ description: "Other Agent 1", id: "test-2" });
-    const other2 = createDetails({ description: "Other Agent 2", id: "test-3" });
+  it("group rendering with others produces consistent output", () => {
+    const main = createDetails({ description: "Main Agent", resultPreview: "Main result" });
+    const other1 = createDetails({ description: "Other Agent 1", id: "test-2", resultPreview: "Other 1 result" });
+    const other2 = createDetails({ description: "Other Agent 2", id: "test-3", resultPreview: "Other 2 result" });
     
     main.others = [other1, other2];
     
@@ -135,7 +83,27 @@ describe("renderer regression-lock snapshot", () => {
       false
     );
     
+    const output = extractRenderedText(rendered);
+    expect(output).toMatchInlineSnapshot(`
+      "[success]✓[/success] **Main Agent** [dim]completed[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Other Agent 1** [dim]completed[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Other 1 result[/dim][success]✓[/success] **Other Agent 2** [dim]completed[/dim]
+        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Other 2 result[/dim]"
+    `);
+  });
+
+  // Keep structural tests for components that can't be easily rendered to text
+  it("structural properties remain consistent", () => {
+    const details = createDetails();
+    const rendered = subagentNotificationRenderer(
+      { details },
+      { expanded: true },
+      mockTheme,
+      "plain",
+      false
+    );
+    
     expect(rendered).toBeDefined();
-    expect(rendered.children).toHaveLength(5); // 3 agents + 2 spacers
+    expect(rendered.children).toHaveLength(2); // header + body
   });
 });
