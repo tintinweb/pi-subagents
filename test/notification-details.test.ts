@@ -94,7 +94,8 @@ describe("UI details buildNotificationDetails", () => {
   it("UI path: surrogate pairs handled gracefully", () => {
     const emoji = "🚀".repeat(1000);
     const record = createRecord({ status: "error", error: emoji, result: undefined });
-    const settings = { failurePreviewMaxChars: 1999 }; // (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
+    // 1999 = (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
+    const settings = { failurePreviewMaxChars: 1999 };
     
     const details = buildNotificationDetails(record, settings);
     
