@@ -12,8 +12,8 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
@@ -133,6 +133,9 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Collapsed preview line limit - matches pi's read/write tool precedent
+const COLLAPSED_PREVIEW_LINES = 10;
+
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
 function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
   const status = getStatusLabel(record.status, record.error);
@@ -244,28 +247,50 @@ export default function (pi: ExtensionAPI) {
         return new Text(line, 0, 0);
       }
 
-      function renderBody(d: NotificationDetails, expanded: boolean, mode: string, theme: any): any {
-        // Line 3: result preview (collapsed) or full (expanded)
-        let bodyText = "";
-        if (expanded) {
-          const lines = d.resultPreview.split("\n").slice(0, 30);
-          for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
+      function renderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
+        if (mode === "markdown") {
+          let body = d.resultPreview;
+          if (!expanded) {
+            const lines = body.split("\n");
+            if (lines.length > COLLAPSED_PREVIEW_LINES) {
+              const remaining = lines.length - COLLAPSED_PREVIEW_LINES;
+              body = lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") + `\n… (${remaining} more lines, ctrl+O to expand)`;
+            }
+          }
+          
+          const container = new Container();
+          if (body.trim()) {
+            container.addChild(new Markdown(body, 2, 0, getMarkdownTheme()));
+          }
+          if (d.outputFile) {
+            container.addChild(new Text(theme.fg("muted", `  transcript: ${d.outputFile}`), 0, 0));
+          }
+          return container;
         } else {
-          const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
-          bodyText = theme.fg("dim", `  ⎿  ${preview}`);
-        }
+          // Plain mode - original behavior
+          let bodyText = "";
+          if (expanded) {
+            const lines = d.resultPreview.split("\n").slice(0, 30);
+            for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
+          } else {
+            const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
+            bodyText = theme.fg("dim", `  ⎿  ${preview}`);
+          }
 
-        // Line 4: output file link (if present)
-        if (d.outputFile) {
-          bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
-        }
+          if (d.outputFile) {
+            bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
+          }
 
-        return new Text(bodyText, 0, 0);
+          return new Text(bodyText, 0, 0);
+        }
       }
+
+      // Honor resultPreviewExpanded setting - bypass pi's expanded flag when true
+      const effectiveExpanded = resultPreviewExpanded ? true : expanded;
 
       function renderOne(d: NotificationDetails): any {
         const header = renderHeader(d, theme);
-        const body = renderBody(d, expanded, "plain", theme);
+        const body = renderBody(d, effectiveExpanded, resultPreviewMode, theme);
         const container = new Container();
         container.addChild(header);
         container.addChild(body);
