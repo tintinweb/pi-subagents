@@ -154,6 +154,26 @@ function safeTruncate(s: string, maxChars: number): string {
   return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
 }
 
+/**
+ * Build the result preview body from an agent record + settings.
+ * Used by both XML payload formatter and UI details builder for symmetry.
+ *
+ * Fallback chain: record.result preferred (success path), then record.error
+ * (failure with diagnostic), then "No output." (manual stop with no signal).
+ *
+ * Failure-mode cap (failurePreviewMaxChars) applies only on error/stopped status;
+ * aborted is grace-period completion and stays uncapped per spec.
+ */
+function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
+  const body = record.result ?? record.error ?? "";
+  if (!body) return "No output.";
+  const isFailure = record.status === "error" || record.status === "stopped";
+  const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
+  return body.length > cap
+    ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
+    : body;
+}
+
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
 /** @internal */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
@@ -164,14 +184,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
   const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
 
-  const body = record.result ?? record.error ?? "";
-  const isFailure = record.status === "error" || record.status === "stopped";
-  const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
-  const resultPreview = body
-    ? body.length > cap
-      ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
-      : body
-    : "No output.";
+  const resultPreview = buildResultPreview(record, settings);
 
   return [
     `<task-notification>`,
@@ -212,14 +225,7 @@ function buildDetails(
 export function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
 
-  const body = record.result ?? record.error ?? "";
-  const isFailure = record.status === "error" || record.status === "stopped";
-  const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
-  const resultPreview = body
-    ? body.length > cap
-      ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
-      : body
-    : "No output.";
+  const resultPreview = buildResultPreview(record, settings);
 
   return {
     id: record.id,
