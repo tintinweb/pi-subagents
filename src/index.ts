@@ -140,6 +140,20 @@ const PLAIN_MODE_EXPANDED_LINE_CAP = 30; // Preserves upstream renderer's expand
 const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first-line preview char cap. Plain mode is the backward-compatibility path.
 const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII. Mirrors the default in src/settings.ts; redeclared here for the call-site fallback when settings.failurePreviewMaxChars is undefined.
 
+/**
+ * Truncate a string to at most `maxChars` UTF-16 code units, snapping back one
+ * code unit if the cut falls inside a surrogate pair. Prevents production code
+ * from emitting unpaired surrogates when failure-mode caps fire mid-emoji or
+ * mid-non-BMP-character.
+ */
+function safeTruncate(s: string, maxChars: number): string {
+  if (s.length <= maxChars) return s;
+  const high = s.charCodeAt(maxChars - 1);
+  // High surrogate range: 0xD800-0xDBFF. If the last kept code unit is a high
+  // surrogate, drop it to keep the pair intact.
+  return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
+}
+
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
 /** @internal */
 export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
@@ -155,7 +169,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
   const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
   const resultPreview = body
     ? body.length > cap
-      ? body.slice(0, cap) + "\n…(truncated, see transcript)"
+      ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
       : body
     : "No output.";
 
@@ -203,7 +217,7 @@ export function buildNotificationDetails(record: AgentRecord, settings: Subagent
   const cap = isFailure ? settings.failurePreviewMaxChars ?? DEFAULT_FAILURE_PREVIEW_MAX_CHARS : Number.POSITIVE_INFINITY;
   const resultPreview = body
     ? body.length > cap
-      ? body.slice(0, cap) + "\n…(truncated, see transcript)"
+      ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
       : body
     : "No output.";
 
