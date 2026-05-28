@@ -44,6 +44,24 @@ describe("markdown rendering branch", () => {
     expect(markdown.text).toContain("… (40 more lines, ctrl+O to expand)");
   });
 
+  it("collapse boundary at exactly 10 lines shows no hint", () => {
+    const tenLines = Array.from({ length: 10 }, (_, i) => `Line ${i + 1}`).join("\n");
+    const details = createDetails({ resultPreview: tenLines });
+    const body = subagentNotificationRenderBody(details, false, "markdown", mockTheme);
+    const container = body as Container;
+    const markdown = container.children[0] as Markdown;
+    expect(markdown.text).not.toContain("more lines");
+  });
+
+  it("collapse boundary at 11 lines shows hint", () => {
+    const elevenLines = Array.from({ length: 11 }, (_, i) => `Line ${i + 1}`).join("\n");
+    const details = createDetails({ resultPreview: elevenLines });
+    const body = subagentNotificationRenderBody(details, false, "markdown", mockTheme);
+    const container = body as Container;
+    const markdown = container.children[0] as Markdown;
+    expect(markdown.text).toContain("(1 more lines, ctrl+O to expand)");
+  });
+
   it("plain mode expanded produces byte-equivalent to baseline", () => {
     const details = createDetails();
     const body = subagentNotificationRenderBody(details, true, "plain", mockTheme);
