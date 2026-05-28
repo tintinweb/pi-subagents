@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatTaskNotification, buildNotificationDetails } from "../src/index.js";
+import { buildNotificationDetails, formatTaskNotification } from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
 
 describe("notification format edge cases", () => {
@@ -18,7 +18,8 @@ describe("notification format edge cases", () => {
   it("failure truncation handles surrogate pairs gracefully", () => {
     const emoji = "🚀".repeat(1000); // Each emoji is 2 UTF-16 code units
     const record = createRecord({ status: "error", error: emoji, result: undefined });
-    const settings = { failurePreviewMaxChars: 1999 }; // (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
+    // 1999 = (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
+    const settings = { failurePreviewMaxChars: 1999 };
     
     const xml = formatTaskNotification(record, settings);
     
