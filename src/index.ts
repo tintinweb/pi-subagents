@@ -134,7 +134,7 @@ function escapeXml(s: string): string {
 }
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
-function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
+function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
@@ -142,10 +142,13 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
   const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
   const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
 
-  const resultPreview = record.result
-    ? record.result.length > resultMaxLen
-      ? record.result.slice(0, resultMaxLen) + "\n...(truncated, use get_subagent_result for full output)"
-      : record.result
+  const body = record.result ?? record.error ?? "";
+  const isFailure = record.status === "error" || record.status === "stopped";
+  const cap = isFailure ? settings.failurePreviewMaxChars ?? 65536 : Number.POSITIVE_INFINITY;
+  const resultPreview = body
+    ? body.length > cap
+      ? body.slice(0, cap) + "\n…(truncated, see transcript)"
+      : body
     : "No output.";
 
   return [
@@ -183,8 +186,17 @@ function buildDetails(
 }
 
 /** Build notification details for the custom message renderer. */
-function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, activity?: AgentActivity): NotificationDetails {
+function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
+
+  const body = record.result ?? record.error ?? "";
+  const isFailure = record.status === "error" || record.status === "stopped";
+  const cap = isFailure ? settings.failurePreviewMaxChars ?? 65536 : Number.POSITIVE_INFINITY;
+  const resultPreview = body
+    ? body.length > cap
+      ? body.slice(0, cap) + "\n…(truncated, see transcript)"
+      : body
+    : "No output.";
 
   return {
     id: record.id,
@@ -197,11 +209,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
     outputFile: record.outputFile,
     error: record.error,
-    resultPreview: record.result
-      ? record.result.length > resultMaxLen
-        ? record.result.slice(0, resultMaxLen) + "…"
-        : record.result
-      : "No output.",
+    resultPreview,
   };
 }
 
@@ -293,14 +301,14 @@ export default function (pi: ExtensionAPI) {
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
 
-    const notification = formatTaskNotification(record, 500);
+    const notification = formatTaskNotification(record, { failurePreviewMaxChars });
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
 
     pi.sendMessage<NotificationDetails>({
       customType: "subagent-notification",
       content: notification + footer,
       display: true,
-      details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
+      details: buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id)),
     }, { deliverAs: "followUp", triggerTurn: true });
   }
 
@@ -322,15 +330,15 @@ export default function (pi: ExtensionAPI) {
         const unconsumed = records.filter(r => !r.resultConsumed);
         if (unconsumed.length === 0) { widget.update(); return; }
 
-        const notifications = unconsumed.map(r => formatTaskNotification(r, 300)).join('\n\n');
+        const notifications = unconsumed.map(r => formatTaskNotification(r, { failurePreviewMaxChars })).join('\n\n');
         const label = partial
           ? `${unconsumed.length} agent(s) finished (partial — others still running)`
           : `${unconsumed.length} agent(s) finished`;
 
         const [first, ...rest] = unconsumed;
-        const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
+        const details = buildNotificationDetails(first, { failurePreviewMaxChars }, agentActivity.get(first.id));
         if (rest.length > 0) {
-          details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
+          details.others = rest.map(r => buildNotificationDetails(r, { failurePreviewMaxChars }, agentActivity.get(r.id)));
         }
 
         pi.sendMessage<NotificationDetails>({
