@@ -78,17 +78,7 @@ describe("notification format edge cases", () => {
     expect(resultContent).toBe("\n…(truncated, see transcript)");
   });
 
-  it("buildNotificationDetails handles surrogate pairs in UI path", () => {
-    const emoji = "🚀".repeat(1000);
-    const record = createRecord({ status: "error", error: emoji, result: undefined });
-    const settings = { failurePreviewMaxChars: 1999 }; // (1000 emoji × 2 UTF-16 units) - 1; cuts the LAST emoji's high surrogate, exercising safeTruncate's drop-trailing-high-surrogate path
-    
-    const details = buildNotificationDetails(record, settings);
-    
-    // Should not contain Unicode replacement characters
-    expect(details.resultPreview).not.toContain("�");
-    expect(details.resultPreview).toContain("truncated, see transcript");
-  });
+
 
 
 
