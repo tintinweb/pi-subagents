@@ -112,15 +112,29 @@ describe("markdown rendering branch", () => {
     expect(rendered.children).toHaveLength(5); // 3 agents + 2 spacers
   });
 
-  it("collapsed markdown with code fence cut mid-block renders gracefully", () => {
-    const lines = ["# Header", "```typescript", "function foo() {", "  return 42;", "}", "```"];
-    const fifteenLines = [...lines, ...Array(9).fill("more content")];
-    const details = createDetails({ resultPreview: fifteenLines.join("\n") });
+  it("code fence cut mid-block in collapsed mode", () => {
+    const lines = [
+      "Line 1", "Line 2", "Line 3", "Line 4", "Line 5", "Line 6", "Line 7",
+      "```javascript", // Fence opens at line 8
+      "const x = 1;", "const y = 2;", "const z = 3;", "const a = 4;", "const b = 5;", // Lines 9-13: code content
+      "```", // Fence closes at line 14
+      "Line 15"
+    ];
+    const longResult = lines.join("\n");
+    const details = createDetails({ resultPreview: longResult });
     
     const body = subagentNotificationRenderBody(details, false, "markdown", mockTheme);
     
-    // Should not crash, markdown component should handle partial fence gracefully
+    // Truncation at line 10 cuts the fence mid-block (only 2 lines of code visible)
     expect(body).toBeInstanceOf(Container);
+    const container = body as Container;
+    const markdown = container.children[0] as Markdown;
+    expect(markdown.text).toContain("```javascript");
+    expect(markdown.text).toContain("const x = 1;");
+    expect(markdown.text).toContain("const y = 2;");
+    expect(markdown.text).not.toContain("const z = 3;"); // Third line of code should be truncated
+    expect(markdown.text).not.toContain("```\nLine 15"); // Closing fence + content should not be present
+    expect(markdown.text).toContain("(5 more lines, ctrl+O to expand)"); // Expand hint should be appended
   });
 
   it("mixed success/failure in d.others renders correctly", () => {
