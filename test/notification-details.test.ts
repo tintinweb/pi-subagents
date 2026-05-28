@@ -117,6 +117,13 @@ describe("UI details buildNotificationDetails", () => {
     expect(details.resultPreview).toContain("truncated, see transcript");
   });
 
+  it("throws when failurePreviewMaxChars is undefined on error status", () => {
+    const record = createRecord({ status: "error", error: "boom", result: undefined });
+    const settings = {} as SubagentsSettings;  // no failurePreviewMaxChars
+    
+    expect(() => buildNotificationDetails(record, settings)).toThrow(/failurePreviewMaxChars must be a number/);
+  });
+
   it("UI path: isolated low surrogate does not crash", () => {
     const malformedInput = "hello" + String.fromCharCode(0xDC00) + "world"; // Bare low surrogate
     const record = createRecord({ status: "error", error: malformedInput, result: undefined });
