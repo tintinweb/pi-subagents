@@ -83,14 +83,28 @@ describe("markdown rendering branch", () => {
     expect(text.text).toContain("[dim]  ⎿  This is a long line that should be truncated at 80 characters for preview[/dim]");
   });
 
-  it("empty body + markdown mode renders sensibly", () => {
-    const details = createDetails({ resultPreview: "" });
-    const body = subagentNotificationRenderBody(details, true, "markdown", mockTheme);
+  it("resultPreviewExpanded: true ignores collapsed expand=false flag, renders all 50 lines", () => {
+    const fiftyLines = Array.from({ length: 50 }, (_, i) => `Line ${i + 1}`).join("\n");
+    const details = createDetails({ resultPreview: fiftyLines });
     
-    expect(body).toBeInstanceOf(Container);
+    const body = subagentNotificationRenderBody(details, true, "markdown", mockTheme);
     const container = body as Container;
-    // Should not crash, container may be empty or have minimal content
-    expect(container.children.length).toBeGreaterThanOrEqual(0);
+    const markdown = container.children[0] as Markdown;
+    
+    expect(markdown.text).toContain("Line 50");
+    expect(markdown.text).not.toContain("more lines, ctrl+O to expand");
+  });
+
+  it("resultPreviewExpanded: false honors collapsed expand=false flag, shows hint", () => {
+    const fiftyLines = Array.from({ length: 50 }, (_, i) => `Line ${i + 1}`).join("\n");
+    const details = createDetails({ resultPreview: fiftyLines });
+    
+    const body = subagentNotificationRenderBody(details, false, "markdown", mockTheme);
+    const container = body as Container;
+    const markdown = container.children[0] as Markdown;
+    
+    expect(markdown.text).not.toContain("Line 50");
+    expect(markdown.text).toContain("more lines, ctrl+O to expand");
   });
 
   it("group rendering produces separated containers", () => {
