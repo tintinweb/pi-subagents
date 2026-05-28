@@ -28,7 +28,7 @@ import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./o
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type ResultPreviewMode, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -530,6 +530,14 @@ export default function (pi: ExtensionAPI) {
   function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
   function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
 
+  // ---- Result preview configuration ----
+  let resultPreviewMode: ResultPreviewMode = "markdown";
+  let resultPreviewExpanded = true;
+  let failurePreviewMaxChars = 65536;
+  function setResultPreviewMode(mode: ResultPreviewMode): void { resultPreviewMode = mode; }
+  function setResultPreviewExpanded(expanded: boolean): void { resultPreviewExpanded = expanded; }
+  function setFailurePreviewMaxChars(chars: number): void { failurePreviewMaxChars = chars; }
+
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -622,6 +630,9 @@ export default function (pi: ExtensionAPI) {
       setDefaultJoinMode,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
+      setResultPreviewMode,
+      setResultPreviewExpanded,
+      setFailurePreviewMaxChars,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
