@@ -237,6 +237,7 @@ export function buildNotificationDetails(record: AgentRecord, settings: Subagent
 }
 
 /** Render notification header with icon, description, status, and stats. */
+/** @internal */
 export function subagentNotificationRenderHeader(d: NotificationDetails, theme: any): any {
   const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
   const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
@@ -261,6 +262,7 @@ export function subagentNotificationRenderHeader(d: NotificationDetails, theme: 
 }
 
 /** Render notification body with markdown or plain mode. */
+/** @internal */
 export function subagentNotificationRenderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
   if (mode === "markdown") {
     let body = d.resultPreview;
@@ -300,6 +302,7 @@ export function subagentNotificationRenderBody(d: NotificationDetails, expanded:
 }
 
 /** Main subagent notification renderer. */
+/** @internal */
 export function subagentNotificationRenderer(message: { details?: NotificationDetails }, options: { expanded: boolean }, theme: any, resultPreviewMode: ResultPreviewMode, resultPreviewExpanded: boolean): any {
   const d = message.details;
   if (!d) return undefined;
@@ -616,7 +619,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Result preview configuration ----
   let resultPreviewMode: ResultPreviewMode = "markdown";
   let resultPreviewExpanded = true;
-  let failurePreviewMaxChars = 65536;
+  let failurePreviewMaxChars = DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
   function setResultPreviewMode(mode: ResultPreviewMode): void { resultPreviewMode = mode; }
   function setResultPreviewExpanded(expanded: boolean): void { resultPreviewExpanded = expanded; }
   function setFailurePreviewMaxChars(chars: number): void { failurePreviewMaxChars = chars; }
