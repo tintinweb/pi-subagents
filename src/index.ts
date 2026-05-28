@@ -268,7 +268,6 @@ export function subagentNotificationRenderBody(d: NotificationDetails, expanded:
     }
     return container;
   } else {
-    // Plain mode - original behavior
     let bodyText = "";
     if (expanded) {
       const lines = d.resultPreview.split("\n").slice(0, PLAIN_MODE_EXPANDED_LINE_CAP);
