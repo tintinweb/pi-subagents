@@ -221,7 +221,7 @@ export default function (pi: ExtensionAPI) {
       const d = message.details;
       if (!d) return undefined;
 
-      function renderOne(d: NotificationDetails): string {
+      function renderHeader(d: NotificationDetails, theme: any): any {
         const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
         const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
         const statusText = isError ? d.status
@@ -241,25 +241,48 @@ export default function (pi: ExtensionAPI) {
           line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
         }
 
+        return new Text(line, 0, 0);
+      }
+
+      function renderBody(d: NotificationDetails, expanded: boolean, mode: string, theme: any): any {
         // Line 3: result preview (collapsed) or full (expanded)
+        let bodyText = "";
         if (expanded) {
           const lines = d.resultPreview.split("\n").slice(0, 30);
-          for (const l of lines) line += "\n" + theme.fg("dim", `  ${l}`);
+          for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
         } else {
           const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
-          line += "\n  " + theme.fg("dim", `⎿  ${preview}`);
+          bodyText = theme.fg("dim", `  ⎿  ${preview}`);
         }
 
         // Line 4: output file link (if present)
         if (d.outputFile) {
-          line += "\n  " + theme.fg("muted", `transcript: ${d.outputFile}`);
+          bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
         }
 
-        return line;
+        return new Text(bodyText, 0, 0);
+      }
+
+      function renderOne(d: NotificationDetails): any {
+        const header = renderHeader(d, theme);
+        const body = renderBody(d, expanded, "plain", theme);
+        const container = new Container();
+        container.addChild(header);
+        container.addChild(body);
+        return container;
       }
 
       const all = [d, ...(d.others ?? [])];
-      return new Text(all.map(renderOne).join("\n"), 0, 0);
+      if (all.length === 1) {
+        return renderOne(all[0]);
+      } else {
+        const container = new Container();
+        for (let i = 0; i < all.length; i++) {
+          if (i > 0) container.addChild(new Spacer());
+          container.addChild(renderOne(all[i]));
+        }
+        return container;
+      }
     }
   );
 
