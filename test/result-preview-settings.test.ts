@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadSettings, saveSettings, applySettings, type SettingsAppliers } from "../src/settings.js";
+import { applySettings, loadSettings, type SettingsAppliers, saveSettings } from "../src/settings.js";
 
 describe("result preview settings sanitizer + persistence", () => {
   let globalDir: string;
