@@ -12,8 +12,8 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getMarkdownTheme, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
@@ -27,8 +27,8 @@ import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
+import { applyAndEmitLoaded, RESULT_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type ResultPreviewMode, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -133,8 +133,35 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/** Format a structured task notification matching Claude Code's <task-notification> XML. */
-function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
+// Collapsed preview line limit - matches pi's read/write tool precedent
+const COLLAPSED_PREVIEW_LINES = 10;
+const PLAIN_MODE_EXPANDED_LINE_CAP = 30; // Preserves upstream renderer's expanded-mode line cap. Plain mode is the backward-compatibility path; markdown mode is uncapped per spec.
+const PLAIN_MODE_COLLAPSED_CHAR_CAP = 80; // Preserves upstream renderer's first-line preview char cap. Plain mode is the backward-compatibility path.
+const DEFAULT_FAILURE_PREVIEW_MAX_CHARS = 65536; // 64 KiB at ASCII.
+
+/** Truncate to maxChars UTF-16 code units, never splitting a surrogate pair. */
+function safeTruncate(s: string, maxChars: number): string {
+  if (s.length <= maxChars) return s;
+  const high = s.charCodeAt(maxChars - 1);
+  return high >= 0xD800 && high <= 0xDBFF ? s.slice(0, maxChars - 1) : s.slice(0, maxChars);
+}
+
+/** Build the preview body shared by XML payload + UI details. Caps failure-mode bodies; success/aborted/steered uncapped. */
+function buildResultPreview(record: AgentRecord, settings: SubagentsSettings): string {
+  const body = record.result ?? record.error ?? "";
+  if (!body) return "No output.";
+  const isFailure = record.status === "error" || record.status === "stopped";
+  if (isFailure && typeof settings.failurePreviewMaxChars !== "number") {
+    throw new Error("buildResultPreview: failurePreviewMaxChars must be a number on failure status");
+  }
+  const cap = isFailure ? (settings.failurePreviewMaxChars as number) : Number.POSITIVE_INFINITY;
+  return body.length > cap
+    ? safeTruncate(body, cap) + "\n…(truncated, see transcript)"
+    : body;
+}
+
+/** @internal Format a structured task notification matching Claude Code's <task-notification> XML. */
+export function formatTaskNotification(record: AgentRecord, settings: SubagentsSettings): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
@@ -142,11 +169,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
   const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
   const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
 
-  const resultPreview = record.result
-    ? record.result.length > resultMaxLen
-      ? record.result.slice(0, resultMaxLen) + "\n...(truncated, use get_subagent_result for full output)"
-      : record.result
-    : "No output.";
+  const resultPreview = buildResultPreview(record, settings);
 
   return [
     `<task-notification>`,
@@ -182,9 +205,11 @@ function buildDetails(
   };
 }
 
-/** Build notification details for the custom message renderer. */
-function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, activity?: AgentActivity): NotificationDetails {
+/** @internal Build notification details for the custom message renderer. */
+export function buildNotificationDetails(record: AgentRecord, settings: SubagentsSettings, activity?: AgentActivity): NotificationDetails {
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
+
+  const resultPreview = buildResultPreview(record, settings);
 
   return {
     id: record.id,
@@ -197,12 +222,99 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
     outputFile: record.outputFile,
     error: record.error,
-    resultPreview: record.result
-      ? record.result.length > resultMaxLen
-        ? record.result.slice(0, resultMaxLen) + "…"
-        : record.result
-      : "No output.",
+    resultPreview,
   };
+}
+
+/** @internal Render notification header with icon, description, status, and stats. */
+export function subagentNotificationRenderHeader(d: NotificationDetails, theme: any): any {
+  const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
+  const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+  const statusText = isError ? d.status
+    : d.status === "steered" ? "completed (steered)"
+    : "completed";
+
+  // Line 1: icon + agent description + status
+  let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
+
+  // Line 2: stats
+  const parts: string[] = [];
+  if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
+  if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
+  if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
+  if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
+  if (parts.length) {
+    line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
+  }
+
+  return new Text(line, 0, 0);
+}
+
+/** @internal Render notification body with markdown or plain mode dispatch. */
+export function subagentNotificationRenderBody(d: NotificationDetails, expanded: boolean, mode: ResultPreviewMode, theme: any): any {
+  if (mode === "markdown") {
+    let body = d.resultPreview;
+    if (!expanded) {
+      const lines = body.split("\n");
+      if (lines.length > COLLAPSED_PREVIEW_LINES) {
+        const remaining = lines.length - COLLAPSED_PREVIEW_LINES;
+        body = lines.slice(0, COLLAPSED_PREVIEW_LINES).join("\n") + `\n… (${remaining} more lines, ctrl+O to expand)`;
+      }
+    }
+    
+    const container = new Container();
+    if (body.trim()) {
+      container.addChild(new Markdown(body, 2, 0, getMarkdownTheme()));
+    }
+    if (d.outputFile) {
+      container.addChild(new Text(theme.fg("muted", `  transcript: ${d.outputFile}`), 0, 0));
+    }
+    return container;
+  } else {
+    let bodyText = "";
+    if (expanded) {
+      const lines = d.resultPreview.split("\n").slice(0, PLAIN_MODE_EXPANDED_LINE_CAP);
+      for (const l of lines) bodyText += (bodyText ? "\n" : "") + theme.fg("dim", `  ${l}`);
+    } else {
+      const preview = d.resultPreview.split("\n")[0]?.slice(0, PLAIN_MODE_COLLAPSED_CHAR_CAP) ?? "";
+      bodyText = theme.fg("dim", `  ⎿  ${preview}`);
+    }
+
+    if (d.outputFile) {
+      bodyText += (bodyText ? "\n" : "") + theme.fg("muted", `  transcript: ${d.outputFile}`);
+    }
+
+    return new Text(bodyText, 0, 0);
+  }
+}
+
+/** @internal Main subagent notification renderer. */
+export function subagentNotificationRenderer(message: { details?: NotificationDetails }, options: { expanded: boolean }, theme: any, resultPreviewMode: ResultPreviewMode, resultPreviewExpanded: boolean): any {
+  const d = message.details;
+  if (!d) return undefined;
+
+  const effectiveExpanded = resultPreviewExpanded ? true : options.expanded;
+
+  function renderOne(d: NotificationDetails): any {
+    const header = subagentNotificationRenderHeader(d, theme);
+    const body = subagentNotificationRenderBody(d, effectiveExpanded, resultPreviewMode, theme);
+    const container = new Container();
+    container.addChild(header);
+    container.addChild(body);
+    return container;
+  }
+
+  const all = [d, ...(d.others ?? [])];
+  if (all.length === 1) {
+    return renderOne(all[0]);
+  } else {
+    const container = new Container();
+    for (let i = 0; i < all.length; i++) {
+      if (i > 0) container.addChild(new Spacer());
+      container.addChild(renderOne(all[i]));
+    }
+    return container;
+  }
 }
 
 export default function (pi: ExtensionAPI) {
@@ -210,48 +322,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer<NotificationDetails>(
     "subagent-notification",
     (message, { expanded }, theme) => {
-      const d = message.details;
-      if (!d) return undefined;
-
-      function renderOne(d: NotificationDetails): string {
-        const isError = d.status === "error" || d.status === "stopped" || d.status === "aborted";
-        const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-        const statusText = isError ? d.status
-          : d.status === "steered" ? "completed (steered)"
-          : "completed";
-
-        // Line 1: icon + agent description + status
-        let line = `${icon} ${theme.bold(d.description)} ${theme.fg("dim", statusText)}`;
-
-        // Line 2: stats
-        const parts: string[] = [];
-        if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
-        if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
-        if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
-        if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
-        if (parts.length) {
-          line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
-        }
-
-        // Line 3: result preview (collapsed) or full (expanded)
-        if (expanded) {
-          const lines = d.resultPreview.split("\n").slice(0, 30);
-          for (const l of lines) line += "\n" + theme.fg("dim", `  ${l}`);
-        } else {
-          const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
-          line += "\n  " + theme.fg("dim", `⎿  ${preview}`);
-        }
-
-        // Line 4: output file link (if present)
-        if (d.outputFile) {
-          line += "\n  " + theme.fg("muted", `transcript: ${d.outputFile}`);
-        }
-
-        return line;
-      }
-
-      const all = [d, ...(d.others ?? [])];
-      return new Text(all.map(renderOne).join("\n"), 0, 0);
+      return subagentNotificationRenderer(message, { expanded }, theme, resultPreviewMode, resultPreviewExpanded);
     }
   );
 
@@ -293,14 +364,14 @@ export default function (pi: ExtensionAPI) {
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
 
-    const notification = formatTaskNotification(record, 500);
+    const notification = formatTaskNotification(record, { failurePreviewMaxChars });
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
 
     pi.sendMessage<NotificationDetails>({
       customType: "subagent-notification",
       content: notification + footer,
       display: true,
-      details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
+      details: buildNotificationDetails(record, { failurePreviewMaxChars }, agentActivity.get(record.id)),
     }, { deliverAs: "followUp", triggerTurn: true });
   }
 
@@ -322,15 +393,15 @@ export default function (pi: ExtensionAPI) {
         const unconsumed = records.filter(r => !r.resultConsumed);
         if (unconsumed.length === 0) { widget.update(); return; }
 
-        const notifications = unconsumed.map(r => formatTaskNotification(r, 300)).join('\n\n');
+        const notifications = unconsumed.map(r => formatTaskNotification(r, { failurePreviewMaxChars })).join('\n\n');
         const label = partial
           ? `${unconsumed.length} agent(s) finished (partial — others still running)`
           : `${unconsumed.length} agent(s) finished`;
 
         const [first, ...rest] = unconsumed;
-        const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
+        const details = buildNotificationDetails(first, { failurePreviewMaxChars }, agentActivity.get(first.id));
         if (rest.length > 0) {
-          details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
+          details.others = rest.map(r => buildNotificationDetails(r, { failurePreviewMaxChars }, agentActivity.get(r.id)));
         }
 
         pi.sendMessage<NotificationDetails>({
@@ -530,6 +601,14 @@ export default function (pi: ExtensionAPI) {
   function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
   function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
 
+  // ---- Result preview configuration ----
+  let resultPreviewMode: ResultPreviewMode = "markdown";
+  let resultPreviewExpanded = true;
+  let failurePreviewMaxChars = DEFAULT_FAILURE_PREVIEW_MAX_CHARS;
+  function setResultPreviewMode(mode: ResultPreviewMode): void { resultPreviewMode = mode; }
+  function setResultPreviewExpanded(expanded: boolean): void { resultPreviewExpanded = expanded; }
+  function setFailurePreviewMaxChars(chars: number): void { failurePreviewMaxChars = chars; }
+
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -622,6 +701,9 @@ export default function (pi: ExtensionAPI) {
       setDefaultJoinMode,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
+      setResultPreviewMode,
+      setResultPreviewExpanded,
+      setFailurePreviewMaxChars,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1851,10 +1933,13 @@ ${systemPrompt}
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      resultPreviewMode,
+      resultPreviewExpanded,
+      failurePreviewMaxChars,
     };
   }
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "failurePreviewMaxChars"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
@@ -1905,6 +1990,27 @@ ${systemPrompt}
           currentValue: isScopeModelsEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
+        {
+          id: "resultPreviewMode",
+          label: "Result preview mode",
+          description: "Render result body as markdown or plain text",
+          currentValue: resultPreviewMode,
+          values: ["markdown", "plain"],
+        },
+        {
+          id: "resultPreviewExpanded",
+          label: "Result preview expanded by default",
+          description: "Always show expanded result preview, ignoring pi's expanded flag",
+          currentValue: resultPreviewExpanded ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "failurePreviewMaxChars",
+          label: "Failure preview max chars",
+          description: "Max chars for failure preview before truncation (Enter to type)",
+          currentValue: String(failurePreviewMaxChars),
+          values: [String(failurePreviewMaxChars)],
+        },
       ];
     }
 
@@ -1949,6 +2055,19 @@ ${systemPrompt}
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "resultPreviewMode") {
+        setResultPreviewMode(value as ResultPreviewMode);
+        notifyApplied(ctx, `Result preview mode set to ${value}`);
+      } else if (id === "resultPreviewExpanded") {
+        const expanded = value === "on";
+        setResultPreviewExpanded(expanded);
+        notifyApplied(ctx, `Result preview expanded by default ${expanded ? "enabled" : "disabled"}`);
+      } else if (id === "failurePreviewMaxChars") {
+        const n = parseInt(value, 10);
+        if (n >= 1 && n <= RESULT_PREVIEW_MAX_CHARS_CEILING) {
+          setFailurePreviewMaxChars(n);
+          notifyApplied(ctx, `Failure preview max chars set to ${n}`);
+        }
       }
     }
 
