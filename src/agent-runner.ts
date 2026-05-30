@@ -258,6 +258,32 @@ export async function runAgent(
   });
   await loader.reload();
 
+  // Collect extension tool names so they pass createAgentSession's allowlist.
+  // Passing `tools: toolNames` (built-in only) to createAgentSession sets
+  // allowedToolNames to a strict whitelist, which filters out all tools
+  // registered by extensions (e.g. globally installed tools).
+  // By merging extension tool names into the `tools` array before creating
+  // the session, we ensure extension tools are present in the tool registry
+  // and can be selectively enabled or disabled by the post-creation filter below.
+  const extensionsResult = loader.getExtensions();
+  let finalToolNames = toolNames;
+  if (extensions !== false) {
+    const extToolNames: string[] = [];
+    for (const ext of extensionsResult.extensions) {
+      for (const toolName of ext.tools.keys()) {
+        if (EXCLUDED_TOOL_NAMES.includes(toolName)) continue;
+        if (Array.isArray(extensions)) {
+          if (extensions.some(e => toolName.startsWith(e) || toolName.includes(e))) {
+            extToolNames.push(toolName);
+          }
+        } else {
+          extToolNames.push(toolName);
+        }
+      }
+    }
+    finalToolNames = [...new Set([...toolNames, ...extToolNames])];
+  }
+
   // Resolve model: explicit option > config.model > parent model
   const model = options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
@@ -273,7 +299,7 @@ export async function runAgent(
     settingsManager: SettingsManager.create(effectiveCwd, agentDir),
     modelRegistry: ctx.modelRegistry,
     model,
-    tools: toolNames,
+    tools: finalToolNames,
     resourceLoader: loader,
   };
   if (thinkingLevel) {
