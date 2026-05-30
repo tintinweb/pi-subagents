@@ -187,6 +187,29 @@ Wildcard plus ext.`);
     expect(agent.extSelectors).toEqual(["ext:foo"]);
   });
 
+  it("tools: 'all' is a case-insensitive alias for '*' (closes #75)", () => {
+    // `tools: all` previously parsed "all" as a single tool name → allowlist
+    // containing the non-existent tool "all" → silent zero-tool agent.
+    for (const [name, value] of [["all-lower", "all"], ["all-upper", "ALL"], ["all-mixed", "All"]]) {
+      writeAgent(name, `---\ntools: ${value}\n---\n\nAlias.`);
+      const agent = loadCustomAgents(tmpDir).get(name)!;
+      expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+      expect(agent.extSelectors).toBeUndefined();
+    }
+  });
+
+  it("tools: 'all' composes with ext: selectors like '*'", () => {
+    writeAgent("all-plus-ext", `---
+tools: "all, ext:foo"
+---
+
+All plus ext.`);
+
+    const agent = loadCustomAgents(tmpDir).get("all-plus-ext")!;
+    expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+    expect(agent.extSelectors).toEqual(["ext:foo"]);
+  });
+
   it("leaves extSelectors undefined when tools: has no ext: entries", () => {
     writeAgent("plain", `---
 tools: read, bash

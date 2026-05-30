@@ -112,14 +112,16 @@ function csvList(val: unknown, defaults: string[]): string[] {
 
 /**
  * Partition the `tools:` CSV into the built-in tool allowlist and raw `ext:` selectors.
- * `*` expands to all built-ins; plain entries are built-in names; `ext:` entries are
- * extension-tool selectors parsed later by the runner. omitted → all built-ins, no
- * selectors. `tools:` present with only `ext:` entries → zero built-ins (use `*`).
+ * `*` (and the case-insensitive alias `all`, for `tools: all`) expands to all
+ * built-ins; plain entries are built-in names; `ext:` entries are extension-tool
+ * selectors parsed later by the runner. omitted → all built-ins, no selectors.
+ * `tools:` present with only `ext:` entries → zero built-ins (use `*`).
  */
 function parseToolsField(val: unknown): { builtinToolNames: string[]; extSelectors: string[] | undefined } {
   const entries = csvList(val, BUILTIN_TOOL_NAMES);
-  const hasWildcard = entries.includes("*");
-  const plain = entries.filter(e => e !== "*" && !e.startsWith("ext:"));
+  const isWildcard = (e: string) => e === "*" || e.toLowerCase() === "all";
+  const hasWildcard = entries.some(isWildcard);
+  const plain = entries.filter(e => !isWildcard(e) && !e.startsWith("ext:"));
   const extEntries = entries.filter(e => e.startsWith("ext:"));
   return {
     builtinToolNames: hasWildcard ? [...new Set([...BUILTIN_TOOL_NAMES, ...plain])] : plain,

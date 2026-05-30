@@ -16,7 +16,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
@@ -30,15 +30,17 @@ const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
 
 /**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.
- * Case-sensitive. Directory extensions (`foo/index.ts`) resolve to the parent
- * directory name (`foo`); single-file extensions to the basename minus `.ts`/`.js`.
+ * Lowercased — extension names match case-insensitively so `extensions: [Mcp]`
+ * resolves the same as `[mcp]`. Tool names within `ext:foo/bar` are not affected.
+ * Directory extensions (`foo/index.ts`) resolve to the parent directory name;
+ * single-file extensions to the basename minus `.ts`/`.js`.
  */
 export function extensionCanonicalName(extPath: string): string {
   const base = basename(extPath);
-  if (base === "index.ts" || base === "index.js") {
-    return basename(dirname(extPath));
-  }
-  return base.replace(/\.(ts|js)$/, "");
+  const name = base === "index.ts" || base === "index.js"
+    ? basename(dirname(extPath))
+    : base.replace(/\.(ts|js)$/, "");
+  return name.toLowerCase();
 }
 
 /**
@@ -60,13 +62,14 @@ export function parseExtensionsSpec(
   const paths: string[] = [];
   let wildcard = false;
   for (const entry of entries) {
+    if (!entry) continue;
     if (entry === "*") {
       wildcard = true;
       continue;
     }
     const isPathEntry = entry.includes("/") || entry.includes("\\") || entry.startsWith("~");
     if (!isPathEntry) {
-      names.add(entry);
+      names.add(entry.toLowerCase());
       continue;
     }
     let p = entry;
@@ -97,9 +100,13 @@ export function parseExtSelectors(entries: string[]): {
   const extNames = new Set<string>();
   const narrowing = new Map<string, Set<string>>();
   for (const raw of entries) {
+    if (!raw) continue;
     const body = raw.slice("ext:".length);
     const slash = body.indexOf("/");
-    const name = (slash === -1 ? body : body.slice(0, slash)).trim();
+    // Extension name matches case-insensitively (matches the loader-side canonical
+    // name). Tool names are case-preserved — they're matched against pi-mono's
+    // registered identifiers, which are case-sensitive.
+    const name = (slash === -1 ? body : body.slice(0, slash)).trim().toLowerCase();
     if (!name) continue;
     extNames.add(name);
     if (slash === -1) continue;
@@ -381,6 +388,22 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await loader.reload();
+
+  // Plain entries in `tools:` are expected to be built-in names (extension tools
+  // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
+  // this produced a silently broken agent (#75) — pi-mono accepted the bogus name
+  // into the allowlist, then dropped it at registration with no signal back.
+  if (agentConfig?.builtinToolNames?.length) {
+    const knownBuiltins = new Set(BUILTIN_TOOL_NAMES);
+    for (const name of agentConfig.builtinToolNames) {
+      if (!knownBuiltins.has(name)) {
+        options.onToolActivity?.({
+          type: "end",
+          toolName: `tools-error:tool "${name}" requested by agent "${type}" is not a known built-in`,
+        });
+      }
+    }
+  }
 
   // A subagent spawns mid-task, so a bad `extensions:`/`ext:` entry warns rather
   // than aborts. Path entries fold their canonical name into `names`, so this

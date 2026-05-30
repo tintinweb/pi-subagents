@@ -53,6 +53,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
 }));
 
 vi.mock("../src/agent-types.js", () => ({
+  BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],
   getConfig: vi.fn(() => ({
     displayName: "Explore",
     description: "Explore",
@@ -613,6 +614,11 @@ describe("extensionCanonicalName", () => {
     expect(extensionCanonicalName("/x/foo/index.ts")).toBe("foo");
     expect(extensionCanonicalName("/x/foo/index.js")).toBe("foo");
   });
+  it("lowercases the result for case-insensitive matching", () => {
+    expect(extensionCanonicalName("/x/MCP.ts")).toBe("mcp");
+    expect(extensionCanonicalName("/x/MyExt.js")).toBe("myext");
+    expect(extensionCanonicalName("/x/Foo/index.ts")).toBe("foo");
+  });
 });
 
 describe("parseExtensionsSpec", () => {
@@ -648,6 +654,15 @@ describe("parseExtensionsSpec", () => {
     expect(spec.wildcard).toBe(true);
     expect(spec.names).toEqual(new Set(["mcp", "foo"]));
     expect(spec.paths).toEqual(["/abs/foo.ts"]);
+  });
+  it("lowercases bare-name entries — extension names match case-insensitively", () => {
+    const spec = parseExtensionsSpec(["Mcp", "LOGGER"], "/work");
+    expect(spec.names).toEqual(new Set(["mcp", "logger"]));
+  });
+  it("ignores empty entries (defensive — upstream parsers already strip them)", () => {
+    const spec = parseExtensionsSpec(["", "mcp", ""], "/work");
+    expect(spec.names).toEqual(new Set(["mcp"]));
+    expect(spec.wildcard).toBe(false);
   });
 });
 
@@ -769,6 +784,65 @@ describe("agent-runner extension allowlist", () => {
       }),
     );
   });
+
+  it("matches `extensions: [Mcp]` against `mcp.ts` (case-insensitive)", async () => {
+    setupArrayAgent(["Mcp"]);
+    withExtensions({ "/ext/mcp.ts": ["mcp_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    // No extension-error warning — the name resolved.
+    const errorCalls = onToolActivity.mock.calls.filter((c) =>
+      typeof c[0]?.toolName === "string" && c[0].toolName.startsWith("extension-error:"),
+    );
+    expect(errorCalls).toEqual([]);
+    expect(lastToolsPassed()).toContain("mcp_tool");
+  });
+});
+
+// ─── unknown built-in tool names in `tools:` (#75) ──────────────────────
+describe("agent-runner unknown built-in tools", () => {
+  it("emits a tools-error warning for each plain entry not in BUILTIN_TOOL_NAMES", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, builtinToolNames: ["read", "reed", "grep", "edt"] }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read", "reed", "grep", "edt"]);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    const result = await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(result.responseText).toBe("OK");
+    const errorMessages = onToolActivity.mock.calls
+      .map((c) => c[0]?.toolName)
+      .filter((n): n is string => typeof n === "string" && n.startsWith("tools-error:"));
+    expect(errorMessages).toHaveLength(2);
+    expect(errorMessages.some((m) => m.includes('"reed"'))).toBe(true);
+    expect(errorMessages.some((m) => m.includes('"edt"'))).toBe(true);
+  });
+
+  it("stays quiet when all plain tool names are valid built-ins", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, builtinToolNames: ["read", "grep"] }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read", "grep"]);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    const errorMessages = onToolActivity.mock.calls
+      .map((c) => c[0]?.toolName)
+      .filter((n): n is string => typeof n === "string" && n.startsWith("tools-error:"));
+    expect(errorMessages).toEqual([]);
+  });
 });
 
 // ─── ext: tool selectors in `tools:` (opt-in flip) ──────────────────────
@@ -801,6 +875,14 @@ describe("parseExtSelectors", () => {
     const { extNames, narrowing } = parseExtSelectors(["ext:", "ext:foo/"]);
     expect(extNames).toEqual(new Set(["foo"]));
     expect(narrowing.size).toBe(0);
+  });
+  it("lowercases the extension name but preserves tool-name case", () => {
+    // The extension half matches the loader's canonical name (also lowercased);
+    // the tool half is matched against pi-mono's registered identifiers, which
+    // are case-sensitive.
+    const { extNames, narrowing } = parseExtSelectors(["ext:Mcp/SomeTool", "ext:FOO"]);
+    expect(extNames).toEqual(new Set(["mcp", "foo"]));
+    expect(narrowing.get("mcp")).toEqual(new Set(["SomeTool"]));
   });
 });
 
