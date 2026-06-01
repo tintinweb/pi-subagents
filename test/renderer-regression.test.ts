@@ -55,15 +55,15 @@ describe("renderer regression-lock snapshot", () => {
     expect(outputs).toMatchInlineSnapshot(`
       [
         "completed: [success]✓[/success] **Test Agent** [dim]completed[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Success result[/dim]",
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Success result[/dim]",
         "error: [error]✗[/error] **Test Agent** [dim]error[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Error: failed[/dim]",
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Error: failed[/dim]",
         "stopped: [error]✗[/error] **Test Agent** [dim]stopped[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  No output.[/dim]",
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  No output.[/dim]",
         "aborted: [error]✗[/error] **Test Agent** [dim]aborted[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Partial result[/dim]",
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Partial result[/dim]",
         "steered: [success]✓[/success] **Test Agent** [dim]completed (steered)[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Steered result[/dim]",
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Steered result[/dim]",
       ]
     `);
   });
@@ -80,8 +80,8 @@ describe("renderer regression-lock snapshot", () => {
     const rendered1 = subagentNotificationRenderer({ details: completedCompleted }, { expanded: true }, mockTheme, "plain", false);
     expect(extractRenderedText(rendered1)).toMatchInlineSnapshot(`
       "[success]✓[/success] **Main Agent** [dim]completed[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Second Agent** [dim]completed[/dim]
-        [dim]⟳2[/dim] [dim]·[/dim] [dim]1 tool use[/dim] [dim]·[/dim] [dim]100 token[/dim] [dim]·[/dim] [dim]3.0s[/dim][dim]  Second result[/dim]"
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Second Agent** [dim]completed[/dim]
+        [dim]↻2[/dim] [dim]·[/dim] [dim]1 tool use[/dim] [dim]·[/dim] [dim]100 token[/dim] [dim]·[/dim] [dim]3.0s[/dim][dim]  Second result[/dim]"
     `);
 
     // 2 agents: completed + error (mixed)
@@ -95,8 +95,8 @@ describe("renderer regression-lock snapshot", () => {
     const rendered2 = subagentNotificationRenderer({ details: completedError }, { expanded: true }, mockTheme, "plain", false);
     expect(extractRenderedText(rendered2)).toMatchInlineSnapshot(`
       "[success]✓[/success] **Main Agent** [dim]completed[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][error]✗[/error] **Failed Agent** [dim]error[/dim]
-        [dim]⟳1[/dim] [dim]·[/dim] [dim]50 token[/dim] [dim]·[/dim] [dim]1.0s[/dim][dim]  Error occurred[/dim]"
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][error]✗[/error] **Failed Agent** [dim]error[/dim]
+        [dim]↻1[/dim] [dim]·[/dim] [dim]50 token[/dim] [dim]·[/dim] [dim]1.0s[/dim][dim]  Error occurred[/dim]"
     `);
 
     // 3 agents: completed + steered + aborted (all success-ish)
@@ -111,9 +111,9 @@ describe("renderer regression-lock snapshot", () => {
     const rendered3 = subagentNotificationRenderer({ details: mixedSuccess }, { expanded: true }, mockTheme, "plain", false);
     expect(extractRenderedText(rendered3)).toMatchInlineSnapshot(`
       "[success]✓[/success] **Main Agent** [dim]completed[/dim]
-        [dim]⟳3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Steered Agent** [dim]completed (steered)[/dim]
-        [dim]⟳4[/dim] [dim]·[/dim] [dim]3 tool uses[/dim] [dim]·[/dim] [dim]200 token[/dim] [dim]·[/dim] [dim]6.0s[/dim][dim]  Steered result[/dim][error]✗[/error] **Aborted Agent** [dim]aborted[/dim]
-        [dim]⟳2[/dim] [dim]·[/dim] [dim]1 tool use[/dim] [dim]·[/dim] [dim]75 token[/dim] [dim]·[/dim] [dim]2.0s[/dim][dim]  Partial result[/dim]"
+        [dim]↻3[/dim] [dim]·[/dim] [dim]2 tool uses[/dim] [dim]·[/dim] [dim]150 token[/dim] [dim]·[/dim] [dim]5.0s[/dim][dim]  Main result[/dim][success]✓[/success] **Steered Agent** [dim]completed (steered)[/dim]
+        [dim]↻4[/dim] [dim]·[/dim] [dim]3 tool uses[/dim] [dim]·[/dim] [dim]200 token[/dim] [dim]·[/dim] [dim]6.0s[/dim][dim]  Steered result[/dim][error]✗[/error] **Aborted Agent** [dim]aborted[/dim]
+        [dim]↻2[/dim] [dim]·[/dim] [dim]1 tool use[/dim] [dim]·[/dim] [dim]75 token[/dim] [dim]·[/dim] [dim]2.0s[/dim][dim]  Partial result[/dim]"
     `);
   });
 
