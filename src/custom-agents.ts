@@ -50,11 +50,14 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
 
     const { frontmatter: fm, body } = parseFrontmatter<Record<string, unknown>>(content);
 
+    const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
+
     agents.set(name, {
       name,
       displayName: str(fm.display_name),
       description: str(fm.description) ?? name,
-      builtinToolNames: csvList(fm.tools, BUILTIN_TOOL_NAMES),
+      builtinToolNames,
+      extSelectors,
       disallowedTools: csvListOptional(fm.disallowed_tools),
       extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
       skills: inheritField(fm.skills ?? fm.inherit_skills),
@@ -105,6 +108,25 @@ function parseCsvField(val: unknown): string[] | undefined {
 function csvList(val: unknown, defaults: string[]): string[] {
   if (val === undefined || val === null) return defaults;
   return parseCsvField(val) ?? [];
+}
+
+/**
+ * Partition the `tools:` CSV into the built-in tool allowlist and raw `ext:` selectors.
+ * `*` (and the case-insensitive alias `all`, for `tools: all`) expands to all
+ * built-ins; plain entries are built-in names; `ext:` entries are extension-tool
+ * selectors parsed later by the runner. omitted → all built-ins, no selectors.
+ * `tools:` present with only `ext:` entries → zero built-ins (use `*`).
+ */
+function parseToolsField(val: unknown): { builtinToolNames: string[]; extSelectors: string[] | undefined } {
+  const entries = csvList(val, BUILTIN_TOOL_NAMES);
+  const isWildcard = (e: string) => e === "*" || e.toLowerCase() === "all";
+  const hasWildcard = entries.some(isWildcard);
+  const plain = entries.filter(e => !isWildcard(e) && !e.startsWith("ext:"));
+  const extEntries = entries.filter(e => e.startsWith("ext:"));
+  return {
+    builtinToolNames: hasWildcard ? [...new Set([...BUILTIN_TOOL_NAMES, ...plain])] : plain,
+    extSelectors: extEntries.length > 0 ? extEntries : undefined,
+  };
 }
 
 /**

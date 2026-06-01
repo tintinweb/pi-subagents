@@ -112,8 +112,9 @@ export function getToolNamesForType(type: string): string[] {
   const key = resolveKey(type);
   const raw = key ? agents.get(key) : undefined;
   const config = raw?.enabled !== false ? raw : undefined;
-  const names = config?.builtinToolNames?.length ? config.builtinToolNames : [...BUILTIN_TOOL_NAMES];
-  return names;
+  // `undefined` (definition omitted the field) → all built-ins; an explicit `[]`
+  // (`tools: none` or a `tools:` with only `ext:` entries) → zero built-ins.
+  return config?.builtinToolNames ?? [...BUILTIN_TOOL_NAMES];
 }
 
 /** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object). Falls back to general-purpose. */

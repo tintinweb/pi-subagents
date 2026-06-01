@@ -203,6 +203,17 @@ describe("agent type registry", () => {
       expect(names).toEqual(["read", "grep", "find"]);
     });
 
+    it("getToolNamesForType honors an explicit empty builtinToolNames as zero built-ins", () => {
+      // `tools: none` and `tools:` with only `ext:` entries both produce `[]`.
+      const agents = new Map([["ext-only", makeAgentConfig({
+        name: "ext-only",
+        builtinToolNames: [],
+      })]]);
+      registerAgents(agents);
+
+      expect(getToolNamesForType("ext-only")).toEqual([]);
+    });
+
     it("getConfig falls back to general-purpose for unknown types", () => {
       const config = getConfig("nonexistent");
       expect(config.displayName).toBe("Agent");
