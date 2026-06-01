@@ -1,6 +1,8 @@
 ---
 description: Security Code Reviewer
-tools: read, grep, find, bash
+tools: "*"
+extensions: true
+skills: true
 model: anthropic/claude-haiku-4-5-20251001
 thinking: off
 max_turns: 10
