@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { JoinMode } from "./types.js";
+import type { JoinMode, ResultPreviewMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -48,6 +48,12 @@ export interface SubagentsSettings {
    * against. Defaults to false: subagents may use any model.
    */
   scopeModels?: boolean;
+  /** Result preview rendering mode. Defaults to "markdown". */
+  resultPreviewMode?: ResultPreviewMode;
+  /** Always show expanded result preview, ignoring pi's expanded flag. Defaults to true. */
+  resultPreviewExpanded?: boolean;
+  /** Max chars for failure preview before truncation. Defaults to 65536 (64 KiB). */
+  failurePreviewMaxChars?: number;
 }
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -58,12 +64,16 @@ export interface SettingsAppliers {
   setDefaultJoinMode: (mode: JoinMode) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setResultPreviewMode: (mode: ResultPreviewMode) => void;
+  setResultPreviewExpanded: (expanded: boolean) => void;
+  setFailurePreviewMaxChars: (chars: number) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
 export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
+const VALID_RESULT_PREVIEW_MODES: ReadonlySet<string> = new Set<ResultPreviewMode>(["plain", "markdown"]);
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
@@ -71,6 +81,7 @@ const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group
 const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
+export const RESULT_PREVIEW_MAX_CHARS_CEILING = 1_048_576;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
@@ -106,6 +117,19 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
+  }
+  if (typeof r.resultPreviewMode === "string" && VALID_RESULT_PREVIEW_MODES.has(r.resultPreviewMode)) {
+    out.resultPreviewMode = r.resultPreviewMode as ResultPreviewMode;
+  }
+  if (typeof r.resultPreviewExpanded === "boolean") {
+    out.resultPreviewExpanded = r.resultPreviewExpanded;
+  }
+  if (
+    Number.isInteger(r.failurePreviewMaxChars) &&
+    (r.failurePreviewMaxChars as number) >= 1 &&
+    (r.failurePreviewMaxChars as number) <= RESULT_PREVIEW_MAX_CHARS_CEILING
+  ) {
+    out.failurePreviewMaxChars = r.failurePreviewMaxChars as number;
   }
   return out;
 }
@@ -163,6 +187,9 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (s.resultPreviewMode) appliers.setResultPreviewMode(s.resultPreviewMode);
+  if (typeof s.resultPreviewExpanded === "boolean") appliers.setResultPreviewExpanded(s.resultPreviewExpanded);
+  if (typeof s.failurePreviewMaxChars === "number") appliers.setFailurePreviewMaxChars(s.failurePreviewMaxChars);
 }
 
 /**
