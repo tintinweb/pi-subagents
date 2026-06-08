@@ -521,6 +521,19 @@ export default function (pi: ExtensionAPI) {
   function isScopeModelsEnabled(): boolean { return scopeModelsEnabled; }
   function setScopeModelsEnabled(enabled: boolean): void { scopeModelsEnabled = enabled; }
 
+  // ---- Widget spacing configuration ----
+  // When enabled, the live agent widget renders a trailing blank line so it
+  // isn't flush against the editor (the host adds a leading spacer above but
+  // none below). Off by default to keep the compact look; opt-in via `/agents
+  // → Settings`. Persisted as `widgetSpacer`. The widget owns the live flag;
+  // this mirror exists only so snapshotSettings() can read it back.
+  let widgetSpacerEnabled = false;
+  function isWidgetSpacerEnabled(): boolean { return widgetSpacerEnabled; }
+  function setWidgetSpacerEnabled(enabled: boolean): void {
+    widgetSpacerEnabled = enabled;
+    widget.setTrailingSpacer(enabled);
+  }
+
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -613,6 +626,7 @@ export default function (pi: ExtensionAPI) {
       setDefaultJoinMode,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
+      setWidgetSpacer: setWidgetSpacerEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1855,6 +1869,7 @@ ${systemPrompt}
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      widgetSpacer: isWidgetSpacerEnabled(),
     };
   }
 
@@ -1909,6 +1924,13 @@ ${systemPrompt}
           currentValue: isScopeModelsEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
+        {
+          id: "widgetSpacer",
+          label: "Widget spacing",
+          description: "Blank line below the Agents widget so it isn't flush against the editor (helps with boxed editors)",
+          currentValue: isWidgetSpacerEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
       ];
     }
 
@@ -1953,6 +1975,11 @@ ${systemPrompt}
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "widgetSpacer") {
+        const enabled = value === "on";
+        setWidgetSpacerEnabled(enabled);
+        widget.update();  // re-render immediately so the spacing change is visible
+        notifyApplied(ctx, `Widget spacing ${enabled ? "enabled" : "disabled"}`);
       }
     }
 

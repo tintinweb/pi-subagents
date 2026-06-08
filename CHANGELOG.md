@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Optional spacing below the agent widget (`widgetSpacer` setting).** The host inserts a leading spacer *above* the `aboveEditor` widget but none below it, so the last tree line (e.g. `└─ ✓ …`) renders directly on top of the input box. This is fine with the default editor but looks cramped with a **boxed/custom editor** whose top border touches that line. A new opt-in setting renders a trailing blank line below the widget for symmetric breathing room. **Defaults to `off`** — the compact look is unchanged for everyone unless they enable it via `/agents → Settings → Widget spacing` (persisted as `widgetSpacer` in `subagents.json`). Visual only — no behavior or stats-format changes.
+
 ## [0.10.0] - 2026-06-01
 
 > **⚠️ Breaking: `extensions:` and `tools:` in agent frontmatter semantics changed.** The `extensions: [...]` array now selects which extensions *load*, not which tool names surface. Agents that previously used the array form will behave differently — see migration below. The `tools:` field also grew new `ext:` and `*` selector forms; existing `tools:` values without these selectors are unchanged.
