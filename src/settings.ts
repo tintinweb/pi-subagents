@@ -48,6 +48,14 @@ export interface SubagentsSettings {
    * against. Defaults to false: subagents may use any model.
    */
   scopeModels?: boolean;
+  /**
+   * Render a trailing blank line below the live agent widget so it isn't flush
+   * against the editor. The host adds a leading spacer above the widget but none
+   * below, so the last tree line would otherwise sit directly on top of the input
+   * box — noticeable with a boxed/custom editor whose top border touches it.
+   * Defaults to `false` (compact look preserved); opt-in via `/agents → Settings`.
+   */
+  widgetSpacer?: boolean;
 }
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -58,6 +66,7 @@ export interface SettingsAppliers {
   setDefaultJoinMode: (mode: JoinMode) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setWidgetSpacer: (enabled: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -106,6 +115,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
+  }
+  if (typeof r.widgetSpacer === "boolean") {
+    out.widgetSpacer = r.widgetSpacer;
   }
   return out;
 }
@@ -163,6 +175,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (typeof s.widgetSpacer === "boolean") appliers.setWidgetSpacer(s.widgetSpacer);
 }
 
 /**

@@ -220,11 +220,23 @@ export class AgentWidget {
   private tui: any | undefined;
   /** Last status bar text, used to avoid redundant setStatus calls. */
   private lastStatusText: string | undefined;
+  /**
+   * When true, render a trailing blank line below the widget so it isn't flush
+   * against the editor. Off by default to preserve the compact look; opt-in via
+   * `/agents → Settings → Widget spacing` (setting `widgetSpacer`). Useful with
+   * a boxed/custom editor whose top border would otherwise touch the last line.
+   */
+  private trailingSpacer = false;
 
   constructor(
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
   ) {}
+
+  /** Toggle the trailing blank line below the widget (see `trailingSpacer`). */
+  setTrailingSpacer(enabled: boolean) {
+    this.trailingSpacer = enabled;
+  }
 
   /** Set the UI context (grabbed from first tool execution). */
   setUICtx(ctx: UICtx) {
@@ -441,6 +453,13 @@ export class AgentWidget {
       lines.push(truncate(theme.fg("dim", "└─") + ` ${theme.fg("dim", `+${hiddenRunning + hiddenFinished} more (${overflowText})`)}`)
       );
     }
+
+    // Optional trailing blank line so the widget isn't flush against the editor.
+    // The host inserts a leading spacer above the widget but none below, so the
+    // last tree line (e.g. `└─ ✓ …`) would otherwise sit directly on top of the
+    // input box — noticeable with a boxed/custom editor. Off by default (compact);
+    // opt-in via the `widgetSpacer` setting.
+    if (this.trailingSpacer) lines.push("");
 
     return lines;
   }
