@@ -121,6 +121,24 @@ describe("worktree", () => {
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
 
+    it("commits changes even when a pre-commit hook rejects (--no-verify)", () => {
+      // A failing pre-commit hook in the main repo also applies to its
+      // worktrees — without --no-verify it would abort the preservation commit.
+      const hookPath = join(repoDir, ".git", "hooks", "pre-commit");
+      writeFileSync(hookPath, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+      const wt = createWorktree(repoDir, "hooked-1")!;
+      expect(wt).toBeDefined();
+      writeFileSync(join(wt.path, "hooked-file.txt"), "agent wrote this");
+
+      const result = cleanupWorktree(repoDir, wt, "hook should not block");
+      expect(result.hasChanges).toBe(true);
+      expect(result.branch).toBe("pi-agent-hooked-1");
+
+      // Cleanup branch
+      try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
     it("creates branch when worktree is clean but HEAD moved", () => {
       const wt = createWorktree(repoDir, "committed-1")!;
       expect(wt).toBeDefined();

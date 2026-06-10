@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Agents with `enabled: false` are no longer advertised in the Agent tool description** ([#92](https://github.com/tintinweb/pi-subagents/issues/92)). `buildTypeListText` listed every registered agent, including disabled ones that `isValidType` then refused to spawn — the LLM was offered types it could never use. The type list now filters through `getAvailableTypes()`, matching the `subagent_type` parameter description.
 - **Agent tool type list no longer built from pre-settings state.** The description text was captured into a variable before persisted settings were applied; it's now built at tool-registration time, after `subagents:settings_loaded`.
+- **Committed work from `isolation: "worktree"` subagents is now preserved** ([#68](https://github.com/tintinweb/pi-subagents/pull/68) — thanks [@rylwin](https://github.com/rylwin)). If an isolated subagent creates its own commit, cleanup previously saw a clean `git status`, treated it as "no changes", and removed the detached worktree — silently discarding the commits. The worktree now records its base SHA at creation, and cleanup creates the expected `pi-agent-*` branch whenever HEAD moved past it, even with a clean tree.
+- **Automatic commits in isolated worktrees skip local Git hooks** ([#68](https://github.com/tintinweb/pi-subagents/pull/68)). The preservation commit at worktree cleanup now uses `--no-verify`, so a failing local pre-commit hook can't abort it (which previously surfaced as `hasChanges: false` — the agent's work lost).
 
 ## [0.10.0] - 2026-06-01
 
@@ -61,17 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`/agents → Eject` now emits YAML-safe `description:` frontmatter.** The new Explore description contains a `: ` colon-space pattern (the search-breadth hint) and embedded quote characters — emitting it raw would have produced malformed frontmatter that the `yaml` parser would mis-parse. `ejectAgent` now wraps the description with `JSON.stringify` (a valid YAML 1.2 double-quoted scalar), so any description string round-trips cleanly through eject → re-load. Latent bug: previously unreachable because old descriptions were YAML-plain-safe.
 - **`/agents → Settings` UI rewritten to inline-editable `SettingsList`.** Replaces the previous modal `ctx.ui.select` chain. All settings visible at once; `↑`/`↓` to navigate, `Space` to cycle preset values on numerics (`Max concurrency`, `Default max turns`, `Grace turns`), `Enter` to type a custom value, `Esc` to exit. Functionally equivalent — same fields, same valid ranges, same persistence behavior — but the interaction model is different. Users scripting against the old screen flow may notice.
 - **`.gitignore` additions.** Added `.pi/subagents.json` (project-local subagents settings — written by `/agents → Settings`, shouldn't be committed) plus pi-runtime working files (`progress.md`, `AGENTS.md`, `CLAUDE.md`). **Migration:** if you previously committed `.pi/subagents.json` to your repo, run `git rm --cached .pi/subagents.json` to untrack — gitignore only blocks new additions.
-
-### Fixed
-- **Automatic commits in isolated worktrees skip local Git hooks.** When an
-  `isolation: "worktree"` subagent makes its automatic commit, use
-  `--no-verify` so local hooks cannot block preserving the agent's work.
-- **Committed work from `isolation: "worktree"` subagents is now preserved.**
-  If an isolated subagent creates its own commit, cleanup now detects that the
-  clean worktree's HEAD moved and creates the expected `pi-agent-*` branch
-  before removing the detached worktree. Previously, cleanup treated the clean
-  status as no changes and removed the detached worktree without returning a
-  branch.
 
 ## [0.8.0] - 2026-05-26
 
