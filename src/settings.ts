@@ -55,7 +55,20 @@ export interface SubagentsSettings {
    * Defaults to false.
    */
   disableDefaultAgents?: boolean;
+  /**
+   * Which Agent tool description the LLM sees. "full" (default) is the rich
+   * Claude Code-style prompt; "compact" is a ~75% smaller version (one-line
+   * agent type list, terse usage notes) for small/local models where tool-spec
+   * tokens are expensive; "custom" reads `.pi/agent-tool-description.md`
+   * (project, falling back to `<agentDir>/agent-tool-description.md`) with
+   * `{{placeholder}}` substitution — a missing/empty file falls back to "full".
+   * The mode is read once at tool registration — changing it applies on the
+   * next pi session.
+   */
+  toolDescriptionMode?: ToolDescriptionMode;
 }
+
+export type ToolDescriptionMode = "full" | "compact" | "custom";
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
@@ -66,12 +79,14 @@ export interface SettingsAppliers {
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
+  setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
 export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
+const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
@@ -117,6 +132,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.disableDefaultAgents === "boolean") {
     out.disableDefaultAgents = r.disableDefaultAgents;
+  }
+  if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
+    out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
   }
   return out;
 }
@@ -175,6 +193,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
+  if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
 }
 
 /**
