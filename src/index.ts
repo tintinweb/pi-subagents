@@ -17,7 +17,7 @@ import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Tex
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
@@ -526,12 +526,11 @@ export default function (pi: ExtensionAPI) {
   // Plan) are not registered. User-defined agents from .pi/agents/*.md are
   // completely unaffected — only DEFAULT_AGENTS are suppressed.
   // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
-  let disableDefaultAgents = false;
-  function isDisableDefaultAgents(): boolean { return disableDefaultAgents; }
+  // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
+  // needs it; this wrapper just re-registers after flipping it.
   function setDisableDefaultAgents(b: boolean): void {
-    disableDefaultAgents = b;
     setDefaultsDisabled(b);
-    reloadCustomAgents();  // re-register with new setting
+    reloadCustomAgents(); // re-register with new setting
   }
 
   // ---- Batch tracking for smart join mode ----
@@ -1169,8 +1168,10 @@ Terse command-style prompts produce shallow, generic work.
 
       const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
 
+      // "general-purpose" may itself be unregistered (defaults disabled, no
+      // user override) — getConfig then uses the hardcoded fallback config.
       const fallbackNote = fellBack
-        ? `Note: Unknown agent type "${rawType}" — using general-purpose.\n\n`
+        ? `Note: Unknown agent type "${rawType}" — using ${resolveType("general-purpose") ? "general-purpose" : "the fallback agent config"}.\n\n`
         : "";
 
       if (record.status === "error") {
@@ -1867,7 +1868,7 @@ ${systemPrompt}
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
-      disableDefaultAgents: isDisableDefaultAgents(),
+      disableDefaultAgents: isDefaultsDisabled(),
     };
   }
 
@@ -1926,7 +1927,7 @@ ${systemPrompt}
           id: "disableDefaultAgents",
           label: "Disable defaults",
           description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
-          currentValue: isDisableDefaultAgents() ? "on" : "off",
+          currentValue: isDefaultsDisabled() ? "on" : "off",
           values: ["on", "off"],
         },
       ];

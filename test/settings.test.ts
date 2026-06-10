@@ -215,6 +215,22 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir).scopeModels).toBeUndefined();
     });
 
+    it("accepts disableDefaultAgents boolean (true and false)", () => {
+      writeProject({ disableDefaultAgents: true });
+      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });
+      writeProject({ disableDefaultAgents: false });
+      expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: false });
+    });
+
+    it("drops non-boolean disableDefaultAgents", () => {
+      writeProject({ disableDefaultAgents: "yes" });
+      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
+      writeProject({ disableDefaultAgents: 1 });
+      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
+      writeProject({ disableDefaultAgents: null });
+      expect(loadSettings(projectDir).disableDefaultAgents).toBeUndefined();
+    });
+
     it("returns {} when the JSON root is not an object (array, string, null)", () => {
       mkdirSync(join(projectDir, ".pi"), { recursive: true });
       writeFileSync(projectFile(), '["not", "an", "object"]');
@@ -312,6 +328,7 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setDisableDefaultAgents: vi.fn(),
       };
     });
 
@@ -323,6 +340,7 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
+      expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
     });
 
     it("applies only the fields that are present", () => {
@@ -344,6 +362,7 @@ describe("settings persistence", () => {
           defaultJoinMode: "group",
           schedulingEnabled: false,
           scopeModels: true,
+          disableDefaultAgents: true,
         },
         appliers,
       );
@@ -353,11 +372,17 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
+      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
     });
 
     it("applies scopeModels: false", () => {
       applySettings({ scopeModels: false }, appliers);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(false);
+    });
+
+    it("applies disableDefaultAgents: false", () => {
+      applySettings({ disableDefaultAgents: false }, appliers);
+      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(false);
     });
 
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {
@@ -414,6 +439,7 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setDisableDefaultAgents: vi.fn(),
       };
     });
 
