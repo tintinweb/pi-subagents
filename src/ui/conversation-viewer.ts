@@ -12,6 +12,7 @@ import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
 const CHROME_LINES_BASE = 6;
@@ -27,6 +28,7 @@ export class ConversationViewer implements Component {
   private closed = false;
   /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
   private stopArmed = false;
+  private keys: ViewerKeys;
 
   constructor(
     private tui: TUI,
@@ -37,7 +39,10 @@ export class ConversationViewer implements Component {
     private done: (result: undefined) => void,
     /** Abort the agent shown here. Omitted → no stop affordance (e.g. read-only history). */
     private onStop?: () => void,
+    /** User keybindings from `ctx.ui.custom()`. Omitted → hardcoded defaults. */
+    keybindings?: ViewerKeybindings,
   ) {
+    this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
       if (this.closed) return;
       this.tui.requestRender();
@@ -71,16 +76,16 @@ export class ConversationViewer implements Component {
     const viewportHeight = this.viewportHeight();
     const maxScroll = Math.max(0, totalLines - viewportHeight);
 
-    if (matchesKey(data, "up") || matchesKey(data, "k")) {
+    if (this.keys.scrollUp(data)) {
       this.scrollOffset = Math.max(0, this.scrollOffset - 1);
       this.autoScroll = this.scrollOffset >= maxScroll;
-    } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
+    } else if (this.keys.scrollDown(data)) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
       this.autoScroll = this.scrollOffset >= maxScroll;
-    } else if (matchesKey(data, "pageUp") || matchesKey(data, "shift+up")) {
+    } else if (this.keys.pageUp(data)) {
       this.scrollOffset = Math.max(0, this.scrollOffset - viewportHeight);
       this.autoScroll = false;
-    } else if (matchesKey(data, "pageDown") || matchesKey(data, "shift+down")) {
+    } else if (this.keys.pageDown(data)) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + viewportHeight);
       this.autoScroll = this.scrollOffset >= maxScroll;
     } else if (matchesKey(data, "home")) {

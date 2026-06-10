@@ -1494,12 +1494,12 @@ Terse command-style prompts produce shallow, generic work.
     const activity = agentActivity.get(record.id);
 
     await ctx.ui.custom<undefined>(
-      (tui, theme, _keybindings, done) => {
+      (tui, theme, keybindings, done) => {
         return new ConversationViewer(tui, session, record, activity, theme, done, () => {
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        });
+        }, keybindings);
       },
       {
         overlay: true,
