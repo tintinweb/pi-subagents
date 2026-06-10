@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`disableDefaultAgents` setting** ([#92](https://github.com/tintinweb/pi-subagents/issues/92) — thanks [@TommyC81](https://github.com/TommyC81)). When on, the three built-in default agents (general-purpose, Explore, Plan) are skipped at registration — only user-defined `.pi/agents/*.md` agents are advertised and spawnable. User agents are unaffected, including ones overriding a default by name; with no user agents defined, spawning falls back to the hardcoded generic config. Off by default; toggle via `/agents → Settings → Disable defaults` or `disableDefaultAgents` in `subagents.json`. Like `schedulingEnabled`, the Agent tool's type list reflects the change on the next pi session (tool schema is registered at startup).
+
+### Fixed
+- **Agents with `enabled: false` are no longer advertised in the Agent tool description** ([#92](https://github.com/tintinweb/pi-subagents/issues/92)). `buildTypeListText` listed every registered agent, including disabled ones that `isValidType` then refused to spawn — the LLM was offered types it could never use. The type list now filters through `getAvailableTypes()`, matching the `subagent_type` parameter description.
+- **Agent tool type list no longer built from pre-settings state.** The description text was captured into a variable before persisted settings were applied; it's now built at tool-registration time, after `subagents:settings_loaded`.
+
 ## [0.10.0] - 2026-06-01
 
 > **⚠️ Breaking: `extensions:` and `tools:` in agent frontmatter semantics changed.** The `extensions: [...]` array now selects which extensions *load*, not which tool names surface. Agents that previously used the array form will behave differently — see migration below. The `tools:` field also grew new `ext:` and `*` selector forms; existing `tools:` values without these selectors are unchanged.

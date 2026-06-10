@@ -48,6 +48,13 @@ export interface SubagentsSettings {
    * against. Defaults to false: subagents may use any model.
    */
   scopeModels?: boolean;
+  /**
+   * When true, the three built-in default agents (general-purpose, Explore, Plan)
+   * are not registered at startup. User-defined agents from .pi/agents/*.md are
+   * completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
+   * Defaults to false.
+   */
+  disableDefaultAgents?: boolean;
 }
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -58,6 +65,7 @@ export interface SettingsAppliers {
   setDefaultJoinMode: (mode: JoinMode) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setDisableDefaultAgents: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -106,6 +114,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
+  }
+  if (typeof r.disableDefaultAgents === "boolean") {
+    out.disableDefaultAgents = r.disableDefaultAgents;
   }
   return out;
 }
@@ -163,6 +174,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
 }
 
 /**

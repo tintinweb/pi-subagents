@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BUILTIN_TOOL_NAMES,
   getAgentConfig,
@@ -9,9 +9,11 @@ import {
   getReadOnlyMemoryToolNames,
   getToolNamesForType,
   getUserAgentNames,
+  isDefaultsDisabled,
   isValidType,
   registerAgents,
   resolveType,
+  setDefaultsDisabled,
 } from "../src/agent-types.js";
 import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import type { AgentConfig } from "../src/types.js";
@@ -127,6 +129,59 @@ describe("agent type registry", () => {
       expect(BUILTIN_TOOL_NAMES).toContain("find");
       expect(BUILTIN_TOOL_NAMES).toContain("ls");
       expect(BUILTIN_TOOL_NAMES.length).toBeGreaterThanOrEqual(7);
+    });
+  });
+
+  describe("disable defaults", () => {
+    // Module-level flag — always reset so later describes see the default roster.
+    afterEach(() => {
+      setDefaultsDisabled(false);
+      registerAgents(new Map());
+    });
+
+    it("defaults to enabled", () => {
+      expect(isDefaultsDisabled()).toBe(false);
+    });
+
+    it("registerAgents skips DEFAULT_AGENTS when disabled", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map());
+
+      expect(getAvailableTypes()).toEqual([]);
+      expect(isValidType("general-purpose")).toBe(false);
+      expect(isValidType("Explore")).toBe(false);
+      expect(isValidType("Plan")).toBe(false);
+    });
+
+    it("user agents are unaffected when defaults are disabled", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map([["auditor", makeAgentConfig({ name: "auditor" })]]));
+
+      expect(getAvailableTypes()).toEqual(["auditor"]);
+      expect(isValidType("auditor")).toBe(true);
+      expect(getDefaultAgentNames()).toEqual([]);
+    });
+
+    it("re-enabling restores defaults on next registerAgents", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map());
+      expect(isValidType("general-purpose")).toBe(false);
+
+      setDefaultsDisabled(false);
+      registerAgents(new Map());
+      expect(isValidType("general-purpose")).toBe(true);
+      expect(isValidType("Explore")).toBe(true);
+      expect(isValidType("Plan")).toBe(true);
+    });
+
+    it("getConfig falls back to the hardcoded config when defaults are disabled and no user agents exist", () => {
+      setDefaultsDisabled(true);
+      registerAgents(new Map());
+
+      const config = getConfig("general-purpose");
+      expect(config.displayName).toBe("Agent");
+      expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+      expect(config.promptMode).toBe("append");
     });
   });
 
