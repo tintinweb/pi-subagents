@@ -24,8 +24,11 @@ export function resolveAgentInvocationConfig(
   isolation?: IsolationMode;
 } {
   return {
-    modelInput: agentConfig?.model ?? params.model,
-    modelFromParams: agentConfig?.model == null && params.model != null,
+    // Caller-supplied `params.model` wins over the agent's frontmatter
+    // default. The param is documented as an "override ... omit to use the
+    // agent type's default" — frontmatter is the default, not authoritative.
+    modelInput: params.model ?? agentConfig?.model,
+    modelFromParams: params.model != null,
     thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
     maxTurns: agentConfig?.maxTurns ?? params.max_turns,
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
