@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Breaking ([#74](https://github.com/tintinweb/pi-subagents/pull/74)):** `extensions: [...]` in agent frontmatter is now a loader-level extension allowlist (names | paths | `"*"`), not a post-load tool-name substring filter. Excluded extensions no longer load, bind handlers, or register tools. To keep all extensions use `extensions: true` or `extensions: "*"`. The `tools:` field also gains `ext:foo` / `ext:foo/bar` selectors and a `*` built-in wildcard — any `ext:` entry flips extension tools to an explicit allowlist.
+
+### Added
+- **`extensions: [...]` loader-level allowlist + `ext:` tool selectors** ([#74](https://github.com/tintinweb/pi-subagents/pull/74)). `extensions:` selects which extensions load (bare name, path, or `"*"`); excluded extensions never bind handlers or register tools. `tools:` partitions into built-in names, a `*` / `all` wildcard, and `ext:foo` / `ext:foo/bar` selectors that narrow which extension tools reach the LLM. Chain-injected custom tools survive the master allowlist.
+- **`disableDefaultAgents` setting** ([#93](https://github.com/tintinweb/pi-subagents/pull/93)). When on, the three built-in default agents (general-purpose, Explore, Plan) are skipped at registration — only user-defined `.pi/agents/*.md` agents are advertised and spawnable. Off by default; toggle via `/agents → Settings` or `subagents.json`.
+- **`toolDescriptionMode` setting** ([#101](https://github.com/tintinweb/pi-subagents/pull/101)). Choose the Agent tool description sent to the LLM: `full` (rich, default), `compact` (~75% fewer tokens, for small/local models), or `custom` (`.pi/agent-tool-description.md` with `{{placeholder}}` substitution). See `examples/agent-tool-description.md`.
+
 ### Fixed
+- **Agents with `enabled: false` are no longer advertised in the Agent tool description** ([#93](https://github.com/tintinweb/pi-subagents/pull/93)). The type list now filters through available (enabled) agents, and the description is built at tool-registration time (after persisted settings load) instead of being captured from pre-settings state.
+- **`tools: none` (and `tools:` with only `ext:` entries) now yields zero built-in tools** ([#74](https://github.com/tintinweb/pi-subagents/pull/74)). `getToolNamesForType` treated an explicit empty list as "unspecified" and fell back to all built-ins.
 - **Committed work from `isolation: "worktree"` subagents is now preserved** ([#68](https://github.com/tintinweb/pi-subagents/pull/68)). If an isolated subagent creates its own commit, cleanup previously saw a clean `git status`, treated it as "no changes", and removed the detached worktree — silently discarding the commits. The worktree now records its base SHA at creation, and cleanup creates the expected `pi-agent-*` branch whenever HEAD moved past it, even with a clean tree.
 - **Automatic commits in isolated worktrees skip local Git hooks** ([#68](https://github.com/tintinweb/pi-subagents/pull/68)). The preservation commit at worktree cleanup now uses `--no-verify`, so a failing local pre-commit hook can't abort it.
 ## [0.7.1] - 2026-05-07
