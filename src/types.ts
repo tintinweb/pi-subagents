@@ -31,8 +31,9 @@ export interface AgentConfig {
   extSelectors?: string[];
   /** Tool denylist — these tools are removed even if `builtinToolNames` or extensions include them. */
   disallowedTools?: string[];
-  /** true = inherit all, string[] = only listed, false = none */
-  extensions: true | string[] | false;
+  /** true = inherit all, string[] = only listed, false = none, undefined = omitted
+   * (fall back to the global `defaultExtensions` setting, else all). */
+  extensions: true | string[] | false | undefined;
   /** true = inherit all, string[] = only listed, false = none */
   skills: true | string[] | false;
   model?: string;

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createAgentSession,
@@ -22,6 +22,9 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
     }
 
     async reload() {}
+    getExtensions() {
+      return { extensions: [] as Array<{ path: string; tools: Map<string, unknown> }> };
+    }
   },
   getAgentDir,
   SessionManager: { inMemory: sessionManagerInMemory },
@@ -72,7 +75,75 @@ vi.mock("../src/skill-loader.js", () => ({
   preloadSkills: vi.fn(() => []),
 }));
 
-import { extensionCanonicalName, parseExtensionsSpec, parseExtSelectors, resumeAgent, runAgent } from "../src/agent-runner.js";
+import { extensionCanonicalName, getDefaultExtensions, parseExtensionsSpec, parseExtSelectors, resumeAgent, runAgent, setDefaultExtensions } from "../src/agent-runner.js";
+import { getAgentConfig as mockedGetAgentConfig, getConfig as mockedGetConfig } from "../src/agent-types.js";
+
+describe("global defaultExtensions resolution", () => {
+  const getAgentConfigMock = mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>;
+  const getConfigMock = mockedGetConfig as unknown as ReturnType<typeof vi.fn>;
+  // Restore the shared module mocks to their default Explore behavior so later
+  // describe blocks are unaffected (these mocks are module-level singletons).
+  const defaultAgentConfig = () => agentCfg(false);
+  const defaultConfig = () => ({
+    displayName: "Explore", description: "Explore", builtinToolNames: ["read"],
+    extensions: false, skills: false, promptMode: "replace",
+  });
+  afterEach(() => {
+    setDefaultExtensions(undefined);
+    getAgentConfigMock.mockImplementation(defaultAgentConfig);
+    getConfigMock.mockImplementation(defaultConfig);
+  });
+
+  function agentCfg(extensions: unknown) {
+    return {
+      name: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions, skills: false, systemPrompt: "x", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+    };
+  }
+
+  it("explicit per-agent extensions: false wins over a global default of true", async () => {
+    getAgentConfigMock.mockReturnValue(agentCfg(false));
+    setDefaultExtensions(true);
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(
+      expect.objectContaining({ noExtensions: true }),
+    );
+  });
+
+  it("omitted per-agent extensions falls back to the global default (false → noExtensions)", async () => {
+    getAgentConfigMock.mockReturnValue(agentCfg(undefined));
+    setDefaultExtensions(false);
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(
+      expect.objectContaining({ noExtensions: true }),
+    );
+  });
+
+  it("omitted per-agent extensions with no global default loads extensions (noExtensions false)", async () => {
+    getAgentConfigMock.mockReturnValue(agentCfg(undefined));
+    // getConfig is the final fallback; in real code it coerces omitted → true.
+    getConfigMock.mockReturnValue({
+      displayName: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions: true, skills: false, promptMode: "replace",
+    });
+    setDefaultExtensions(undefined);
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(
+      expect.objectContaining({ noExtensions: false }),
+    );
+  });
+
+  it("getDefaultExtensions reflects the last set value", () => {
+    setDefaultExtensions(["mcp"]);
+    expect(getDefaultExtensions()).toEqual(["mcp"]);
+    setDefaultExtensions(undefined);
+    expect(getDefaultExtensions()).toBeUndefined();
+  });
+});
 
 describe("extensionCanonicalName", () => {
   it("uses the parent dir name for index.ts/index.js extensions", () => {

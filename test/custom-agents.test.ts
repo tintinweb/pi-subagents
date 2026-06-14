@@ -76,7 +76,9 @@ Just a prompt.`);
     expect(agent.name).toBe("minimal");
     expect(agent.description).toBe("minimal"); // defaults to filename
     expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES); // all tools
-    expect(agent.extensions).toBe(true); // inherit all
+    // Omitted extensions → undefined (defer to the global defaultExtensions
+    // setting; the runner resolves to all when that is also unset).
+    expect(agent.extensions).toBeUndefined();
     expect(agent.skills).toBe(true); // inherit all
     expect(agent.model).toBeUndefined();
     expect(agent.thinking).toBeUndefined();

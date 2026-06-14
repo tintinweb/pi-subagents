@@ -44,6 +44,14 @@ export interface SubagentsSettings {
    * next pi session.
    */
   toolDescriptionMode?: ToolDescriptionMode;
+  /**
+   * Global default for a subagent's `extensions:` when its frontmatter omits the
+   * field. Same shape and loader-level semantics as the per-agent `extensions:`
+   * field: `true` = all extensions, `false` = none, `string[]` = allowlist of
+   * extension names/paths. An explicit per-agent `extensions:` always wins.
+   * Omitted here → agents that omit the field load all extensions (legacy default).
+   */
+  defaultExtensions?: true | string[] | false;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -57,6 +65,7 @@ export interface SettingsAppliers {
   setSchedulingEnabled: (b: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
+  setDefaultExtensions: (v: true | string[] | false) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -109,6 +118,14 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
     out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
+  }
+  // defaultExtensions mirrors the per-agent `extensions:` shape: boolean, or a
+  // list of non-empty strings (names/paths). Anything else is dropped.
+  if (typeof r.defaultExtensions === "boolean") {
+    out.defaultExtensions = r.defaultExtensions;
+  } else if (Array.isArray(r.defaultExtensions)) {
+    const list = r.defaultExtensions.filter((e): e is string => typeof e === "string" && e.trim().length > 0);
+    if (list.length > 0) out.defaultExtensions = list;
   }
   return out;
 }
@@ -167,6 +184,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
+  if (s.defaultExtensions !== undefined) appliers.setDefaultExtensions(s.defaultExtensions);
 }
 
 /**

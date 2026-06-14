@@ -108,6 +108,20 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("round-trips defaultExtensions: booleans and string lists, drops junk", () => {
+    saveSettings({ defaultExtensions: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ defaultExtensions: false });
+    saveSettings({ defaultExtensions: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ defaultExtensions: true });
+    saveSettings({ defaultExtensions: ["mcp", "web"] }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ defaultExtensions: ["mcp", "web"] });
+    // empty/whitespace entries are dropped; an all-empty list is dropped entirely
+    writeProject({ defaultExtensions: ["", "  ", 3] } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+    writeProject({ defaultExtensions: "mcp" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips schedulingEnabled (true and false), and absence stays absent", () => {
     saveSettings({ schedulingEnabled: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ schedulingEnabled: false });
@@ -311,6 +325,7 @@ describe("settings persistence", () => {
         setSchedulingEnabled: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
+        setDefaultExtensions: vi.fn(),
       };
     });
 
@@ -375,6 +390,20 @@ describe("settings persistence", () => {
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
     });
 
+    it("calls setDefaultExtensions for boolean and list values, including false", () => {
+      applySettings({ defaultExtensions: false }, appliers);
+      expect(appliers.setDefaultExtensions).toHaveBeenCalledWith(false);
+      applySettings({ defaultExtensions: true }, appliers);
+      expect(appliers.setDefaultExtensions).toHaveBeenCalledWith(true);
+      applySettings({ defaultExtensions: ["mcp"] }, appliers);
+      expect(appliers.setDefaultExtensions).toHaveBeenCalledWith(["mcp"]);
+    });
+
+    it("does not call setDefaultExtensions when the field is absent", () => {
+      applySettings({ maxConcurrent: 2 }, appliers);
+      expect(appliers.setDefaultExtensions).not.toHaveBeenCalled();
+    });
+
     it("does not call setToolDescriptionMode when the field is absent", () => {
       applySettings({ maxConcurrent: 2 }, appliers);
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
@@ -427,6 +456,7 @@ describe("settings persistence", () => {
         setSchedulingEnabled: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
+        setDefaultExtensions: vi.fn(),
       };
     });
 

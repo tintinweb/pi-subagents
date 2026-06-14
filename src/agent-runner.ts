@@ -126,6 +126,19 @@ export function parseExtSelectors(entries: string[]): {
 /** Default max turns. undefined = unlimited (no turn limit). */
 let defaultMaxTurns: number | undefined;
 
+/**
+ * Global default for an agent's `extensions:` when its frontmatter omits the
+ * field. Same shape and loader-level semantics as the per-agent `extensions:`
+ * field: true = all, string[] = allowlist, false = none. undefined = unset
+ * (fall back to all). An explicit per-agent value always wins over this.
+ */
+let defaultExtensions: true | string[] | false | undefined;
+
+/** Get the global default extensions setting. undefined = unset (all). */
+export function getDefaultExtensions(): true | string[] | false | undefined { return defaultExtensions; }
+/** Set the global default extensions setting. */
+export function setDefaultExtensions(v: true | string[] | false | undefined): void { defaultExtensions = v; }
+
 /** Normalize max turns. undefined or 0 = unlimited, otherwise minimum 1. */
 export function normalizeMaxTurns(n: number | undefined): number | undefined {
   if (n == null || n === 0) return undefined;
@@ -293,8 +306,13 @@ export async function runAgent(
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = {};
 
-  // Resolve extensions/skills: isolated overrides to false
-  const extensions = options.isolated ? false : config.extensions;
+  // Resolve extensions/skills: isolated overrides to false.
+  // Precedence for extensions: explicit per-agent frontmatter (incl. false) >
+  // global `defaultExtensions` setting > all. `agentConfig?.extensions` is
+  // undefined only when the frontmatter omitted the field; `??` lets an
+  // explicit `false` win while an omitted value falls through to the default.
+  const resolvedExtensions = agentConfig?.extensions ?? defaultExtensions ?? config.extensions;
+  const extensions = options.isolated ? false : resolvedExtensions;
   const skills = options.isolated ? false : config.skills;
 
   // Skill preloading: when skills is string[], preload their content into prompt

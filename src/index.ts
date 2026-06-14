@@ -16,7 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultExtensions, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultExtensions, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { buildReadsBlock, createChainDir, createChainOutputTool, injectOutputInstruction, isAgentReadOnly, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateStepIO } from "./chain-io.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -698,6 +698,7 @@ export default function (pi: ExtensionAPI) {
       setSchedulingEnabled,
       setDisableDefaultAgents,
       setToolDescriptionMode,
+      setDefaultExtensions,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -2350,6 +2351,7 @@ ${systemPrompt}
       schedulingEnabled: isSchedulingEnabled(),
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
+      ...(getDefaultExtensions() !== undefined ? { defaultExtensions: getDefaultExtensions() } : {}),
     };
   }
 
@@ -2362,6 +2364,7 @@ ${systemPrompt}
       `Scheduling (current: ${isSchedulingEnabled() ? "enabled" : "disabled"})`,
       `Disable defaults (current: ${isDefaultsDisabled() ? "on" : "off"})`,
       `Tool description (current: ${getToolDescriptionMode()})`,
+      `Default extensions (current: ${describeDefaultExtensions(getDefaultExtensions())})`,
     ]);
     if (!choice) return;
 
@@ -2471,7 +2474,42 @@ ${systemPrompt}
           notifyApplied(ctx, `Tool description set to ${mode}. Takes effect on next pi session.`);
         }
       }
+    } else if (choice.startsWith("Default extensions")) {
+      const val = await ctx.ui.select(
+        "Default extensions for subagents that omit `extensions:` in frontmatter",
+        [
+          "all — every loaded extension (default)",
+          "none — no extensions",
+          "custom — comma-separated allowlist of extension names/paths",
+        ],
+      );
+      if (val) {
+        if (val.startsWith("all")) {
+          setDefaultExtensions(true);
+          notifyApplied(ctx, "Default extensions set to all.");
+        } else if (val.startsWith("none")) {
+          setDefaultExtensions(false);
+          notifyApplied(ctx, "Default extensions set to none.");
+        } else {
+          const csv = await ctx.ui.input("Extension names/paths (comma-separated)", "");
+          const list = (csv ?? "").split(",").map(s => s.trim()).filter(Boolean);
+          if (list.length > 0) {
+            setDefaultExtensions(list);
+            notifyApplied(ctx, `Default extensions set to: ${list.join(", ")}.`);
+          } else {
+            ctx.ui.notify("No extensions entered — unchanged.", "warning");
+          }
+        }
+      }
     }
+  }
+
+  /** Human-readable summary of the global defaultExtensions setting for the menu. */
+  function describeDefaultExtensions(v: true | string[] | false | undefined): string {
+    if (v === undefined) return "all (unset)";
+    if (v === true) return "all";
+    if (v === false) return "none";
+    return `${v.length} listed`;
   }
 
   // Persist the current snapshot, emit `subagents:settings_changed`, and surface

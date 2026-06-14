@@ -144,7 +144,10 @@ export function getConfig(type: string): {
       displayName: config.displayName ?? config.name,
       description: config.description,
       builtinToolNames: config.builtinToolNames ?? BUILTIN_TOOL_NAMES,
-      extensions: config.extensions,
+      // `undefined` (omitted frontmatter) is surfaced as `true` here; the runner
+      // resolves the real precedence (frontmatter > defaultExtensions > all)
+      // from the raw AgentConfig, not from this concrete view.
+      extensions: config.extensions ?? true,
       skills: config.skills,
       promptMode: config.promptMode,
     };
@@ -157,7 +160,7 @@ export function getConfig(type: string): {
       displayName: gp.displayName ?? gp.name,
       description: gp.description,
       builtinToolNames: gp.builtinToolNames ?? BUILTIN_TOOL_NAMES,
-      extensions: gp.extensions,
+      extensions: gp.extensions ?? true,
       skills: gp.skills,
       promptMode: gp.promptMode,
     };

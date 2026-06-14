@@ -10,42 +10,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **⚠️ Breaking ([#74](https://github.com/tintinweb/pi-subagents/pull/74)):** `extensions: [...]` in agent frontmatter is now a loader-level extension allowlist (names | paths | `"*"`), not a post-load tool-name substring filter. Excluded extensions no longer load, bind handlers, or register tools. To keep all extensions use `extensions: true` or `extensions: "*"`. The `tools:` field also gains `ext:foo` / `ext:foo/bar` selectors and a `*` built-in wildcard — any `ext:` entry flips extension tools to an explicit allowlist.
 
 ### Added
+
+- **`defaultExtensions` global setting.** Sets the default `extensions:` for subagents whose frontmatter omits the field, using the same shape and loader-level semantics as the per-agent field (`true` = all, `false` = none, `string[]` = allowlist of names/paths). An explicit per-agent `extensions:` always wins. Lets you globally trim which extensions subagents load (token + bind cost) without editing every agent file. Toggle via `/agents → Settings → Default extensions` or `subagents.json`. Omitting the setting preserves the legacy behavior (agents that omit `extensions:` load all extensions).
 - **`extensions: [...]` loader-level allowlist + `ext:` tool selectors** ([#74](https://github.com/tintinweb/pi-subagents/pull/74)). `extensions:` selects which extensions load (bare name, path, or `"*"`); excluded extensions never bind handlers or register tools. `tools:` partitions into built-in names, a `*` / `all` wildcard, and `ext:foo` / `ext:foo/bar` selectors that narrow which extension tools reach the LLM. Chain-injected custom tools survive the master allowlist.
 - **`disableDefaultAgents` setting** ([#93](https://github.com/tintinweb/pi-subagents/pull/93)). When on, the three built-in default agents (general-purpose, Explore, Plan) are skipped at registration — only user-defined `.pi/agents/*.md` agents are advertised and spawnable. Off by default; toggle via `/agents → Settings` or `subagents.json`.
 - **`toolDescriptionMode` setting** ([#101](https://github.com/tintinweb/pi-subagents/pull/101)). Choose the Agent tool description sent to the LLM: `full` (rich, default), `compact` (~75% fewer tokens, for small/local models), or `custom` (`.pi/agent-tool-description.md` with `{{placeholder}}` substitution). See `examples/agent-tool-description.md`.
 
 ### Fixed
+
 - **Agents with `enabled: false` are no longer advertised in the Agent tool description** ([#93](https://github.com/tintinweb/pi-subagents/pull/93)). The type list now filters through available (enabled) agents, and the description is built at tool-registration time (after persisted settings load) instead of being captured from pre-settings state.
 - **`tools: none` (and `tools:` with only `ext:` entries) now yields zero built-in tools** ([#74](https://github.com/tintinweb/pi-subagents/pull/74)). `getToolNamesForType` treated an explicit empty list as "unspecified" and fell back to all built-ins.
 - **Committed work from `isolation: "worktree"` subagents is now preserved** ([#68](https://github.com/tintinweb/pi-subagents/pull/68)). If an isolated subagent creates its own commit, cleanup previously saw a clean `git status`, treated it as "no changes", and removed the detached worktree — silently discarding the commits. The worktree now records its base SHA at creation, and cleanup creates the expected `pi-agent-*` branch whenever HEAD moved past it, even with a clean tree.
 - **Automatic commits in isolated worktrees skip local Git hooks** ([#68](https://github.com/tintinweb/pi-subagents/pull/68)). The preservation commit at worktree cleanup now uses `--no-verify`, so a failing local pre-commit hook can't abort it.
+
 ## [0.7.1] - 2026-05-07
 
 > **Heads-up — behavior change:**
+>
 > - `isolation: "worktree"` now fails loud (returns an error) instead of silently falling back to the main tree. Affects users running pi in a non-git directory or a fresh repo with no commits.
 
 ### Changed
+
 - **`isolation: "worktree"` now fails loud instead of silently falling back.** Previously when `createWorktree` returned undefined (not a git repo, no commits yet, or `git worktree add` failed), the agent ran in the main `cwd` with a `[WARNING: ...]` block prepended to its prompt — visible only to the LLM, never surfaced to the caller. Now the failure throws a structured error that propagates back to the `Agent` tool response; no agent record is created. Failed scheduled fires are recorded as `lastStatus: "error"` with the reason in the `subagents:scheduled` error event. Queued background spawns whose worktree creation fails when they dequeue are marked terminal-error and don't block the rest of the queue.
 
 ### Fixed
 
 - **Headless `pi --print` runs no longer hang or crash after background
-subagents complete.** Cleanup timers no longer keep the process alive, and
-stale completion notifications are treated as best-effort shutdown side
-effects.
+  subagents complete.** Cleanup timers no longer keep the process alive, and
+  stale completion notifications are treated as best-effort shutdown side
+  effects.
 
 ## [0.7.0] - 2026-05-04
 
 > **Heads-up — behavior changes:**
+>
 > - `subagents:completed`/`failed` event `tokens.total` now excludes `cacheRead` (previously double-counted across turns) — see Fixed [#38].
 > - Cron `?` is now a wildcard (same as `*`), not "current time value" — affects Quartz-style expressions only.
 
 ### Changed
+
 - **`@mariozechner/pi-{ai,coding-agent,tui}` moved to `peerDependencies` (`>=0.70.5`).** Avoids duplicate framework instances when the host loads this extension.
 - **`@sinclair/typebox` pinned from `latest` to `^0.34.49`** so installs are reproducible.
 - **`croner` bumped 8 → 10.** Heads-up: in cron strings, `?` now means wildcard (same as `*`) instead of "current time value" — affects Quartz-style expressions only.
 
 ### Added
+
 - **Master switch for scheduling** — new `schedulingEnabled` setting (default `true`) under `/agents → Settings → Scheduling`. When set to `false`: the `schedule` parameter and its guideline are stripped from the `Agent` tool spec at registration (zero LLM-context cost), the scheduler does not bind to the session, the `/agents → Scheduled jobs` menu entry is hidden, and any in-flight scheduler is stopped immediately. The schema-level removal applies on next pi session; the runtime kill (menu, fire path) takes effect immediately. Persisted at `<cwd>/.pi/subagents.json`.
 - **Schedule subagent spawns** — the `Agent` tool now accepts an optional `schedule` parameter. When set, the spawn registers a job that fires later instead of running immediately. Three formats: 6-field cron (`"0 0 9 * * 1"` — 9am every Monday), interval (`"5m"`, `"1h"`), or one-shot (`"+10m"` or ISO timestamp). Returns the job ID. Schedules are session-scoped — they reset on `/new`, restore on `/resume` (mirrors the persistence model of pi-chonky-tasks). Storage at `<cwd>/.pi/subagent-schedules/<sessionId>.json`, with PID-based file locking + atomic temp+rename for concurrent-instance safety. **Result delivery is identical to today's background-spawn completions**: when the scheduled agent finishes, the existing `subagent-notification` followUp path emits the result to the conversation — no new delivery code, no new message types. **Concurrency**: scheduled fires bypass `maxConcurrent` so a 5-minute interval can't be deferred behind 4 long-running manual agents. **Management**: `/agents` → "Scheduled jobs" lists active jobs and lets you cancel any one of them. Creation is via the `Agent` tool only — no parallel manual-create wizard in this iteration. **Events**: `subagents:scheduled` ({ type: "added" | "removed" | "updated" | "fired" | "error", … }) and `subagents:scheduler_ready` for cross-extension consumers. **Restrictions**: `schedule` is incompatible with `inherit_context` (no parent at fire time) and `resume` (schedules create fresh agents); forces `run_in_background: true`. Scheduler engine mirrors `pi-cron-schedule` (`croner` for cron, `setInterval`/`setTimeout` for interval/once); past one-shot timestamps and invalid cron expressions are caught at create time.
 - **Context-window utilization indicator in the subagent overlay** — token count is now followed by a colored `(NN%)` showing how full the subagent's context is right now (`estimateContextTokens(messages) / model.contextWindow * 100`, sourced from upstream `contextUsage.percent`). Threshold colors: <70% dim, 70–85% warning, ≥85% error. Gracefully omitted when the model has no `contextWindow` declared, or right after compaction before the next assistant turn (`tokens` is `null` in that window). The same annotation slot also surfaces a compaction count `↻N` when the agent has compacted at least once — e.g. `12.3k token (84% · ↻3)` (percent + compactions joined with `·`), `12.3k token (↻1)` (compactions only, immediately post-compaction while percent is still null). The compaction glyph stays dim regardless; the percent's threshold color carries the urgency signal. Two live overlays get the annotations (running stats line; inspect-overlay header); post-completion notifications and result/event payloads only get the count (the indicator is no longer actionable once the agent is done).
@@ -53,27 +62,32 @@ effects.
 - **New `subagents:compacted` lifecycle event** fires when a subagent's session successfully compacts. Payload: `{ id, type, description, reason: "manual" | "threshold" | "overflow", tokensBefore, compactionCount }` — `tokensBefore` is upstream's pre-compaction context size estimate; `compactionCount` is the running total for this agent (also persisted on `AgentRecord.compactionCount` and surfaced in `get_subagent_result` / `steer_subagent` / `task-notification` when > 0). Aborted compactions don't fire. Routed through a new manager-level `onCompact` constructor callback, matching the existing `onStart` / `onComplete` pattern.
 
 ### Fixed
-- **Subagent token count was inflated 5–15× and reset mid-run** ([#38](https://github.com/tintinweb/pi-subagents/issues/38)). Two distinct bugs in the same field. (1) Upstream `getSessionStats().tokens.total` sums per-turn `cacheRead` across every assistant message — but each turn's `cacheRead` is the *cumulative* cached prefix re-read on that one API call, so summing N turns counts the prefix N times (quadratic inflation, very visible on long sessions). (2) Even with that fixed, anything derived from `session.state.messages` resets at compaction because upstream replaces the array via `this.agent.state.messages = sessionContext.messages`. Fix replaces all six display readers with a lifetime accumulator (`AgentRecord.lifetimeUsage` and `AgentActivity.lifetimeUsage` — `{ input, output, cacheWrite }`) fed by a new `onAssistantUsage` callback dispatched from `message_end` events in both `runAgent` and `resumeAgent`. The accumulator is independent of `state.messages` mutation, so it survives compaction; total = input + output + cacheWrite by construction (cacheRead deliberately excluded — same prefix-double-counting reason). The `subagents:completed`/`failed` event payload's `tokens` field is now also lifetime-accumulated for `input`, `output`, and `total` together (was: `total` lifetime, `input`/`output` session-derived → inconsistent after compaction).
+
+- **Subagent token count was inflated 5–15× and reset mid-run** ([#38](https://github.com/tintinweb/pi-subagents/issues/38)). Two distinct bugs in the same field. (1) Upstream `getSessionStats().tokens.total` sums per-turn `cacheRead` across every assistant message — but each turn's `cacheRead` is the _cumulative_ cached prefix re-read on that one API call, so summing N turns counts the prefix N times (quadratic inflation, very visible on long sessions). (2) Even with that fixed, anything derived from `session.state.messages` resets at compaction because upstream replaces the array via `this.agent.state.messages = sessionContext.messages`. Fix replaces all six display readers with a lifetime accumulator (`AgentRecord.lifetimeUsage` and `AgentActivity.lifetimeUsage` — `{ input, output, cacheWrite }`) fed by a new `onAssistantUsage` callback dispatched from `message_end` events in both `runAgent` and `resumeAgent`. The accumulator is independent of `state.messages` mutation, so it survives compaction; total = input + output + cacheWrite by construction (cacheRead deliberately excluded — same prefix-double-counting reason). The `subagents:completed`/`failed` event payload's `tokens` field is now also lifetime-accumulated for `input`, `output`, and `total` together (was: `total` lifetime, `input`/`output` session-derived → inconsistent after compaction).
 - **ESC during a foreground `Agent` call now actually stops the subagent** ([#44](https://github.com/tintinweb/pi-subagents/pull/44) — thanks [@Zeng-Zer](https://github.com/Zeng-Zer)). Pi's interrupt path is `esc → agent.abort()` on the parent → `AbortSignal` delivered to every tool's `execute(toolCallId, params, signal, …)`, but the `Agent` tool dropped that signal on the floor: subagents ran on their own independent `AbortController` inside `AgentManager`, so the parent abort was invisible and the subagent kept running until natural completion or `max_turns`. Fix threads `signal` through `Agent.execute` → `manager.spawnAndWait()` → `SpawnOptions.signal`, and `AgentManager.startAgent()` now attaches an `{ once: true }` `"abort"` listener that calls `this.abort(id)` (which sets `status: "stopped"` and aborts the child controller). The listener is detached in both `.then` and `.catch` to avoid leaking on natural settle. **Scope:** foreground only — background agents intentionally outlive the parent tool call, so their spawn deliberately does not forward `signal`. Resume path (`AgentManager.resume()`) has the same blind spot and is tracked as a follow-up.
 
 ## [0.6.3] - 2026-04-28
 
 ### Fixed
-- **`run_in_background: true` (and `inherit_context`, `isolated`) silently ignored on default agents** ([#37](https://github.com/tintinweb/pi-subagents/issues/37) — thanks [@kylesnowschwartz](https://github.com/kylesnowschwartz) for the diagnosis). The three built-in defaults (`general-purpose`, `Explore`, `Plan`) baked `runInBackground: false`, `inheritContext: false`, and `isolated: false` into their configs. `resolveAgentInvocationConfig` uses `agentConfig?.field ?? params.field ?? false`, and `??` only falls through on `null`/`undefined` — so an explicit `false` from the agent config silently won over the caller's `true`. Calling `Agent({ subagent_type: "general-purpose", run_in_background: true })` returned the result inline instead of backgrounding, blocking the parent UI for the agent's full runtime. Fix drops the three lines from each default (and from the unreachable defensive fallback in `agent-runner.ts`) — the type already declared each as `field?: boolean` with JSDoc *"undefined = caller decides"*, so the runtime now matches the documented contract. **Behavior:** custom agents that explicitly set these fields in frontmatter still lock as before (the v0.5.1 "frontmatter is authoritative" guarantee is preserved); the fix only stops *defaults* from spuriously claiming an opinion on callsite-strategy fields they don't actually have. The unreachable fallback now spreads `DEFAULT_AGENTS.get("general-purpose")` instead of duplicating the config inline, so future drift is impossible.
+
+- **`run_in_background: true` (and `inherit_context`, `isolated`) silently ignored on default agents** ([#37](https://github.com/tintinweb/pi-subagents/issues/37) — thanks [@kylesnowschwartz](https://github.com/kylesnowschwartz) for the diagnosis). The three built-in defaults (`general-purpose`, `Explore`, `Plan`) baked `runInBackground: false`, `inheritContext: false`, and `isolated: false` into their configs. `resolveAgentInvocationConfig` uses `agentConfig?.field ?? params.field ?? false`, and `??` only falls through on `null`/`undefined` — so an explicit `false` from the agent config silently won over the caller's `true`. Calling `Agent({ subagent_type: "general-purpose", run_in_background: true })` returned the result inline instead of backgrounding, blocking the parent UI for the agent's full runtime. Fix drops the three lines from each default (and from the unreachable defensive fallback in `agent-runner.ts`) — the type already declared each as `field?: boolean` with JSDoc _"undefined = caller decides"_, so the runtime now matches the documented contract. **Behavior:** custom agents that explicitly set these fields in frontmatter still lock as before (the v0.5.1 "frontmatter is authoritative" guarantee is preserved); the fix only stops _defaults_ from spuriously claiming an opinion on callsite-strategy fields they don't actually have. The unreachable fallback now spreads `DEFAULT_AGENTS.get("general-purpose")` instead of duplicating the config inline, so future drift is impossible.
 
 ## [0.6.2] - 2026-04-28
 
 ### Fixed
+
 - **`Agent` tool fails on Windows with `ENOENT` creating output directory** ([#27](https://github.com/tintinweb/pi-subagents/issues/27) — thanks [@sixnathan](https://github.com/sixnathan) for the diagnosis). The cwd-encoding regex in `output-file.ts` only handled POSIX `/` separators, so on Windows `cwd = "C:\\Users\\foo\\project"` survived unchanged and `path.join(tmpRoot, encoded, …)` produced an invalid nested-absolute path. Now extracts a small `encodeCwd()` helper that handles both `/` and `\\` separators, strips the Windows drive-letter prefix, and preserves UNC server/share segments. The `chmodSync(root, 0o700)` call is also wrapped in a try/catch that swallows errors only on Windows (where chmod is a no-op and can throw on some filesystems); on Unix the error still propagates so umask-defeating `0o700` enforcement is preserved.
 
 ## [0.6.1] - 2026-04-25
 
 ### Added
+
 - **Persistent `/agents` → Settings** ([#24](https://github.com/tintinweb/pi-subagents/issues/24)) — the four runtime tuning values (`maxConcurrent`, `defaultMaxTurns`, `graceTurns`, `defaultJoinMode`) now survive pi restarts via a two-file dual-scope model mirroring pi's own `SettingsManager`. Global `~/.pi/agent/subagents.json` provides machine-wide defaults (edit by hand; the menu never writes here); project `<cwd>/.pi/subagents.json` holds per-project overrides (written by `/agents` → Settings). Load merges both with project winning on conflicts. Invalid fields are silently dropped per field; malformed JSON emits a warning to stderr and falls back to defaults so startup always proceeds; write failures downgrade the settings toast to a warning with `(session only; failed to persist)` so changes aren't silently reverted on next restart.
 - **New lifecycle events** — `subagents:settings_loaded` (emitted once at extension init with the merged settings) and `subagents:settings_changed` (emitted on each `/agents` → Settings mutation with the new snapshot and a `persisted: boolean` flag so listeners can react to write failures).
 
 ### Fixed
-- **`AGENTS.md` / `CLAUDE.md` / `APPEND_SYSTEM.md` no longer leak into sub-agent prompts** ([#26](https://github.com/tintinweb/pi-subagents/pull/26) — thanks [@mikeyobrien](https://github.com/mikeyobrien) for the diagnosis). Upstream `buildSystemPrompt()` re-appends `contextFiles` and `appendSystemPrompt` *after* our `systemPromptOverride` runs, which silently defeated `prompt_mode: replace` and `isolated: true` — parent project context (e.g. autoresearch-mode blocks) was bleeding into fresh `Explore` / custom sub-agents regardless of frontmatter. Fix uses upstream's `noContextFiles: true` flag (skips the load entirely, introduced in pi 0.68) plus `appendSystemPromptOverride: () => []` (no flag equivalent for append sources). **Behavior change:** subagents no longer implicitly inherit parent `AGENTS.md`/`CLAUDE.md`/`APPEND_SYSTEM.md`. To get parent project context into a subagent, use `prompt_mode: append` (parent's already-built system prompt flows in via `systemPromptOverride`), or `inherit_context: true` (parent conversation), or inline the content into the agent's own frontmatter.
+
+- **`AGENTS.md` / `CLAUDE.md` / `APPEND_SYSTEM.md` no longer leak into sub-agent prompts** ([#26](https://github.com/tintinweb/pi-subagents/pull/26) — thanks [@mikeyobrien](https://github.com/mikeyobrien) for the diagnosis). Upstream `buildSystemPrompt()` re-appends `contextFiles` and `appendSystemPrompt` _after_ our `systemPromptOverride` runs, which silently defeated `prompt_mode: replace` and `isolated: true` — parent project context (e.g. autoresearch-mode blocks) was bleeding into fresh `Explore` / custom sub-agents regardless of frontmatter. Fix uses upstream's `noContextFiles: true` flag (skips the load entirely, introduced in pi 0.68) plus `appendSystemPromptOverride: () => []` (no flag equivalent for append sources). **Behavior change:** subagents no longer implicitly inherit parent `AGENTS.md`/`CLAUDE.md`/`APPEND_SYSTEM.md`. To get parent project context into a subagent, use `prompt_mode: append` (parent's already-built system prompt flows in via `systemPromptOverride`), or `inherit_context: true` (parent conversation), or inline the content into the agent's own frontmatter.
 - **Custom agent discovery respects `PI_CODING_AGENT_DIR`** ([#35](https://github.com/tintinweb/pi-subagents/pull/35), closes [#23](https://github.com/tintinweb/pi-subagents/issues/23) — thanks [@Amolith](https://github.com/Amolith) for the diagnosis). Two remaining hardcoded `~/.pi/agent/agents/` paths in `custom-agents.ts` and `index.ts` bypassed the env var, so users who relocated their agent directory (e.g. via `PI_CODING_AGENT_DIR`) still had global agents loaded from the default location and help text referencing the wrong path. Both now use upstream `getAgentDir()`, consistent with `agent-runner.ts` and `settings.ts`; tilde expansion is handled by upstream.
 
 ## [0.6.0] - 2026-04-24
@@ -81,34 +95,41 @@ effects.
 > **⚠️ Breaking: drops support for `pi` < 0.68.** The upstream `pi-coding-agent` package shipped breaking API changes in v0.68 (and further ones in v0.70). This release migrates to `^0.70.2` and is **not** backward-compatible with hosts on `pi` 0.62–0.67. Users on those versions must upgrade their `pi` installation (`npm install -g @mariozechner/pi-coding-agent@latest`) before updating this extension.
 
 ### Changed
+
 - **Bumped peer `@mariozechner/pi-coding-agent` to `^0.70.2`** ([#28](https://github.com/tintinweb/pi-subagents/pull/28)) — crosses the v0.68 breaking-change line upstream. Specifically: tools are now passed as `string[]` (was `Tool[]`); `cwd`/`agentDir` are mandatory on `SettingsManager.create()` and `DefaultResourceLoader`; `session_switch` event renamed to `session_before_switch`; `ToolDefinition.params` widens to `unknown` under contextual typing, requiring `defineTool(...)`.
 - **Tool registrations wrapped with `defineTool(...)`** — preserves `TParams` inference so `execute` handlers get properly-typed `params` instead of `unknown`. Applies to the `Agent`, `get_subagent_result`, and `steer_subagent` tools.
 
 ### Removed
+
 - **Cwd-bound tool factory registry** — the internal `TOOL_FACTORIES` closure table and `create{Bash,Edit,Read,Write,Grep,Find,Ls}Tool` imports are gone. Exported helpers renamed: `getToolsForType(type, cwd)` → `getToolNamesForType(type)`, `getMemoryTools(cwd, set)` → `getMemoryToolNames(set)`, `getReadOnlyMemoryTools(cwd, set)` → `getReadOnlyMemoryToolNames(set)` — all returning `string[]` instead of `Tool[]`. The host binds cwd when resolving tool names, so the extension no longer instantiates tools directly.
 
 ### Fixed
+
 - **Subagent `SettingsManager` read wrong project settings in worktree mode** ([#30](https://github.com/tintinweb/pi-subagents/pull/30)) — `SettingsManager.create()` was called without arguments, defaulting `cwd` to `process.cwd()`. When the subagent's effective cwd differed (worktree isolation or explicit `cwd` override), its settings manager read `.pi/settings.json` from the parent's cwd rather than its own, diverging from the loader and session manager. Now passes `effectiveCwd` and `agentDir` explicitly, keeping all three managers consistent.
 
 ## [0.5.2] - 2026-03-26
 
 ### Fixed
+
 - **Extension `session_start` handlers now fire in subagent sessions** ([#20](https://github.com/tintinweb/pi-subagents/issues/20)) — `bindExtensions()` was never called on subagent sessions, so extensions that initialize state in `session_start` (e.g. loading credentials, setting up connections) silently failed at runtime. Tools appeared registered but were non-functional. Now calls `session.bindExtensions()` after tool filtering and before prompting, matching the lifecycle used by pi's interactive, print, and RPC modes. Also triggers `extendResourcesFromExtensions("startup")` so extension-provided skills and prompts are discovered.
 
 ## [0.5.1] - 2026-03-24
 
 ### Changed
+
 - **Agent config is authoritative** — frontmatter values for `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, and `isolation` now take precedence over `Agent` tool-call parameters. Tool-call params only fill fields the agent config leaves unspecified.
 - **`join_mode` is now a global setting only** — removed the per-call `join_mode` parameter from the `Agent` tool. Join behavior is configured via `/agents` → Settings → Join mode.
 - **`max_turns: 0` means unlimited** — agent files can now explicitly set `max_turns: 0` to lock unlimited turns. Previously `0` was silently clamped to `1`.
 
 ### Fixed
+
 - **Final subagent text preserved from non-streaming providers** — agents using providers that return the final message without streaming `text_delta` events no longer return empty results. Falls back to extracting text from the completed session history.
 - **`effectiveMaxTurns` passed to spawn calls** — previously `params.max_turns` was passed raw to both foreground and background spawn, bypassing the agent config entirely.
 
 ## [0.5.0] - 2026-03-22
 
 ### Added
+
 - **RPC stop handler** — new `subagents:rpc:stop` event bus RPC allows other extensions to stop running subagents by agent ID. Returns structured error ("Agent not found") on failure.
 - **`abort` in `SpawnCapable` interface** — cross-extension RPC consumers can now stop agents, not just spawn them.
 - **Live turn counter** — all agents now show a live turn count in the widget, inline result, and completion notification. With a turn limit: `⟳5≤30` (5 of 30 turns). Without: `⟳5`. Updates in real time as turns progress via `onTurnEnd` callback.
@@ -117,35 +138,42 @@ effects.
 - **Auto-trigger parent turn on background completion** — background agent completion notifications now use `triggerTurn: true`, automatically prompting the parent agent to process results instead of waiting for user input.
 
 ### Changed
+
 - **Standardized RPC envelope** — cross-extension RPC handlers (`ping`, `spawn`, `stop`) now use a `handleRpc` wrapper that emits structured envelopes (`{ success: true, data }` / `{ success: false, error }`), matching pi-mono's `RpcResponse` convention.
 - **Protocol versioning via ping** — ping reply now includes `{ version: PROTOCOL_VERSION }` (currently v2). Callers can detect version mismatches and warn users to update.
 - **Default max turns is now unlimited** — subagents no longer have a 50-turn default cap. The default is unlimited (no turn limit), matching Claude Code's main loop behavior. Users can still set explicit limits per-agent via `max_turns` frontmatter or the Agent tool parameter, or globally via `/agents` → Settings (`0` = unlimited).
 - **Stale dist in published package** — added `prepublishOnly` hook to build fresh `dist/` on every `npm publish`.
 
 ### Fixed
+
 - **Tool name display** — `getAgentConversation` now reads `ToolCall.name` (the correct property) instead of `toolName`, resolving `[Tool: unknown]` in conversation viewer and verbose output.
 - **Env test CI failure** — `detectEnv` test assumed a branch name exists, but CI checks out detached HEAD. Split into separate tests for repo detection and branch detection with a controlled temp repo.
 
 ## [0.4.9] - 2026-03-18
 
 ### Fixed
+
 - **Conversation viewer crash in narrow terminals** ([#7](https://github.com/tintinweb/pi-subagents/issues/7)) — `buildContentLines()` in the live conversation viewer could return lines wider than the terminal when `wrapTextWithAnsi()` misjudged visible width on ANSI-heavy input (e.g. tool output with embedded escape codes, long URLs, wide tables). All content lines are now clamped with `truncateToWidth()` before returning. Same class of bug as the widget fix in v0.2.7, different component.
 
 ### Added
+
 - **Conversation viewer width-safety tests** — 17 tests covering `render()` and `buildContentLines()` across varied content (plain text, ANSI codes, unicode, tables, long URLs, narrow terminals). Includes mock-based regression tests that simulate upstream `wrapTextWithAnsi` returning overwidth lines, ensuring the safety net catches them.
 
 ## [0.4.8] - 2026-03-18
 
 ### Added
+
 - **Cross-extension RPC** — other pi extensions can spawn subagents via `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`). Emits `subagents:ready` on load.
 - **Session persistence for agent records** — completed agent records are persisted via `pi.appendEntry("subagents:record", ...)` for cross-extension history reconstruction.
 
 ### Fixed
+
 - **Background agent notification race condition** — `pi.sendMessage()` is fire-and-forget, so completion notifications sent eagerly from `onComplete` could not be retracted when `get_subagent_result` was called in the same turn. Notifications are now held behind a 200ms cancellable timer; `get_subagent_result` cancels the pending timer before it fires, eliminating duplicate notifications. Group notifications also re-check `resultConsumed` at send time so consumed agents are filtered out.
 
 ## [0.4.7] - 2026-03-17
 
 ### Added
+
 - **Custom notification renderer** — background agent completion notifications now render as styled, themed boxes instead of raw XML. Uses `pi.registerMessageRenderer()` with the `"subagent-notification"` custom message type. The LLM continues to receive `<task-notification>` XML via `content`; only the user-facing display changes.
 - **Group notification rendering** — group completions render each agent as its own styled block (icon, description, stats, result preview) instead of showing only the first agent.
 - **Output file streaming for background agents** — background agents now get the same output file transcript as foreground agents, with `onSessionCreated` wiring and proper cleanup on completion/error.
@@ -153,47 +181,57 @@ effects.
 - `buildNotificationDetails()` helper — extracts renderer-facing details from an `AgentRecord`.
 
 ### Changed
+
 - **Notification delivery** — `sendIndividualNudge` and group notification now use `pi.sendMessage()` (custom message) instead of `pi.sendUserMessage()` (plain text), enabling renderer-controlled display.
 - **Steered status rendering** — steered agents show "completed (steered)" in the notification box instead of plain "completed".
 
 ### Fixed
+
 - **Output file cleanup on completion** — `agent-manager.ts` now calls `record.outputCleanup()` in both the success and error paths of agent completion, ensuring the streaming subscription is flushed and released.
 
 ## [0.4.6] - 2026-03-16
 
 ### Fixed
+
 - **Graceful shutdown aborts agents instead of blocking** — `session_shutdown` now calls `abortAll()` instead of `waitForAll()`, so the process exits immediately instead of hanging until all background agents complete. Agent results are undeliverable after shutdown anyway.
 
 ### Added
+
 - `abortAll()` method on `AgentManager` — stops all queued and running agents at once, returning the count of affected agents.
 
 ## [0.4.5] - 2026-03-16
 
 ### Changed
+
 - **Widget render-once pattern** — the widget callback is now registered once via `setWidget()` and subsequent updates use `requestRender()` instead of re-registering the entire widget on every `update()` call. Eliminates layout thrashing from repeated widget teardown/setup cycles.
 - **Status bar dedup** — `setStatus()` is now only called when the status text actually changes, avoiding redundant TUI updates.
 - **UICtx change detection** — `setUICtx()` detects context changes and forces widget re-registration, correctly handling session switches.
 
 ### Refactored
+
 - Extracted `renderWidget()` private method — moves all widget content rendering out of the `update()` closure into a standalone method that reads live state on each call.
 - `update()` is now a lightweight coordinator: counts agents, manages registration lifecycle, and triggers re-renders.
 
 ## [0.4.4] - 2026-03-16
 
 ### Fixed
+
 - **Race condition in `get_subagent_result` with `wait: true`** — `resultConsumed` is now set before `await record.promise`, preventing a redundant follow-up notification. Previously the `onComplete` callback (attached at spawn time via `.then()`) always fired before the await resumed, seeing `resultConsumed` as false.
 - **Stale agent records across sessions** — new `clearCompleted()` method removes all completed/stopped/errored agent records on `session_start` and `session_switch` events, so tasks from a prior session don't persist into a new one.
 - **`steer_subagent` race on freshly launched agents** — steering an agent before its session initialized silently dropped the message. Now steers are queued on the record and flushed once `onSessionCreated` fires.
 
 ### Changed
+
 - Extracted `removeRecord()` private helper in `AgentManager` — deduplicates dispose+delete logic between `cleanup()` and `clearCompleted()`.
 
 ### Added
+
 - 8 new tests covering `resultConsumed` race condition and `clearCompleted` behavior (185 total).
 
 ## [0.4.3] - 2026-03-13
 
 ### Added
+
 - **Persistent agent memory** — new `memory` frontmatter field with three scopes: `"user"` (global `~/.pi/`), `"project"` (per-project `.pi/`), `"local"` (gitignored `.pi/`). Agents with write/edit tools get full read-write memory; read-only agents get a read-only fallback that injects existing MEMORY.md content without granting write access or creating directories.
 - **Git worktree isolation** — new `isolation: "worktree"` frontmatter field and Agent tool parameter. Creates a temporary `git worktree` so agents work on an isolated copy of the repo. On completion, changes are auto-committed to a `pi-agent-<id>` branch; clean worktrees are removed. Includes crash recovery via `pruneWorktrees()`.
 - **Skill preloading** — `skills` frontmatter now accepts a comma-separated list of skill names (e.g. `skills: planning, review`). Reads from `.pi/skills/` (project) then `~/.pi/skills/` (global), tries `.md`/`.txt`/bare extensions. Content injected into the system prompt as `# Preloaded Skill: {name}`.
@@ -207,6 +245,7 @@ effects.
 - 177 total tests across 8 test files (41 new tests).
 
 ### Fixed
+
 - **Read-only agents no longer escalated to read-write** — enabling `memory` on a read-only agent (e.g. Explore) previously auto-added `write`/`edit` tools. Now the runner detects write capability and branches: read-write agents get full memory tools, read-only agents get read-only memory prompt with only the `read` tool added.
 - **Denylist-aware memory detection** — write capability check now accounts for `disallowedTools`. An agent with `tools: write` + `disallowed_tools: write` correctly gets read-only memory instead of broken read-write instructions.
 - **Worktree requires commits** — repos with no commits (empty HEAD) are now rejected early with a warning instead of failing silently at `git worktree add`.
@@ -214,11 +253,13 @@ effects.
 - **No force-branch overwrite** — worktree cleanup appends a timestamp suffix on branch name conflict instead of using `git branch -f`.
 
 ### Security
+
 - **Whitelist name validation** — agent/skill names must match `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, max 128 chars. Rejects path traversal, leading dots, spaces, and special characters.
 - **Symlink protection** — `safeReadFile()` and `isSymlink()` reject symlinks in memory directories, MEMORY.md files, and skill files, preventing arbitrary file reads.
 - **Symlink-safe directory creation** — `ensureMemoryDir()` throws on symlinked directories.
 
 ### Changed
+
 - `agent-runner.ts`: tool/extension/skill resolution moved before memory detection; `ctx.cwd` → `effectiveCwd` throughout.
 - `custom-agents.ts`: extracted `parseCsvField()` helper; added `csvListOptional()` and `parseMemory()`.
 - `skill-loader.ts`: uses `safeReadFile()` from `memory.ts` instead of raw `readFileSync`.
@@ -227,6 +268,7 @@ effects.
 ## [0.4.2] - 2026-03-12
 
 ### Added
+
 - **Event bus** — agent lifecycle events emitted via `pi.events.emit()`, enabling other extensions to react to sub-agent activity:
   - `subagents:created` — background agent registered (includes `id`, `type`, `description`, `isBackground`)
   - `subagents:started` — agent transitions to running (includes queued→running)
@@ -239,36 +281,43 @@ effects.
 ## [0.4.1] - 2026-03-11
 
 ### Fixed
+
 - **Graceful shutdown in headless mode** — the CLI now waits for all running and queued background agents to complete before exiting (`waitForAll` on `session_shutdown`). Previously, background agents could be silently killed mid-execution when the session ended. Only affects headless/non-interactive mode; interactive sessions already kept the process alive.
 
 ### Added
+
 - `hasRunning()` / `waitForAll()` methods on `AgentManager`.
 - **Cross-package manager access** — agent manager exposed via `Symbol.for("pi-subagents:manager")` on `globalThis` for other extensions to check status or await completion.
 
 ## [0.4.0] - 2026-03-11
 
 ### Added
+
 - **XML-delimited prompt sections** — append-mode agents now wrap inherited content in `<inherited_system_prompt>`, `<sub_agent_context>`, and `<agent_instructions>` XML tags, giving the model explicit structure to distinguish inherited rules from sub-agent-specific instructions. Replace mode is unchanged.
 - **Token count in agent results** — foreground agent results, background completion notifications, and `get_subagent_result` now include the token count alongside tool uses and duration (e.g. `Agent completed in 4.2s (12 tool uses, 33.8k token)`).
 - **Widget overflow cap** — the running agents widget now caps at 12 lines. When exceeded, running agents are prioritized over finished ones and an overflow summary line shows hidden counts (e.g. `+3 more (1 running, 2 finished)`).
 
 ### Changed - **changing behavior**
+
 - **General-purpose agent inherits parent prompt** — the default `general-purpose` agent now uses `promptMode: "append"` with an empty system prompt, making it a "parent twin" that inherits the full parent system prompt (including CLAUDE.md rules, project conventions, and safety guardrails). Previously it used a standalone prompt that duplicated a subset of the parent's rules. Explore and Plan are unchanged (standalone prompts). To customize: eject via `/agents` → select `general-purpose` → Eject, then edit the resulting `.md` file. Set `prompt_mode: replace` to go back to a standalone prompt, or keep `prompt_mode: append` and add extra instructions in the body.
 - **Append-mode agents receive parent system prompt** — `buildAgentPrompt` now accepts the parent's system prompt and threads it into append-mode agents (env header + parent prompt + sub-agent context bridge + optional custom instructions). Replace-mode agents are unchanged.
 - **Prompt pipeline simplified** — removed `systemPromptOverride`/`systemPromptAppend` from `SpawnOptions` and `RunOptions`. These were a separate code path where `index.ts` pre-resolved the prompt mode and passed raw strings into the runner, bypassing `buildAgentPrompt`. Now all prompt assembly flows through `buildAgentPrompt` using the agent's `promptMode` config — one code path, no special cases.
 
 ### Removed
+
 - Deprecated backwards-compat aliases: `registerCustomAgents`, `getCustomAgentConfig`, `getCustomAgentNames` (use `registerAgents`, `getAgentConfig`, `getUserAgentNames`).
 - `resolveCustomPrompt()` helper in index.ts — no longer needed now that prompt routing is config-driven.
 
 ## [0.3.1] - 2026-03-09
 
 ### Added
+
 - **Live conversation viewer** — selecting a running (or completed) agent in `/agents` → "Running agents" now opens a scrollable overlay showing the agent's full conversation in real time. Auto-scrolls to follow new content; scroll up to pause, End to resume. Press Esc to close.
 
 ## [0.3.0] - 2026-03-08
 
 ### Added
+
 - **Case-insensitive agent type lookup** — `"explore"`, `"EXPLORE"`, and `"Explore"` all resolve to the same agent. LLMs frequently lowercase type names; this prevents validation failures.
 - **Unknown type fallback** — unrecognized agent types fall back to `general-purpose` with a note, instead of hard-rejecting. Matches Claude Code behavior.
 - **Dynamic tool list for general-purpose** — `builtinToolNames` is now optional in `AgentConfig`. When omitted, the agent gets all tools from `TOOL_FACTORIES` at lookup time, so new tools added upstream are automatically available.
@@ -281,9 +330,11 @@ effects.
 - `source` field on `AgentConfig` — tracks where an agent was loaded from (`"default"`, `"project"`, `"global"`).
 
 ### Fixed
+
 - **Model resolver checks auth for exact matches** — `resolveModel("anthropic/claude-haiku-4-5-20251001")` now fails gracefully when no Anthropic API key is configured, instead of returning a model that errors at the API call. Explore silently falls back to the parent model on non-Anthropic setups.
 
 ### Changed
+
 - **Unified agent registry** — built-in and custom agents now use the same `AgentConfig` type and a single registry. No more separate code paths for built-in vs custom agents.
 - **Default agents are overridable** — creating a `.md` file with the same name as a default agent (e.g. `.pi/agents/Explore.md`) overrides it.
 - **`/agents` menu** — "Agent types" list shows defaults and custom agents together with source indicators. Default agents get Eject/Disable actions; overridden defaults get Reset to default.
@@ -293,6 +344,7 @@ effects.
 - **Menu navigation** — Esc in agent detail returns to agent list (not main menu).
 
 ### Removed
+
 - **`statusline-setup` and `claude-code-guide` agents** — removed as built-in types (never spawned programmatically). Users can recreate them as custom agents if needed.
 - `BuiltinSubagentType` union type, `SUBAGENT_TYPES` array, `DISPLAY_NAMES` map, `SubagentTypeConfig` interface — replaced by unified `AgentConfig`.
 - `buildSystemPrompt()` switch statement — replaced by config-driven `buildAgentPrompt()`.
@@ -301,16 +353,19 @@ effects.
 - `ALL_TOOLS` hardcoded constant — general-purpose now derives tools dynamically.
 
 ### Added
+
 - `src/default-agents.ts` — embedded default configs for general-purpose, Explore, and Plan.
 
 ## [0.2.7] - 2026-03-08
 
 ### Fixed
+
 - **Widget crash in narrow terminals** — agent widget lines were not truncated to terminal width, causing `doRender` to throw when the tmux pane was narrower than the rendered content. All widget lines are now truncated using `truncateToWidth()` with the actual terminal column count.
 
 ## [0.2.6] - 2026-03-07
 
 ### Added
+
 - **Background task join strategies** — smart grouping of background agent completion notifications
   - `smart` (default): 2+ background agents spawned in the same turn are auto-grouped into a single consolidated notification instead of individual nudges
   - `async`: each agent notifies individually on completion (previous behavior)
@@ -321,10 +376,12 @@ effects.
 - New `src/group-join.ts` — `GroupJoinManager` class for batched completion notifications
 
 ### Changed
+
 - `AgentRecord` now includes optional `groupId`, `joinMode`, and `resultConsumed` fields
 - Background agent completion routing refactored: individual nudge logic extracted to `sendIndividualNudge()`, group delivery via `GroupJoinManager`
 
 ### Fixed
+
 - **Debounce window race** — agents that complete during the 100ms batch debounce window are now deferred and retroactively fed into the group once it's registered, preventing split notifications (one individual + one partial group) and zombie groups
 - **Solo agent swallowed notification** — if only one agent was spawned (no group formed) but it completed during the debounce window, its deferred notification is now sent when the batch finalizes
 - **Duplicate notifications after polling** — calling `get_subagent_result` on a completed agent now marks its result as consumed, suppressing the subsequent completion notification (both individual and group)
@@ -332,6 +389,7 @@ effects.
 ## [0.2.5] - 2026-03-06
 
 ### Added
+
 - **Interactive `/agents` menu** — single command replaces `/agent` and `/agents` with a full management wizard
   - Browse and manage running agents
   - Custom agents submenu — edit or delete existing agents
@@ -343,28 +401,33 @@ effects.
 - Sub-menus return to main menu instead of exiting
 
 ### Removed
+
 - `/agent <type> <prompt>` command (use `Agent` tool directly, or create custom agents via `/agents`)
 
 ## [0.2.4] - 2026-03-06
 
 ### Added
+
 - **Global custom agents** — agents in `~/.pi/agent/agents/*.md` are now discovered automatically and available across all projects
 - Two-tier discovery hierarchy: project-level (`.pi/agents/`) overrides global (`~/.pi/agent/agents/`)
 
 ## [0.2.3] - 2026-03-05
 
 ### Added
+
 - Screenshot in README
 
 ## [0.2.2] - 2026-03-05
 
 ### Changed
+
 - Renamed package to `@tintinweb/pi-subagents`
 - Fuzzy model resolver now only matches models with auth configured (prevents selecting unconfigured providers)
 - Custom agents hot-reload on each `Agent` tool call (no restart needed for new `.pi/agents/*.md` files)
 - Updated pi dependencies to 0.56.1
 
 ### Refactored
+
 - Extracted `createActivityTracker()` — eliminates duplicated tool activity wiring between foreground and background paths
 - Extracted `safeFormatTokens()` — replaces 4 repeated try-catch blocks
 - Extracted `buildDetails()` — consolidates AgentDetails construction
@@ -377,6 +440,7 @@ effects.
 ## [0.2.1] - 2026-03-05
 
 ### Added
+
 - **Persistent above-editor widget** — tree view of all running/queued/finished agents with animated spinners and live stats
 - **Concurrency queue** — configurable max concurrent background agents (default: 4), auto-drain
 - **Queued agents** collapsed to single summary line in widget
@@ -385,6 +449,7 @@ effects.
 - **Live response streaming** — `onTextDelta` shows truncated agent response text instead of static "thinking..."
 
 ### Changed
+
 - Tool names match Claude Code: `Agent`, `get_subagent_result`, `steer_subagent`
 - Labels use "Agent" / "Agents" (not "Subagent")
 - Widget heading: `●` when active, `○` when only lingering finished agents
@@ -393,6 +458,7 @@ effects.
 ## [0.2.0] - 2026-03-05
 
 ### Added
+
 - **Claude Code-style UI rendering** — `renderCall`/`renderResult`/`onUpdate` for live streaming progress
   - Live activity descriptions: "searching, reading 3 files…"
   - Token count display: "33.8k token"
@@ -404,6 +470,7 @@ effects.
 - **Fuzzy model selection** — `"haiku"`, `"sonnet"` resolve to best matching available model
 
 ### Changed
+
 - Tool label changed from "Spawn Agent" to "Agent" (matches Claude Code style)
 - `onToolUse` callback replaced with richer `onToolActivity` (includes tool name + start/end)
 - `onSessionCreated` callback for accessing session stats (token counts)
@@ -414,6 +481,7 @@ effects.
 Initial release.
 
 ### Added
+
 - **Autonomous sub-agents** — spawn specialized agents via tool call, each running in an isolated pi session
 - **Built-in agent types** — general-purpose, Explore (defaults to haiku), Plan, statusline-setup, claude-code-guide
 - **Custom user-defined agents** — define agents in `.pi/agents/<name>.md` with YAML frontmatter + system prompt body

@@ -59,7 +59,11 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       builtinToolNames,
       extSelectors,
       disallowedTools: csvListOptional(fm.disallowed_tools),
-      extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
+      // Omitted entirely → undefined so the runner can fall back to the global
+      // `defaultExtensions` setting. An explicit value (true/false/list) wins.
+      extensions: fm.extensions == null && fm.inherit_extensions == null
+        ? undefined
+        : inheritField(fm.extensions ?? fm.inherit_extensions),
       skills: inheritField(fm.skills ?? fm.inherit_skills),
       model: str(fm.model),
       thinking: str(fm.thinking) as ThinkingLevel | undefined,
