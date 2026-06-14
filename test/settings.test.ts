@@ -101,6 +101,13 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("round-trips toolDescriptionMode and drops invalid values", () => {
+    saveSettings({ toolDescriptionMode: "compact" }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ toolDescriptionMode: "compact" });
+    writeProject({ toolDescriptionMode: "tiny" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips schedulingEnabled (true and false), and absence stays absent", () => {
     saveSettings({ schedulingEnabled: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ schedulingEnabled: false });
@@ -303,6 +310,7 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
+        setToolDescriptionMode: vi.fn(),
       };
     });
 
@@ -362,6 +370,16 @@ describe("settings persistence", () => {
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
     });
 
+    it("calls setToolDescriptionMode with the persisted mode", () => {
+      applySettings({ toolDescriptionMode: "compact" }, appliers);
+      expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
+    });
+
+    it("does not call setToolDescriptionMode when the field is absent", () => {
+      applySettings({ maxConcurrent: 2 }, appliers);
+      expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
+    });
+
     it("calls setSchedulingEnabled(true) when schedulingEnabled is true", () => {
       applySettings({ schedulingEnabled: true }, appliers);
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(true);
@@ -408,6 +426,7 @@ describe("settings persistence", () => {
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
+        setToolDescriptionMode: vi.fn(),
       };
     });
 

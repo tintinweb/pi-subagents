@@ -28,7 +28,7 @@ import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./o
 import { buildRecoveryPrompt, CHECKPOINT_PROTOCOL, extractCheckpoint, SOFT_LIMIT_STEER, safeExec } from "./recovery.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
+import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
@@ -566,6 +566,15 @@ export default function (pi: ExtensionAPI) {
     reloadCustomAgents(); // re-register with new setting
   }
 
+  // ---- Agent tool description mode ----
+  // "full" (default) keeps the rich Claude Code-style description; "compact"
+  // swaps in a ~75% smaller one for small/local models; "custom" reads a
+  // user-authored template. Read once at tool registration — flipping it
+  // applies on the next pi session.
+  let toolDescriptionMode: ToolDescriptionMode = "full";
+  function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
+  function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
+
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -651,6 +660,20 @@ export default function (pi: ExtensionAPI) {
     return name.replace(/-\d{8}$/, "");
   }
 
+  /** First sentence of an agent description — for the compact type list. */
+  const firstSentence = (text: string): string => {
+    const match = text.match(/^.*?[.!?](?=\s|$)/s);
+    return (match ? match[0] : text).replace(/\s+/g, " ").trim();
+  };
+
+  /** Compact type list: one line per available agent, first sentence only. */
+  const buildCompactTypeListText = () =>
+    getAvailableTypes().map((name) => {
+      const cfg = getAgentConfig(name);
+      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
+      return `- ${name}: ${firstSentence(cfg?.description ?? name)}${modelSuffix}`;
+    }).join("\n");
+
   /** Build routing guidelines dynamically from all available agent descriptions. */
   const buildGuidelinesText = (): string => {
     const availableSet = new Set(getAvailableTypes());
@@ -674,6 +697,7 @@ export default function (pi: ExtensionAPI) {
       setDefaultJoinMode,
       setSchedulingEnabled,
       setDisableDefaultAgents,
+      setToolDescriptionMode,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -702,10 +726,8 @@ export default function (pi: ExtensionAPI) {
     ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
     : "";
 
-  pi.registerTool(defineTool({
-    name: "Agent",
-    label: "Agent",
-    description: `Launch a new agent to handle complex, multi-step tasks autonomously.
+  // Full (default) Agent tool description — the rich, dynamic version.
+  const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 
 The Agent tool launches specialized agents that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
@@ -726,7 +748,75 @@ ${buildGuidelinesText()}
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
 - Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).
-- Use chain to run multiple agents sequentially, passing each step's output to the next via {previous}.${scheduleGuideline}`,
+- Use chain to run multiple agents sequentially, passing each step's output to the next via {previous}.${scheduleGuideline}`;
+
+  // Compact Agent tool description (`toolDescriptionMode: "compact"`) — the same
+  // load-bearing facts at ~75% fewer tokens, for small/local models. Per-option
+  // details live in the param descriptions.
+  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
+${buildCompactTypeListText()}
+
+Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
+
+Notes:
+- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
+- Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
+- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
+- resume continues a previous agent by ID; steer_subagent messages a running one.
+- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.${scheduleGuideline}`;
+
+  // `toolDescriptionMode: "custom"` — user-authored description with live
+  // dynamic parts. Project file wins over global; missing/empty falls back to
+  // "full" (a stale fallback beats a blank tool description). Only the prose is
+  // customizable — the parameter schema stays code-owned.
+  const renderToolDescriptionTemplate = (template: string): string => {
+    const vars: Record<string, () => string> = {
+      typeList: buildTypeListText,
+      compactTypeList: buildCompactTypeListText,
+      guidelines: buildGuidelinesText,
+      agentDir: getAgentDir,
+      scheduleGuideline: () => scheduleGuideline,
+    };
+    // Replacement callback (not a string) — agent descriptions may contain `$&` etc.
+    return template.replace(/\{\{(\w+)\}\}/g, (raw, name: string) => {
+      if (vars[name]) return vars[name]();
+      console.warn(`[pi-subagents] agent-tool-description.md: unknown placeholder ${raw} left as-is`);
+      return raw;
+    });
+  };
+
+  const loadCustomToolDescription = (): string | undefined => {
+    for (const path of [
+      join(process.cwd(), ".pi", "agent-tool-description.md"),
+      join(getAgentDir(), "agent-tool-description.md"),
+    ]) {
+      try {
+        if (!existsSync(path)) continue;
+        const text = readFileSync(path, "utf-8").trim();
+        if (text) return renderToolDescriptionTemplate(text);
+        console.warn(`[pi-subagents] ${path} is empty — ignoring`);
+      } catch (err) {
+        console.warn(`[pi-subagents] failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return undefined;
+  };
+
+  const agentToolDescription = (() => {
+    const mode = getToolDescriptionMode();
+    if (mode === "compact") return compactAgentToolDescription;
+    if (mode === "custom") {
+      const custom = loadCustomToolDescription();
+      if (custom) return custom;
+      console.warn('[pi-subagents] toolDescriptionMode is "custom" but no agent-tool-description.md found — using "full"');
+    }
+    return fullAgentToolDescription;
+  })();
+
+  pi.registerTool(defineTool({
+    name: "Agent",
+    label: "Agent",
+    description: agentToolDescription,
     parameters: Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
@@ -2259,6 +2349,7 @@ ${systemPrompt}
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
       disableDefaultAgents: isDefaultsDisabled(),
+      toolDescriptionMode: getToolDescriptionMode(),
     };
   }
 
@@ -2270,6 +2361,7 @@ ${systemPrompt}
       `Join mode (current: ${getDefaultJoinMode()})`,
       `Scheduling (current: ${isSchedulingEnabled() ? "enabled" : "disabled"})`,
       `Disable defaults (current: ${isDefaultsDisabled() ? "on" : "off"})`,
+      `Tool description (current: ${getToolDescriptionMode()})`,
     ]);
     if (!choice) return;
 
@@ -2359,6 +2451,24 @@ ${systemPrompt}
             ctx,
             `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`,
           );
+        }
+      }
+    } else if (choice.startsWith("Tool description")) {
+      const val = await ctx.ui.select(
+        "Agent tool description sent to the LLM",
+        [
+          "full — rich Claude Code-style description (default)",
+          "compact — ~75% fewer tokens, for small/local models",
+          "custom — .pi/agent-tool-description.md with {{placeholders}}",
+        ],
+      );
+      if (val) {
+        const mode = val.split(" ")[0] as ToolDescriptionMode;
+        if (mode === getToolDescriptionMode()) {
+          ctx.ui.notify(`Tool description already ${mode}.`, "info");
+        } else {
+          setToolDescriptionMode(mode);
+          notifyApplied(ctx, `Tool description set to ${mode}. Takes effect on next pi session.`);
         }
       }
     }
