@@ -1556,6 +1556,24 @@ Notes:
           });
         });
 
+      // Wire the persistent Agents widget so the tree/cards UI renders alongside
+      // the inline chain spinner. Register the step's agent into the activity map
+      // keyed by its real id, start the render timer, and refresh.
+      let stepAgentId: string | undefined;
+      const origStepOnSession = stepCallbacks.onSessionCreated;
+      stepCallbacks.onSessionCreated = (session: any) => {
+        origStepOnSession(session);
+        for (const a of manager.listAgents()) {
+          if (a.session === session) {
+            stepAgentId = a.id;
+            agentActivity.set(a.id, stepState);
+            widget.ensureTimer();
+            widget.update();
+            break;
+          }
+        }
+      };
+
       let _spinnerFrame = 0;
       const stepStartedAt = Date.now();
       const spinnerInterval = setInterval(() => {
@@ -1592,6 +1610,11 @@ Notes:
         );
       } finally {
         clearInterval(spinnerInterval);
+        if (stepAgentId) {
+          agentActivity.delete(stepAgentId);
+          widget.markFinished(stepAgentId);
+          widget.update();
+        }
       }
 
       const stepDurationMs = (record.completedAt ?? Date.now()) - stepStartedAt;
