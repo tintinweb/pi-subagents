@@ -1,5 +1,5 @@
 ---
-description: E2E feature chain: scout, plan, implement, review, fix-up (file-handoff)
+description: "E2E feature chain: scout, plan, implement, review, fix-up (file-handoff)"
 ---
 
 # /feature

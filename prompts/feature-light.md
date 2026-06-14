@@ -1,5 +1,5 @@
 ---
-description: Lightweight feature/fix chain: implement, review, fix-up (file-handoff)
+description: "Lightweight feature/fix chain: implement, review, fix-up (file-handoff)"
 ---
 
 # /feature-light
