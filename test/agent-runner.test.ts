@@ -29,6 +29,7 @@ vi.mock("@mariozechner/pi-coding-agent", () => ({
 }));
 
 vi.mock("../src/agent-types.js", () => ({
+  BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],
   getConfig: vi.fn(() => ({
     displayName: "Explore",
     description: "Explore",
@@ -71,7 +72,46 @@ vi.mock("../src/skill-loader.js", () => ({
   preloadSkills: vi.fn(() => []),
 }));
 
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { extensionCanonicalName, parseExtensionsSpec, parseExtSelectors, resumeAgent, runAgent } from "../src/agent-runner.js";
+
+describe("extensionCanonicalName", () => {
+  it("uses the parent dir name for index.ts/index.js extensions", () => {
+    expect(extensionCanonicalName("/a/b/foo/index.ts")).toBe("foo");
+    expect(extensionCanonicalName("/a/b/Foo/index.js")).toBe("foo");
+  });
+  it("strips .ts/.js from single-file extensions and lowercases", () => {
+    expect(extensionCanonicalName("/a/b/Mcp.ts")).toBe("mcp");
+    expect(extensionCanonicalName("/a/b/bar.js")).toBe("bar");
+  });
+});
+
+describe("parseExtensionsSpec", () => {
+  it("classifies names, paths, and the wildcard", () => {
+    const spec = parseExtensionsSpec(["mcp", "*", "/abs/extra.ts"], "/cwd");
+    expect(spec.wildcard).toBe(true);
+    expect(spec.paths).toEqual(["/abs/extra.ts"]);
+    // path entries fold their canonical name into names too
+    expect([...spec.names].sort()).toEqual(["extra", "mcp"]);
+  });
+  it("resolves relative path entries against cwd and lowercases names", () => {
+    const spec = parseExtensionsSpec(["Foo", "./rel/Bar.ts"], "/cwd");
+    expect(spec.paths).toEqual(["/cwd/rel/Bar.ts"]);
+    expect([...spec.names].sort()).toEqual(["bar", "foo"]);
+  });
+});
+
+describe("parseExtSelectors", () => {
+  it("collects ext names and per-extension narrowing", () => {
+    const { extNames, narrowing } = parseExtSelectors(["ext:foo", "ext:bar/x", "ext:bar/y"]);
+    expect([...extNames].sort()).toEqual(["bar", "foo"]);
+    expect(narrowing.has("foo")).toBe(false);
+    expect([...narrowing.get("bar")!].sort()).toEqual(["x", "y"]);
+  });
+  it("narrowing wins when a bare ext:foo accompanies ext:foo/tool", () => {
+    const { narrowing } = parseExtSelectors(["ext:foo", "ext:foo/bar"]);
+    expect([...narrowing.get("foo")!]).toEqual(["bar"]);
+  });
+});
 
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
