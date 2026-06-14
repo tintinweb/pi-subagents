@@ -311,7 +311,12 @@ export class AgentManager {
           }
         }
 
-        if (options.isBackground) {
+        // Fire onComplete for foreground agents too — lifecycle symmetry.
+        // Mark resultConsumed so the callback skips notifications (result returned inline).
+        if (!options.isBackground) {
+          record.resultConsumed = true;
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        } else {
           this.runningBackground--;
           try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
           this.drainQueue();
@@ -342,7 +347,12 @@ export class AgentManager {
           } catch { /* ignore cleanup errors */ }
         }
 
-        if (options.isBackground) {
+        // Fire onComplete for foreground agents too — lifecycle symmetry.
+        // Mark resultConsumed so the callback skips notifications (result returned inline).
+        if (!options.isBackground) {
+          record.resultConsumed = true;
+          this.onComplete?.(record);
+        } else {
           this.runningBackground--;
           this.onComplete?.(record);
           this.drainQueue();
@@ -351,6 +361,11 @@ export class AgentManager {
       });
 
     record.promise = promise;
+
+    // Notify caller that spawn is complete (record is in the map, promise is set).
+    // Called synchronously — onSessionCreated fires asynchronously inside runAgent.
+    // Used by spawnAndWait to let the caller set up output files before streaming starts.
+    this.onSpawned?.(id);
   }
 
   /** Start queued agents up to the concurrency limit. */
@@ -373,8 +388,19 @@ export class AgentManager {
   }
 
   /**
+   * Called synchronously right after spawn, before onSessionCreated fires.
+   * Lets the caller set up the output file path on the record.
+   * The record is guaranteed to be in this.agents at this point.
+   */
+  private onSpawned?: (id: string) => void;
+
+  /**
    * Spawn an agent and wait for completion (foreground use).
    * Foreground agents bypass the concurrency queue.
+   * Returns { id, record } so callers can access the agent ID.
+   *
+   * @param onSpawned - Called synchronously after spawn(), before onSessionCreated fires.
+   *   Use this to set record.outputFile so streamToOutputFile can pick it up.
    */
   async spawnAndWait(
     pi: ExtensionAPI,
@@ -382,11 +408,19 @@ export class AgentManager {
     type: SubagentType,
     prompt: string,
     options: Omit<SpawnOptions, "isBackground">,
-  ): Promise<AgentRecord> {
-    const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
-    const record = this.agents.get(id)!;
-    await record.promise;
-    return record;
+    onSpawned?: (id: string) => void,
+  ): Promise<{ id: string; record: AgentRecord }> {
+    // Temporarily register the onSpawned hook so startAgent can call it.
+    const prevOnSpawned = this.onSpawned;
+    this.onSpawned = onSpawned;
+    try {
+      const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
+      const record = this.agents.get(id)!;
+      await record.promise;
+      return { id, record };
+    } finally {
+      this.onSpawned = prevOnSpawned;
+    }
   }
 
   /**

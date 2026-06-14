@@ -94,18 +94,22 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
     expect(completedRecord!.resultConsumed).toBeFalsy();
   });
 
-  it("onComplete is not called for foreground agents", async () => {
-    let onCompleteCalled = false;
-    manager = new AgentManager(() => {
-      onCompleteCalled = true;
+  it("onComplete IS called for foreground agents (lifecycle symmetry)", async () => {
+    let completedRecord: AgentRecord | undefined;
+    manager = new AgentManager((r) => {
+      completedRecord = r;
     });
     resolvedRun();
 
-    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
     });
 
-    expect(onCompleteCalled).toBe(false);
+    expect(completedRecord).toBeDefined();
+    expect(completedRecord!.status).toBe("completed");
+    // resultConsumed is set by spawnAndWait so onComplete skips notifications
+    expect(completedRecord!.resultConsumed).toBe(true);
+    expect(record).toBe(completedRecord);
   });
 });
 

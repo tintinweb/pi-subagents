@@ -1200,7 +1200,9 @@ Terse command-style prompts produce shallow, generic work.
 
       const { state: fgState, callbacks: fgCallbacks } = createActivityTracker(effectiveMaxTurns, streamUpdate);
 
-      // Wire session creation to register in widget
+      // Wire session creation: register in widget + stream to output file.
+      // The output file path is set synchronously after spawn (below),
+      // before onSessionCreated fires — same pattern as background agents.
       const origOnSession = fgCallbacks.onSessionCreated;
       fgCallbacks.onSessionCreated = (session: any) => {
         origOnSession(session);
@@ -1210,6 +1212,13 @@ Terse command-style prompts produce shallow, generic work.
             agentActivity.set(a.id, fgState);
             widget.ensureTimer();
             break;
+          }
+        }
+        // Stream conversation to output file (foreground agent logging)
+        if (fgId) {
+          const rec = manager.getRecord(fgId);
+          if (rec?.outputFile) {
+            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd);
           }
         }
       };
@@ -1224,7 +1233,7 @@ Terse command-style prompts produce shallow, generic work.
 
       let record: AgentRecord;
       try {
-        record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
+        const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           model,
           maxTurns: effectiveMaxTurns,
@@ -1235,7 +1244,16 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           signal,
           ...fgCallbacks,
+        }, (fgAgentId) => {
+          // onSpawned: called synchronously after spawn, before onSessionCreated fires.
+          // Set up the output file so streamToOutputFile can pick it up.
+          const fgRec = manager.getRecord(fgAgentId);
+          if (fgRec) {
+            fgRec.outputFile = createOutputFilePath(ctx.cwd, fgAgentId, ctx.sessionManager.getSessionId());
+            writeInitialEntry(fgRec.outputFile, fgAgentId, params.prompt, ctx.cwd);
+          }
         });
+        record = fgResult.record;
       } catch (err) {
         clearInterval(spinnerInterval);
         return textResult(err instanceof Error ? err.message : String(err));
@@ -1838,7 +1856,7 @@ Guidelines for choosing settings:
 
 Write the file using the write tool. Only write the file, nothing else.`;
 
-    const record = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
+    const { record } = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
       description: `Generate ${name} agent`,
       maxTurns: 5,
     });
