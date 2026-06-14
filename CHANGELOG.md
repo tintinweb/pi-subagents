@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Committed work from `isolation: "worktree"` subagents is now preserved** ([#68](https://github.com/tintinweb/pi-subagents/pull/68)). If an isolated subagent creates its own commit, cleanup previously saw a clean `git status`, treated it as "no changes", and removed the detached worktree — silently discarding the commits. The worktree now records its base SHA at creation, and cleanup creates the expected `pi-agent-*` branch whenever HEAD moved past it, even with a clean tree.
+- **Automatic commits in isolated worktrees skip local Git hooks** ([#68](https://github.com/tintinweb/pi-subagents/pull/68)). The preservation commit at worktree cleanup now uses `--no-verify`, so a failing local pre-commit hook can't abort it.
 ## [0.7.1] - 2026-05-07
 
 > **Heads-up — behavior change:**

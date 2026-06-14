@@ -38,6 +38,9 @@ describe("worktree", () => {
       expect(wt).toBeDefined();
       expect(existsSync(wt!.path)).toBe(true);
       expect(wt!.branch).toBe("pi-agent-test-id-1");
+      expect(wt!.baseSha).toBe(execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repoDir, stdio: "pipe",
+      }).toString().trim());
 
       // Verify it's a valid worktree with the repo's files
       expect(existsSync(join(wt!.path, "README.md"))).toBe(true);
@@ -113,6 +116,50 @@ describe("worktree", () => {
         cwd: repoDir, stdio: "pipe",
       }).toString().trim();
       expect(log).toContain("pi-agent: added new file");
+
+      // Cleanup branch
+      try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
+    it("commits changes even when a pre-commit hook rejects (--no-verify)", () => {
+      // A failing pre-commit hook in the main repo also applies to its
+      // worktrees — without --no-verify it would abort the preservation commit.
+      const hookPath = join(repoDir, ".git", "hooks", "pre-commit");
+      writeFileSync(hookPath, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+      const wt = createWorktree(repoDir, "hooked-1")!;
+      expect(wt).toBeDefined();
+      writeFileSync(join(wt.path, "hooked-file.txt"), "agent wrote this");
+
+      const result = cleanupWorktree(repoDir, wt, "hook should not block");
+      expect(result.hasChanges).toBe(true);
+      expect(result.branch).toBe("pi-agent-hooked-1");
+
+      // Cleanup branch
+      try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
+    });
+
+    it("creates branch when worktree is clean but HEAD moved", () => {
+      const wt = createWorktree(repoDir, "committed-1")!;
+      expect(wt).toBeDefined();
+
+      writeFileSync(join(wt.path, "committed-file.txt"), "agent committed this");
+      execFileSync("git", ["add", "committed-file.txt"], { cwd: wt.path, stdio: "pipe" });
+      execFileSync("git", ["commit", "-m", "agent commit"], { cwd: wt.path, stdio: "pipe" });
+      const agentCommit = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: wt.path, stdio: "pipe",
+      }).toString().trim();
+
+      const result = cleanupWorktree(repoDir, wt, "already committed");
+      expect(result.hasChanges).toBe(true);
+      expect(result.branch).toBeDefined();
+      expect(result.branch).toBe("pi-agent-committed-1");
+
+      const branchCommit = execFileSync("git", ["rev-parse", result.branch!], {
+        cwd: repoDir, stdio: "pipe",
+      }).toString().trim();
+      expect(branchCommit).toBe(agentCommit);
+      expect(existsSync(wt.path)).toBe(false);
 
       // Cleanup branch
       try { execFileSync("git", ["branch", "-D", result.branch!], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
