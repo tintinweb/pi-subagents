@@ -49,6 +49,9 @@
     "extensions": [
       "./src/index.ts"
     ],
+    "prompts": [
+      "./prompts"
+    ],
     "video": "https://github.com/tintinweb/pi-subagents/raw/master/media/demo.mp4",
     "image": "https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png"
   }

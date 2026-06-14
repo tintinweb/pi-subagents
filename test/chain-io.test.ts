@@ -6,14 +6,17 @@ import {
   buildReadsBlock,
   createChainDir,
   createChainOutputTool,
+  formatParallelEditHazardWarning,
   injectOutputInstruction,
   isAgentReadOnly,
+  mergeParallelOutputs,
   persistStepOutput,
   resolveOutputPath,
   resolveStepOutput,
   snapshotOutputFile,
   substituteChainPlaceholders,
   validateChainFileOnlyHandoff,
+  validateParallelStage,
   validateStepIO,
 } from "../src/chain-io.js";
 
@@ -482,6 +485,73 @@ describe("validateChainFileOnlyHandoff", () => {
       { prompt: "step 2", subagent_type: "worker", reads: ["{previous}"] },
     ];
     expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
+  });
+
+  it("supports parallel stages and unions member reads", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/out.md", output_mode: "file-only" },
+      {
+        parallel: [
+          { prompt: "member 1", subagent_type: "worker", reads: ["{previous}"] },
+          { prompt: "member 2", subagent_type: "worker" },
+        ],
+      },
+    ];
+    expect(validateChainFileOnlyHandoff(chain)).toHaveLength(0);
+  });
+
+  it("warns when file-only output feeds parallel stage without matching reads", () => {
+    const chain = [
+      { prompt: "step 1", subagent_type: "worker", output: "{chain_dir}/out.md", output_mode: "file-only" },
+      {
+        parallel: [
+          { prompt: "member 1", subagent_type: "worker" },
+          { prompt: "member 2", subagent_type: "worker" },
+        ],
+      },
+    ];
+    const warnings = validateChainFileOnlyHandoff(chain);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Step 1");
+    expect(warnings[0]).toContain("step 2");
+    expect(warnings[0]).toContain("{chain_dir}/out.md");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mergeParallelOutputs / validateParallelStage / formatParallelEditHazardWarning
+// ---------------------------------------------------------------------------
+
+describe("parallel stage helpers", () => {
+  it("merges member outputs with labels and separators", () => {
+    const merged = mergeParallelOutputs([
+      { agent: "Explore", output: "alpha" },
+      { agent: "Plan", output: "beta" },
+    ]);
+    expect(merged).toBe("### Member 1 (Explore)\n\nalpha\n\n---\n\n### Member 2 (Plan)\n\nbeta");
+  });
+
+  it("marks failed member in header and preserves empty output placeholder", () => {
+    const merged = mergeParallelOutputs([
+      { agent: "Explore", output: "" },
+      { agent: "Plan", output: "partial", error: "boom" },
+    ]);
+    expect(merged).toContain("(no output)");
+    expect(merged).toContain("(failed: boom)");
+  });
+
+  it("validates parallel stage and nested member IO", () => {
+    expect(validateParallelStage(0, { parallel: [] })).toContain("parallel stage requires at least one member");
+    expect(validateParallelStage(0, { parallel: [{ subagent_type: "worker", prompt: "p", output_mode: "file-only" }] as any })).toContain("file-only");
+    expect(validateParallelStage(0, { parallel: [{ subagent_type: "worker", prompt: "p" }], output_mode: "file-only" })).toContain("output path");
+    expect(validateParallelStage(0, { parallel: [{ subagent_type: "worker", prompt: "p" }] })).toBeUndefined();
+  });
+
+  it("formats edit hazard warning with isolation guidance", () => {
+    const msg = formatParallelEditHazardWarning(1, 0, "Explore");
+    expect(msg).toContain("Parallel stage 2 member 1");
+    expect(msg).toContain("Explore");
+    expect(msg).toContain('isolation: "worktree"');
   });
 });
 

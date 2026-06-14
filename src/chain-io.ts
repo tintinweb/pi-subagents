@@ -344,6 +344,66 @@ export function validateStepIO(
   return undefined;
 }
 
+/** Merge parallel member outputs into labeled concat for downstream handoff. */
+export function mergeParallelOutputs(
+  members: Array<{ agent: string; output: string; error?: string }>,
+): string {
+  return members
+    .map((member, index) => {
+      const header = `### Member ${index + 1} (${member.agent})${member.error ? ` (failed: ${member.error})` : ""}`;
+      const body = member.output.trim() ? member.output : "(no output)";
+      return `${header}\n\n${body}`;
+    })
+    .join("\n\n---\n\n");
+}
+
+/** Warn when a writable parallel member can edit files without worktree isolation. */
+export function formatParallelEditHazardWarning(
+  stageIndex: number,
+  memberIndex: number,
+  agentType: string,
+): string {
+  return (
+    `⚠ Parallel stage ${stageIndex + 1} member ${memberIndex + 1} (${agentType}) can write files and is not worktree-isolated; ` +
+    `concurrent members may clobber each other. Set isolation: "worktree" or make the agent read-only.`
+  );
+}
+
+export function validateParallelStage(
+  stageIndex: number,
+  stage: Readonly<{
+    parallel?: Array<{
+      output?: string;
+      output_mode?: string;
+      reads?: string[];
+    }>;
+    output?: string;
+    output_mode?: string;
+  }>,
+): string | undefined {
+  if (!stage.parallel || stage.parallel.length === 0) {
+    return `Chain stage ${stageIndex + 1}: parallel stage requires at least one member.`;
+  }
+
+  const stageIOError = validateStepIO(stageIndex, {
+    output: stage.output,
+    outputMode: stage.output_mode as ChainStepIO["outputMode"],
+  });
+  if (stageIOError) return stageIOError;
+
+  for (let i = 0; i < stage.parallel.length; i++) {
+    const member = stage.parallel[i];
+    const memberIOError = validateStepIO(i, {
+      output: member.output,
+      outputMode: member.output_mode as ChainStepIO["outputMode"],
+      reads: member.reads,
+    });
+    if (memberIOError) return memberIOError;
+  }
+
+  return undefined;
+}
+
 /**
  * Validate that every `file-only` step is followed by a step that declares a
  * matching `reads` entry.
@@ -362,15 +422,37 @@ export function validateChainFileOnlyHandoff(
     output?: string;
     output_mode?: string;
     reads?: string[];
+    parallel?: Array<{
+      output?: string;
+      output_mode?: string;
+      reads?: string[];
+    }>;
   }>,
 ): string[] {
   const warnings: string[] = [];
+
+  const normalizeReads = (reads?: string[]) => {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const read of reads ?? []) {
+      if (seen.has(read)) continue;
+      seen.add(read);
+      normalized.push(read);
+    }
+    return normalized;
+  };
+
+  const normalizeElement = (step: (typeof chain)[number]) => ({
+    output: step.output,
+    output_mode: step.output_mode,
+    reads: step.parallel ? normalizeReads(step.parallel.flatMap((member) => member.reads ?? [])) : normalizeReads(step.reads),
+  });
+
   for (let i = 0; i < chain.length - 1; i++) {
-    const step = chain[i];
+    const step = normalizeElement(chain[i]);
     if (step.output_mode !== "file-only" || !step.output) continue;
-    const nextStep = chain[i + 1];
-    const nextReads = nextStep.reads ?? [];
-    if (!nextReads.includes(step.output) && !nextReads.includes("{previous}")) {
+    const nextStep = normalizeElement(chain[i + 1]);
+    if (!nextStep.reads.includes(step.output) && !nextStep.reads.includes("{previous}")) {
       warnings.push(
         `⚠ Step ${i + 1} uses output_mode "file-only" but step ${i + 2} does not declare ` +
         `a matching reads entry for "${step.output}". ` +

@@ -12,6 +12,8 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
+- **Parallel chain stages** — `chain: [{ parallel: [...] }]` runs static member sets concurrently, then passes a labeled concat to the next step
+- **Bundled prompt templates** — installs `/feature` and `/feature-light` slash commands that drive ready-made scout/plan/implement/review chains
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause)
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
@@ -56,6 +58,38 @@ Agent({
 ```
 
 Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
+
+### Parallel Chain Stages
+
+Use a `parallel` chain element when a fixed set of steps can run side by side:
+
+```ts
+Agent({
+  chain: [
+    {
+      parallel: [
+        { subagent_type: "Explore", prompt: "Scan frontend files" },
+        { subagent_type: "Explore", prompt: "Scan backend files" },
+      ],
+      continue_on_error: true,
+      output: "{chain_dir}/parallel.md",
+      output_mode: "file-only",
+    },
+    {
+      subagent_type: "Plan",
+      prompt: "Review results:\n{previous}",
+    },
+  ],
+});
+```
+
+Notes:
+
+- Members run concurrently and each sees same `{previous}` input.
+- Downstream `{previous}` becomes labeled concat (`### Member 1 (...)`, `### Member 2 (...)`, ...).
+- `output_mode: "file-only"` on stage writes merged concat to single `output` file; next step should read it via `reads: ["{previous}"]` or that path.
+- Writable members that are not `isolation: "worktree"` emit warning, since concurrent edits can clobber each other.
+- Default behavior is fail-fast; set `continue_on_error: true` to keep surviving outputs.
 
 ### Scheduling
 
@@ -252,9 +286,11 @@ Send a steering message to a running agent. The message interrupts after the cur
 
 ## Commands
 
-| Command   | Description                       |
-| --------- | --------------------------------- |
-| `/agents` | Interactive agent management menu |
+| Command          | Description                                                           |
+| ---------------- | --------------------------------------------------------------------- |
+| `/agents`        | Interactive agent management menu                                     |
+| `/feature`       | Full feature chain: scout, plan, implement, review, fix-up            |
+| `/feature-light` | Lightweight chain for small/scoped changes: implement, review, fix-up |
 
 The `/agents` command opens an interactive menu:
 
@@ -274,6 +310,21 @@ Settings                                    ← max concurrency, max turns, grac
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
 - **Settings** — configure max concurrency, default max turns, grace turns, and join mode at runtime
+
+## Prompt Templates
+
+The package ships two prompt templates (under `prompts/`) that pi auto-loads on install as slash commands. Each issues a single `Agent({ chain: [...] })` call and handles `{previous}` / `{chain_dir}` handoff between steps.
+
+| Command                 | When to use                                         | Chain steps                             |
+| ----------------------- | --------------------------------------------------- | --------------------------------------- |
+| `/feature <task>`       | Normal feature work, default choice                 | Explore, Plan, worker, reviewer, worker |
+| `/feature-light <task>` | Small or scoped change with no behavioral ambiguity | worker, reviewer, worker                |
+
+Both templates open with a required clarifying-questions step so the chain runs against a well-bounded requirement. Each step writes its output to `{chain_dir}` and downstream steps read those files via `reads:` (full content, bypasses compaction).
+
+`/feature` documents an optional parallel scout stage: when recon splits into separable domains (for example frontend and backend), the first Explore step can be replaced with a `parallel` stage that fans out concurrent scouts and merges their findings into one file for the planner. Use it only when domains are clearly separable; the single Explore step is the default.
+
+To customize, copy a template into `~/.pi/agent/prompts/` (global) or `.pi/agent/prompts/` (project) and edit it there. A local copy overrides the bundled one.
 
 ## Graceful Max Turns
 
