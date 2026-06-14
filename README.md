@@ -193,8 +193,8 @@ All fields are optional — sensible defaults for everything.
 |-------|---------|-------------|
 | `description` | filename | Agent description shown in tool listings |
 | `display_name` | — | Display name for UI (e.g. widget, agent list) |
-| `tools` | all 7 | Comma-separated built-in tools: read, bash, edit, write, grep, find, ls. `none` for no tools |
-| `extensions` | `true` | Inherit MCP/extension tools. `false` to disable |
+| `tools` | all 7 | Comma-separated built-in tools: read, bash, edit, write, grep, find, ls. `none` for no tools. `*` (or `all`) expands to all built-ins. `ext:foo` / `ext:foo/bar` select extension tools; any `ext:` entry makes extension tools an explicit allowlist |
+| `extensions` | omitted | Which extensions load (loader-level allowlist). `true` = all, `false` = none, comma-separated names/paths = only those. Omitted falls back to the global `defaultExtensions` setting, then all. Excluded extensions do not load, bind, or register tools |
 | `skills` | `true` | Inherit skills from parent. Can be a comma-separated list of skill names to preload from `.pi/skills/` |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
 | `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
@@ -312,12 +312,26 @@ When background agents complete, they notify the main agent. The **join mode** c
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, default join mode) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings persist across pi restarts. Two files, merged on load:
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `maxConcurrent` | `4` | Max concurrent background agents |
+| `defaultMaxTurns` | unlimited | Default max turns before graceful wrap-up (`0` = unlimited) |
+| `graceTurns` | `5` | Extra turns allowed after the wrap-up steer |
+| `defaultJoinMode` | `smart` | Background join strategy: `async`, `group`, or `smart` |
+| `schedulingEnabled` | `true` | Master switch for the `schedule` param + scheduler |
+| `disableDefaultAgents` | `false` | Skip the three built-in agents (general-purpose, Explore, Plan) at registration; custom agents are unaffected |
+| `toolDescriptionMode` | `full` | Agent tool description sent to the LLM: `full`, `compact` (~75% fewer tokens), or `custom` (`.pi/agent-tool-description.md`) |
+| `defaultExtensions` | omitted | Default `extensions:` for agents that omit the field. Same shape as the per-agent field: `true` = all, `false` = none, list of names/paths = allowlist. An explicit per-agent `extensions:` always wins. Omitted = all (legacy) |
+
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, join mode `smart`).
+Some settings (`disableDefaultAgents`, `toolDescriptionMode`) change the Agent tool schema, which pi registers once at startup, so they take effect on the next pi session.
+
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults.
 
 **Example — global defaults for a beefy machine:**
 
