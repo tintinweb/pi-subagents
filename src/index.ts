@@ -280,19 +280,38 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  // ---- Individual nudge helper (async join mode) ----
+  // ---- Completion nudge delivery ----
+  //
+  // Do not use sendMessage({ triggerTurn: true }): it calls agent.prompt() directly,
+  // bypassing AgentSession.prompt() and skipping before_agent_start. Extensions that
+  // rely on before_agent_start for per-turn setup will cause the provider to reject
+  // the turn with an error and the orchestrator goes silent.
+  //
+  // When idle: display the notification widget, then trigger via sendUserMessage() so
+  // AgentSession.prompt() is called and before_agent_start fires.
+  // When streaming: queue locally and flush automatically in agent_end once idle.
+
+  const queuedCompletionNudges: Array<{ content: string; details: NotificationDetails }> = [];
+
+  function deliverCompletionNudge(content: string, details: NotificationDetails) {
+    if (currentCtx?.isIdle?.() === true) {
+      pi.sendMessage<NotificationDetails>(
+        { customType: "subagent-notification", content, display: true, details }
+      );
+      pi.sendUserMessage("Background subagent completed. Review the notification above and continue.");
+    } else {
+      queuedCompletionNudges.push({ content, details });
+    }
+  }
+
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
-
     const notification = formatTaskNotification(record, 500);
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
-
-    pi.sendMessage<NotificationDetails>({
-      customType: "subagent-notification",
-      content: notification + footer,
-      display: true,
-      details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
-    }, { deliverAs: "followUp", triggerTurn: true });
+    deliverCompletionNudge(
+      notification + footer,
+      buildNotificationDetails(record, 500, agentActivity.get(record.id))
+    );
   }
 
   function sendIndividualNudge(record: AgentRecord) {
@@ -324,12 +343,10 @@ export default function (pi: ExtensionAPI) {
           details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
         }
 
-        pi.sendMessage<NotificationDetails>({
-          customType: "subagent-notification",
-          content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
-          display: true,
-          details,
-        }, { deliverAs: "followUp", triggerTurn: true });
+        deliverCompletionNudge(
+          `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
+          details
+        );
       });
       widget.update();
     },
@@ -479,6 +496,16 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
+  // Flush queued completion nudges when the orchestrator becomes idle.
+  pi.on("agent_end", async (_event, ctx) => {
+    currentCtx = ctx;
+    if (ctx.isIdle?.() === true && queuedCompletionNudges.length > 0) {
+      for (const nudge of queuedCompletionNudges.splice(0)) {
+        deliverCompletionNudge(nudge.content, nudge.details);
+      }
+    }
+  });
+
   pi.on("session_shutdown", async () => {
     unsubSpawnRpc();
     unsubStopRpc();
