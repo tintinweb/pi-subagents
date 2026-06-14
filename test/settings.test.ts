@@ -94,6 +94,13 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual(settings);
   });
 
+  it("round-trips disableDefaultAgents and drops non-boolean values", () => {
+    saveSettings({ disableDefaultAgents: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });
+    writeProject({ disableDefaultAgents: "yes" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips schedulingEnabled (true and false), and absence stays absent", () => {
     saveSettings({ schedulingEnabled: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ schedulingEnabled: false });
@@ -295,6 +302,7 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
+        setDisableDefaultAgents: vi.fn(),
       };
     });
 
@@ -342,6 +350,18 @@ describe("settings persistence", () => {
     // Wiring tests for the master switch — ensures the schedulingEnabled
     // field flows from the parsed settings into the applier callback that
     // sets the in-memory flag in index.ts.
+    it("calls setDisableDefaultAgents with the persisted boolean", () => {
+      applySettings({ disableDefaultAgents: true }, appliers);
+      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
+      applySettings({ disableDefaultAgents: false }, appliers);
+      expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(false);
+    });
+
+    it("does not call setDisableDefaultAgents when the field is absent", () => {
+      applySettings({ maxConcurrent: 2 }, appliers);
+      expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
+    });
+
     it("calls setSchedulingEnabled(true) when schedulingEnabled is true", () => {
       applySettings({ schedulingEnabled: true }, appliers);
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(true);
@@ -387,6 +407,7 @@ describe("settings persistence", () => {
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
         setSchedulingEnabled: vi.fn(),
+        setDisableDefaultAgents: vi.fn(),
       };
     });
 

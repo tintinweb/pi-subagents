@@ -26,6 +26,13 @@ export interface SubagentsSettings {
    * (next pi session); runtime menu/runtime-fire short-circuit is immediate.
    */
   schedulingEnabled?: boolean;
+  /**
+   * When true, the three built-in default agents (general-purpose, Explore, Plan)
+   * are not registered at startup. User-defined agents from .pi/agents/*.md are
+   * completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
+   * Defaults to false.
+   */
+  disableDefaultAgents?: boolean;
 }
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -35,6 +42,7 @@ export interface SettingsAppliers {
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
   setSchedulingEnabled: (b: boolean) => void;
+  setDisableDefaultAgents: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -80,6 +88,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.schedulingEnabled === "boolean") {
     out.schedulingEnabled = r.schedulingEnabled;
+  }
+  if (typeof r.disableDefaultAgents === "boolean") {
+    out.disableDefaultAgents = r.disableDefaultAgents;
   }
   return out;
 }
@@ -136,6 +147,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
+  if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
 }
 
 /**

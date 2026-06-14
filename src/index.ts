@@ -17,7 +17,7 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { buildReadsBlock, createChainDir, createChainOutputTool, injectOutputInstruction, isAgentReadOnly, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateStepIO } from "./chain-io.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
@@ -554,6 +554,18 @@ export default function (pi: ExtensionAPI) {
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
+  // ---- Disable default agents configuration ----
+  // When enabled, the three hardcoded default agents (general-purpose, Explore,
+  // Plan) are not registered. User-defined agents from .pi/agents/*.md are
+  // completely unaffected — only DEFAULT_AGENTS are suppressed. Defaults to
+  // false; opt-in via `/agents → Settings` or subagents.json. State lives in
+  // agent-types.ts (isDefaultsDisabled) because registerAgents needs it; this
+  // wrapper just re-registers after flipping it.
+  function setDisableDefaultAgents(b: boolean): void {
+    setDefaultsDisabled(b);
+    reloadCustomAgents(); // re-register with new setting
+  }
+
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
   // Uses a debounced timer: each new agent resets the 100ms window so that all
@@ -605,8 +617,11 @@ export default function (pi: ExtensionAPI) {
 
   /** Build the full type list text dynamically from the unified registry. */
   const buildTypeListText = () => {
-    const defaultNames = getDefaultAgentNames();
-    const userNames = getUserAgentNames();
+    // Filter to enabled agents only — disabled agents (enabled: false) must not
+    // be advertised to the LLM since isValidType refuses to spawn them.
+    const availableSet = new Set(getAvailableTypes());
+    const defaultNames = getDefaultAgentNames().filter((n) => availableSet.has(n));
+    const userNames = getUserAgentNames().filter((n) => availableSet.has(n));
 
     const defaultDescs = defaultNames.map((name) => {
       const cfg = getAgentConfig(name);
@@ -636,11 +651,10 @@ export default function (pi: ExtensionAPI) {
     return name.replace(/-\d{8}$/, "");
   }
 
-  const typeListText = buildTypeListText();
-
   /** Build routing guidelines dynamically from all available agent descriptions. */
   const buildGuidelinesText = (): string => {
-    const allNames = [...getDefaultAgentNames(), ...getUserAgentNames()];
+    const availableSet = new Set(getAvailableTypes());
+    const allNames = [...getDefaultAgentNames(), ...getUserAgentNames()].filter((n) => availableSet.has(n));
     const routingLines = allNames.map((name) => {
       const cfg = getAgentConfig(name);
       const desc = cfg?.description ?? name;
@@ -648,8 +662,6 @@ export default function (pi: ExtensionAPI) {
     });
     return routingLines.join("\n");
   };
-
-  const guidelinesText = buildGuidelinesText();
 
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
@@ -661,6 +673,7 @@ export default function (pi: ExtensionAPI) {
       setGraceTurns,
       setDefaultJoinMode,
       setSchedulingEnabled,
+      setDisableDefaultAgents,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -697,11 +710,11 @@ export default function (pi: ExtensionAPI) {
 The Agent tool launches specialized agents that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
 
 Available agent types:
-${typeListText}
+${buildTypeListText()}
 
 Guidelines:
 Agent selection — pick the most specific type for the task:
-${guidelinesText}
+${buildGuidelinesText()}
 
 - For parallel work, use run_in_background: true on each agent. Foreground calls run sequentially — only one executes at a time.
 - Provide clear, detailed prompts so the agent can work autonomously.
@@ -2245,6 +2258,7 @@ ${systemPrompt}
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
       schedulingEnabled: isSchedulingEnabled(),
+      disableDefaultAgents: isDefaultsDisabled(),
     };
   }
 
@@ -2255,6 +2269,7 @@ ${systemPrompt}
       `Grace turns (current: ${getGraceTurns()})`,
       `Join mode (current: ${getDefaultJoinMode()})`,
       `Scheduling (current: ${isSchedulingEnabled() ? "enabled" : "disabled"})`,
+      `Disable defaults (current: ${isDefaultsDisabled() ? "on" : "off"})`,
     ]);
     if (!choice) return;
 
@@ -2323,6 +2338,26 @@ ${systemPrompt}
           notifyApplied(
             ctx,
             `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
+          );
+        }
+      }
+    } else if (choice.startsWith("Disable defaults")) {
+      const val = await ctx.ui.select(
+        "Disable built-in default agents (general-purpose, Explore, Plan)",
+        [
+          "off — built-in default agents are available",
+          "on — hide built-in defaults; only custom .pi/agents/*.md agents are advertised",
+        ],
+      );
+      if (val) {
+        const enabled = val.startsWith("on");
+        if (enabled === isDefaultsDisabled()) {
+          ctx.ui.notify(`Default agents already ${enabled ? "disabled" : "enabled"}.`, "info");
+        } else {
+          setDisableDefaultAgents(enabled);
+          notifyApplied(
+            ctx,
+            `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`,
           );
         }
       }
