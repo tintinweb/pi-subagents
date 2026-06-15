@@ -30,6 +30,21 @@ Condense the full conversation into one block: where the plan came from, decisio
 
 `isolation: "worktree"` commits each worker's changes onto a separate branch that does NOT merge back into the working tree. The reviewer in this chain inspects `git diff` in the main tree, so worktree-isolated changes would be invisible to it. For execution→review→fix to work in one chain, all edits must land in one tree. Safety comes from the strict disjoint partition in Step 0 instead of isolation.
 
+## Parallel stage shape (reference)
+
+A chain element may be a parallel stage that runs several subagents concurrently, then merges their outputs (labeled concat) into the next step's `{previous}`/file. Shape:
+
+```
+{
+  parallel: [ {step}, {step}, ... ],   // static count, declared up front
+  continue_on_error?: boolean,          // default false = fail-fast (one member fails, stage aborts)
+  output?: "{chain_dir}/worker.md",     // stage-level merged output
+  output_mode?: "file-only"
+}
+```
+
+The merged file contains `### Member 1 (worker)` and `### Member 2 (worker)` blocks, one per package, so the reviewer reads a single file covering every package. Give each member a non-overlapping (disjoint) file scope so changes never collide. Keep `continue_on_error` at its default (fail-fast) here: a half-applied package leaves the tree in a state the reviewer cannot safely reason about.
+
 ## Invoke as a single tool call
 
 Replace the two members below with your actual N packages. Each member prompt must name its OWNED files and assigned plan steps and forbid touching anything else.
