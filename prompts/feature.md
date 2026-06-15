@@ -15,6 +15,7 @@ Turn the user task ($@) into a clearly bounded requirement before invoking the c
 Use the ask-user / interview tool to ask pointed clarifying questions. The chain is expensive, so one upfront round prevents wasted scout/plan/worker turns.
 
 Cover only intent gaps the planner cannot derive from the codebase:
+
 - **Acceptance criteria**: what "done" looks like, observably
 - **Scope boundaries**: what is IN, what is OUT
 - **Constraints**: perf budgets, compat targets, libraries to use/avoid, deadlines
