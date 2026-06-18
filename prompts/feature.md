@@ -117,10 +117,37 @@ chain: [
 
 The merged `scout.md` contains `### Member 1 (Explore)` and `### Member 2 (Explore)` blocks, so Plan reads one file covering both domains. Give each member a non-overlapping scope so findings do not duplicate.
 
+## Optional: parallel implement stage (use when the plan partitions)
+
+When the plan splits into 2-4 packages whose file ownership does NOT overlap, replace the single worker step with a parallel stage of package workers, the same pattern as `/execute-plan`. Use it only for larger features with clean file boundaries; for most features the single worker is simpler, so do not parallelize by default.
+
+Requirements:
+
+- The Plan step must define the disjoint partition: per-package owned files + assigned plan steps. No two packages may edit the same file. Shared files (lockfiles, barrels, config) and repo-wide commands (format-all, codegen, global build) are deferred to the fix-up worker, never run during the parallel stage.
+- Do NOT use `isolation: "worktree"` here. The reviewer inspects `git diff` in the main tree, so worktree-isolated changes would be invisible to it. Safety comes from the disjoint partition, not isolation.
+- Keep `continue_on_error` at its default (fail-fast): a half-applied package leaves the tree in a state the reviewer cannot safely reason about.
+
+Replace the worker step with:
+
+```
+{
+  parallel: [
+    { subagent_type: "worker", description: "Implement package A", output_mode: "file-only",
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE A. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_package>\n\nImplement ONLY your package. Edit ONLY your owned files. Do NOT touch files outside your list, edit shared config/lockfiles, or run repo-wide format/build/codegen. Validate ONLY your slice (scoped typecheck/test). Use write_output for a verbose report: every file changed (path + summary), every test (file:line), scoped validation commands + full output, any out-of-package file you needed (report it, do NOT touch), decisions beyond the plan, open risks." },
+    { subagent_type: "worker", description: "Implement package B", output_mode: "file-only",
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE B. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_package>\n\nSame contract as package A: edit ONLY your owned files, no shared/global changes, validate your slice, verbose write_output report." }
+  ],
+  output: "{chain_dir}/worker.md",
+  output_mode: "file-only"
+}
+```
+
+The reviewer then reads the merged `worker.md` (one `### Member N (worker)` block per package) and inspects the combined `git diff`. The fix-up worker (full tree, no package restriction) wires cross-package integration and runs the deferred shared-file + repo-wide validation.
+
 ## Rules
 
 - Substitute `{{CONVO_CONTEXT}}` and `{{TASK}}` in every step's `prompt` BEFORE calling `Agent`. Runtime substitutes `{previous}` and `{chain_dir}`, not `{{...}}`.
 - Do NOT collapse, skip, or modify chain steps.
 - Parallel scout stage is OPTIONAL. Use only when recon splits into separable domains. Default to the single Explore step.
-- If parallel members ever edit files (not the scout case), give each `isolation: "worktree"` to avoid races.
+- Parallel implement stage is OPTIONAL — use only when the plan partitions into disjoint files. Do NOT give it `isolation: "worktree"`: the reviewer reads `git diff` in the main tree, so worktree changes would be invisible. Safety comes from disjoint file ownership; shared/global changes go to the fix-up worker.
 - Wait for the chain to complete, then report the final summary to the user.

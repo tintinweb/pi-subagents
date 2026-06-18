@@ -791,7 +791,8 @@ ${buildGuidelinesText()}
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
 - Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications).
-- Use chain to run a multi-agent workflow. Each element is either a sequential step (receives the prior output via {previous}) or a {parallel:[...]} stage whose members run concurrently and whose labeled outputs are merged for the next step. Parallel stages fail-fast by default; set continue_on_error to keep surviving outputs.${scheduleGuideline}`;
+- Use chain to run a multi-agent workflow. Each element is either a sequential step (receives the prior output via {previous}) or a {parallel:[...]} stage whose members run concurrently and whose labeled outputs are merged for the next step. Parallel stages fail-fast by default; set continue_on_error to keep surviving outputs.
+- DEFAULT TO PARALLEL. A sequential step blocks until its agent finishes AND pumps that agent's full output into the next step + the context, so back-to-back single-agent steps are the slow, context-bloating path. Only chain steps sequentially when step N+1 literally consumes step N's output. Independent work (multi-file recon, parallel reviews, fan-out edits on non-overlapping files) belongs in ONE {parallel:[...]} stage, never as consecutive single-agent steps. If two adjacent steps don't pass real data between them, they are parallel members, not steps.${scheduleGuideline}`;
 
   // Compact Agent tool description (`toolDescriptionMode: "compact"`) — the same
   // load-bearing facts at ~75% fewer tokens, for small/local models. Per-option
@@ -804,7 +805,7 @@ Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
 - Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
-- chain: ordered workflow where each element is a sequential step ({previous} = prior output) or a {parallel:[...]} stage (members run concurrently, outputs merged for the next step).
+- chain: ordered workflow where each element is a sequential step ({previous} = prior output) or a {parallel:[...]} stage (members run concurrently, outputs merged for the next step). DEFAULT TO PARALLEL: only use a separate sequential step when N+1 consumes N's output. Independent work goes in ONE {parallel:[...]} stage, never consecutive single-agent steps (serial = slow + context bloat).
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
 - isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.${scheduleGuideline}`;
@@ -1064,7 +1065,7 @@ Notes:
             }),
           ]),
           {
-            description: "Sequential chain of agents. Each element is either a single step or a {parallel:[...]} stage. Sequential steps receive the prior step output via {previous}; parallel stages merge member outputs into one labeled concat for downstream handoff.",
+            description: "Chain of agents. Each element is either a single sequential step or a {parallel:[...]} stage. Sequential steps receive the prior output via {previous}; parallel members run concurrently and merge into one labeled concat for downstream handoff. PREFER PARALLEL: consecutive single-agent steps run serially and accumulate every output in context (slow + bloat). Use a separate step only when it consumes the previous output; otherwise group independent agents into one {parallel:[...]} stage.",
             minItems: 2,
           }
         )

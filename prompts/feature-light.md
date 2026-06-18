@@ -65,8 +65,32 @@ Agent({
 })
 ```
 
+## Optional: parallel implement stage (rarely needed)
+
+`/feature-light` targets small scoped changes, so the single worker is almost always right. Only when the task clearly splits into 2-3 packages with NON-overlapping files, replace the worker step with a parallel stage. There is no Plan step here, so YOU (the parent) must define the disjoint partition up front in Step 0.
+
+Same rules as `/feature`'s parallel implement: disjoint file ownership (no two packages edit the same file), shared files + repo-wide commands (format-all, codegen, global build) deferred to the fix-up worker, NO `isolation: "worktree"` (the reviewer reads `git diff` in the main tree, so worktree changes would be invisible), `continue_on_error` left at its fail-fast default.
+
+Replace the worker step with:
+
+```
+{
+  parallel: [
+    { subagent_type: "worker", description: "Implement package A", output_mode: "file-only",
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE A. You OWN exactly these files: <absolute paths>.\n</your_package>\n\nImplement ONLY your package. Edit ONLY your owned files. No shared config/lockfiles, no repo-wide commands. Validate ONLY your slice. Use write_output: every file changed (path + summary), every test (file:line), scoped validation output, any out-of-package file you needed (report it, do NOT touch), decisions, risks." },
+    { subagent_type: "worker", description: "Implement package B", output_mode: "file-only",
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE B. You OWN exactly these files: <absolute paths>.\n</your_package>\n\nSame contract as package A." }
+  ],
+  output: "{chain_dir}/worker.md",
+  output_mode: "file-only"
+}
+```
+
+The reviewer reads the merged `worker.md` + the combined `git diff`. The fix-up worker (full tree, no restriction) wires cross-package integration and runs the deferred shared-file + repo-wide validation.
+
 ## Rules
 
 - Substitute `{{CONVO_CONTEXT}}` and `{{TASK}}` in every step's `prompt` BEFORE calling `Agent`. Runtime substitutes `{previous}` and `{chain_dir}`.
 - Do NOT collapse, skip, or modify chain steps.
+- Parallel implement stage is OPTIONAL and rarely warranted here — use only when the task splits into disjoint files, and never with `isolation: "worktree"` (the reviewer needs the main tree).
 - Wait for the chain to complete, then report the final summary to the user.
