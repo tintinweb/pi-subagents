@@ -458,12 +458,12 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    manager.clearCompleted();
+    manager.clearCompleted(true);
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
   pi.on("session_before_switch", () => {
-    manager.clearCompleted();
+    manager.clearCompleted(true);
     scheduler.stop();
   });
 

@@ -514,10 +514,13 @@ export class AgentManager {
   /**
    * Remove all completed/stopped/errored records immediately.
    * Called on session start/switch so tasks from a prior session don't persist.
+   * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
+   * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
    */
-  clearCompleted(): void {
+  clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
   }

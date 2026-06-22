@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Background agent records lost before result is read** ([#108](https://github.com/tintinweb/pi-subagents/issues/108) — thanks [@philipmw](https://github.com/philipmw)). On session switch or `/new`/`/resume`, `clearCompleted()` removed completed agent records regardless of whether the LLM had retrieved the result, causing `get_subagent_result` to return "Agent not found" for agents that had finished but hadn't been checked yet. `clearCompleted()` now accepts a `skipUnconsumed` flag; session event handlers pass `true`, so records with `resultConsumed=false` are preserved across session transitions. The 10-minute cleanup timer handles eventual eviction. Note: a full session shutdown (`session_shutdown`) calls `dispose()` which clears all records unconditionally — that path is not affected by this fix.
+
 ### Added
 - **Foreground agent lifecycle completion and conversation logging** ([#105](https://github.com/tintinweb/pi-subagents/pull/105) — thanks [@benrhodeland](https://github.com/benrhodeland)). Two gaps closed: (1) **`onComplete` now fires for foreground agents**, emitting `subagents:completed` / `subagents:failed` lifecycle events and writing a `subagents:record` entry to the parent JSONL — previously only background agents emitted these, leaving cross-extension observers with an orphaned `subagents:started` event and no matching completion. `resultConsumed` is pre-set so the callback skips notifications (the result is returned inline); no change to the tool's return value. (2) **Foreground agent conversations are now streamed to `.output` files** (same `.pi/output/agent-<id>.jsonl` path as background agents) — inline subagent transcripts were previously permanently lost after `spawnAndWait` returned.
 
