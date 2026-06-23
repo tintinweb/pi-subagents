@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **FleetView — a Claude Code-style subagent navigator below the editor.** A persistent, navigable list of `main` + every active subagent renders beneath the editor whenever agents are running — **auto-shown, no keypress needed** — mirroring Claude Code's bottom fleet bar: `⏺`/`◯` selection markers, agent type + description, right-aligned `elapsed · ↓ tokens`, and a `↓ N more` overflow once past five rows. Press `↓` (or `←`) at an **empty prompt** to move focus into the list, `↑`/`↓` to select, `Enter` to open the selected agent's live, auto-updating conversation overlay, and `Esc` (or `↑` above `main`) to return to the prompt. Implemented as a `belowEditor` widget with all key handling routed through `onTerminalInput` (which fires before the editor); it only captures arrow keys at an empty prompt — and acts on key-**press** only (kitty-protocol release events are ignored, otherwise each tap moved twice) — so typing, history, and cursor movement are untouched. Rows are ordered **earliest-launched first**; only openable agents (those with a session) are shown, so pending/queued agents appear once they start and `Enter` never dead-ends; **finished agents linger ~4s** before dropping out (their elapsed freezes at completion); and a viewer **stays open through its agent's completion** so the final output remains readable. Selection follows the viewed agent by id, so closing a viewer returns you to the same agent even if the list reordered while it was open. Every rendered line is width-clamped — the narrow-terminal crash/flicker class previously fixed in v0.2.7 and [#7](https://github.com/tintinweb/pi-subagents/issues/7). Toggle via `/agents → Settings → Fleet view` (default on; pure-UI, so no LLM-context cost).
+
 ## [0.11.0] - 2026-06-23
 
 ### Added

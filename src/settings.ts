@@ -66,6 +66,12 @@ export interface SubagentsSettings {
    * next pi session.
    */
   toolDescriptionMode?: ToolDescriptionMode;
+  /**
+   * Whether the Claude Code-style FleetView (the navigable main+subagents list
+   * rendered below the editor) is shown. Defaults to `true`. Pure-UI: when off,
+   * the list never registers and the global key handler never captures input.
+   */
+  fleetView?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -80,6 +86,7 @@ export interface SettingsAppliers {
   setScopeModels: (enabled: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
+  setFleetView: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -135,6 +142,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
     out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
+  }
+  if (typeof r.fleetView === "boolean") {
+    out.fleetView = r.fleetView;
   }
   return out;
 }
@@ -194,6 +204,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
+  if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
 }
 
 /**
