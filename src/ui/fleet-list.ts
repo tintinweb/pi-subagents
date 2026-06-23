@@ -4,7 +4,7 @@
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
  * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ⏺ marker),
  * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
- * If the viewed agent finishes, the overlay auto-closes back to the list.
+ * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
@@ -159,6 +159,7 @@ export class FleetList {
     }
 
     this.clampSelection();
+    this.ensureTimer(); // keep stats ticking whenever the list is shown (e.g. after a re-enable)
 
     if (!this.widgetRegistered) {
       this.ui.setWidget(FLEET_KEY, (tui, theme) => {

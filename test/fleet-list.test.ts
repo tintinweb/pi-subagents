@@ -1,5 +1,5 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 import { getDisplayName } from "../src/ui/agent-widget.js";
@@ -201,6 +201,29 @@ describe("FleetList navigation", () => {
     h.fleet.setEnabled(false);
     expect(h.press(DOWN)).toBeUndefined();
     expect(h.render()).toEqual([]);
+  });
+
+  it("re-arms the refresh timer when the list is re-shown (toggle off→on)", () => {
+    vi.useFakeTimers();
+    try {
+      const agents = [makeRecord({ id: "a1" })];
+      const listAgents = vi.fn(() => agents);
+      const manager = { listAgents, abort: () => true } as unknown as AgentManager;
+      const fleet = new FleetList(manager, new Map());
+      fleet.setUICtx({
+        setWidget: () => {}, onTerminalInput: () => () => {}, getEditorText: () => "",
+        notify: () => {}, custom: (() => new Promise<undefined>(() => {})) as FleetUICtx["custom"],
+      });
+      fleet.update();          // shows list, arms the timer
+      fleet.setEnabled(false); // hides, clears the timer
+      fleet.setEnabled(true);  // re-shows — must re-arm the timer
+      const before = listAgents.mock.calls.length;
+      vi.advanceTimersByTime(250); // a tick should fire and re-read the roster
+      expect(listAgents.mock.calls.length).toBeGreaterThan(before);
+      fleet.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
