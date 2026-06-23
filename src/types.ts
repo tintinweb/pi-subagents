@@ -41,6 +41,10 @@ export interface AgentConfig {
   model?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
+  /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
+  persistSession?: boolean;
+  /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
+  sessionDir?: string;
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */

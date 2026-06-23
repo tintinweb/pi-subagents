@@ -288,6 +288,13 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
   return () => signal.removeEventListener("abort", onAbort);
 }
 
+function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
+  if (!sessionDir) return undefined;
+  if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
+  if (isAbsolute(sessionDir)) return sessionDir;
+  return resolve(cwd, sessionDir);
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -555,11 +562,18 @@ export async function runAgent(
     return !noExtensions;
   });
 
+  const settingsManager = SettingsManager.create(configCwd, agentDir);
+  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
+  const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
+  const sessionManager = agentConfig?.persistSession
+    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
+    : SessionManager.inMemory(effectiveCwd);
+
   const sessionOpts: Parameters<typeof createAgentSession>[0] = {
     cwd: effectiveCwd,
     agentDir,
-    sessionManager: SessionManager.inMemory(effectiveCwd),
-    settingsManager: SettingsManager.create(configCwd, agentDir),
+    sessionManager,
+    settingsManager,
     modelRegistry: ctx.modelRegistry,
     model,
     tools: allowedTools,

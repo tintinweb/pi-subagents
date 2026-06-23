@@ -7,7 +7,9 @@ const {
   loaderExtensionsRef,
   getAgentDir,
   sessionManagerInMemory,
+  sessionManagerCreate,
   settingsManagerCreate,
+  settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
@@ -20,7 +22,9 @@ const {
   },
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
-  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager" })),
+  sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
+  settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
+  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -53,7 +57,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
   },
   getAgentDir,
-  SessionManager: { inMemory: sessionManagerInMemory },
+  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate },
   SettingsManager: { create: settingsManagerCreate },
 }));
 
@@ -149,6 +153,9 @@ beforeEach(() => {
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
+  sessionManagerCreate.mockClear();
+  settingsManagerGetSessionDir.mockReset();
+  settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
 });
@@ -499,6 +506,53 @@ function lastToolsPassed(): string[] {
 function lastLoaderOpts(): Record<string, unknown> {
   return defaultResourceLoaderCtor.mock.calls[0][0];
 }
+
+describe("agent-runner session persistence", () => {
+  it("uses an in-memory session by default", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp");
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "memory-session-manager" },
+    }));
+  });
+
+  it("uses pi's normal persistent session location when persistSession is true", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: true }));
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/normal/pi/sessions");
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "persistent-session-manager" },
+    }));
+  });
+
+  it("uses a frontmatter sessionDir when persistSession is true and sessionDir is configured", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ persistSession: true, sessionDir: ".seams/pi-sessions/seam-plan-reviewer" }),
+    );
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo" });
+
+    expect(sessionManagerCreate).toHaveBeenCalledWith(
+      "/repo",
+      "/repo/.seams/pi-sessions/seam-plan-reviewer",
+    );
+  });
+});
 
 describe("agent-runner master tool allowlist", () => {
   it("extensions: true with extension tools — all 7 built-ins plus extension tools land in the allowlist", async () => {
