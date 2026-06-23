@@ -124,7 +124,7 @@ Individual agent results render Claude Code-style in the conversation:
 
 Completed results can be expanded (ctrl+o in pi) to show the full agent output inline.
 
-Background agent completion notifications render as styled boxes:
+Both foreground and background agents stream their full conversation to a `.pi/output/agent-<id>.jsonl` transcript file. Background agent completion notifications render as styled boxes:
 
 ```
 ✓ Find auth files completed
@@ -420,8 +420,8 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:started` | Agent transitions to running (including queued→running) | `id`, `type`, `description` |
 | `subagents:tools_resolve` | Tools resolved, before session creation (mutable) | `type`, `tools` (array, mutable), `agentId` |
 | `subagents:session_ready` | Agent session created and ready for use | `id`, `type`, `session` (AgentSession), `record` (AgentRecord) |
-| `subagents:completed` | Agent finished successfully | `id`, `type`, `durationMs`, `tokens` (lifetime `{ input, output, total }`), `toolUses`, `result` |
-| `subagents:failed` | Agent errored, stopped, or aborted | same as completed + `error`, `status` |
+| `subagents:completed` | Agent finished successfully (background and foreground) | `id`, `type`, `durationMs`, `tokens` (lifetime `{ input, output, total }`), `toolUses`, `result` |
+| `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | same as completed + `error`, `status` |
 | `subagents:steered` | Steering message sent | `id`, `message` |
 | `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
 | `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
