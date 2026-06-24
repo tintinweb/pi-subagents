@@ -89,6 +89,8 @@ interface SpawnOptions {
   onTextDelta?: (delta: string, fullText: string) => void;
   /** Called when the agent session is created (for accessing session stats). */
   onSessionCreated?: (session: AgentSession) => void;
+  /** Called after tools are resolved, before session creation. Allows injecting additional tools. */
+  onToolsResolve?: (tools: any[], agentType: string) => any[];
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /** Called once per assistant message_end with that message's usage delta. */
@@ -260,6 +262,7 @@ export class AgentManager {
       },
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
+      onToolsResolve: options.onToolsResolve,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
         options.onAssistantUsage?.(usage);
@@ -279,6 +282,8 @@ export class AgentManager {
           record.pendingSteers = undefined;
         }
         options.onSessionCreated?.(session);
+        // Emit event for extensions that need session access (e.g., memory systems)
+        pi.events.emit("subagents:session_ready", { id, type, session, record });
       },
     })
       .then(({ responseText, session, aborted, steered }) => {
