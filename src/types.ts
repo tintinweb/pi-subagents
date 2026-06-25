@@ -106,6 +106,10 @@ export interface AgentRecord {
   compactionCount: number;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Nesting depth in the spawn tree (1 = direct child of the real session). Gates and propagates nested spawning. */
+  depth?: number;
+  /** Spawning agent id; undefined for roots. */
+  parentId?: string;
 }
 
 export interface AgentInvocation {

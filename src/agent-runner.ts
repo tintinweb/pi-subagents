@@ -2,6 +2,7 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { Model } from "@mariozechner/pi-ai";
@@ -28,6 +29,22 @@ import type { SubagentType, ThinkingLevel } from "./types.js";
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
 const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
+
+interface AgentDepthStore {
+  depth: number;
+  id?: string;
+}
+
+/**
+ * Tracks how deep in the spawn tree the currently-running agent is. The real
+ * (user) session has no store -> depth 0; its children run at depth 1, etc.
+ * Read synchronously inside `manager.spawn` to stamp each child's depth, since
+ * the background queue drains agents outside their spawn call's async context.
+ */
+export const agentDepth = new AsyncLocalStorage<AgentDepthStore>();
+
+/** Max nesting allowed. depth 1 = direct children, depth 2 = grandchildren. ponytail: flat cap, make a setting if per-agent depth is ever needed. */
+const MAX_DEPTH = 2;
 
 /**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.
@@ -206,6 +223,8 @@ export interface RunOptions {
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
+  /** Nesting depth of this agent in the spawn tree (1 = direct child of the real session). Gates whether it inherits the Agent tools. */
+  depth?: number;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /** Called on tool start/end with activity info. */
@@ -505,8 +524,11 @@ export async function runAgent(
   // to the allowlist so they survive the gate even for read-only agent types.
   const customToolNames = options.customTools?.map(t => t.name) ?? [];
   const builtinToolNameSet = new Set([...toolNames, ...customToolNames]);
+  // Agent tools (spawn/result/steer) are stripped once the depth cap is hit, so
+  // nesting stops at MAX_DEPTH instead of recursing without bound.
+  const canNest = (options.depth ?? 1) < MAX_DEPTH;
   const allowedTools = [...toolNames, ...customToolNames, ...extensionToolNames].filter((t) => {
-    if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
+    if (EXCLUDED_TOOL_NAMES.includes(t) && !canNest) return false;
     if (disallowedSet?.has(t)) return false;
     if (builtinToolNameSet.has(t)) return true;
     // Reached only for extension tools. The extension set was already filtered
@@ -614,7 +636,9 @@ export async function runAgent(
   }
 
   try {
-    await session.prompt(effectivePrompt);
+    // Run inside the depth store so any Agent tool the child invokes stamps its
+    // own children at depth+1 (read synchronously by manager.spawn).
+    await agentDepth.run({ depth: options.depth ?? 1, id: options.agentId }, () => session.prompt(effectivePrompt));
   } finally {
     unsubTurns();
     collector.unsubscribe();
@@ -636,6 +660,8 @@ export async function resumeAgent(
     onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
+    depth?: number;
+    id?: string;
   } = {},
 ): Promise<string> {
   const collector = collectResponseText(session);
@@ -660,7 +686,7 @@ export async function resumeAgent(
     : () => {};
 
   try {
-    await session.prompt(prompt);
+    await agentDepth.run({ depth: options.depth ?? 1, id: options.id }, () => session.prompt(prompt));
   } finally {
     collector.unsubscribe();
     unsubEvents();

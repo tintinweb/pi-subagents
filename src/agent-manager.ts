@@ -9,7 +9,8 @@
 import { randomUUID } from "node:crypto";
 import type { Model } from "@mariozechner/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { agentDepth, resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { registerRecord, unregisterRecord } from "./global-registry.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -53,6 +54,8 @@ interface SpawnOptions {
   isolation?: IsolationMode;
   /** Resolved invocation snapshot captured for UI display. */
   invocation?: AgentInvocation;
+  /** Nesting depth override; normally derived from the ambient spawn-tree depth. */
+  depth?: number;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
   signal?: AbortSignal;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
@@ -131,6 +134,11 @@ export class AgentManager {
   ): string {
     const id = randomUUID().slice(0, 17);
     const abortController = new AbortController();
+    // Stamp depth synchronously here (inside the spawning agent's depth store);
+    // the queue may start this agent later, outside that async context.
+    const store = agentDepth.getStore();
+    const depth = options.depth ?? (store?.depth ?? 0) + 1;
+    options = { ...options, depth };
     const record: AgentRecord = {
       id,
       type,
@@ -144,8 +152,11 @@ export class AgentManager {
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
       invocation: options.invocation,
+      depth,
+      parentId: store?.id,
     };
     this.agents.set(id, record);
+    registerRecord(record);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
@@ -161,6 +172,7 @@ export class AgentManager {
       this.startAgent(id, record, args);
     } catch (err) {
       this.agents.delete(id);
+      unregisterRecord(id);
       throw err;
     }
     return id;
@@ -206,6 +218,7 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
+      depth: options.depth,
       cwd: worktreeCwd,
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
@@ -361,6 +374,8 @@ export class AgentManager {
 
     try {
       const responseText = await resumeAgent(record.session, prompt, {
+        depth: record.depth,
+        id: record.id,
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
         },
@@ -419,6 +434,7 @@ export class AgentManager {
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
+    unregisterRecord(id);
   }
 
   private cleanup() {
@@ -492,8 +508,9 @@ export class AgentManager {
     clearInterval(this.cleanupInterval);
     // Clear queue
     this.queue = [];
-    for (const record of this.agents.values()) {
+    for (const [id, record] of this.agents) {
       record.session?.dispose();
+      unregisterRecord(id);
     }
     this.agents.clear();
     // Prune any orphaned git worktrees (crash recovery)

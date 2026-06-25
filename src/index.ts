@@ -21,6 +21,7 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, get
 import { buildReadsBlock, createChainDir, createChainOutputTool, formatParallelEditHazardWarning, injectOutputInstruction, isAgentReadOnly, mergeParallelOutputs, persistStepOutput, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateParallelStage, validateStepIO } from "./chain-io.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { deleteGlobalActivity, setGlobalActivity } from "./global-registry.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
@@ -374,6 +375,7 @@ export default function (pi: ExtensionAPI) {
 
   function sendIndividualNudge(record: AgentRecord) {
     agentActivity.delete(record.id);
+    deleteGlobalActivity(record.id);
     widget.markFinished(record.id);
     scheduleNudge(record.id, () => emitIndividualNudge(record));
     widget.update();
@@ -382,7 +384,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
-      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); }
+      for (const r of records) { agentActivity.delete(r.id); deleteGlobalActivity(r.id); widget.markFinished(r.id); }
 
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
       scheduleNudge(groupKey, () => {
@@ -457,6 +459,7 @@ export default function (pi: ExtensionAPI) {
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
       agentActivity.delete(record.id);
+      deleteGlobalActivity(record.id);
       widget.markFinished(record.id);
       widget.update();
       return;
@@ -1406,6 +1409,7 @@ Notes:
         }
 
         agentActivity.set(id, bgState);
+        setGlobalActivity(id, bgState);
         widget.ensureTimer();
         widget.update();
 
@@ -1465,6 +1469,7 @@ Notes:
           if (a.session === session) {
             fgId = a.id;
             agentActivity.set(a.id, fgState);
+            setGlobalActivity(a.id, fgState);
             widget.ensureTimer();
             break;
           }
@@ -1509,6 +1514,7 @@ Notes:
       // Clean up foreground agent from widget
       if (fgId) {
         agentActivity.delete(fgId);
+        deleteGlobalActivity(fgId);
         widget.markFinished(fgId);
       }
 
@@ -1765,6 +1771,7 @@ Notes:
         }
         for (const id of finishedIds) {
           agentActivity.delete(id);
+          deleteGlobalActivity(id);
           widget.markFinished(id);
         }
         widget.update();
@@ -1792,6 +1799,7 @@ Notes:
               if (a.session === session) {
                 memberAgentIds[m] = a.id;
                 agentActivity.set(a.id, state);
+                setGlobalActivity(a.id, state);
                 widget.ensureTimer();
                 widget.update();
                 break;
@@ -1995,6 +2003,7 @@ Notes:
           if (a.session === session) {
             stepAgentId = a.id;
             agentActivity.set(a.id, stepState);
+            setGlobalActivity(a.id, stepState);
             widget.ensureTimer();
             widget.update();
             break;
@@ -2038,6 +2047,7 @@ Notes:
         clearInterval(spinnerInterval);
         if (stepAgentId) {
           agentActivity.delete(stepAgentId);
+          deleteGlobalActivity(stepAgentId);
           widget.markFinished(stepAgentId);
           widget.update();
         }

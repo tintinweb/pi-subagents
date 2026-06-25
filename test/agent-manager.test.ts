@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 
-vi.mock("../src/agent-runner.js", () => ({
+vi.mock("../src/agent-runner.js", async () => ({
   runAgent: vi.fn(),
   resumeAgent: vi.fn(),
+  agentDepth: new (await import("node:async_hooks")).AsyncLocalStorage(),
 }));
 
 vi.mock("../src/worktree.js", () => ({
@@ -13,12 +14,16 @@ vi.mock("../src/worktree.js", () => ({
   pruneWorktrees: vi.fn(),
 }));
 
-import { runAgent } from "../src/agent-runner.js";
+import { agentDepth, runAgent } from "../src/agent-runner.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
 
 const mockSession = () => ({ dispose: vi.fn() } as any);
+
+afterEach(() => {
+  (globalThis as any)[Symbol.for("pi-subagents:registry")] = undefined;
+});
 
 const resolvedRun = () =>
   vi.mocked(runAgent).mockResolvedValue({
@@ -380,5 +385,30 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.listAgents()).toEqual([]);
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("AgentManager — nesting depth", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("stamps top-level spawns at depth 1 and nested spawns at parent depth + 1", () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const top = manager.spawn(mockPi, mockCtx, "general-purpose", "t", {
+      description: "t", isBackground: true,
+    });
+    expect(manager.getRecord(top)!.depth).toBe(1);
+
+    // Simulate running inside a depth-1 agent: its spawns must be depth 2.
+    const nested = agentDepth.run({ depth: 1, id: "p1" }, () =>
+      manager.spawn(mockPi, mockCtx, "general-purpose", "n", {
+        description: "n", isBackground: true,
+      }),
+    );
+    expect(manager.getRecord(nested)!.depth).toBe(2);
+    expect(manager.getRecord(nested)!.parentId).toBe("p1");
+    expect(manager.getRecord(top)!.parentId).toBeUndefined();
   });
 });
