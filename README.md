@@ -24,7 +24,7 @@ The full capability list is below.
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
 - **Parallel chain stages** — `chain: [{ parallel: [...] }]` runs static member sets concurrently, then passes a labeled concat to the next step
 - **Nested subagents** — a subagent can spawn its own subagents up to a fixed depth (default 2 levels). Grandchildren render indented under their parent in the tree-view widget. The depth cap stops runaway recursion
-- **Bundled prompt templates** — installs `/feature`, `/feature-light`, and `/execute-plan` slash commands that drive ready-made scout/plan/implement/review chains
+- **Bundled prompt templates** — installs `/feature`, `/feature-light`, `/execute-plan`, and `/orchestrate` slash commands that drive ready-made scout/plan/implement/review chains
 - **Bundled default agents** — ships `worker`, `reviewer`, and `oracle` alongside `general-purpose`, `Explore`, and `Plan`, all inheriting the parent model
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause)
@@ -316,13 +316,14 @@ Send a steering message to a running agent. The message interrupts after the cur
 
 ## Commands
 
-| Command          | Description                                                           |
-| ---------------- | --------------------------------------------------------------------- |
-| `/agents`        | Interactive agent management menu                                     |
-| `/agents-view`   | Toggle the widget display between cards and tree                      |
-| `/feature`       | Full feature chain: scout, plan, implement, review, fix-up            |
-| `/feature-light` | Lightweight chain for small/scoped changes: implement, review, fix-up |
-| `/execute-plan`  | Run an existing plan: parallel implement, review, fix-up              |
+| Command          | Description                                                              |
+| ---------------- | ------------------------------------------------------------------------ |
+| `/agents`        | Interactive agent management menu                                        |
+| `/agents-view`   | Toggle the widget display between cards and tree                         |
+| `/feature`       | Full feature chain: scout, plan, implement, review, fix-up               |
+| `/feature-light` | Lightweight chain for small/scoped changes: implement, review, fix-up    |
+| `/execute-plan`  | Run an existing plan: parallel implement, review, fix-up                 |
+| `/orchestrate`   | Fan out independent threads to autonomous orchestrators, one per feature |
 
 The `/agents` command opens an interactive menu:
 
@@ -345,15 +346,18 @@ Settings                                    ← max concurrency, max turns, grac
 
 ## Prompt Templates
 
-The package ships three prompt templates (under `prompts/`) that pi auto-loads on install as slash commands. Each issues a single `Agent({ chain: [...] })` call and handles `{previous}` / `{chain_dir}` handoff between steps.
+The package ships four prompt templates (under `prompts/`) that pi auto-loads on install as slash commands. Each issues a single `Agent({ chain: [...] })` call and handles `{previous}` / `{chain_dir}` handoff between steps.
 
-| Command                 | When to use                                             | Chain steps                             |
-| ----------------------- | ------------------------------------------------------- | --------------------------------------- |
-| `/feature <task>`       | Normal feature work, default choice                     | Explore, Plan, worker, reviewer, worker |
-| `/feature-light <task>` | Small or scoped change with no behavioral ambiguity     | worker, reviewer, worker                |
-| `/execute-plan <plan>`  | Run a plan that already exists, no scouting or planning | parallel worker(s), reviewer, worker    |
+| Command                  | When to use                                             | Chain steps                                |
+| ------------------------ | ------------------------------------------------------- | ------------------------------------------ |
+| `/feature <task>`        | Normal feature work, default choice                     | Explore, Plan, worker, reviewer, worker    |
+| `/feature-light <task>`  | Small or scoped change with no behavioral ambiguity     | worker, reviewer, worker                   |
+| `/execute-plan <plan>`   | Run a plan that already exists, no scouting or planning | parallel worker(s), reviewer, worker       |
+| `/orchestrate <threads>` | Two or more independent features in one conversation    | parallel orchestrators, each self-managing |
 
 `/execute-plan` takes a plan path, inline plan text, or a reference to a plan written earlier in the session. It partitions the plan into disjoint file packages, implements them as a `parallel` worker stage (each worker owns a non-overlapping set of files, so no worktree isolation is needed and all edits land in one tree), then runs a review and fix-up pass against the combined diff. If the plan cannot be cleanly partitioned, it falls back to a single worker.
+
+`/orchestrate` is for when one conversation holds several independent pieces of work. It splits the request into threads and hands each to its own `general-purpose` orchestrator subagent running in an isolated git worktree. Each orchestrator owns its feature end to end and freely spawns its own scout, implement, and review subagents (this relies on [nested subagents](#nested-subagents)). Threads run concurrently and never collide, since each worktree commits to its own branch; you merge the branches afterward. For a single feature, use `/feature` instead.
 
 Both templates open with a required clarifying-questions step so the chain runs against a well-bounded requirement. Each step writes its output to `{chain_dir}` and downstream steps read those files via `reads:` (full content, bypasses compaction).
 
