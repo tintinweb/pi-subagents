@@ -8,15 +8,24 @@
 
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 export interface WorktreeInfo {
-  /** Absolute path to the worktree directory. */
+  /** Absolute path to the worktree directory (the copied repo's root). */
   path: string;
   /** Branch name created for this worktree (if changes exist). */
   branch: string;
+  /** Commit SHA that the worktree was created from. */
+  baseSha: string;
+  /**
+   * Where the agent should work inside the worktree: the equivalent of the
+   * cwd the worktree was created from. Equals `path` when that cwd was the
+   * repo root; points at the copied subdirectory when it was deeper (e.g. a
+   * monorepo package), so the requested scoping survives isolation.
+   */
+  workPath: string;
 }
 
 export interface WorktreeCleanupResult {
@@ -34,9 +43,21 @@ export interface WorktreeCleanupResult {
  */
 export function createWorktree(cwd: string, agentId: string): WorktreeInfo | undefined {
   // Verify we're in a git repo with at least one commit (HEAD must exist)
+  let baseSha: string;
+  let subdir: string;
   try {
     execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd, stdio: "pipe", timeout: 5000 });
-    execFileSync("git", ["rev-parse", "HEAD"], { cwd, stdio: "pipe", timeout: 5000 });
+    baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd, stdio: "pipe", timeout: 5000 })
+      .toString()
+      .trim();
+    // Where cwd sits inside the repo ("" at the root): the agent must work at
+    // the same subdirectory inside the copy, or a monorepo-package cwd would
+    // silently widen to the whole repo. realpath both sides — git emits
+    // resolved paths while cwd may arrive through a symlink (macOS /tmp).
+    const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, stdio: "pipe", timeout: 5000 })
+      .toString()
+      .trim();
+    subdir = relative(realpathSync(topLevel), realpathSync(cwd));
   } catch {
     return undefined;
   }
@@ -52,7 +73,7 @@ export function createWorktree(cwd: string, agentId: string): WorktreeInfo | und
       stdio: "pipe",
       timeout: 30000,
     });
-    return { path: worktreePath, branch };
+    return { path: worktreePath, branch, baseSha, workPath: subdir ? join(worktreePath, subdir) : worktreePath };
   } catch {
     // If worktree creation fails, return undefined (agent runs in normal cwd)
     return undefined;
@@ -81,22 +102,30 @@ export function cleanupWorktree(
       timeout: 10000,
     }).toString().trim();
 
-    if (!status) {
-      // No changes — remove worktree
-      removeWorktree(cwd, worktree.path);
-      return { hasChanges: false };
-    }
+    if (status) {
+      // Changes exist — stage, commit, and create a branch
+      execFileSync("git", ["add", "-A"], { cwd: worktree.path, stdio: "pipe", timeout: 10000 });
+      // Truncate description for commit message (no shell sanitization needed — execFileSync uses argv)
+      const safeDesc = agentDescription.slice(0, 200);
+      const commitMsg = `pi-agent: ${safeDesc}`;
+      execFileSync("git", ["commit", "--no-verify", "-m", commitMsg], {
+        cwd: worktree.path,
+        stdio: "pipe",
+        timeout: 10000,
+      });
+    } else {
+      const currentSha = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: worktree.path,
+        stdio: "pipe",
+        timeout: 5000,
+      }).toString().trim();
 
-    // Changes exist — stage, commit, and create a branch
-    execFileSync("git", ["add", "-A"], { cwd: worktree.path, stdio: "pipe", timeout: 10000 });
-    // Truncate description for commit message (no shell sanitization needed — execFileSync uses argv)
-    const safeDesc = agentDescription.slice(0, 200);
-    const commitMsg = `pi-agent: ${safeDesc}`;
-    execFileSync("git", ["commit", "-m", commitMsg], {
-      cwd: worktree.path,
-      stdio: "pipe",
-      timeout: 10000,
-    });
+      if (currentSha === worktree.baseSha) {
+        // No changes — remove worktree
+        removeWorktree(cwd, worktree.path);
+        return { hasChanges: false };
+      }
+    }
 
     // Create a branch pointing to the worktree's HEAD.
     // If the branch already exists, append a suffix to avoid overwriting previous work.

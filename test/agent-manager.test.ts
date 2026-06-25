@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
@@ -93,18 +94,88 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
     expect(completedRecord!.resultConsumed).toBeFalsy();
   });
 
-  it("onComplete is not called for foreground agents", async () => {
-    let onCompleteCalled = false;
-    manager = new AgentManager(() => {
-      onCompleteCalled = true;
+  it("onComplete IS called for foreground agents (lifecycle symmetry)", async () => {
+    let completedRecord: AgentRecord | undefined;
+    manager = new AgentManager((r) => {
+      completedRecord = r;
     });
     resolvedRun();
 
-    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
       description: "test",
     });
 
-    expect(onCompleteCalled).toBe(false);
+    expect(completedRecord).toBeDefined();
+    expect(completedRecord!.status).toBe("completed");
+    // resultConsumed is set by spawnAndWait so onComplete skips notifications
+    expect(completedRecord!.resultConsumed).toBe(true);
+    expect(record).toBe(completedRecord);
+  });
+});
+
+describe("AgentManager — spawnAndWait onSpawned + foreground output file wiring (#105)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("fields set on the record in onSpawned are visible when onSessionCreated fires", async () => {
+    // The load-bearing ordering guarantee: onSpawned fires synchronously inside
+    // spawn(), before runAgent's async onSessionCreated fires. index.ts relies on
+    // this to set record.outputFile so streamToOutputFile can pick it up.
+    manager = new AgentManager();
+    let capturedId: string | undefined;
+    let outputFileSeenAtSessionCreated: string | undefined;
+
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const session = mockSession();
+      // Yield one microtask to mirror real behavior: in production, onSessionCreated
+      // fires async (after network/session setup). onSpawned fires synchronously
+      // inside spawn() before runAgent's promise even starts. This await lets the
+      // remainder of startAgent (record.promise = …, onSpawned?.()) finish first.
+      await Promise.resolve();
+      opts.onSessionCreated?.(session);
+      outputFileSeenAtSessionCreated = capturedId
+        ? manager.getRecord(capturedId)?.outputFile
+        : undefined;
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+
+    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, (fgId) => {
+      capturedId = fgId;
+      manager.getRecord(fgId)!.outputFile = "/fake/agent.jsonl";
+    });
+
+    expect(outputFileSeenAtSessionCreated).toBe("/fake/agent.jsonl");
+  });
+
+  it("onSpawned id matches the id returned by spawnAndWait", async () => {
+    manager = new AgentManager();
+    let spawnedId: string | undefined;
+    resolvedRun();
+
+    const { id } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    }, (fgId) => { spawnedId = fgId; });
+
+    expect(spawnedId).toBe(id);
+  });
+
+  it("onComplete fires on the error path with resultConsumed=true", async () => {
+    // The .then path is covered by the lifecycle-symmetry test above; this guards
+    // the .catch path which lacks try/catch around onComplete (a known asymmetry).
+    let completedRecord: AgentRecord | undefined;
+    manager = new AgentManager((r) => { completedRecord = r; });
+    vi.mocked(runAgent).mockRejectedValue(new Error("agent failed"));
+
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    });
+
+    expect(completedRecord).toBeDefined();
+    expect(completedRecord!.status).toBe("error");
+    expect(completedRecord!.resultConsumed).toBe(true);
+    expect(record).toBe(completedRecord);
   });
 });
 
@@ -235,6 +306,57 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
 
     manager.clearCompleted();
     expect(manager.getRecord(id)).toBeUndefined();
+  });
+
+  it("clearCompleted(true) preserves completed records with resultConsumed=false", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+    expect(manager.getRecord(id)!.status).toBe("completed");
+    expect(manager.getRecord(id)!.resultConsumed).toBeFalsy();
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(id)).toBeDefined();
+  });
+
+  it("clearCompleted(true) removes completed records with resultConsumed=true", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    record.resultConsumed = true;
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(id)).toBeUndefined();
+  });
+
+  it("clearCompleted(true) still removes running=false queued=false records when resultConsumed=false for error status", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockRejectedValue(new Error("boom"));
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+    expect(manager.getRecord(id)!.status).toBe("error");
+    expect(manager.getRecord(id)!.resultConsumed).toBeFalsy();
+
+    // Error records with unread results are also preserved — the LLM should
+    // be able to read the error message via get_subagent_result before the
+    // record is evicted.
+    manager.clearCompleted(true);
+    expect(manager.getRecord(id)).toBeDefined();
   });
 });
 
@@ -383,6 +505,148 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
   });
 });
 
+describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("passes cwd to runAgent as the working dir, parent cwd as configCwd", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "/", // absolute and always exists
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(runAgent).toHaveBeenCalledWith(
+      mockCtx, "general-purpose", "test",
+      expect.objectContaining({ cwd: "/", configCwd: "/tmp" }),
+    );
+  });
+
+  it("without cwd, configCwd stays unset — existing behavior untouched", async () => {
+    // mockClear + lastCall: toHaveBeenCalledWith would scan the file's whole
+    // accumulated call history, where earlier no-cwd spawns already match.
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+    });
+    await manager.getRecord(id)!.promise;
+
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.cwd).toBeUndefined();
+    expect(opts.configCwd).toBeUndefined();
+  });
+
+  it("cwd: null (RPC 'unset') behaves exactly like omitting cwd", async () => {
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: null as any,
+    });
+    await manager.getRecord(id)!.promise;
+
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.cwd).toBeUndefined();
+    expect(opts.configCwd).toBeUndefined();
+  });
+
+  it("cwd + isolation: worktree — worktree created FROM cwd, session runs at the copy's workPath, cleanup targets cwd's repo", async () => {
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/packages/api",
+    });
+    resolvedRun();
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "/",
+      isolation: "worktree",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(createWorktree).toHaveBeenCalledWith("/", id);
+    // Worktree wins for the working dir — at workPath, so subdirectory scoping
+    // survives isolation. Config still anchored to the parent.
+    expect(runAgent).toHaveBeenCalledWith(
+      mockCtx, "general-purpose", "test",
+      expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp" }),
+    );
+    expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
+  });
+
+  it("plain worktree (no cwd) keeps the historical root working dir even when workPath differs", async () => {
+    // Parent session sitting in a repo subdirectory: workPath would point at
+    // the copied subdir. Without SpawnOptions.cwd the agent must stay at the
+    // copy's root — moving it would also move .pi config discovery.
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir",
+    });
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+    await manager.getRecord(id)!.promise;
+
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.cwd).toBe("/wt/copy");
+    expect(opts.configCwd).toBeUndefined();
+  });
+
+  it("relative cwd throws immediately; no orphan record", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "relative/path",
+    })).toThrow(/absolute path/);
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("nonexistent cwd throws immediately; no orphan record", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: "/nonexistent-pi-subagents-test-dir",
+    })).toThrow(/does not exist/);
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("cwd pointing at a regular file throws a curated 'not a directory' error", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: fileURLToPath(import.meta.url), // this test file: absolute, exists, not a directory
+    })).toThrow(/not a directory/);
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("non-string cwd (RPC junk) throws the curated error, not a TypeError from path internals", () => {
+    vi.mocked(runAgent).mockClear();
+    manager = new AgentManager();
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      cwd: 123 as any,
+    })).toThrow(/must be an absolute path/);
+    expect(manager.listAgents()).toEqual([]);
+  });
+});
+
 describe("AgentManager — abort() state machine", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
@@ -446,6 +710,31 @@ describe("AgentManager — abort() state machine", () => {
 
     expect(manager.abort(id)).toBe(false);
     expect(manager.getRecord(id)?.status).toBe("completed");
+  });
+
+  it("a user abort survives the agent settling — stays 'stopped', never 'completed'", async () => {
+    // Guards the `if (record.status !== "stopped")` check in the completion
+    // handler: after a user abort, runAgent's promise still settles (here with
+    // aborted:false, as a non-cooperative mock would), and must NOT flip the
+    // user-stopped status back to "completed" — otherwise the parent agent
+    // would read the partial output as a finished result.
+    manager = new AgentManager();
+    let resolveRun!: (v: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((res) => { resolveRun = res as (v: unknown) => void; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("running");
+
+    expect(manager.abort(id)).toBe(true);
+    expect(record.status).toBe("stopped");
+
+    // The agent loop ends and the promise settles "normally".
+    resolveRun({ responseText: "partial output", session: mockSession(), aborted: false, steered: false });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");        // not overwritten to "completed"
+    expect(record.result).toBe("partial output"); // partial result still captured
   });
 });
 

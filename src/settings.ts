@@ -54,7 +54,33 @@ export interface SubagentsSettings {
   resultPreviewExpanded?: boolean;
   /** Max chars for failure preview before truncation. Defaults to 65536 (64 KiB). */
   failurePreviewMaxChars?: number;
+  /**
+   * When true, the three built-in default agents (general-purpose, Explore, Plan)
+   * are not registered at startup. User-defined agents from .pi/agents/*.md are
+   * completely unaffected — only the hardcoded DEFAULT_AGENTS are suppressed.
+   * Defaults to false.
+   */
+  disableDefaultAgents?: boolean;
+  /**
+   * Which Agent tool description the LLM sees. "full" (default) is the rich
+   * Claude Code-style prompt; "compact" is a ~75% smaller version (one-line
+   * agent type list, terse usage notes) for small/local models where tool-spec
+   * tokens are expensive; "custom" reads `.pi/agent-tool-description.md`
+   * (project, falling back to `<agentDir>/agent-tool-description.md`) with
+   * `{{placeholder}}` substitution — a missing/empty file falls back to "full".
+   * The mode is read once at tool registration — changing it applies on the
+   * next pi session.
+   */
+  toolDescriptionMode?: ToolDescriptionMode;
+  /**
+   * Whether the Claude Code-style FleetView (the navigable main+subagents list
+   * rendered below the editor) is shown. Defaults to `true`. Pure-UI: when off,
+   * the list never registers and the global key handler never captures input.
+   */
+  fleetView?: boolean;
 }
+
+export type ToolDescriptionMode = "full" | "compact" | "custom";
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
@@ -67,6 +93,9 @@ export interface SettingsAppliers {
   setResultPreviewMode: (mode: ResultPreviewMode) => void;
   setResultPreviewExpanded: (expanded: boolean) => void;
   setFailurePreviewMaxChars: (chars: number) => void;
+  setDisableDefaultAgents: (b: boolean) => void;
+  setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
+  setFleetView: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -74,6 +103,8 @@ export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
 const VALID_RESULT_PREVIEW_MODES: ReadonlySet<string> = new Set<ResultPreviewMode>(["plain", "markdown"]);
+const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
+
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
@@ -130,6 +161,15 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.failurePreviewMaxChars as number) <= RESULT_PREVIEW_MAX_CHARS_CEILING
   ) {
     out.failurePreviewMaxChars = r.failurePreviewMaxChars as number;
+  }
+  if (typeof r.disableDefaultAgents === "boolean") {
+    out.disableDefaultAgents = r.disableDefaultAgents;
+  }
+  if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
+    out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
+  }
+  if (typeof r.fleetView === "boolean") {
+    out.fleetView = r.fleetView;
   }
   return out;
 }
@@ -190,6 +230,9 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.resultPreviewMode) appliers.setResultPreviewMode(s.resultPreviewMode);
   if (typeof s.resultPreviewExpanded === "boolean") appliers.setResultPreviewExpanded(s.resultPreviewExpanded);
   if (typeof s.failurePreviewMaxChars === "number") appliers.setFailurePreviewMaxChars(s.failurePreviewMaxChars);
+  if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
+  if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
+  if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
 }
 
 /**

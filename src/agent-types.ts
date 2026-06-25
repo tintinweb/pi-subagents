@@ -5,14 +5,33 @@
  * User agents override defaults with the same name. Disabled agents are kept but excluded from spawning.
  */
 
+import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import type { AgentConfig } from "./types.js";
 
-/** All known built-in tool names. */
-export const BUILTIN_TOOL_NAMES: string[] = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+/**
+ * All known built-in tool names, derived from pi's own tool factories rather
+ * than hardcoded so the set tracks pi-mono if it adds/renames a built-in.
+ * `createCodingTools` → read/bash/edit/write; `createReadOnlyTools` →
+ * read/grep/find/ls; their de-duplicated union is the 7 built-ins
+ * (read, bash, edit, write, grep, find, ls). The `cwd` only binds tool
+ * operations we never invoke here — we read each tool's `.name` and discard it.
+ */
+export const BUILTIN_TOOL_NAMES: string[] = [
+  ...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map((t) => t.name)),
+];
 
 /** Unified runtime registry of all agents (defaults + user-defined). */
 const agents = new Map<string, AgentConfig>();
+
+/** When true, DEFAULT_AGENTS are skipped during registration. */
+let disableDefaults = false;
+
+/** Check whether default agents are disabled. */
+export function isDefaultsDisabled(): boolean { return disableDefaults; }
+
+/** Set whether default agents are disabled. */
+export function setDefaultsDisabled(b: boolean): void { disableDefaults = b; }
 
 /**
  * Register agents into the unified registry.
@@ -22,9 +41,11 @@ const agents = new Map<string, AgentConfig>();
 export function registerAgents(userAgents: Map<string, AgentConfig>): void {
   agents.clear();
 
-  // Start with defaults
-  for (const [name, config] of DEFAULT_AGENTS) {
-    agents.set(name, config);
+  // Start with defaults (unless disabled via settings)
+  if (!disableDefaults) {
+    for (const [name, config] of DEFAULT_AGENTS) {
+      agents.set(name, config);
+    }
   }
 
   // Overlay user agents (overrides defaults with same name)
@@ -123,6 +144,7 @@ export function getConfig(type: string): {
   description: string;
   builtinToolNames: string[];
   extensions: true | string[] | false;
+  excludeExtensions?: string[];
   skills: true | string[] | false;
   promptMode: "replace" | "append";
 } {
@@ -134,6 +156,7 @@ export function getConfig(type: string): {
       description: config.description,
       builtinToolNames: config.builtinToolNames ?? BUILTIN_TOOL_NAMES,
       extensions: config.extensions,
+      excludeExtensions: config.excludeExtensions,
       skills: config.skills,
       promptMode: config.promptMode,
     };
@@ -147,6 +170,7 @@ export function getConfig(type: string): {
       description: gp.description,
       builtinToolNames: gp.builtinToolNames ?? BUILTIN_TOOL_NAMES,
       extensions: gp.extensions,
+      excludeExtensions: gp.excludeExtensions,
       skills: gp.skills,
       promptMode: gp.promptMode,
     };

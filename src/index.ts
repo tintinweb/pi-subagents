@@ -16,8 +16,8 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, Markdown, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, registerAgents, resolveType } from "./agent-types.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
+import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
@@ -27,7 +27,8 @@ import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, RESULT_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged } from "./settings.js";
+import { applyAndEmitLoaded, RESULT_PREVIEW_MAX_CHARS_CEILING, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { getStatusNote } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type ResultPreviewMode, type SubagentType } from "./types.js";
 import {
   type AgentActivity,
@@ -44,6 +45,7 @@ import {
   SPINNER,
   type UICtx,
 } from "./ui/agent-widget.js";
+import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
@@ -118,16 +120,6 @@ function getStatusLabel(status: string, error?: string): string {
   }
 }
 
-/** Parenthetical status note for completed agent result text. */
-function getStatusNote(status: string): string {
-  switch (status) {
-    case "aborted": return " (aborted — max turns exceeded, output may be incomplete)";
-    case "steered": return " (wrapped up — reached turn limit)";
-    case "stopped": return " (stopped by user)";
-    default: return "";
-  }
-}
-
 /** Escape XML special characters to prevent injection in structured notifications. */
 function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -177,7 +169,7 @@ export function formatTaskNotification(record: AgentRecord, settings: SubagentsS
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}</summary>`,
+    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
@@ -378,6 +370,7 @@ export default function (pi: ExtensionAPI) {
   function sendIndividualNudge(record: AgentRecord) {
     agentActivity.delete(record.id);
     widget.markFinished(record.id);
+    fleet.onAgentFinished(record.id);
     scheduleNudge(record.id, () => emitIndividualNudge(record));
     widget.update();
   }
@@ -385,7 +378,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
-      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); }
+      for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
 
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
       scheduleNudge(groupKey, () => {
@@ -463,6 +456,7 @@ export default function (pi: ExtensionAPI) {
     if (record.resultConsumed) {
       agentActivity.delete(record.id);
       widget.markFinished(record.id);
+      fleet.onAgentFinished(record.id);
       widget.update();
       return;
     }
@@ -538,12 +532,12 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    manager.clearCompleted();
+    manager.clearCompleted(true);
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
   pi.on("session_before_switch", () => {
-    manager.clearCompleted();
+    manager.clearCompleted(true);
     scheduler.stop();
   });
 
@@ -569,11 +563,18 @@ export default function (pi: ExtensionAPI) {
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    fleet.dispose();
     manager.dispose();
   });
 
   // Live widget: show running agents above editor
   const widget = new AgentWidget(manager, agentActivity);
+
+  // Claude Code-style FleetView: navigable list of main + subagents below the editor.
+  const fleet = new FleetList(manager, agentActivity);
+  let fleetViewEnabled = true;
+  function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
+  function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
 
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
@@ -608,6 +609,26 @@ export default function (pi: ExtensionAPI) {
   function setResultPreviewMode(mode: ResultPreviewMode): void { resultPreviewMode = mode; }
   function setResultPreviewExpanded(expanded: boolean): void { resultPreviewExpanded = expanded; }
   function setFailurePreviewMaxChars(chars: number): void { failurePreviewMaxChars = chars; }
+
+  // ---- Disable default agents configuration ----
+  // When enabled, the three hardcoded default agents (general-purpose, Explore,
+  // Plan) are not registered. User-defined agents from .pi/agents/*.md are
+  // completely unaffected — only DEFAULT_AGENTS are suppressed.
+  // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
+  // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
+  // needs it; this wrapper just re-registers after flipping it.
+  function setDisableDefaultAgents(b: boolean): void {
+    setDefaultsDisabled(b);
+    reloadCustomAgents(); // re-register with new setting
+  }
+
+  // ---- Agent tool description mode ----
+  // "full" (default) keeps the rich Claude Code-style description; "compact"
+  // swaps in a ~75% smaller one for small/local models (#91). Read once at
+  // tool registration — flipping it applies on the next pi session.
+  let toolDescriptionMode: ToolDescriptionMode = "full";
+  function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
+  function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
 
   // ---- Batch tracking for smart join mode ----
   // Collects background agent IDs spawned in the current turn for smart grouping.
@@ -655,6 +676,7 @@ export default function (pi: ExtensionAPI) {
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {
     widget.setUICtx(ctx.ui as UICtx);
+    fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
     widget.onTurnStart();
   });
 
@@ -668,17 +690,30 @@ export default function (pi: ExtensionAPI) {
     return isFullSet ? "*" : tools.join(", ");
   };
 
-  /** Build the full type list text dynamically from the unified registry. */
+  /** Build the full type list text dynamically from available agents only. */
   const buildTypeListText = () => {
-    const allNames = [...getDefaultAgentNames(), ...getUserAgentNames()];
+    const available = getAvailableTypes();
 
-    return allNames.map((name) => {
+    return available.map((name) => {
       const cfg = getAgentConfig(name);
       const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
       const toolsSuffix = ` (Tools: ${formatToolsSuffix(cfg)})`;
       return `- ${name}: ${cfg?.description ?? name}${modelSuffix}${toolsSuffix}`;
     }).join("\n");
   };
+
+  /** First sentence of an agent description — for the compact type list. */
+  const firstSentence = (text: string): string => {
+    const match = text.match(/^.*?[.!?](?=\s|$)/s);
+    return (match ? match[0] : text).replace(/\s+/g, " ").trim();
+  };
+
+  /** Compact type list: one line per agent, first sentence only. */
+  const buildCompactTypeListText = () =>
+    getAvailableTypes().map((name) => {
+      const cfg = getAgentConfig(name);
+      return `- ${name}: ${firstSentence(cfg?.description ?? name)} (Tools: ${formatToolsSuffix(cfg)})`;
+    }).join("\n");
 
   /** Derive a short model label from a model string. */
   function getModelLabelFromConfig(model: string): string {
@@ -687,8 +722,6 @@ export default function (pi: ExtensionAPI) {
     // Strip trailing date suffix (e.g. "claude-haiku-4-5-20251001" → "claude-haiku-4-5")
     return name.replace(/-\d{8}$/, "");
   }
-
-  const typeListText = buildTypeListText();
 
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
@@ -704,6 +737,9 @@ export default function (pi: ExtensionAPI) {
       setResultPreviewMode,
       setResultPreviewExpanded,
       setFailurePreviewMaxChars,
+      setDisableDefaultAgents: setDisableDefaultAgents,
+      setToolDescriptionMode: setToolDescriptionMode,
+      setFleetView: setFleetViewEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -732,13 +768,25 @@ export default function (pi: ExtensionAPI) {
     ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
     : "";
 
-  pi.registerTool(defineTool({
-    name: "Agent",
-    label: "Agent",
-    description: `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
+  // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
+  // the same load-bearing facts as the full version at ~75% fewer tokens, for
+  // small/local models. Per-option details live in the param descriptions.
+  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
+${buildCompactTypeListText()}
+
+Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
+
+Notes:
+- description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
+- Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
+- The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
+- resume continues a previous agent by ID; steer_subagent messages a running one.
+- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
+
+  const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
 Available agent types and the tools they have access to:
-${typeListText}
+${buildTypeListText()}
 
 Custom agents can be defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
 
@@ -776,7 +824,59 @@ Provide clear, detailed prompts so the agent can work autonomously. Brief it lik
 
 Terse command-style prompts produce shallow, generic work.
 
-**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.`,
+**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.`;
+
+  // `toolDescriptionMode: "custom"` — user-authored description with live
+  // dynamic parts. Project file wins over global; missing/empty falls back to
+  // "full" (a stale fallback beats a blank tool description). Only the prose
+  // is customizable — the parameter schema stays code-owned.
+  const renderToolDescriptionTemplate = (template: string): string => {
+    const vars: Record<string, () => string> = {
+      typeList: buildTypeListText,
+      compactTypeList: buildCompactTypeListText,
+      agentDir: getAgentDir,
+      scheduleGuideline: () => scheduleGuideline,
+    };
+    // Replacement callback (not a string) — agent descriptions may contain `$&` etc.
+    return template.replace(/\{\{(\w+)\}\}/g, (raw, name: string) => {
+      if (vars[name]) return vars[name]();
+      console.warn(`[pi-subagents] agent-tool-description.md: unknown placeholder ${raw} left as-is`);
+      return raw;
+    });
+  };
+
+  const loadCustomToolDescription = (): string | undefined => {
+    for (const path of [
+      join(process.cwd(), ".pi", "agent-tool-description.md"),
+      join(getAgentDir(), "agent-tool-description.md"),
+    ]) {
+      try {
+        if (!existsSync(path)) continue;
+        const text = readFileSync(path, "utf-8").trim();
+        if (text) return renderToolDescriptionTemplate(text);
+        console.warn(`[pi-subagents] ${path} is empty — ignoring`);
+      } catch (err) {
+        console.warn(`[pi-subagents] failed to read ${path}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    return undefined;
+  };
+
+  const agentToolDescription = (() => {
+    const mode = getToolDescriptionMode();
+    if (mode === "compact") return compactAgentToolDescription;
+    if (mode === "custom") {
+      const custom = loadCustomToolDescription();
+      if (custom) return custom;
+      console.warn('[pi-subagents] toolDescriptionMode is "custom" but no agent-tool-description.md found — using "full"');
+    }
+    return fullAgentToolDescription;
+  })();
+
+  pi.registerTool(defineTool({
+    name: SUBAGENT_TOOL_NAMES.AGENT,
+    label: "Agent",
+    description: agentToolDescription,
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
@@ -1145,6 +1245,8 @@ Terse command-style prompts produce shallow, generic work.
         agentActivity.set(id, bgState);
         widget.ensureTimer();
         widget.update();
+        fleet.ensureTimer();
+        fleet.update();
 
         // Emit created event
         pi.events.emit("subagents:created", {
@@ -1194,7 +1296,9 @@ Terse command-style prompts produce shallow, generic work.
 
       const { state: fgState, callbacks: fgCallbacks } = createActivityTracker(effectiveMaxTurns, streamUpdate);
 
-      // Wire session creation to register in widget
+      // Wire session creation: register in widget + stream to output file.
+      // The output file path is set synchronously after spawn (below),
+      // before onSessionCreated fires — same pattern as background agents.
       const origOnSession = fgCallbacks.onSessionCreated;
       fgCallbacks.onSessionCreated = (session: any) => {
         origOnSession(session);
@@ -1203,7 +1307,16 @@ Terse command-style prompts produce shallow, generic work.
             fgId = a.id;
             agentActivity.set(a.id, fgState);
             widget.ensureTimer();
+            fleet.ensureTimer();
+            fleet.update();
             break;
+          }
+        }
+        // Stream conversation to output file (foreground agent logging)
+        if (fgId) {
+          const rec = manager.getRecord(fgId);
+          if (rec?.outputFile) {
+            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd);
           }
         }
       };
@@ -1218,7 +1331,7 @@ Terse command-style prompts produce shallow, generic work.
 
       let record: AgentRecord;
       try {
-        record = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
+        const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           model,
           maxTurns: effectiveMaxTurns,
@@ -1229,7 +1342,16 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           signal,
           ...fgCallbacks,
+        }, (fgAgentId) => {
+          // onSpawned: called synchronously after spawn, before onSessionCreated fires.
+          // Set up the output file so streamToOutputFile can pick it up.
+          const fgRec = manager.getRecord(fgAgentId);
+          if (fgRec) {
+            fgRec.outputFile = createOutputFilePath(ctx.cwd, fgAgentId, ctx.sessionManager.getSessionId());
+            writeInitialEntry(fgRec.outputFile, fgAgentId, params.prompt, ctx.cwd);
+          }
         });
+        record = fgResult.record;
       } catch (err) {
         clearInterval(spinnerInterval);
         return textResult(err instanceof Error ? err.message : String(err));
@@ -1241,6 +1363,7 @@ Terse command-style prompts produce shallow, generic work.
       if (fgId) {
         agentActivity.delete(fgId);
         widget.markFinished(fgId);
+        fleet.onAgentFinished(fgId);
       }
 
       // Get final token count
@@ -1248,8 +1371,10 @@ Terse command-style prompts produce shallow, generic work.
 
       const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
 
+      // "general-purpose" may itself be unregistered (defaults disabled, no
+      // user override) — getConfig then uses the hardcoded fallback config.
       const fallbackNote = fellBack
-        ? `Note: Unknown agent type "${rawType}" — using general-purpose.\n\n`
+        ? `Note: Unknown agent type "${rawType}" — using ${resolveType("general-purpose") ? "general-purpose" : "the fallback agent config"}.\n\n`
         : "";
 
       if (record.status === "error") {
@@ -1270,7 +1395,7 @@ Terse command-style prompts produce shallow, generic work.
   // ---- get_subagent_result tool ----
 
   pi.registerTool(defineTool({
-    name: "get_subagent_result",
+    name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
       "Check status and retrieve results from a background agent. Use the agent ID returned by Agent with run_in_background.",
@@ -1318,7 +1443,7 @@ Terse command-style prompts produce shallow, generic work.
 
       let output =
         `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status} | ${statsParts.join(" | ")}\n` +
+        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
       if (record.status === "running") {
@@ -1350,7 +1475,7 @@ Terse command-style prompts produce shallow, generic work.
   // ---- steer_subagent tool ----
 
   pi.registerTool(defineTool({
-    name: "steer_subagent",
+    name: SUBAGENT_TOOL_NAMES.STEER,
     label: "Steer Agent",
     description:
       "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
@@ -1572,8 +1697,12 @@ Terse command-style prompts produce shallow, generic work.
     const activity = agentActivity.get(record.id);
 
     await ctx.ui.custom<undefined>(
-      (tui, theme, _keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done);
+      (tui, theme, keybindings, done) => {
+        return new ConversationViewer(tui, session, record, activity, theme, done, () => {
+          if (manager.abort(record.id)) {
+            ctx.ui.notify(`Stopped "${record.description}".`, "info");
+          }
+        }, keybindings);
       },
       {
         overlay: true,
@@ -1675,6 +1804,7 @@ Terse command-style prompts produce shallow, generic work.
     fmFields.push(`prompt_mode: ${cfg.promptMode}`);
     if (cfg.extensions === false) fmFields.push("extensions: false");
     else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
+    if (cfg.excludeExtensions?.length) fmFields.push(`exclude_extensions: ${cfg.excludeExtensions.join(", ")}`);
     if (cfg.skills === false) fmFields.push("skills: false");
     else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
     if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
@@ -1825,7 +1955,7 @@ Guidelines for choosing settings:
 
 Write the file using the write tool. Only write the file, nothing else.`;
 
-    const record = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
+    const { record } = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
       description: `Generate ${name} agent`,
       maxTurns: 5,
     });
@@ -1945,6 +2075,9 @@ ${systemPrompt}
       resultPreviewMode,
       resultPreviewExpanded,
       failurePreviewMaxChars,
+      disableDefaultAgents: isDefaultsDisabled(),
+      toolDescriptionMode: getToolDescriptionMode(),
+      fleetView: isFleetViewEnabled(),
     };
   }
 
@@ -2020,6 +2153,27 @@ ${systemPrompt}
           currentValue: String(failurePreviewMaxChars),
           values: [String(failurePreviewMaxChars)],
         },
+        {
+          id: "disableDefaultAgents",
+          label: "Disable defaults",
+          description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
+          currentValue: isDefaultsDisabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "fleetView",
+          label: "Fleet view",
+          description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
+          currentValue: isFleetViewEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "toolDescriptionMode",
+          label: "Tool description",
+          description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
+          currentValue: getToolDescriptionMode(),
+          values: ["full", "compact", "custom"],
+        },
       ];
     }
 
@@ -2077,6 +2231,17 @@ ${systemPrompt}
           setFailurePreviewMaxChars(n);
           notifyApplied(ctx, `Failure preview max chars set to ${n}`);
         }
+      } else if (id === "disableDefaultAgents") {
+        const enabled = value === "on";
+        setDisableDefaultAgents(enabled);
+        notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
+      } else if (id === "toolDescriptionMode") {
+        setToolDescriptionMode(value as ToolDescriptionMode);
+        notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);
+      } else if (id === "fleetView") {
+        const enabled = value === "on";
+        setFleetViewEnabled(enabled);
+        notifyApplied(ctx, `Fleet view ${enabled ? "enabled" : "disabled"}`);
       }
     }
 

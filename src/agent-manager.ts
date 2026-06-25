@@ -7,6 +7,8 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
@@ -21,6 +23,28 @@ export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; toke
 
 /** Default max concurrent background agents. */
 const DEFAULT_MAX_CONCURRENT = 4;
+
+/**
+ * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
+ * (parent cwd). Anything else must be an absolute path to an existing
+ * directory — curated errors instead of TypeErrors from path/fs internals
+ * (RPC callers send arbitrary JSON: null, numbers, file paths).
+ */
+function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | null {
+  if (cwd == null) return;
+  if (typeof cwd !== "string" || !isAbsolute(cwd)) {
+    throw new Error(`SpawnOptions.cwd must be an absolute path: "${String(cwd)}"`);
+  }
+  let isDirectory = false;
+  try {
+    isDirectory = statSync(cwd).isDirectory();
+  } catch {
+    throw new Error(`SpawnOptions.cwd does not exist: "${cwd}"`);
+  }
+  if (!isDirectory) {
+    throw new Error(`SpawnOptions.cwd is not a directory: "${cwd}"`);
+  }
+}
 
 interface SpawnArgs {
   pi: ExtensionAPI;
@@ -46,6 +70,15 @@ interface SpawnOptions {
   bypassQueue?: boolean;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
+  /**
+   * Working directory for the agent (absolute path). Default: parent session
+   * cwd. The agent's tools operate here, but .pi config (extensions, skills,
+   * settings, memory) still loads from the parent session's project — the
+   * target directory's `.pi` extensions never execute. With isolation:
+   * "worktree", the worktree is created FROM this directory and the result
+   * branch lands in that repo.
+   */
+  cwd?: string;
   /** Resolved invocation snapshot captured for UI display. */
   invocation?: AgentInvocation;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
@@ -71,6 +104,9 @@ export class AgentManager {
   private onStart?: OnAgentStart;
   private onCompact?: OnAgentCompact;
   private maxConcurrent: number;
+  /** Base repos worktrees were created from — so dispose() can prune them all,
+   *  not just the parent repo (caller-supplied cwd can target other repos). */
+  private worktreeRepos = new Set<string>();
 
   /** Queue of background agents waiting to start. */
   private queue: { id: string; args: SpawnArgs }[] = [];
@@ -114,6 +150,11 @@ export class AgentManager {
     prompt: string,
     options: SpawnOptions,
   ): string {
+    // Validate before the queue branch — a queued spawn should fail at the
+    // call, not minutes later at drain. Throw (not warn): programmatic callers
+    // can fix and retry; the RPC layer converts throws into error envelopes.
+    assertValidSpawnCwd(options.cwd);
+
     const id = randomUUID().slice(0, 17);
     const abortController = new AbortController();
     const record: AgentRecord = {
@@ -151,12 +192,21 @@ export class AgentManager {
 
   /** Actually start an agent (called immediately or from queue drain). */
   private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
+    // Re-validate a caller-supplied cwd: queued spawns can start minutes after
+    // spawn()'s check, and the directory may be gone by then (TOCTOU). Same
+    // curated errors; drainQueue parks a throw on the record as an error.
+    assertValidSpawnCwd(options.cwd);
+    // Single resolution point for the caller-supplied cwd — the worktree base
+    // repo and both cleanup calls below MUST agree on this value forever.
+    const customCwd = options.cwd ?? undefined; // null (RPC "unset") → undefined
+    const baseCwd = customCwd ?? ctx.cwd;
+
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done
     // BEFORE state mutation so a throw doesn't leave the record half-running.
     let worktreeCwd: string | undefined;
     if (options.isolation === "worktree") {
-      const wt = createWorktree(ctx.cwd, id);
+      const wt = createWorktree(baseCwd, id);
       if (!wt) {
         throw new Error(
           'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
@@ -164,7 +214,14 @@ export class AgentManager {
         );
       }
       record.worktree = wt;
-      worktreeCwd = wt.path;
+      // workPath preserves subdirectory scoping for caller-supplied cwds: a
+      // cwd deep in a monorepo maps to the same subdir inside the copy, not
+      // the copied repo's root. Plain worktree spawns keep the historical
+      // behavior (agent at the copy's root) — moving them to workPath would
+      // also move .pi config discovery when the parent session sits in a repo
+      // subdirectory, silently dropping extensions/skills.
+      worktreeCwd = customCwd !== undefined ? wt.workPath : wt.path;
+      this.worktreeRepos.add(baseCwd);
     }
 
     record.status = "running";
@@ -189,7 +246,13 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
-      cwd: worktreeCwd,
+      // Worktree wins for the working dir (the agent must run in the copy —
+      // which, with a custom cwd, was created from that target). Config stays
+      // with the parent project when a caller-supplied cwd is in play; it must
+      // stay undefined otherwise so plain worktree runs keep resolving config
+      // (incl. relative extension paths and memory) inside the worktree copy.
+      cwd: worktreeCwd ?? customCwd,
+      configCwd: customCwd !== undefined ? ctx.cwd : undefined,
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
@@ -237,15 +300,23 @@ export class AgentManager {
 
         // Clean up worktree if used
         if (record.worktree) {
-          const wtResult = cleanupWorktree(ctx.cwd, record.worktree, options.description);
+          const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
           record.worktreeResult = wtResult;
           if (wtResult.hasChanges && wtResult.branch) {
+            // With a caller-supplied cwd the branch lives in THAT repo, not the
+            // parent session's — say so, or the orchestrator merges in the wrong repo.
+            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
             record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`. Merge with: \`git merge ${wtResult.branch}\``;
+              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
           }
         }
 
-        if (options.isBackground) {
+        // Fire onComplete for foreground agents too — lifecycle symmetry.
+        // Mark resultConsumed so the callback skips notifications (result returned inline).
+        if (!options.isBackground) {
+          record.resultConsumed = true;
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        } else {
           this.runningBackground--;
           try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
           this.drainQueue();
@@ -271,12 +342,17 @@ export class AgentManager {
         // Best-effort worktree cleanup on error
         if (record.worktree) {
           try {
-            const wtResult = cleanupWorktree(ctx.cwd, record.worktree, options.description);
+            const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
             record.worktreeResult = wtResult;
           } catch { /* ignore cleanup errors */ }
         }
 
-        if (options.isBackground) {
+        // Fire onComplete for foreground agents too — lifecycle symmetry.
+        // Mark resultConsumed so the callback skips notifications (result returned inline).
+        if (!options.isBackground) {
+          record.resultConsumed = true;
+          this.onComplete?.(record);
+        } else {
           this.runningBackground--;
           this.onComplete?.(record);
           this.drainQueue();
@@ -285,6 +361,11 @@ export class AgentManager {
       });
 
     record.promise = promise;
+
+    // Notify caller that spawn is complete (record is in the map, promise is set).
+    // Called synchronously — onSessionCreated fires asynchronously inside runAgent.
+    // Used by spawnAndWait to let the caller set up output files before streaming starts.
+    this.onSpawned?.(id);
   }
 
   /** Start queued agents up to the concurrency limit. */
@@ -307,8 +388,19 @@ export class AgentManager {
   }
 
   /**
+   * Called synchronously right after spawn, before onSessionCreated fires.
+   * Lets the caller set up the output file path on the record.
+   * The record is guaranteed to be in this.agents at this point.
+   */
+  private onSpawned?: (id: string) => void;
+
+  /**
    * Spawn an agent and wait for completion (foreground use).
    * Foreground agents bypass the concurrency queue.
+   * Returns { id, record } so callers can access the agent ID.
+   *
+   * @param onSpawned - Called synchronously after spawn(), before onSessionCreated fires.
+   *   Use this to set record.outputFile so streamToOutputFile can pick it up.
    */
   async spawnAndWait(
     pi: ExtensionAPI,
@@ -316,11 +408,19 @@ export class AgentManager {
     type: SubagentType,
     prompt: string,
     options: Omit<SpawnOptions, "isBackground">,
-  ): Promise<AgentRecord> {
-    const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
-    const record = this.agents.get(id)!;
-    await record.promise;
-    return record;
+    onSpawned?: (id: string) => void,
+  ): Promise<{ id: string; record: AgentRecord }> {
+    // Temporarily register the onSpawned hook so startAgent can call it.
+    const prevOnSpawned = this.onSpawned;
+    this.onSpawned = onSpawned;
+    try {
+      const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
+      const record = this.agents.get(id)!;
+      await record.promise;
+      return { id, record };
+    } finally {
+      this.onSpawned = prevOnSpawned;
+    }
   }
 
   /**
@@ -414,10 +514,13 @@ export class AgentManager {
   /**
    * Remove all completed/stopped/errored records immediately.
    * Called on session start/switch so tasks from a prior session don't persist.
+   * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
+   * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
    */
-  clearCompleted(): void {
+  clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
   }
@@ -479,5 +582,10 @@ export class AgentManager {
     this.agents.clear();
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
+    // Also prune repos that caller-supplied cwds created worktrees in — a clean
+    // exit with in-flight agents would otherwise leave stale registrations there.
+    for (const repo of this.worktreeRepos) {
+      try { pruneWorktrees(repo); } catch { /* ignore */ }
+    }
   }
 }

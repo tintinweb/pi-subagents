@@ -39,6 +39,8 @@ tools: read, grep, find
 model: anthropic/claude-opus-4-6
 thinking: high
 max_turns: 30
+persist_session: true
+session_dir: .seams/pi-sessions/seam-plan-reviewer
 prompt_mode: replace
 inherit_context: true
 run_in_background: true
@@ -57,6 +59,8 @@ You are a security auditor.`);
     expect(agent.model).toBe("anthropic/claude-opus-4-6");
     expect(agent.thinking).toBe("high");
     expect(agent.maxTurns).toBe(30);
+    expect(agent.persistSession).toBe(true);
+    expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     expect(agent.runInBackground).toBe(true);
@@ -81,6 +85,8 @@ Just a prompt.`);
     expect(agent.model).toBeUndefined();
     expect(agent.thinking).toBeUndefined();
     expect(agent.maxTurns).toBeUndefined();
+    expect(agent.persistSession).toBeUndefined();
+    expect(agent.sessionDir).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();
@@ -137,6 +143,49 @@ Partial access.`);
     const agent = result.get("partial")!;
     expect(agent.extensions).toEqual(["web-search", "mcp-server"]);
     expect(agent.skills).toEqual(["planning", "review"]);
+  });
+
+  it("parses exclude_extensions CSV", () => {
+    writeAgent("no-notify", `---
+extensions: true
+exclude_extensions: pi-notify, telemetry
+---
+
+No notifications.`);
+
+    const result = loadCustomAgents(tmpDir);
+    const agent = result.get("no-notify")!;
+    expect(agent.extensions).toBe(true);
+    expect(agent.excludeExtensions).toEqual(["pi-notify", "telemetry"]);
+  });
+
+  it("parses exclude_extensions YAML list", () => {
+    writeAgent("no-notify-yaml", `---
+exclude_extensions:
+  - pi-notify
+---
+
+No notifications.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("no-notify-yaml")!.excludeExtensions).toEqual(["pi-notify"]);
+  });
+
+  it("exclude_extensions omitted or none → undefined", () => {
+    writeAgent("plain", `---
+description: plain
+---
+
+Plain.`);
+    writeAgent("explicit-none", `---
+exclude_extensions: none
+---
+
+None.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("plain")!.excludeExtensions).toBeUndefined();
+    expect(result.get("explicit-none")!.excludeExtensions).toBeUndefined();
   });
 
   it("passes through unknown tool names (not filtered)", () => {

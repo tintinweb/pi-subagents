@@ -320,4 +320,64 @@ describe("ConversationViewer", () => {
       assertAllLinesFit(callBuildContentLines(viewer, w), w);
     });
   });
+
+  describe("stop key", () => {
+    const W = 80;
+
+    it("two-press x stops a running agent (first arms, second aborts)", () => {
+      const onStop = vi.fn();
+      const tui = mockTui(30, W);
+      const viewer = new ConversationViewer(
+        tui, mockSession(), mockRecord({ status: "running" }), undefined, ansiTheme(), vi.fn(), onStop,
+      );
+
+      // Idle footer offers the stop affordance.
+      expect(viewer.render(W).join("\n")).toContain("x stop");
+
+      // First press arms (no abort yet) and re-renders.
+      viewer.handleInput("x");
+      expect(onStop).not.toHaveBeenCalled();
+      expect(tui.requestRender).toHaveBeenCalled();
+      expect(viewer.render(W).join("\n")).toContain("x again to STOP");
+
+      // Second press aborts.
+      viewer.handleInput("x");
+      expect(onStop).toHaveBeenCalledTimes(1);
+    });
+
+    it("any other key disarms the confirm", () => {
+      const onStop = vi.fn();
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(), mockRecord({ status: "running" }), undefined, ansiTheme(), vi.fn(), onStop,
+      );
+
+      viewer.handleInput("x");                       // arm
+      viewer.handleInput("j");                       // scroll → disarm
+      expect(viewer.render(W).join("\n")).toContain("x stop");
+      expect(viewer.render(W).join("\n")).not.toContain("x again to STOP");
+
+      viewer.handleInput("x");                       // arms again, does NOT stop
+      expect(onStop).not.toHaveBeenCalled();
+    });
+
+    it("does not offer or perform stop once the agent is no longer running", () => {
+      const onStop = vi.fn();
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(), mockRecord({ status: "completed" }), undefined, ansiTheme(), vi.fn(), onStop,
+      );
+
+      expect(viewer.render(W).join("\n")).not.toContain("x stop");
+      viewer.handleInput("x");
+      viewer.handleInput("x");
+      expect(onStop).not.toHaveBeenCalled();
+    });
+
+    it("no stop affordance when no onStop handler is provided (read-only history)", () => {
+      const viewer = new ConversationViewer(
+        mockTui(30, W), mockSession(), mockRecord({ status: "running" }), undefined, ansiTheme(), vi.fn(),
+      );
+      expect(viewer.render(W).join("\n")).not.toContain("x stop");
+      expect(() => { viewer.handleInput("x"); viewer.handleInput("x"); }).not.toThrow();
+    });
+  });
 });

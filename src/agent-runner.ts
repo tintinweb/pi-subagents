@@ -25,8 +25,20 @@ import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 
+/**
+ * Tool names registered by THIS extension. Single source of truth so the
+ * registration sites (index.ts) and the subagent exclusion list below can't
+ * drift apart. These are our own tools, not pi built-ins, so they can't be
+ * derived from pi — but they only need defining once.
+ */
+export const SUBAGENT_TOOL_NAMES = {
+  AGENT: "Agent",
+  GET_RESULT: "get_subagent_result",
+  STEER: "steer_subagent",
+} as const;
+
 /** Names of tools registered by this extension that subagents must NOT inherit. */
-const EXCLUDED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
+const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
 /**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.
@@ -194,6 +206,20 @@ export interface RunOptions {
   thinkingLevel?: ThinkingLevel;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
+  /**
+   * Where .pi config is discovered (project extensions, skills, pi settings,
+   * agent memory). Default: same as the working directory. The manager sets
+   * this to the parent session's cwd when `SpawnOptions.cwd` points the
+   * working directory elsewhere — the agent works *there* but carries the
+   * parent project's config (the target's `.pi` extensions never execute).
+   *
+   * WARNING for future callers: if you pass `cwd` pointing at a directory the
+   * user didn't open, you almost certainly must pass `configCwd` too —
+   * omitting it makes the target's `.pi` extensions execute in this process.
+   * (Worktree isolation is the one intentional exception: its copy IS the
+   * parent's repo, so config resolving inside it is correct.)
+   */
+  configCwd?: string;
   /** Called on tool start/end with activity info. */
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
@@ -262,6 +288,13 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
   return () => signal.removeEventListener("abort", onAbort);
 }
 
+function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
+  if (!sessionDir) return undefined;
+  if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
+  if (isAbsolute(sessionDir)) return sessionDir;
+  return resolve(cwd, sessionDir);
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -273,6 +306,9 @@ export async function runAgent(
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
+  // Filesystem work happens in effectiveCwd; config discovery in configCwd.
+  // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
+  const configCwd = options.configCwd ?? effectiveCwd;
 
   const env = await detectEnv(options.pi, effectiveCwd);
 
@@ -284,11 +320,14 @@ export async function runAgent(
 
   // Resolve extensions/skills: isolated overrides to false
   const extensions = options.isolated ? false : config.extensions;
+  // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
+  // isolation is an intentional override, not a misconfiguration.
+  const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
   const skills = options.isolated ? false : config.skills;
 
   // Skill preloading: when skills is string[], preload their content into prompt
   if (Array.isArray(skills)) {
-    const loaded = preloadSkills(skills, effectiveCwd);
+    const loaded = preloadSkills(skills, configCwd);
     if (loaded.length > 0) {
       extras.skillBlocks = loaded;
     }
@@ -308,12 +347,12 @@ export async function runAgent(
       // Read-write memory: add any missing memory tool names (read/write/edit)
       const extraNames = getMemoryToolNames(existingNames);
       if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
-      extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
+      extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
     } else {
       // Read-only memory: only add read tool name, use read-only prompt
       const extraNames = getReadOnlyMemoryToolNames(existingNames);
       if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
-      extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
+      extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
     }
   }
 
@@ -358,24 +397,41 @@ export async function runAgent(
   const noExtensions = extensions === false;
 
   const extensionsSpec = Array.isArray(extensions)
-    ? parseExtensionsSpec(extensions, effectiveCwd)
+    ? parseExtensionsSpec(extensions, configCwd)
     : undefined;
   const keepNames = extensionsSpec?.names ?? new Set<string>();
-  // The override filters loaded extensions down to `keepNames`. It's only needed
-  // when we're neither loading everything (`extensions: true` or a `"*"` wildcard)
-  // nor nothing (`noExtensions`).
+  // `exclude_extensions:` is a denylist applied AFTER the include set — exclude wins.
+  // Plain canonical names only (case-insensitive). Note: excluded extensions'
+  // factories still run once during reload() (see comment above) — exclusion
+  // suppresses handler binding and tool registration; it is not a sandbox.
+  const excludeNames = new Set((excludeExtensions ?? []).map((n) => n.toLowerCase()));
+  const hasExcludes = excludeNames.size > 0;
+  // The override filters loaded extensions down to `keepNames` minus `excludeNames`.
+  // It's only needed when we're neither loading everything without excludes
+  // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
   const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+  // Pre-filter discovered set, captured by the override — the exclude-typo warning
+  // must compare against this, not the surviving set (absence from survivors is
+  // an exclude *succeeding*).
+  let discoveredNames: Set<string> | undefined;
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
-    loadAll || noExtensions
+    noExtensions || (loadAll && !hasExcludes)
       ? undefined
-      : (base) => ({
-          ...base,
-          extensions: base.extensions.filter((e) => keepNames.has(extensionCanonicalName(e.path))),
-        });
+      : (base) => {
+          discoveredNames = new Set(base.extensions.map((e) => extensionCanonicalName(e.path)));
+          return {
+            ...base,
+            extensions: base.extensions.filter((e) => {
+              const name = extensionCanonicalName(e.path);
+              if (excludeNames.has(name)) return false; // exclude wins
+              return loadAll || keepNames.has(name);
+            }),
+          };
+        };
 
   const loader = new DefaultResourceLoader({
-    cwd: effectiveCwd,
+    cwd: configCwd,
     agentDir,
     noExtensions,
     additionalExtensionPaths,
@@ -413,6 +469,27 @@ export async function runAgent(
   //   - `tools: ext:foo` but foo isn't in the loaded set (because `extensions:`
   //     didn't include it). Since v0.9, `ext:` no longer pulls extensions in;
   //     loading is `extensions:`-authoritative.
+  // An exclude_extensions: alongside extensions: false is contradictory — nothing
+  // loads, so there is nothing to exclude.
+  if (hasExcludes && noExtensions) {
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `extension-error:exclude_extensions has no effect for agent "${type}" — extensions: false loads nothing`,
+    });
+  }
+  // Exclude typo check: compares against the PRE-filter discovered set (an excluded
+  // name absent from the surviving set is the exclude working as intended). Also
+  // flags path-like and "*" entries — excludes are plain names only.
+  if (hasExcludes && discoveredNames) {
+    for (const name of excludeNames) {
+      if (!discoveredNames.has(name)) {
+        options.onToolActivity?.({
+          type: "end",
+          toolName: `extension-error:exclude_extensions: "${name}" for agent "${type}" did not match any discovered extension`,
+        });
+      }
+    }
+  }
   if (keepNames.size > 0 || extNames.size > 0) {
     const survivingNames = new Set(
       loader.getExtensions().extensions.map((e) => extensionCanonicalName(e.path)),
@@ -421,7 +498,9 @@ export async function runAgent(
       if (!survivingNames.has(name)) {
         options.onToolActivity?.({
           type: "end",
-          toolName: `extension-error:extension "${name}" requested by agent "${type}" was not loaded`,
+          toolName: excludeNames.has(name)
+            ? `extension-error:extension "${name}" is in both extensions: and exclude_extensions: for agent "${type}" — exclude wins`
+            : `extension-error:extension "${name}" requested by agent "${type}" was not loaded`,
         });
       }
     }
@@ -429,7 +508,7 @@ export async function runAgent(
       if (!survivingNames.has(name)) {
         options.onToolActivity?.({
           type: "end",
-          toolName: `extension-error:ext:${name} referenced by agent "${type}" but extension "${name}" is not loaded (add it to extensions:)`,
+          toolName: `extension-error:ext:${name} referenced by agent "${type}" but extension "${name}" is not loaded (check extensions:/exclude_extensions:)`,
         });
       }
     }
@@ -483,11 +562,18 @@ export async function runAgent(
     return !noExtensions;
   });
 
+  const settingsManager = SettingsManager.create(configCwd, agentDir);
+  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
+  const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
+  const sessionManager = agentConfig?.persistSession
+    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
+    : SessionManager.inMemory(effectiveCwd);
+
   const sessionOpts: Parameters<typeof createAgentSession>[0] = {
     cwd: effectiveCwd,
     agentDir,
-    sessionManager: SessionManager.inMemory(effectiveCwd),
-    settingsManager: SettingsManager.create(effectiveCwd, agentDir),
+    sessionManager,
+    settingsManager,
     modelRegistry: ctx.modelRegistry,
     model,
     tools: allowedTools,

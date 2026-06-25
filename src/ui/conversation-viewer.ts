@@ -12,6 +12,7 @@ import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
 const CHROME_LINES_BASE = 6;
@@ -25,6 +26,9 @@ export class ConversationViewer implements Component {
   private unsubscribe: (() => void) | undefined;
   private lastInnerW = 0;
   private closed = false;
+  /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
+  private stopArmed = false;
+  private keys: ViewerKeys;
 
   constructor(
     private tui: TUI,
@@ -33,7 +37,12 @@ export class ConversationViewer implements Component {
     private activity: AgentActivity | undefined,
     private theme: Theme,
     private done: (result: undefined) => void,
+    /** Abort the agent shown here. Omitted → no stop affordance (e.g. read-only history). */
+    private onStop?: () => void,
+    /** User keybindings from `ctx.ui.custom()`. Omitted → hardcoded defaults. */
+    keybindings?: ViewerKeybindings,
   ) {
+    this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
       if (this.closed) return;
       this.tui.requestRender();
@@ -47,20 +56,36 @@ export class ConversationViewer implements Component {
       return;
     }
 
+    // Stop/abort the agent (only while it can still be stopped). Two-press:
+    // first "x" arms, second confirms — any other key disarms.
+    if (matchesKey(data, "x")) {
+      if (this.isStoppable()) {
+        if (this.stopArmed) {
+          this.stopArmed = false;
+          this.onStop?.();
+        } else {
+          this.stopArmed = true;
+        }
+        this.tui.requestRender();
+      }
+      return;
+    }
+    if (this.stopArmed) this.stopArmed = false;
+
     const totalLines = this.buildContentLines(this.lastInnerW).length;
     const viewportHeight = this.viewportHeight();
     const maxScroll = Math.max(0, totalLines - viewportHeight);
 
-    if (matchesKey(data, "up") || matchesKey(data, "k")) {
+    if (this.keys.scrollUp(data)) {
       this.scrollOffset = Math.max(0, this.scrollOffset - 1);
       this.autoScroll = this.scrollOffset >= maxScroll;
-    } else if (matchesKey(data, "down") || matchesKey(data, "j")) {
+    } else if (this.keys.scrollDown(data)) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + 1);
       this.autoScroll = this.scrollOffset >= maxScroll;
-    } else if (matchesKey(data, "pageUp") || matchesKey(data, "shift+up")) {
+    } else if (this.keys.pageUp(data)) {
       this.scrollOffset = Math.max(0, this.scrollOffset - viewportHeight);
       this.autoScroll = false;
-    } else if (matchesKey(data, "pageDown") || matchesKey(data, "shift+down")) {
+    } else if (this.keys.pageDown(data)) {
       this.scrollOffset = Math.min(maxScroll, this.scrollOffset + viewportHeight);
       this.autoScroll = this.scrollOffset >= maxScroll;
     } else if (matchesKey(data, "home")) {
@@ -141,12 +166,23 @@ export class ConversationViewer implements Component {
       ? "100%"
       : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
     const footerLeft = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-    const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
+    const scrollHint = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
+    // Stop hint goes first in the right group so it survives right-edge
+    // truncation on narrow terminals (the scroll hint is the expendable part).
+    const footerRight = this.isStoppable()
+      ? (this.stopArmed ? th.fg("error", "x again to STOP") : th.fg("dim", "x stop")) +
+        th.fg("dim", " · ") + scrollHint
+      : scrollHint;
     const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
     lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
     lines.push(hrBot);
 
     return lines;
+  }
+
+  /** Stoppable only when a stop handler exists and the agent is still active. */
+  private isStoppable(): boolean {
+    return !!this.onStop && (this.record.status === "running" || this.record.status === "queued");
   }
 
   invalidate(): void { /* no cached state to clear */ }

@@ -7,7 +7,9 @@ const {
   loaderExtensionsRef,
   getAgentDir,
   sessionManagerInMemory,
+  sessionManagerCreate,
   settingsManagerCreate,
+  settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
@@ -20,7 +22,9 @@ const {
   },
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
-  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager" })),
+  sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
+  settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
+  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
@@ -53,7 +57,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
   },
   getAgentDir,
-  SessionManager: { inMemory: sessionManagerInMemory },
+  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate },
   SettingsManager: { create: settingsManagerCreate },
 }));
 
@@ -149,6 +153,9 @@ beforeEach(() => {
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
+  sessionManagerCreate.mockClear();
+  settingsManagerGetSessionDir.mockReset();
+  settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
 });
@@ -500,6 +507,53 @@ function lastLoaderOpts(): Record<string, unknown> {
   return defaultResourceLoaderCtor.mock.calls[0][0];
 }
 
+describe("agent-runner session persistence", () => {
+  it("uses an in-memory session by default", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp");
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "memory-session-manager" },
+    }));
+  });
+
+  it("uses pi's normal persistent session location when persistSession is true", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: true }));
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/normal/pi/sessions");
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "persistent-session-manager" },
+    }));
+  });
+
+  it("uses a frontmatter sessionDir when persistSession is true and sessionDir is configured", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ persistSession: true, sessionDir: ".seams/pi-sessions/seam-plan-reviewer" }),
+    );
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo" });
+
+    expect(sessionManagerCreate).toHaveBeenCalledWith(
+      "/repo",
+      "/repo/.seams/pi-sessions/seam-plan-reviewer",
+    );
+  });
+});
+
 describe("agent-runner master tool allowlist", () => {
   it("extensions: true with extension tools — all 7 built-ins plus extension tools land in the allowlist", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
@@ -738,6 +792,30 @@ describe("agent-runner extension allowlist", () => {
     expect(tools).toContain("foo_tool");
   });
 
+  it("['mcp', path] keeps exactly those two, drops other defaults (no wildcard)", async () => {
+    // Changelog: `["mcp", "/abs/foo.ts"]` is *just* those two. Distinct from
+    // `['*', path]` (all defaults + path) and `['mcp']` (name only).
+    setupArrayAgent(["mcp", "/abs/foo.ts"]);
+    withExtensions({
+      "/ext/mcp.ts": ["mcp_tool"],
+      "/abs/foo.ts": ["foo_tool"],
+      "/ext/other.ts": ["other_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const opts = lastLoaderOpts();
+    expect(opts.additionalExtensionPaths).toEqual(["/abs/foo.ts"]);
+    // No "*" → the loader override is in force (narrowing, not load-all).
+    expect(opts.extensionsOverride).toBeDefined();
+    const tools = lastToolsPassed();
+    expect(tools).toContain("mcp_tool");
+    expect(tools).toContain("foo_tool");
+    expect(tools).not.toContain("other_tool");
+  });
+
   it("disallowedTools still applies to tools from an allowlisted extension", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: ["mcp"] }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(
@@ -805,6 +883,153 @@ describe("agent-runner extension allowlist", () => {
     );
     expect(errorCalls).toEqual([]);
     expect(lastToolsPassed()).toContain("mcp_tool");
+  });
+});
+
+// ─── exclude_extensions: denylist (#94) ──────────────────────────────────
+describe("agent-runner exclude_extensions", () => {
+  function setupAgent(overrides: Record<string, unknown>) {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig(overrides));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig(overrides));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+  }
+  function extensionErrors(onToolActivity: ReturnType<typeof vi.fn>): string[] {
+    return onToolActivity.mock.calls
+      .map((c) => c[0]?.toolName)
+      .filter((n): n is string => typeof n === "string" && n.startsWith("extension-error:"));
+  }
+
+  it("extensions: true + exclude — override installed, excluded tools dropped, others kept", async () => {
+    setupAgent({ extensions: true, excludeExtensions: ["notify"] });
+    withExtensions({
+      "/ext/notify.ts": ["notify_send"],
+      "/ext/mcp.ts": ["mcp_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(lastLoaderOpts().extensionsOverride).toBeDefined();
+    const tools = lastToolsPassed();
+    expect(tools).not.toContain("notify_send");
+    expect(tools).toContain("mcp_tool");
+    expect(extensionErrors(onToolActivity)).toEqual([]);
+  });
+
+  it("['*'] + exclude — wildcard no longer short-circuits, exclusion applies", async () => {
+    setupAgent({ extensions: ["*"], excludeExtensions: ["notify"] });
+    withExtensions({
+      "/ext/notify.ts": ["notify_send"],
+      "/ext/mcp.ts": ["mcp_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(lastLoaderOpts().extensionsOverride).toBeDefined();
+    const tools = lastToolsPassed();
+    expect(tools).not.toContain("notify_send");
+    expect(tools).toContain("mcp_tool");
+  });
+
+  it("allowlist + exclude of a listed name — subtracted, 'in both' warning fires", async () => {
+    setupAgent({ extensions: ["mcp", "other"], excludeExtensions: ["other"] });
+    withExtensions({
+      "/ext/mcp.ts": ["mcp_tool"],
+      "/ext/other.ts": ["other_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("mcp_tool");
+    expect(tools).not.toContain("other_tool");
+    expect(extensionErrors(onToolActivity)).toEqual([
+      expect.stringContaining('in both extensions: and exclude_extensions:'),
+    ]);
+  });
+
+  it("exclude typo — warning fires, all extensions still load", async () => {
+    setupAgent({ extensions: true, excludeExtensions: ["nope"] });
+    withExtensions({ "/ext/mcp.ts": ["mcp_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(lastToolsPassed()).toContain("mcp_tool");
+    expect(extensionErrors(onToolActivity)).toEqual([
+      expect.stringContaining('exclude_extensions: "nope"'),
+    ]);
+  });
+
+  it("extensions: false + exclude — orphan warning, no override", async () => {
+    setupAgent({ extensions: false, excludeExtensions: ["notify"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(lastLoaderOpts().extensionsOverride).toBeUndefined();
+    expect(extensionErrors(onToolActivity)).toEqual([
+      expect.stringContaining("exclude_extensions has no effect"),
+    ]);
+  });
+
+  it("isolated: true + exclude — excludes nulled, no warnings", async () => {
+    setupAgent({ extensions: true, excludeExtensions: ["notify"] });
+    withExtensions({ "/ext/notify.ts": ["notify_send"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity, isolated: true });
+
+    expect(lastToolsPassed()).not.toContain("notify_send");
+    expect(extensionErrors(onToolActivity)).toEqual([]);
+  });
+
+  it("tools: ext:foo referencing an excluded extension — existing orphan warning fires", async () => {
+    setupAgent({
+      extensions: true,
+      excludeExtensions: ["beta"],
+      extSelectors: ["ext:beta"],
+    });
+    withExtensions({
+      "/ext/beta.ts": ["beta_tool"],
+      "/ext/mcp.ts": ["mcp_tool"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(lastToolsPassed()).not.toContain("beta_tool");
+    expect(extensionErrors(onToolActivity)).toEqual([
+      expect.stringContaining("extension-error:ext:beta"),
+    ]);
+  });
+
+  it("exclude matches case-insensitively", async () => {
+    setupAgent({ extensions: true, excludeExtensions: ["MCP"] });
+    withExtensions({ "/ext/mcp.ts": ["mcp_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(lastToolsPassed()).not.toContain("mcp_tool");
+    expect(extensionErrors(onToolActivity)).toEqual([]);
   });
 });
 
@@ -1043,5 +1268,69 @@ describe("agent-runner ext: tool selectors", () => {
     expect(tools).toContain("read");
     expect(tools).not.toContain("foo_tool");
     expect(lastLoaderOpts().noExtensions).toBe(true);
+  });
+
+  it("ext: composes with a path-loaded extension via its canonical name", async () => {
+    // Changelog: `ext:` is name-only (matched by canonical name), so it composes
+    // with extensions loaded by path through `extensions:`. The path "/abs/foo.ts"
+    // has canonical name "foo", which `ext:foo` then surfaces — no orphan warning.
+    setupExtAgent({
+      extensions: ["/abs/foo.ts"],
+      builtinToolNames: ["read"],
+      extSelectors: ["ext:foo"],
+    });
+    withExtensions({ "/abs/foo.ts": ["foo_tool"], "/ext/other.ts": ["other_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(lastLoaderOpts().additionalExtensionPaths).toEqual(["/abs/foo.ts"]);
+    const tools = lastToolsPassed();
+    expect(tools).toContain("foo_tool"); // path-loaded ext surfaced via ext:foo
+    expect(tools).toContain("read");
+    expect(tools).not.toContain("other_tool"); // dropped at the loader (not in keepNames)
+    // ext:foo resolved against the path's canonical name → not orphaned.
+    const errorCalls = onToolActivity.mock.calls.filter(
+      (c) => typeof c[0]?.toolName === "string" && c[0].toolName.startsWith("extension-error:"),
+    );
+    expect(errorCalls).toEqual([]);
+  });
+
+  it("ext:foo/Bar narrowing is case-sensitive on the tool half", async () => {
+    // The extension half is canonicalised (lowercased); the tool half is matched
+    // verbatim against pi-mono's registered identifiers, so `Bar` must not match `bar`.
+    setupExtAgent({ extensions: true, builtinToolNames: ["read"], extSelectors: ["ext:foo/Bar"] });
+    withExtensions({ "/ext/foo.ts": ["Bar", "bar"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("Bar");
+    expect(tools).not.toContain("bar"); // case-sensitive: not the selected tool
+  });
+
+  it("disallowedTools removes a tool reached via an ext: selector", async () => {
+    // The denylist applies uniformly to extension tools, including those surfaced
+    // by the ext: opt-in flip — same construction-time `allowedTools` filter.
+    setupExtAgent({
+      extensions: true,
+      builtinToolNames: ["read"],
+      extSelectors: ["ext:foo"],
+      disallowedTools: ["foo_tool"],
+    });
+    withExtensions({ "/ext/foo.ts": ["foo_tool", "foo_other"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("read");
+    expect(tools).toContain("foo_other");
+    expect(tools).not.toContain("foo_tool"); // denylisted even though ext:foo selects it
   });
 });
