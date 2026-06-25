@@ -2,18 +2,30 @@
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in foreground or background, steer them mid-run, resume completed sessions, and define your own custom agent types.
 
-> **Status:** Early release.
-
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
 
 https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
+
+## Why pi-subagents
+
+Most sub-agent tools just spawn a child and wait. pi-subagents is a multi-agent workflow engine, with the observability and control to run it on serious work.
+
+- **Real parallelism, not just background jobs.** Fan out many agents at once with automatic queuing, and compose `chain: [{ parallel: [...] }]` stages that run concurrently and merge their results into the next step. Recon, implementation, and review scale horizontally.
+- **Subagents that spawn subagents.** A worker can delegate its own recon or review, nested up to a safe depth cap. The widget renders the whole tree live, so deep workflows stay legible instead of opaque.
+- **A working roster out of the box.** Ships `worker`, `reviewer`, `oracle`, `Explore`, and `Plan`, plus `/feature` and `/execute-plan` chains that wire them into scout, plan, implement, review, fix-up pipelines. You get a real workflow on install, not an empty `Agent` tool.
+- **You can see what is happening.** A live above-editor widget shows per-agent spinners, tool activity, token and context-window usage, and status icons. Open any agent's full conversation in a scrolling overlay while it runs.
+- **Built for long-running autonomous work.** Steer agents mid-run, resume finished sessions, cap turns gracefully with a wrap-up warning before abort, isolate risky edits in git worktrees, and schedule agents on cron or intervals.
+
+The full capability list is below.
 
 ## Features
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
 - **Parallel chain stages** — `chain: [{ parallel: [...] }]` runs static member sets concurrently, then passes a labeled concat to the next step
-- **Bundled prompt templates** — installs `/feature` and `/feature-light` slash commands that drive ready-made scout/plan/implement/review chains
+- **Nested subagents** — a subagent can spawn its own subagents up to a fixed depth (default 2 levels). Grandchildren render indented under their parent in the tree-view widget. The depth cap stops runaway recursion
+- **Bundled prompt templates** — installs `/feature`, `/feature-light`, and `/execute-plan` slash commands that drive ready-made scout/plan/implement/review chains
+- **Bundled default agents** — ships `worker`, `reviewer`, and `oracle` alongside `general-purpose`, `Explore`, and `Plan`, all inheriting the parent model
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause)
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
@@ -144,6 +156,21 @@ The token field is annotated with two optional signals inside parens:
 - **`NN%`** — context-window utilization (color-coded: <70% dim, 70–85% warning, ≥85% error). Omitted when the model has no declared `contextWindow`, or briefly right after compaction.
 - **`↻N`** — number of times the session has compacted, when > 0. Stays dim; the percent's color carries urgency.
 
+When a subagent spawns its own subagents (see [Nested Subagents](#nested-subagents)), the children render indented under their parent in tree mode:
+
+```
+● Agents
+├─ ⠙ worker  refactor auth module · ⟳5 · 5 tool uses · 4.1k token · 23s
+│    ⎿  spawning subagents…
+│    ├─ ⠹ Explore  map call sites · ⟳2 · 2 tool uses · 6s
+│    │    ⎿  Grepping src/auth/
+│    └─ ✓ reviewer  check migration safety · 8 tool uses · 11s
+│         ⎿  Done
+└─ ⠋ general-purpose  write changelog · ⟳1 · 2 tool uses · 9s
+     ⎿  thinking…
+```
+
+The widget has two display modes, toggled with `/agents-view`: **cards** (a flat colored grid, the default) and **tree** (shown above, the only mode that nests). Nesting is at most one level deep, matching the spawn depth cap.
 Individual agent results render Claude Code-style in the conversation:
 
 | State          | Example                                                                                  |
@@ -170,13 +197,16 @@ Group completions render each agent as a separate block. The LLM receives struct
 
 ## Default Agent Types
 
-| Type              | Tools                      | Model                         | Prompt Mode            | Description                                                                           |
-| ----------------- | -------------------------- | ----------------------------- | ---------------------- | ------------------------------------------------------------------------------------- |
-| `general-purpose` | all 7                      | inherit                       | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions |
-| `Explore`         | read, bash, grep, find, ls | haiku (falls back to inherit) | `replace` (standalone) | Fast codebase exploration (read-only)                                                 |
-| `Plan`            | read, bash, grep, find, ls | inherit                       | `replace` (standalone) | Software architect for implementation planning (read-only)                            |
+| Type              | Tools                      | Model                         | Prompt Mode            | Description                                                                                            |
+| ----------------- | -------------------------- | ----------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------ |
+| `general-purpose` | all 7                      | inherit                       | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions                  |
+| `Explore`         | read, bash, grep, find, ls | haiku (falls back to inherit) | `replace` (standalone) | Fast codebase exploration (read-only)                                                                  |
+| `Plan`            | read, bash, grep, find, ls | inherit                       | `replace` (standalone) | Software architect for implementation planning (read-only)                                             |
+| `worker`          | all 7                      | inherit                       | `replace`              | Implementation agent for normal tasks and approved handoffs. Forks parent context, recovers on abort   |
+| `reviewer`        | all 7                      | inherit                       | `replace`              | Review specialist for diffs, plans, solutions, codebase health, and PR/issue validation (max 30 turns) |
+| `oracle`          | read, bash, grep, find, ls | inherit                       | `replace`              | High-context decision-consistency advisor. Forks parent context, read-only (max 30 turns)              |
 
-The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles.
+The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles. `worker`, `reviewer`, and `oracle` back the bundled prompt-template chains: `worker` is the single writer thread, `reviewer` inspects and reports with evidence, and `oracle` is a read-only advisor that forks the parent conversation to catch drift before risky decisions.
 
 Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
 
@@ -289,8 +319,10 @@ Send a steering message to a running agent. The message interrupts after the cur
 | Command          | Description                                                           |
 | ---------------- | --------------------------------------------------------------------- |
 | `/agents`        | Interactive agent management menu                                     |
+| `/agents-view`   | Toggle the widget display between cards and tree                      |
 | `/feature`       | Full feature chain: scout, plan, implement, review, fix-up            |
 | `/feature-light` | Lightweight chain for small/scoped changes: implement, review, fix-up |
+| `/execute-plan`  | Run an existing plan: parallel implement, review, fix-up              |
 
 The `/agents` command opens an interactive menu:
 
@@ -313,12 +345,15 @@ Settings                                    ← max concurrency, max turns, grac
 
 ## Prompt Templates
 
-The package ships two prompt templates (under `prompts/`) that pi auto-loads on install as slash commands. Each issues a single `Agent({ chain: [...] })` call and handles `{previous}` / `{chain_dir}` handoff between steps.
+The package ships three prompt templates (under `prompts/`) that pi auto-loads on install as slash commands. Each issues a single `Agent({ chain: [...] })` call and handles `{previous}` / `{chain_dir}` handoff between steps.
 
-| Command                 | When to use                                         | Chain steps                             |
-| ----------------------- | --------------------------------------------------- | --------------------------------------- |
-| `/feature <task>`       | Normal feature work, default choice                 | Explore, Plan, worker, reviewer, worker |
-| `/feature-light <task>` | Small or scoped change with no behavioral ambiguity | worker, reviewer, worker                |
+| Command                 | When to use                                             | Chain steps                             |
+| ----------------------- | ------------------------------------------------------- | --------------------------------------- |
+| `/feature <task>`       | Normal feature work, default choice                     | Explore, Plan, worker, reviewer, worker |
+| `/feature-light <task>` | Small or scoped change with no behavioral ambiguity     | worker, reviewer, worker                |
+| `/execute-plan <plan>`  | Run a plan that already exists, no scouting or planning | parallel worker(s), reviewer, worker    |
+
+`/execute-plan` takes a plan path, inline plan text, or a reference to a plan written earlier in the session. It partitions the plan into disjoint file packages, implements them as a `parallel` worker stage (each worker owns a non-overlapping set of files, so no worktree isolation is needed and all edits land in one tree), then runs a review and fix-up pass against the combined diff. If the plan cannot be cleanly partitioned, it falls back to a single worker.
 
 Both templates open with a required clarifying-questions step so the chain runs against a well-bounded requirement. Each step writes its output to `{chain_dir}` and downstream steps read those files via `reads:` (full content, bypasses compaction).
 
@@ -346,6 +381,16 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
 Foreground agents bypass the queue — they block the parent anyway.
+
+## Nested Subagents
+
+A subagent can spawn its own subagents. The `Agent`, `get_subagent_result`, and `steer_subagent` tools are handed down to a child only while it sits below the depth cap, so nesting stops automatically at a fixed depth.
+
+- **Depth cap:** 2 by default. The real session is depth 0, its direct children are depth 1, and their children are depth 2. Depth-2 agents do not receive the spawning tools, so they cannot nest further. This bounds the spawn tree and prevents runaway recursion.
+- **Display:** grandchildren appear indented under their parent in the tree-view widget (see [UI](#ui)). The depth cap means the tree is at most one level deep.
+- **Each level is independent:** a nested child has its own context window, tools, model, and turn limit, exactly like a top-level subagent. Depth and parentage are tracked per spawn so concurrent siblings never cross wires.
+
+Use it when a subagent's task naturally fans out (a `worker` delegating recon to `Explore`, or running its own review pass), not as a default. Flat parallelism via [parallel chain stages](#parallel-chain-stages) is usually the better tool when the work is known up front.
 
 ## Join Strategies
 
@@ -560,6 +605,7 @@ src/
   agent-types.ts      # Unified agent registry (defaults + user), tool name resolution
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
+  global-registry.ts  # Process-global record/activity registry for cross-manager nested display
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events
   group-join.ts       # Group join manager: batched completion notifications with timeout
   custom-agents.ts    # Load user-defined agents from .pi/agents/*.md
