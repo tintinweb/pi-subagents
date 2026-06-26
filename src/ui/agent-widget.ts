@@ -314,7 +314,7 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.manager.listAgents();
+    const allAgents = this.manager.listAgents().filter(a => a.invocation?.runInBackground === true);
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
     const finished = allAgents.filter(a =>
@@ -448,7 +448,7 @@ export class AgentWidget {
   /** Force an immediate widget update. */
   update() {
     if (!this.uiCtx) return;
-    const allAgents = this.manager.listAgents();
+    const allAgents = this.manager.listAgents().filter(a => a.invocation?.runInBackground === true);
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;
