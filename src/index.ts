@@ -43,6 +43,7 @@ import {
   getDisplayName,
   getPromptModeLabel,
   SPINNER,
+  type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
@@ -54,6 +55,18 @@ import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsag
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
+}
+
+export function renderRunningAgentStatus(
+  frame: string,
+  statsText: string,
+  activity: string,
+  theme: Pick<Theme, "fg">,
+): Container {
+  const container = new Container();
+  container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
+  container.addChild(new Text(theme.fg("dim", `  ⎿  ${activity}`), 0, 0));
+  return container;
 }
 
 /** Format an agent's lifetime token total, or "" when zero. */
@@ -889,9 +902,7 @@ Terse command-style prompts produce shallow, generic work.
       if (isPartial || details.status === "running") {
         const frame = SPINNER[details.spinnerFrame ?? 0];
         const s = stats(details);
-        let line = theme.fg("accent", frame) + (s ? " " + s : "");
-        line += "\n" + theme.fg("dim", `  ⎿  ${details.activity ?? "thinking…"}`);
-        return new Text(line, 0, 0);
+        return renderRunningAgentStatus(frame, s, details.activity ?? "thinking…", theme);
       }
 
       // ---- Background agent launched ----
