@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { JoinMode } from "./types.js";
+import type { JoinMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -72,6 +72,17 @@ export interface SubagentsSettings {
    * the list never registers and the global key handler never captures input.
    */
   fleetView?: boolean;
+  /**
+   * Display mode for the persistent above-editor agent widget:
+   *   - `all`: show every agent (foreground + background).
+   *   - `background`: hide foreground agents — they already render inline as the
+   *     Agent tool result, so the widget would otherwise double-render them
+   *     (#118); everything else (background, queued, scheduled, RPC) stays.
+   *   - `off`: hide the widget entirely.
+   * Defaults to `background`. Pure-UI and applied live (toggling refreshes the
+   * widget).
+   */
+  widgetMode?: WidgetMode;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -87,6 +98,7 @@ export interface SettingsAppliers {
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
   setFleetView: (b: boolean) => void;
+  setWidgetMode: (mode: WidgetMode) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -94,6 +106,7 @@ export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
+const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
@@ -145,6 +158,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.fleetView === "boolean") {
     out.fleetView = r.fleetView;
+  }
+  if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
+    out.widgetMode = r.widgetMode as WidgetMode;
   }
   return out;
 }
@@ -205,6 +221,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
+  if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
 }
 
 /**

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
+import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, formatSessionTokens } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
@@ -51,7 +52,7 @@ describe("AgentWidget", () => {
     };
   }
 
-  function makeRecord(id: string, runInBackground?: boolean) {
+  function makeRecord(id: string, opts: { isBackground?: boolean } = {}) {
     return {
       id,
       type: "general-purpose",
@@ -61,40 +62,61 @@ describe("AgentWidget", () => {
       startedAt: Date.now(),
       lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
-      invocation: { runInBackground },
+      isBackground: opts.isBackground,
     };
   }
 
-  it("does not render foreground agents in the persistent widget", () => {
-    const manager = { listAgents: () => [makeRecord("foreground", false)] };
-    const widget = new AgentWidget(manager as any, new Map([["foreground", makeActivity()]]));
-    const calls: Array<{ key: string; content: unknown }> = [];
-
-    widget.setUICtx({
-      setStatus: () => {},
-      setWidget: (key, content) => calls.push({ key, content }),
-    });
-
-    widget.update();
-
-    expect(calls).toEqual([]);
-  });
-
-  it("renders background agents in the persistent widget", () => {
-    const manager = { listAgents: () => [makeRecord("background", true)] };
-    const widget = new AgentWidget(manager as any, new Map([["background", makeActivity()]]));
+  /** Render the widget for a manager and return the produced lines ("" if nothing rendered). */
+  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode): string {
+    const widget = new AgentWidget(
+      manager as any,
+      new Map([[activityId, makeActivity()]]),
+      mode,
+    );
     let factory: any;
-
     widget.setUICtx({
       setStatus: () => {},
       setWidget: (_key, content) => { factory = content; },
     });
-
     widget.update();
+    if (!factory) return "";
+    return factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme)
+      .render()
+      .join("\n");
+  }
 
-    const component = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme);
-    const lines = component.render().join("\n");
+  // "all" (and the no-policy constructor default) shows every agent.
+  it("shows foreground agents in 'all' mode (and by default)", () => {
+    const manager = { listAgents: () => [makeRecord("foreground", { isBackground: false })] };
+    expect(renderLines(manager, "foreground")).toContain("foreground description");
+    expect(renderLines(manager, "foreground", () => "all")).toContain("foreground description");
+  });
+
+  it("excludes foreground agents in 'background' mode", () => {
+    const manager = { listAgents: () => [makeRecord("foreground", { isBackground: false })] };
+    expect(renderLines(manager, "foreground", () => "background")).toBe("");
+  });
+
+  // Also covers scheduler-spawned agents (isBackground=true, no `invocation`
+  // snapshot): if the filter still keyed off `invocation.runInBackground` —
+  // #118's original approach — this would wrongly vanish.
+  it("renders background agents in 'background' mode", () => {
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    const lines = renderLines(manager, "background", () => "background");
     expect(lines).toContain("Agents");
     expect(lines).toContain("background description");
+  });
+
+  // 'background' excludes only agents *known* to be foreground; one with no
+  // isBackground flag (e.g. a cross-extension RPC spawn) is kept, not hidden.
+  it("keeps agents with no isBackground flag in 'background' mode", () => {
+    const manager = { listAgents: () => [makeRecord("unflagged", {})] };
+    expect(renderLines(manager, "unflagged", () => "background")).toContain("unflagged description");
+  });
+
+  // "off" hides the widget entirely — even a background agent renders nothing.
+  it("renders nothing in 'off' mode", () => {
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    expect(renderLines(manager, "background", () => "off")).toBe("");
   });
 });

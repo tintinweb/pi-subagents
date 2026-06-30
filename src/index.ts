@@ -29,7 +29,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getStatusNote } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -509,8 +509,15 @@ export default function (pi: ExtensionAPI) {
     manager.dispose();
   });
 
-  // Live widget: show running agents above editor
-  const widget = new AgentWidget(manager, agentActivity);
+  // Live widget: show running agents above editor.
+  // widgetMode (default "background") selects what the widget shows: "all" =
+  // every agent; "background" = hide foreground (they already render inline as
+  // the Agent tool result, so showing them here too is a duplicate, #118), keep
+  // everything else; "off" = hide the widget entirely. Read live at render time.
+  let widgetMode: WidgetMode = "background";
+  function getWidgetMode(): WidgetMode { return widgetMode; }
+  const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
+  function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
   const fleet = new FleetList(manager, agentActivity);
@@ -671,6 +678,7 @@ export default function (pi: ExtensionAPI) {
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
+      setWidgetMode: setWidgetMode,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -2004,6 +2012,7 @@ ${systemPrompt}
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
+      widgetMode: getWidgetMode(),
     };
   }
 
@@ -2073,6 +2082,13 @@ ${systemPrompt}
           values: ["on", "off"],
         },
         {
+          id: "widgetMode",
+          label: "Widget",
+          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
+          currentValue: getWidgetMode(),
+          values: ["all", "background", "off"],
+        },
+        {
           id: "toolDescriptionMode",
           label: "Tool description",
           description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
@@ -2134,6 +2150,9 @@ ${systemPrompt}
         const enabled = value === "on";
         setFleetViewEnabled(enabled);
         notifyApplied(ctx, `Fleet view ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "widgetMode") {
+        setWidgetMode(value as WidgetMode);
+        notifyApplied(ctx, `Widget set to ${value}`);
       }
     }
 

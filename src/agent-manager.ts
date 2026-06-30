@@ -167,6 +167,12 @@ export class AgentManager {
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
       compactionCount: 0,
+      // Raw tri-state (not coerced to a boolean): true = background, false =
+      // foreground (has an inline tool-result surface), undefined = caller never
+      // declared it (e.g. a cross-extension RPC spawn). The widget's background-
+      // only filter excludes only explicit `false`, so undefined agents — which
+      // have no inline surface — stay visible instead of vanishing.
+      isBackground: options.isBackground,
       invocation: options.invocation,
     };
     this.agents.set(id, record);

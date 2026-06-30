@@ -8,7 +8,7 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
-import type { AgentInvocation, SubagentType } from "../types.js";
+import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -224,7 +224,33 @@ export class AgentWidget {
   constructor(
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
+    /**
+     * Read live at render time. Selects which agents the widget shows — see
+     * `WidgetMode`. Defaults to `"all"` when a caller supplies no policy; the
+     * extension supplies one defaulting to `"background"`.
+     */
+    private mode: () => WidgetMode = () => "all",
   ) {}
+
+  /**
+   * Agents eligible for the widget, per the current `WidgetMode`:
+   *   - `off`: none (the widget's existing empty-state path hides it entirely).
+   *   - `background`: drop only agents *known* to be foreground
+   *     (`isBackground === false`); keep everything else — background, queued,
+   *     scheduled, or RPC-spawned (`undefined`). Keying off the `isBackground`
+   *     record flag rather than the UI-only `invocation` snapshot (which only the
+   *     Agent-tool path sets), and excluding rather than allow-listing, means
+   *     only proven-foreground runs drop out — nothing else silently vanishes.
+   *   - `all`: every agent.
+   */
+  private widgetAgents() {
+    const all = this.manager.listAgents();
+    switch (this.mode()) {
+      case "off": return [];
+      case "background": return all.filter(a => a.isBackground !== false);
+      default: return all;
+    }
+  }
 
   /** Set the UI context (grabbed from first tool execution). */
   setUICtx(ctx: UICtx) {
@@ -314,7 +340,7 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
-    const allAgents = this.manager.listAgents().filter(a => a.invocation?.runInBackground === true);
+    const allAgents = this.widgetAgents();
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
     const finished = allAgents.filter(a =>
@@ -448,7 +474,7 @@ export class AgentWidget {
   /** Force an immediate widget update. */
   update() {
     if (!this.uiCtx) return;
-    const allAgents = this.manager.listAgents().filter(a => a.invocation?.runInBackground === true);
+    const allAgents = this.widgetAgents();
 
     // Lightweight existence checks — full categorization happens in renderWidget()
     let runningCount = 0;
