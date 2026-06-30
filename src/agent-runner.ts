@@ -225,6 +225,12 @@ export interface RunOptions {
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
+  /**
+   * Called after tools are resolved but before session creation.
+   * Allows injecting additional tools (e.g., memory/context tools).
+   * Return the modified tools array.
+   */
+  onToolsResolve?: (tools: any[], agentType: string) => any[];
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /**
@@ -552,7 +558,7 @@ export async function runAgent(
   // set, so listing the exact final set here means the session is correctly
   // scoped from the first instant — no post-construction narrowing required.
   const builtinToolNameSet = new Set(toolNames);
-  const allowedTools = [...toolNames, ...extensionToolNames].filter((t) => {
+  let allowedTools = [...toolNames, ...extensionToolNames].filter((t) => {
     if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
     if (disallowedSet?.has(t)) return false;
     if (builtinToolNameSet.has(t)) return true;
@@ -561,6 +567,16 @@ export async function runAgent(
     // (`ext:` opt-in flip), so any extension tool in `extensionToolNames` is allowed.
     return !noExtensions;
   });
+
+  // Allow external tool injection (e.g., memory tools)
+  // Callback takes precedence, then event-based injection
+  if (options.onToolsResolve) {
+    allowedTools = options.onToolsResolve(allowedTools, type);
+  }
+  // Emit event for extensions to inject tools
+  const toolsEvent = { type, tools: allowedTools, agentId: options.agentId };
+  options.pi.events.emit("subagents:tools_resolve", toolsEvent);
+  allowedTools = toolsEvent.tools;
 
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
