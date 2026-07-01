@@ -361,7 +361,7 @@ export class AgentWidget {
   private uiCtx: UICtx | undefined;
   private widgetFrame = 0;
   private widgetInterval: ReturnType<typeof setInterval> | undefined;
-  private displayMode: WidgetDisplayMode = "cards";
+  private displayMode: WidgetDisplayMode = "tree";
   /** Tracks how many turns each finished agent has survived. Key: agent ID, Value: turns since finished. */
   private finishedTurnAge = new Map<string, number>();
   /** How many extra turns errors/aborted agents linger (completed agents clear after 1 turn). */
