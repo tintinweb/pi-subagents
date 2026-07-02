@@ -2,7 +2,7 @@
  * fleet-list.ts — Claude Code-style "FleetView" list rendered below the editor.
  *
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
- * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ⏺ marker),
+ * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ◉ marker),
  * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
  * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
  *
@@ -328,7 +328,9 @@ export class FleetList {
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");
-    lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} main`, width));
+    const mainBullet = this.bullet(0, sel, theme);
+    const mainLabel = sel === 0 ? theme.bold("main") : theme.fg("dim", "main");
+    lines.push(truncateToWidth(`  ${mainBullet} ${mainLabel}`, width));
 
     // Window the agent rows so the selected one stays visible.
     const visible = Math.min(MAX_AGENT_ROWS, agents.length);
@@ -345,8 +347,13 @@ export class FleetList {
     return lines;
   }
 
+  /**
+   * Render the selection bullet.
+   * Uses a radio-button style: filled circle-with-dot for selected,
+   * empty circle for unselected.
+   */
   private bullet(rosterIndex: number, sel: number, theme: Theme): string {
-    return rosterIndex === sel ? theme.fg("accent", "⏺") : theme.fg("dim", "◯");
+    return rosterIndex === sel ? theme.fg("accent", "◉") : theme.fg("dim", "○");
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
