@@ -573,7 +573,7 @@ export function formatParallelEditHazardWarning(
 ): string {
   return (
     `⚠ Parallel stage ${stageIndex + 1} member ${memberIndex + 1} (${agentType}) can write files and is not worktree-isolated; ` +
-    `concurrent members may clobber each other. Set isolation: "worktree" or make the agent read-only.`
+    `concurrent members may clobber each other if their files overlap. Set isolation: "worktree" or make the agent read-only.`
   );
 }
 
