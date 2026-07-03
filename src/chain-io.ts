@@ -546,6 +546,25 @@ export function mergeParallelOutputs(
     .join("\n\n---\n\n");
 }
 
+/**
+ * Note appended to a step's prompt when other writable, non-worktree-isolated
+ * agents are active concurrently elsewhere (e.g. a sibling top-level `Agent`
+ * call, not a member of this same chain/stage). Chain-internal validation
+ * (`validateParallelStage`, `formatParallelEditHazardWarning`) only sees
+ * members declared inside one chain's own `parallel` array — it has no
+ * visibility into a separate concurrent dispatch. This note compensates by
+ * telling the step itself: don't misattribute a concurrent sibling's legitimate
+ * changes as issues in your own review/validation.
+ */
+export function formatConcurrentActivityNote(count: number): string {
+  const plural = count === 1 ? "agent is" : "agents are";
+  return (
+    `Note: ${count} other writable ${plural} currently active in this working tree without worktree isolation. ` +
+    `If \`git diff\`/\`git status\` or a build/test run shows changes or failures outside your assigned scope, ` +
+    `they likely belong to that concurrent work — do not flag them as issues in this task unless they fall within your assigned files.`
+  );
+}
+
 /** Warn when a writable parallel member can edit files without worktree isolation. */
 export function formatParallelEditHazardWarning(
   stageIndex: number,

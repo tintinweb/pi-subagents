@@ -8,6 +8,7 @@ import {
   createChainDir,
   createChainOutputTool,
   formatChainNextProposal,
+  formatConcurrentActivityNote,
   formatParallelEditHazardWarning,
   injectOutputInstruction,
   isAgentReadOnly,
@@ -893,6 +894,19 @@ describe("parseChainNext", () => {
 // ---------------------------------------------------------------------------
 // formatChainNextProposal
 // ---------------------------------------------------------------------------
+
+describe("formatConcurrentActivityNote", () => {
+  it("uses singular phrasing for one other agent", () => {
+    const text = formatConcurrentActivityNote(1);
+    expect(text).toContain("1 other writable agent is currently active");
+    expect(text).toContain("do not flag them as issues");
+  });
+
+  it("uses plural phrasing for multiple other agents", () => {
+    const text = formatConcurrentActivityNote(2);
+    expect(text).toContain("2 other writable agents are currently active");
+  });
+});
 
 describe("formatChainNextProposal", () => {
   it("renders each chunk with its type, files, and prompt", () => {

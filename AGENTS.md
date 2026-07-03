@@ -10,6 +10,7 @@ Repo orientation for agents.
 - Parallel stages run static members concurrently, merge labeled outputs, and pass merged `{previous}` downstream.
 - Writable parallel members should use `isolation: "worktree"` or be read-only.
 - A sequential step can set `pause_after: true` to stop the chain there instead of continuing. The caller resumes with a second `Agent({ chain_run_id, remaining })` call. If the paused step's output contains a fenced ```chain-next``` JSON array, `parseChainNext` (`src/chain-io.ts`) validates it (file-overlap, non-empty files, chunk count) and it is returned as a reviewable proposal only — the runtime never auto-dispatches it into `remaining`.
+- `prepareStep` (in `executeChain`) checks `manager.listAgents()` for any other `running`, writable, non-worktree agent before building a step's prompt, and appends `formatConcurrentActivityNote` if found. This exists because chain-internal validation (`validateParallelStage`, `formatParallelEditHazardWarning`) only sees members of the current chain's own `parallel` stage — it's blind to a separate, concurrently dispatched top-level `Agent` call sharing the same cwd. The note tells the step not to misattribute a concurrent sibling's legitimate changes as its own task's issues.
 
 ## Tests
 

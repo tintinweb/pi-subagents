@@ -18,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultExtensions, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultExtensions, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
-import { buildReadsBlock, consumeChainPauseState, createChainDir, createChainOutputTool, formatChainNextProposal, formatParallelEditHazardWarning, injectOutputInstruction, isAgentReadOnly, isValidChainRunId, mergeParallelOutputs, parseChainNext, persistStepOutput, resolveOutputPath, resolveStepOutput, saveChainPauseState, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateParallelStage, validateStepIO, type ChainPauseState } from "./chain-io.js";
+import { buildReadsBlock, consumeChainPauseState, createChainDir, createChainOutputTool, formatChainNextProposal, formatConcurrentActivityNote, formatParallelEditHazardWarning, injectOutputInstruction, isAgentReadOnly, isValidChainRunId, mergeParallelOutputs, parseChainNext, persistStepOutput, resolveOutputPath, resolveStepOutput, saveChainPauseState, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateParallelStage, validateStepIO, type ChainPauseState } from "./chain-io.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deleteGlobalActivity, setGlobalActivity } from "./global-registry.js";
@@ -1710,6 +1710,20 @@ Notes:
         stepPrompt = readsBlock + stepPrompt;
       }
       stepPrompt = injectOutputInstruction(stepPrompt, resolvedOutputPath);
+
+      // Cross-dispatch awareness: chain-internal parallel validation only sees
+      // members of THIS chain's own stage. A sibling top-level Agent call (a
+      // separate, concurrently running chain sharing the same cwd) is invisible
+      // to it. If one is active and writable and not worktree-isolated, tell
+      // this step so it doesn't misattribute the sibling's legitimate changes.
+      const concurrentWriters = manager.listAgents().filter((a) => {
+        if (a.status !== "running" || a.worktree) return false;
+        const otherConfig = getAgentConfig(a.type);
+        return !isAgentReadOnly(otherConfig?.builtinToolNames, otherConfig?.disallowedTools);
+      }).length;
+      if (concurrentWriters > 0) {
+        stepPrompt = `${stepPrompt}\n\n${formatConcurrentActivityNote(concurrentWriters)}`;
+      }
 
       const customConfig = getAgentConfig(resolvedStepType);
       const chainOutputTool = resolvedOutputPath ? createChainOutputTool(resolvedOutputPath) : undefined;
