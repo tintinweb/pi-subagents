@@ -1,10 +1,12 @@
 ---
-description: "E2E feature chain: scout, plan, implement, review, fix-up (file-handoff)"
+description: "E2E feature chain: scout, plan, implement, review, fix-up (file-handoff, plan-gated fan-out)"
 ---
 
 # /feature
 
-Run a 5-step chain via the `Agent` tool's native `chain` parameter. Every step writes its output to `{chain_dir}` and downstream steps consume those files via `reads:` (full content, bypasses compaction). `output_mode: file-only` keeps `{previous}` light.
+Run this as two `Agent` chain calls, not one. The first call scouts and plans, then pauses. You read the plan (and any fan-out proposal it emits) and decide the implement shape before the second call runs the rest. This exists because a single upfront call would force you to guess the implement shape (single worker vs several parallel workers on disjoint files) before the plan exists to tell you what the shape should be.
+
+Every step writes its output to `{chain_dir}` and downstream steps consume those files via `reads:` (full content, bypasses compaction). `output_mode: file-only` keeps `{previous}` light.
 
 **User task**: $@
 
@@ -32,12 +34,12 @@ The refined requirement becomes `{{TASK}}`.
 
 With the requirement locked, condense the full conversation (clarifying Q&A plus prior chat) into one block: requirements clarified, decisions, constraints, files/symbols mentioned, things ruled out, current branch/PR state. Factual, no speculation. Substitute into `{{CONVO_CONTEXT}}`. Substitute `{{TASK}}` with the refined requirement from Step 0.
 
-## Invoke as a single tool call
+## Call 1: scout + plan (pauses after Plan)
 
 ```
 Agent({
   subagent_type: "general-purpose",
-  description: "feature chain",
+  description: "feature chain: scout + plan",
   prompt: "chain",
   chain: [
     {
@@ -53,23 +55,73 @@ Agent({
       reads: ["{chain_dir}/scout.md"],
       output: "{chain_dir}/plan.md",
       output_mode: "file-only",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe scout findings are prepended above as <context>. Produce an EXHAUSTIVE implementation plan. Use write_output to persist incrementally.\n\nPlan must include:\n- File-by-file changes with absolute paths and exact functions/lines\n- Test strategy: which tests to add/update, which files, what they assert\n- Edge cases enumerated with handling\n- Validation commands (exact shell invocations)\n- Rollback strategy\n- Sequencing if order matters\n- Explicit decisions on every open question from the scout findings; cite which evidence resolved each\n\nDo NOT defer decisions to the worker. If genuinely ambiguous, list options with tradeoffs and pick one with reasoning."
-    },
-    {
-      subagent_type: "worker",
-      description: "Implement plan",
-      reads: ["{chain_dir}/plan.md"],
-      output: "{chain_dir}/worker.md",
-      output_mode: "file-only",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe plan is prepended above. Implement it end-to-end. Edit files, add or update tests, run validations. If a decision is ambiguous AND not resolved by the plan, pick the least-risky option and log it.\n\nUse write_output to persist your implementation report incrementally. The report must include:\n- Every file changed (absolute path) with one-line change summary\n- Every test added/modified with file:line\n- Exact validation commands run and full output per command\n- Every decision you made beyond the plan, with reasoning\n- Open risks discovered during implementation\n- `Need decision:` section only if you stopped on an unapproved decision\n\nVerbose receipts. The reviewer cross-checks against this."
-    },
+      pause_after: true,
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe scout findings are prepended above as <context>. Produce an EXHAUSTIVE implementation plan. Use write_output to persist incrementally.\n\nPlan must include:\n- File-by-file changes with absolute paths and exact functions/lines\n- Test strategy: which tests to add/update, which files, what they assert\n- Edge cases enumerated with handling\n- Validation commands (exact shell invocations)\n- Rollback strategy\n- Sequencing if order matters\n- Explicit decisions on every open question from the scout findings; cite which evidence resolved each\n\nDo NOT defer decisions to the worker. If genuinely ambiguous, list options with tradeoffs and pick one with reasoning.\n\nIf, and only if, the implementation splits into independently-scoped, file-disjoint chunks that could be built in parallel, also append a fenced `chain-next` block: a JSON array where each item is {\"subagent_type\": \"worker\", \"prompt\": \"<self-contained outcome-based task for this chunk>\", \"files\": [\"<absolute paths this chunk touches>\"], \"isolation\": \"worktree\"} (omit \"isolation\" only when certain no chunk's files overlap any other chunk's). Do not emit this for single-scope or tightly-coupled work."
+    }
+  ]
+})
+```
+
+`pause_after: true` on the Plan step stops the chain there. The result includes the plan's full output, a `chain_run_id`, and — if Plan emitted one — a parsed, validated fan-out proposal (or an explicit warning if the block was malformed). Nothing is dispatched yet.
+
+## Step 1.5: Decide the implement shape (REQUIRED, do not skip)
+
+Read the returned plan. Default to parallel: actively look for a disjoint-file split before settling on a single worker. Do not wait for Plan to volunteer one.
+
+- If Plan emitted a fan-out proposal: review it against the plan text. Use it as-is, or edit it, if the split is genuinely disjoint and each chunk's prompt is self-contained and outcome-based. Do not paste it through unreviewed — you are the gate, not Plan.
+- If there is no proposal, check the plan's file list yourself: does it already group into independent chunks (different files, different layers, different modules) with no real coupling between them? If yes, build the parallel shape yourself, even though Plan didn't propose one.
+- Only fall back to a single worker when the plan is genuinely one coupled change: chunks would overlap files, need to run in a specific order, or share enough context that splitting adds coordination cost without saving time. That is a real judgment call, not a default you reach for out of habit.
+- Never give parallel implement workers `isolation: "worktree"` here — the reviewer inspects `git diff` in the main tree, so worktree-isolated changes would be invisible to it. Safety comes from disjoint file ownership, not isolation. If two chunks are not truly disjoint, merge them into one worker instead of isolating them.
+
+Build `{{IMPLEMENT_STEP}}`: either the single-worker step or a `parallel` stage, per the two shapes below.
+
+**Single worker (default):**
+
+```
+{
+  subagent_type: "worker",
+  description: "Implement plan",
+  reads: ["{chain_dir}/plan.md"],
+  output: "{chain_dir}/worker.md",
+  output_mode: "file-only",
+  prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe plan is prepended above. Implement it end-to-end. Edit files, add or update tests, run validations. If a decision is ambiguous AND not resolved by the plan, pick the least-risky option and log it.\n\nUse write_output to persist your implementation report incrementally. The report must include:\n- Every file changed (absolute path) with one-line change summary\n- Every test added/modified with file:line\n- Exact validation commands run and full output per command\n- Every decision you made beyond the plan, with reasoning\n- Open risks discovered during implementation\n- `Need decision:` section only if you stopped on an unapproved decision\n\nVerbose receipts. The reviewer cross-checks against this."
+}
+```
+
+**Parallel workers (only when the plan/proposal cleanly partitions into disjoint files, 2-4 chunks):**
+
+```
+{
+  parallel: [
+    { subagent_type: "worker", description: "Implement chunk A", output_mode: "file-only",
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_chunk>\nCHUNK A. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_chunk>\n\nImplement ONLY your chunk. Edit ONLY your owned files. Do NOT touch files outside your list, edit shared config/lockfiles, or run repo-wide format/build/codegen. Validate ONLY your slice. Use write_output for a verbose report: every file changed (path + summary), every test (file:line), scoped validation commands + full output, any out-of-chunk file you needed (report it, do NOT touch), decisions beyond the plan, open risks." },
+    { subagent_type: "worker", description: "Implement chunk B", output_mode: "file-only",
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_chunk>\nCHUNK B. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_chunk>\n\nSame contract as chunk A: edit ONLY your owned files, no shared/global changes, validate your slice, verbose write_output report." }
+  ],
+  output: "{chain_dir}/worker.md",
+  output_mode: "file-only"
+}
+```
+
+Shared files (lockfiles, barrels, config) and repo-wide commands (format-all, codegen, global build) are deferred to the fix-up worker, never run during the parallel stage. Keep `continue_on_error` at its default (fail-fast): a half-applied chunk leaves the tree in a state the reviewer cannot safely reason about.
+
+## Call 2: resume with implement + review + fix-up
+
+```
+Agent({
+  subagent_type: "general-purpose",
+  description: "feature chain: implement + review",
+  prompt: "chain",
+  chain_run_id: "<id returned by call 1>",
+  remaining: [
+    {{IMPLEMENT_STEP}},
     {
       subagent_type: "reviewer",
       description: "Review diff",
       reads: ["{chain_dir}/plan.md", "{chain_dir}/worker.md"],
       output: "{chain_dir}/review.md",
       output_mode: "file-only",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nPlan and worker report are prepended above. Inspect the actual diff via `git diff` (and `git status` for untracked files). Cross-check the diff against plan and worker report.\n\nUse write_output to persist findings incrementally. Review must cover:\n- Correctness/contract violations (file:line)\n- Test coverage gaps (cite missing case names)\n- Unnecessary complexity, dead code, premature abstraction (file:line)\n- Mismatches between worker report and actual diff\n- Mismatches between plan and actual diff\n\nPer finding: severity (blocker/note), exact location, recommended fix. Flag only fixes worth doing now. Do not edit."
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nPlan and worker report are prepended above. Inspect the actual diff via `git diff` (and `git status` for untracked files). Cross-check the diff against plan and worker report.\n\nUse write_output to persist findings incrementally. Review must cover:\n- Plan steps not implemented or implemented wrong (file:line)\n- Correctness/contract violations (file:line)\n- Integration gaps if implementation was split into chunks: mismatched signatures, missing wiring, shared files no chunk updated (file:line)\n- Test coverage gaps (cite missing case names)\n- Unnecessary complexity, dead code, premature abstraction (file:line)\n- Mismatches between worker report and actual diff\n- Mismatches between plan and actual diff\n\nPer finding: severity (blocker/note), exact location, recommended fix. Flag only fixes worth doing now. Do not edit."
     },
     {
       subagent_type: "worker",
@@ -77,11 +129,13 @@ Agent({
       reads: ["{chain_dir}/review.md"],
       output: "{chain_dir}/worker-final.md",
       output_mode: "inline",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe review is prepended above. Apply only the fixes clearly worth doing now. Re-run validations.\n\nUse write_output to persist the final report. Must include:\n- Every fix applied (file:line)\n- Every review finding marked applied/deferred/disagreed with reasoning\n- Final validation command output\n- Final list of changed files\n- Remaining risks"
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe review is prepended above. You work in the full tree now (no chunk restriction if implementation was split). Apply only the fixes clearly worth doing now, wire up any cross-chunk integration gaps, make deferred shared-file/repo-wide changes, then re-run validations (full suite if implementation was split).\n\nUse write_output to persist the final report. Must include:\n- Every fix applied (file:line)\n- Every review finding marked applied/deferred/disagreed with reasoning\n- Final validation command output\n- Final list of changed files\n- Remaining risks"
     }
   ]
 })
 ```
+
+`{{IMPLEMENT_STEP}}` is whichever shape you built in Step 1.5 — a single object (single worker) or `{ parallel: [...] }` (parallel chunks). `remaining` must have at least one element; `chain_run_id` must be the exact ID call 1 returned. `{chain_dir}` in these prompts still resolves correctly — it is the same scratch directory from call 1.
 
 ## Optional: parallel scout stage (use when applicable)
 
@@ -96,7 +150,7 @@ A chain element may be a parallel stage that runs several subagents concurrently
 }
 ```
 
-Apply this ONLY when recon splits into clearly separable domains (e.g. frontend vs backend, two independent services). For most tasks the single Explore step is simpler and cheaper, so do not parallelize by default. When it applies, replace the first Explore step with a parallel scout stage and keep the rest of the chain identical:
+Apply this ONLY when recon splits into clearly separable domains (e.g. frontend vs backend, two independent services). For most tasks the single Explore step is simpler and cheaper, so do not parallelize by default. When it applies, replace the Explore step in call 1 with a parallel scout stage and keep the Plan step (with `pause_after: true`) identical:
 
 ```
 chain: [
@@ -110,44 +164,18 @@ chain: [
     output: "{chain_dir}/scout.md",
     output_mode: "file-only"
   },
-  { subagent_type: "Plan", reads: ["{chain_dir}/scout.md"], output: "{chain_dir}/plan.md", output_mode: "file-only", prompt: "...{{TASK}}... plan from the merged scout findings ..." },
-  // worker, reviewer, worker (unchanged)
+  { subagent_type: "Plan", reads: ["{chain_dir}/scout.md"], output: "{chain_dir}/plan.md", output_mode: "file-only", pause_after: true, prompt: "...{{TASK}}... plan from the merged scout findings ..." }
 ]
 ```
 
 The merged `scout.md` contains `### Member 1 (Explore)` and `### Member 2 (Explore)` blocks, so Plan reads one file covering both domains. Give each member a non-overlapping scope so findings do not duplicate.
 
-## Optional: parallel implement stage (use when the plan partitions)
-
-When the plan splits into 2-4 packages whose file ownership does NOT overlap, replace the single worker step with a parallel stage of package workers, the same pattern as `/execute-plan`. Use it only for larger features with clean file boundaries; for most features the single worker is simpler, so do not parallelize by default.
-
-Requirements:
-
-- The Plan step must define the disjoint partition: per-package owned files + assigned plan steps. No two packages may edit the same file. Shared files (lockfiles, barrels, config) and repo-wide commands (format-all, codegen, global build) are deferred to the fix-up worker, never run during the parallel stage.
-- Do NOT use `isolation: "worktree"` here. The reviewer inspects `git diff` in the main tree, so worktree-isolated changes would be invisible to it. Safety comes from the disjoint partition, not isolation.
-- Keep `continue_on_error` at its default (fail-fast): a half-applied package leaves the tree in a state the reviewer cannot safely reason about.
-
-Replace the worker step with:
-
-```
-{
-  parallel: [
-    { subagent_type: "worker", description: "Implement package A", output_mode: "file-only",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE A. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_package>\n\nImplement ONLY your package. Edit ONLY your owned files. Do NOT touch files outside your list, edit shared config/lockfiles, or run repo-wide format/build/codegen. Validate ONLY your slice (scoped typecheck/test). Use write_output for a verbose report: every file changed (path + summary), every test (file:line), scoped validation commands + full output, any out-of-package file you needed (report it, do NOT touch), decisions beyond the plan, open risks." },
-    { subagent_type: "worker", description: "Implement package B", output_mode: "file-only",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE B. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_package>\n\nSame contract as package A: edit ONLY your owned files, no shared/global changes, validate your slice, verbose write_output report." }
-  ],
-  output: "{chain_dir}/worker.md",
-  output_mode: "file-only"
-}
-```
-
-The reviewer then reads the merged `worker.md` (one `### Member N (worker)` block per package) and inspects the combined `git diff`. The fix-up worker (full tree, no package restriction) wires cross-package integration and runs the deferred shared-file + repo-wide validation.
-
 ## Rules
 
-- Substitute `{{CONVO_CONTEXT}}` and `{{TASK}}` in every step's `prompt` BEFORE calling `Agent`. Runtime substitutes `{previous}` and `{chain_dir}`, not `{{...}}`.
-- Do NOT collapse, skip, or modify chain steps.
-- Parallel scout stage is OPTIONAL. Use only when recon splits into separable domains. Default to the single Explore step.
-- Parallel implement stage is OPTIONAL — use only when the plan partitions into disjoint files. Do NOT give it `isolation: "worktree"`: the reviewer reads `git diff` in the main tree, so worktree changes would be invisible. Safety comes from disjoint file ownership; shared/global changes go to the fix-up worker.
-- Wait for the chain to complete, then report the final summary to the user.
+- This is two `Agent` calls, not one. Do not try to declare the implement/review/fix-up steps in call 1 — they are unreachable, since `pause_after: true` returns before the chain gets to them.
+- Substitute `{{CONVO_CONTEXT}}` and `{{TASK}}` in every step's `prompt` BEFORE calling `Agent`, in both calls. Runtime substitutes `{previous}` and `{chain_dir}`, not `{{...}}`.
+- Do NOT collapse, skip, or modify the Explore/Plan/implement/reviewer/fix-up steps.
+- Step 1.5 is REQUIRED, not optional — even a fan-out proposal from Plan must be reviewed by you before use, never dispatched unreviewed.
+- Check the parallel scout stage before defaulting to a single Explore step: if recon splits into separable domains (frontend vs backend, independent services), use it.
+- Check the parallel implement stage before defaulting to a single worker: if the plan (or its proposal) partitions into disjoint files, use it. Only stay single-worker when the work is genuinely one coupled change. Do NOT give parallel implement workers `isolation: "worktree"`: the reviewer reads `git diff` in the main tree, so worktree changes would be invisible. Safety comes from disjoint file ownership; shared/global changes go to the fix-up worker.
+- Wait for each call to complete before issuing the next, then report the final summary to the user.

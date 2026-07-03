@@ -18,7 +18,7 @@ Run a 3-step chain via the `Agent` tool's native `chain` parameter, starting fro
    - No two packages may edit the same file.
    - Shared files (package.json, lockfiles, shared config/barrels/snapshots) are owned by exactly ONE package, or deferred to the fix-up step.
    - Repo-wide commands that rewrite files (format-all, codegen, global build) are deferred to the fix-up step, never run during the parallel stage.
-   - If the plan cannot be cleanly partitioned (heavy cross-file coupling), use the single-worker fallback below.
+   - Try a coarser partition (fewer, larger packages) before giving up on splitting entirely — 2 packages with a clean file boundary still beats 1. Only use the single-worker fallback below when the plan is genuinely one coupled change with no clean file boundary at any granularity.
 
 The partition (per-package owned files + assigned plan steps) is substituted into each member prompt. The resolved plan becomes `{{PLAN}}`.
 

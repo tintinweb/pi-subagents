@@ -8,6 +8,18 @@ Run a 3-step chain via the `Agent` tool's native `chain` parameter. Each step wr
 
 **User task**: $@
 
+## Step -1: Escalation gate (REQUIRED, check before Step 0)
+
+`/feature-light` skips Explore, Plan, and any informed fan-out decision. That is only safe when the task is small enough that one worker can hold the whole thing in one pass. Before proceeding, check the task against every line below. If ANY line is true, STOP and use `/feature` instead — tell the user why in one sentence and switch.
+
+- Touches more than one architectural layer (e.g. backend + frontend, server + CLI plugin, schema + consumer) in the same change.
+- Touches 3 or more files that are not all trivial variations of the same edit (e.g. renaming a symbol everywhere doesn't count; changing three unrelated modules to support one feature does).
+- Requires understanding cross-file contracts or data flow you cannot see just by reading the task text (i.e. you would need to explore the codebase first to know what "done" requires).
+- The task description itself lists several sub-parts, phases, or "and also" clauses.
+- You are unsure whether it is scoped enough to hold in one worker's head. Default to `/feature` when unsure — the cost of an extra Explore+Plan pass is small, the cost of a 1000+ second single-worker mega-diff is not.
+
+Only proceed past this gate when the task is truly one tightly-coupled, single-layer change: a bug fix, a small UI tweak, a single function's behavior, one config change.
+
 ## Step 0: Tighten the requirement (REQUIRED, do not skip)
 
 Turn the user task ($@) into a clearly bounded requirement before invoking the chain.
@@ -65,9 +77,11 @@ Agent({
 })
 ```
 
-## Optional: parallel implement stage (rarely needed)
+## Check for a parallel implement stage before defaulting to a single worker
 
-`/feature-light` targets small scoped changes, so the single worker is almost always right. Only when the task clearly splits into 2-3 packages with NON-overlapping files, replace the worker step with a parallel stage. There is no Plan step here, so YOU (the parent) must define the disjoint partition up front in Step 0.
+Check every task against this, even here: does it touch 2-3 files with NO overlap between them (e.g. one change in file A, an unrelated change in file B)? If yes, replace the worker step with a parallel stage instead of doing them one after another. There is no Plan step here, so YOU (the parent) must define the disjoint partition up front in Step 0.
+
+Most tasks that pass the escalation gate above are small enough that this won't apply — the gate already filtered out cross-cutting, multi-layer work. But do the check; don't skip straight to a single worker out of habit when a task genuinely has two independent parts.
 
 Same rules as `/feature`'s parallel implement: disjoint file ownership (no two packages edit the same file), shared files + repo-wide commands (format-all, codegen, global build) deferred to the fix-up worker, NO `isolation: "worktree"` (the reviewer reads `git diff` in the main tree, so worktree changes would be invisible), `continue_on_error` left at its fail-fast default.
 
@@ -92,5 +106,5 @@ The reviewer reads the merged `worker.md` + the combined `git diff`. The fix-up 
 
 - Substitute `{{CONVO_CONTEXT}}` and `{{TASK}}` in every step's `prompt` BEFORE calling `Agent`. Runtime substitutes `{previous}` and `{chain_dir}`.
 - Do NOT collapse, skip, or modify chain steps.
-- Parallel implement stage is OPTIONAL and rarely warranted here — use only when the task splits into disjoint files, and never with `isolation: "worktree"` (the reviewer needs the main tree).
+- Check for a disjoint-file split before defaulting to a single worker, even on small tasks. Use it when the task splits into non-overlapping files; never with `isolation: "worktree"` (the reviewer needs the main tree).
 - Wait for the chain to complete, then report the final summary to the user.
