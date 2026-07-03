@@ -10,9 +10,9 @@
  *   - outputMode "inline" (default) includes content in results; "file-only" omits it.
  */
 
-import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { defineTool, type ToolDefinition } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { nanoid } from "nanoid";
@@ -49,13 +49,38 @@ export interface PersistResult {
  *
  * Layout: /tmp/pi-subagents-chain-<uid>/<runId>
  */
-export function createChainDir(): string {
+/** Root scratch directory all chain runs live under: /tmp/pi-subagents-chain-<uid>. */
+function chainScratchRoot(): string {
   const uid = process.getuid?.() ?? 0;
-  const root = join(tmpdir(), `pi-subagents-chain-${uid}`);
+  return join(tmpdir(), `pi-subagents-chain-${uid}`);
+}
+
+export function createChainDir(): string {
+  const root = chainScratchRoot();
   const runId = nanoid(12);
   const dir = join(root, runId);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/**
+ * Validate that a model-supplied `chain_run_id` resolves to exactly one
+ * directory level under the chain scratch root (i.e. matches `createChainDir`'s
+ * own layout) — never higher up, never nested deeper, no `..` escapes.
+ *
+ * `chain_run_id` is an LLM-controlled string used directly as a filesystem
+ * path; without this check it could be pointed at an arbitrary path to read
+ * or (via `remaining`'s subsequent writes) write outside the intended scratch
+ * directory.
+ */
+export function isValidChainRunId(candidate: string): boolean {
+  if (!candidate) return false;
+  const root = chainScratchRoot();
+  const resolved = resolve(candidate);
+  const rel = relative(root, resolved);
+  if (!rel || rel.startsWith("..") || isAbsolute(rel)) return false;
+  // Must be exactly one path segment (the runId), not nested deeper.
+  return !rel.includes(sep);
 }
 
 // ---------------------------------------------------------------------------
@@ -321,6 +346,170 @@ export function isAgentReadOnly(
     for (const t of denied) effective.delete(t);
   }
   return !effective.has("edit") && !effective.has("write");
+}
+
+// ---------------------------------------------------------------------------
+// chain-next fan-out proposals (pause_after / chain_run_id)
+// ---------------------------------------------------------------------------
+
+export interface ChainNextItem {
+  subagent_type: string;
+  prompt: string;
+  files: string[];
+  isolation?: "worktree";
+}
+
+export interface ChainNextResult {
+  /** Present only when the block parsed and validated cleanly. */
+  proposal?: ChainNextItem[];
+  /** Non-empty when a block was found but is malformed, or fails validation. */
+  errors: string[];
+}
+
+const CHAIN_NEXT_BLOCK_RE = /```chain-next\s*\n([\s\S]*?)```/;
+const MAX_CHAIN_NEXT_CHUNKS = 6;
+
+/**
+ * Look for a fenced ```chain-next``` JSON array in a step's output and parse +
+ * validate it. Returns `{ errors: [] }` (no proposal, no error) when no block
+ * is present — that's a normal outcome, not a failure.
+ *
+ * Validation gates:
+ *  - must be a non-empty JSON array, at most `MAX_CHAIN_NEXT_CHUNKS` items
+ *  - each item needs a non-empty `subagent_type`, `prompt`, and `files` array
+ *  - two items may not declare the same file unless both set `isolation: "worktree"`
+ *
+ * This never dispatches anything — it only produces a proposal for the parent
+ * to review and, if it agrees, hand-build into `remaining` on the follow-up call.
+ */
+export function parseChainNext(output: string): ChainNextResult {
+  const match = output.match(CHAIN_NEXT_BLOCK_RE);
+  if (!match) return { errors: [] };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch (err) {
+    return { errors: [`chain-next block is not valid JSON: ${err instanceof Error ? err.message : String(err)}`] };
+  }
+
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    return { errors: ["chain-next block must be a non-empty JSON array."] };
+  }
+  if (parsed.length > MAX_CHAIN_NEXT_CHUNKS) {
+    return { errors: [`chain-next proposes ${parsed.length} chunks, exceeding the max of ${MAX_CHAIN_NEXT_CHUNKS}.`] };
+  }
+
+  const errors: string[] = [];
+  const items: ChainNextItem[] = [];
+
+  parsed.forEach((raw, idx) => {
+    if (typeof raw !== "object" || raw === null) {
+      errors.push(`chain-next[${idx}]: not an object.`);
+      return;
+    }
+    const item = raw as Record<string, unknown>;
+    const subagent_type = typeof item.subagent_type === "string" && item.subagent_type ? item.subagent_type : undefined;
+    const prompt = typeof item.prompt === "string" && item.prompt ? item.prompt : undefined;
+    const isolation = item.isolation === "worktree" ? "worktree" as const : undefined;
+
+    if (!subagent_type) errors.push(`chain-next[${idx}]: missing "subagent_type".`);
+    if (!prompt) errors.push(`chain-next[${idx}]: missing "prompt".`);
+
+    let files: string[] = [];
+    if (!Array.isArray(item.files) || item.files.length === 0) {
+      errors.push(`chain-next[${idx}]: "files" must be a non-empty array.`);
+    } else if (item.files.some((f) => typeof f !== "string" || f.trim().length === 0)) {
+      errors.push(`chain-next[${idx}]: "files" must contain only non-empty strings — found a malformed entry.`);
+    } else {
+      files = item.files as string[];
+    }
+
+    items.push({ subagent_type: subagent_type ?? "worker", prompt: prompt ?? "", files, isolation });
+  });
+
+  if (errors.length > 0) return { errors };
+
+  // File-overlap check across chunks: only OK when both sides are worktree-isolated.
+  const ownerOf = new Map<string, number>();
+  for (let i = 0; i < items.length; i++) {
+    for (const file of items[i].files) {
+      const owner = ownerOf.get(file);
+      if (owner === undefined) {
+        ownerOf.set(file, i);
+        continue;
+      }
+      const bothIsolated = items[owner].isolation === "worktree" && items[i].isolation === "worktree";
+      if (!bothIsolated) {
+        errors.push(
+          `chain-next[${owner}] and chain-next[${i}] both touch "${file}" without isolation: "worktree" on both — would clobber.`,
+        );
+      }
+    }
+  }
+
+  if (errors.length > 0) return { errors };
+  return { proposal: items, errors: [] };
+}
+
+/** Render a validated chain-next proposal as a human-reviewable block. */
+export function formatChainNextProposal(proposal: ChainNextItem[]): string {
+  return proposal
+    .map((item, i) => {
+      const iso = item.isolation ? " (worktree)" : "";
+      return `${i + 1}. [${item.subagent_type}]${iso} files: ${item.files.join(", ")}\n   ${item.prompt}`;
+    })
+    .join("\n\n");
+}
+
+// ---------------------------------------------------------------------------
+// Chain pause/resume state (pause_after → chain_run_id + remaining)
+// ---------------------------------------------------------------------------
+
+export interface ChainPauseState {
+  previousOutput: string;
+  results: Array<{ step: number; agent: string; output: string; savedPath?: string; durationMs: number }>;
+  pausedAtStep: number;
+}
+
+const PAUSE_STATE_FILENAME = "_chain_pause_state.json";
+
+/** Persist chain state to the chain's scratch directory so a later Agent call (chain_run_id) can resume it. */
+export function saveChainPauseState(chainDir: string, state: ChainPauseState): void {
+  writeFileSync(join(chainDir, PAUSE_STATE_FILENAME), JSON.stringify(state), "utf-8");
+}
+
+/** Load previously persisted chain state. Returns undefined if missing or unreadable. */
+export function loadChainPauseState(chainDir: string): ChainPauseState | undefined {
+  try {
+    return JSON.parse(readFileSync(join(chainDir, PAUSE_STATE_FILENAME), "utf-8")) as ChainPauseState;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Load and immediately delete a paused chain's state file, making the pause
+ * single-use: a `chain_run_id` cannot be resumed twice (which would otherwise
+ * let a model dispatch the same `remaining` steps — and their file writes —
+ * more than once). Returns undefined if missing/unreadable (already consumed
+ * or never existed) without throwing.
+ */
+export function consumeChainPauseState(chainDir: string): ChainPauseState | undefined {
+  const path = join(chainDir, PAUSE_STATE_FILENAME);
+  let state: ChainPauseState | undefined;
+  try {
+    state = JSON.parse(readFileSync(path, "utf-8")) as ChainPauseState;
+  } catch {
+    return undefined;
+  }
+  try {
+    unlinkSync(path);
+  } catch {
+    // Best-effort: if deletion fails, still return the state — losing the
+    // single-use guarantee is better than losing the resume entirely.
+  }
+  return state;
 }
 
 // ---------------------------------------------------------------------------

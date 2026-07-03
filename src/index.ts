@@ -18,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultExtensions, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultExtensions, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
-import { buildReadsBlock, createChainDir, createChainOutputTool, formatParallelEditHazardWarning, injectOutputInstruction, isAgentReadOnly, mergeParallelOutputs, persistStepOutput, resolveOutputPath, resolveStepOutput, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateParallelStage, validateStepIO } from "./chain-io.js";
+import { buildReadsBlock, consumeChainPauseState, createChainDir, createChainOutputTool, formatChainNextProposal, formatParallelEditHazardWarning, injectOutputInstruction, isAgentReadOnly, isValidChainRunId, mergeParallelOutputs, parseChainNext, persistStepOutput, resolveOutputPath, resolveStepOutput, saveChainPauseState, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateParallelStage, validateStepIO, type ChainPauseState } from "./chain-io.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deleteGlobalActivity, setGlobalActivity } from "./global-registry.js";
@@ -229,6 +229,7 @@ type ChainElement =
       isolated?: boolean;
       inherit_context?: boolean;
       isolation?: "worktree";
+      pause_after?: boolean;
     }
   | {
       parallel: Array<{
@@ -861,6 +862,181 @@ Notes:
     return fullAgentToolDescription;
   })();
 
+  // Shared chain element schema — reused by both `chain` (top-level array) and
+  // `remaining` (steps supplied when resuming a paused chain via chain_run_id).
+  const chainElementUnion = Type.Union([
+    Type.Object({
+      subagent_type: Type.String({
+        description: "The type of specialized agent to use for this step.",
+      }),
+      prompt: Type.String({
+        description: "Task prompt. Use {previous} to inject output from the prior step.",
+      }),
+      description: Type.Optional(
+        Type.String({
+          description: "Short description of this step (shown in UI).",
+        })
+      ),
+      model: Type.Optional(
+        Type.String({
+          description: "Optional model override for this step.",
+        })
+      ),
+      thinking: Type.Optional(
+        Type.String({
+          description: "Thinking level override for this step.",
+        })
+      ),
+      max_turns: Type.Optional(
+        Type.Number({
+          description: "Max turns for this step.",
+          minimum: 1,
+        })
+      ),
+      output: Type.Optional(
+        Type.String({
+          description: "File path to write this step's output to (relative to cwd or absolute). The agent is instructed to write its findings there. Use {chain_dir} to reference the shared per-run scratch directory.",
+        })
+      ),
+      output_mode: Type.Optional(
+        Type.Union(
+          [Type.Literal("inline"), Type.Literal("file-only")],
+          {
+            description: '"inline" (default): include file content in chain result and pass to next step. "file-only": store to disk only; next step receives the file path, not its content.',
+          }
+        )
+      ),
+      reads: Type.Optional(
+        Type.Array(
+          Type.String({ description: "A file path to read (relative to cwd or absolute)." }),
+          {
+            description: "Files to read at the start of this step and prepend to the prompt as context.",
+          }
+        )
+      ),
+      isolated: Type.Optional(
+        Type.Boolean({
+          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
+        }),
+      ),
+      inherit_context: Type.Optional(
+        Type.Boolean({
+          description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
+        }),
+      ),
+      isolation: Type.Optional(
+        Type.Literal("worktree", {
+          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+        }),
+      ),
+      pause_after: Type.Optional(
+        Type.Boolean({
+          description:
+            'If true, the chain stops after this step instead of continuing. Returns the step output plus a `chain_run_id`. ' +
+            'If the step\'s output contains a fenced ```chain-next``` JSON array (each item: {subagent_type, prompt, files, isolation?}), ' +
+            'it is parsed and validated (file-overlap, non-empty files, chunk count) and returned as a reviewable proposal — never auto-dispatched. ' +
+            'Resume by calling Agent again with `chain_run_id` and `remaining` (the steps to run next, e.g. a `{parallel:[...]}` stage built from the proposal).',
+        }),
+      ),
+    }),
+    Type.Object({
+      parallel: Type.Array(
+        Type.Object({
+          subagent_type: Type.String({
+            description: "The type of specialized agent to use for this member.",
+          }),
+          prompt: Type.String({
+            description: "Task prompt. Use {previous} to inject the stage input into each parallel member.",
+          }),
+          description: Type.Optional(
+            Type.String({
+              description: "Short description of this member (shown in UI).",
+            })
+          ),
+          model: Type.Optional(
+            Type.String({
+              description: "Optional model override for this member.",
+            })
+          ),
+          thinking: Type.Optional(
+            Type.String({
+              description: "Thinking level override for this member.",
+            })
+          ),
+          max_turns: Type.Optional(
+            Type.Number({
+              description: "Max turns for this member.",
+              minimum: 1,
+            })
+          ),
+          output: Type.Optional(
+            Type.String({
+              description: "File path to write this member's output to (relative to cwd or absolute).",
+            })
+          ),
+          output_mode: Type.Optional(
+            Type.Union(
+              [Type.Literal("inline"), Type.Literal("file-only")],
+              {
+                description: '"inline" (default): include file content in member result and pass to stage merge. "file-only": store to disk only; member sees its output file path.',
+              }
+            )
+          ),
+          reads: Type.Optional(
+            Type.Array(
+              Type.String({ description: "A file path to read (relative to cwd or absolute)." }),
+              {
+                description: "Files to read at the start of this member and prepend to the prompt as context.",
+              }
+            )
+          ),
+          isolated: Type.Optional(
+            Type.Boolean({
+              description: "If true, agent gets no extension/MCP tools — only built-in tools.",
+            }),
+          ),
+          inherit_context: Type.Optional(
+            Type.Boolean({
+              description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
+            }),
+          ),
+          isolation: Type.Optional(
+            Type.Literal("worktree", {
+              description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+            }),
+          ),
+        }),
+        {
+          description: "Members run concurrently. Their outputs are labeled, concatenated, and passed to the next chain step via {previous}.",
+          minItems: 1,
+        }
+      ),
+      continue_on_error: Type.Optional(
+        Type.Boolean({
+          description: "If true, a failed member does not abort the chain; surviving outputs are preserved and the failure is noted. Default: false (fail-fast).",
+        })
+      ),
+      description: Type.Optional(
+        Type.String({
+          description: "Short description of this parallel stage (shown in UI).",
+        })
+      ),
+      output: Type.Optional(
+        Type.String({
+          description: "File path to write the merged stage output to (relative to cwd or absolute).",
+        })
+      ),
+      output_mode: Type.Optional(
+        Type.Union(
+          [Type.Literal("inline"), Type.Literal("file-only")],
+          {
+            description: '"inline" (default): include the merged stage output in the chain result and pass it to the next step. "file-only": store the merged output to disk only; the next step receives the saved file path in {previous}.',
+          }
+        )
+      ),
+    }),
+  ]);
+
   pi.registerTool(defineTool({
     name: "Agent",
     label: "Agent",
@@ -903,175 +1079,21 @@ Notes:
         }),
       ),
       chain: Type.Optional(
-        Type.Array(
-          Type.Union([
-            Type.Object({
-              subagent_type: Type.String({
-                description: "The type of specialized agent to use for this step.",
-              }),
-              prompt: Type.String({
-                description: "Task prompt. Use {previous} to inject output from the prior step.",
-              }),
-              description: Type.Optional(
-                Type.String({
-                  description: "Short description of this step (shown in UI).",
-                })
-              ),
-              model: Type.Optional(
-                Type.String({
-                  description: "Optional model override for this step.",
-                })
-              ),
-              thinking: Type.Optional(
-                Type.String({
-                  description: "Thinking level override for this step.",
-                })
-              ),
-              max_turns: Type.Optional(
-                Type.Number({
-                  description: "Max turns for this step.",
-                  minimum: 1,
-                })
-              ),
-              output: Type.Optional(
-                Type.String({
-                  description: "File path to write this step's output to (relative to cwd or absolute). The agent is instructed to write its findings there. Use {chain_dir} to reference the shared per-run scratch directory.",
-                })
-              ),
-              output_mode: Type.Optional(
-                Type.Union(
-                  [Type.Literal("inline"), Type.Literal("file-only")],
-                  {
-                    description: '"inline" (default): include file content in chain result and pass to next step. "file-only": store to disk only; next step receives the file path, not its content.',
-                  }
-                )
-              ),
-              reads: Type.Optional(
-                Type.Array(
-                  Type.String({ description: "A file path to read (relative to cwd or absolute)." }),
-                  {
-                    description: "Files to read at the start of this step and prepend to the prompt as context.",
-                  }
-                )
-              ),
-              isolated: Type.Optional(
-                Type.Boolean({
-                  description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-                }),
-              ),
-              inherit_context: Type.Optional(
-                Type.Boolean({
-                  description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
-                }),
-              ),
-              isolation: Type.Optional(
-                Type.Literal("worktree", {
-                  description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-                }),
-              ),
-            }),
-            Type.Object({
-              parallel: Type.Array(
-                Type.Object({
-                  subagent_type: Type.String({
-                    description: "The type of specialized agent to use for this member.",
-                  }),
-                  prompt: Type.String({
-                    description: "Task prompt. Use {previous} to inject the stage input into each parallel member.",
-                  }),
-                  description: Type.Optional(
-                    Type.String({
-                      description: "Short description of this member (shown in UI).",
-                    })
-                  ),
-                  model: Type.Optional(
-                    Type.String({
-                      description: "Optional model override for this member.",
-                    })
-                  ),
-                  thinking: Type.Optional(
-                    Type.String({
-                      description: "Thinking level override for this member.",
-                    })
-                  ),
-                  max_turns: Type.Optional(
-                    Type.Number({
-                      description: "Max turns for this member.",
-                      minimum: 1,
-                    })
-                  ),
-                  output: Type.Optional(
-                    Type.String({
-                      description: "File path to write this member's output to (relative to cwd or absolute).",
-                    })
-                  ),
-                  output_mode: Type.Optional(
-                    Type.Union(
-                      [Type.Literal("inline"), Type.Literal("file-only")],
-                      {
-                        description: '"inline" (default): include file content in member result and pass to stage merge. "file-only": store to disk only; member sees its output file path.',
-                      }
-                    )
-                  ),
-                  reads: Type.Optional(
-                    Type.Array(
-                      Type.String({ description: "A file path to read (relative to cwd or absolute)." }),
-                      {
-                        description: "Files to read at the start of this member and prepend to the prompt as context.",
-                      }
-                    )
-                  ),
-                  isolated: Type.Optional(
-                    Type.Boolean({
-                      description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-                    }),
-                  ),
-                  inherit_context: Type.Optional(
-                    Type.Boolean({
-                      description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
-                    }),
-                  ),
-                  isolation: Type.Optional(
-                    Type.Literal("worktree", {
-                      description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-                    }),
-                  ),
-                }),
-                {
-                  description: "Members run concurrently. Their outputs are labeled, concatenated, and passed to the next chain step via {previous}.",
-                  minItems: 1,
-                }
-              ),
-              continue_on_error: Type.Optional(
-                Type.Boolean({
-                  description: "If true, a failed member does not abort the chain; surviving outputs are preserved and the failure is noted. Default: false (fail-fast).",
-                })
-              ),
-              description: Type.Optional(
-                Type.String({
-                  description: "Short description of this parallel stage (shown in UI).",
-                })
-              ),
-              output: Type.Optional(
-                Type.String({
-                  description: "File path to write the merged stage output to (relative to cwd or absolute).",
-                })
-              ),
-              output_mode: Type.Optional(
-                Type.Union(
-                  [Type.Literal("inline"), Type.Literal("file-only")],
-                  {
-                    description: '"inline" (default): include the merged stage output in the chain result and pass it to the next step. "file-only": store the merged output to disk only; the next step receives the saved file path in {previous}.',
-                  }
-                )
-              ),
-            }),
-          ]),
-          {
-            description: "Chain of agents. Each element is either a single sequential step or a {parallel:[...]} stage. Sequential steps receive the prior output via {previous}; parallel members run concurrently and merge into one labeled concat for downstream handoff. PREFER PARALLEL: consecutive single-agent steps run serially and accumulate every output in context (slow + bloat). Use a separate step only when it consumes the previous output; otherwise group independent agents into one {parallel:[...]} stage.",
-            minItems: 2,
-          }
-        )
+        Type.Array(chainElementUnion, {
+          description: "Chain of agents. Each element is either a single sequential step or a {parallel:[...]} stage. Sequential steps receive the prior output via {previous}; parallel members run concurrently and merge into one labeled concat for downstream handoff. Parallel stages fail-fast by default; set continue_on_error to keep surviving outputs. PREFER PARALLEL: consecutive single-agent steps run serially and accumulate every output in context (slow + bloat). Use a separate step only when it consumes the previous output; otherwise group independent agents into one {parallel:[...]} stage. Set pause_after: true on a step (e.g. a planning step) to stop the chain there and review its output — including any ```chain-next``` fan-out proposal — before dispatching the rest via chain_run_id + remaining.",
+          minItems: 2,
+        })
+      ),
+      chain_run_id: Type.Optional(
+        Type.String({
+          description: "Resume a paused chain (returned when a step had pause_after: true) by its ID. Must be paired with `remaining`.",
+        }),
+      ),
+      remaining: Type.Optional(
+        Type.Array(chainElementUnion, {
+          description: "The steps to run after resuming a paused chain via chain_run_id. Review the paused step's output (and any chain-next proposal) before authoring these — never paste the proposal through unreviewed.",
+          minItems: 1,
+        })
       ),
       isolated: Type.Optional(
         Type.Boolean({
@@ -1227,6 +1249,27 @@ Notes:
 
       // Reload custom agents so new .pi/agents/*.md files are picked up without restart
       reloadCustomAgents();
+
+      if (params.chain_run_id) {
+        if (!params.remaining || params.remaining.length === 0) {
+          return textResult("chain_run_id requires `remaining`: the steps to run after the pause.");
+        }
+        if (!isValidChainRunId(params.chain_run_id)) {
+          return textResult(`Invalid chain_run_id: "${params.chain_run_id}". It must be an ID returned by a previous paused chain, not an arbitrary path.`);
+        }
+        // Single-use: consuming deletes the state file, so a chain_run_id cannot
+        // be resumed twice (which would otherwise re-dispatch `remaining` and
+        // duplicate whatever file writes/edits it makes).
+        const pauseState = consumeChainPauseState(params.chain_run_id);
+        if (!pauseState) {
+          return textResult(`No paused chain found at "${params.chain_run_id}". It may have been cleaned up or already resumed.`);
+        }
+        return await executeChain(params.remaining, params, signal, onUpdate, ctx, {
+          chainDir: params.chain_run_id,
+          initialPreviousOutput: pauseState.previousOutput,
+          priorResults: pauseState.results,
+        });
+      }
 
       if (params.chain && params.chain.length > 0) {
         return await executeChain(params.chain, params, signal, onUpdate, ctx);
@@ -1592,7 +1635,8 @@ Notes:
     topParams: any,
     signal: AbortSignal | undefined,
     onUpdate: any,
-    ctx: any
+    ctx: any,
+    resumeState?: { chainDir: string; initialPreviousOutput: string; priorResults: ChainPauseState["results"] }
   ) {
     // Validate IO config for all elements before starting any work
     for (let i = 0; i < chain.length; i++) {
@@ -1610,17 +1654,23 @@ Notes:
     // Warn (visibly, in chain result) when a file-only step is not matched by reads on the next step
     const chainWarnings: string[] = validateChainFileOnlyHandoff(chain);
 
-    // Create a per-run scratch directory (shared across all steps)
-    const chainDir = createChainDir();
+    // Reuse the paused run's scratch directory when resuming, otherwise create a fresh one.
+    const chainDir = resumeState?.chainDir ?? createChainDir();
 
-    let previousOutput = "";
+    let previousOutput = resumeState?.initialPreviousOutput ?? "";
     const results: Array<{
       step: number;
       agent: string;
       output: string;
       savedPath?: string;
       durationMs: number;
-    }> = [];
+    }> = resumeState ? [...resumeState.priorResults] : [];
+
+    // When resuming a paused chain, step numbers and totals must account for
+    // the steps that already ran before the pause — otherwise resumed steps
+    // restart at "1/N" and collide with the prior run's numbering.
+    const stepBase = resumeState?.priorResults.length ?? 0;
+    const totalSteps = stepBase + chain.length;
 
     type SequentialChainStep = Extract<ChainElement, { subagent_type: string }>;
     type ParallelStage = Extract<ChainElement, { parallel: unknown[] }>;
@@ -1711,7 +1761,7 @@ Notes:
       | { fatal: false; previousOutput: string; results: Array<{ step: number; agent: string; output: string; savedPath?: string; durationMs: number }>; warnings: string[] }
     > => {
       if (signal?.aborted) {
-        return { fatal: true, fatalMessage: `Chain stopped at step ${stageIndex + 1}: aborted.` };
+        return { fatal: true, fatalMessage: `Chain stopped at step ${stepBase + stageIndex + 1}: aborted.` };
       }
 
       const warnings: string[] = [];
@@ -1724,7 +1774,7 @@ Notes:
           const prev = seenOutputPaths.get(prepared.resolvedOutputPath);
           if (prev !== undefined) {
             warnings.push(
-              `⚠ Parallel stage ${stageIndex + 1} members ${prev + 1} and ${m + 1} both write ${prepared.resolvedOutputPath}; last write wins.`,
+              `⚠ Parallel stage ${stepBase + stageIndex + 1} members ${prev + 1} and ${m + 1} both write ${prepared.resolvedOutputPath}; last write wins.`,
             );
           } else {
             seenOutputPaths.set(prepared.resolvedOutputPath, m);
@@ -1748,7 +1798,7 @@ Notes:
             {
               type: "text",
               text:
-                `Chain step ${stageIndex + 1}/${chain.length} — parallel: ` +
+                `Chain step ${stepBase + stageIndex + 1}/${totalSteps} — parallel: ` +
                 preparedMembers
                   .map((prepared, idx) => {
                     const state = memberStates[idx];
@@ -1785,7 +1835,7 @@ Notes:
               content: [
                 {
                   type: "text",
-                  text: `Chain step ${stageIndex + 1}/${chain.length} parallel ${m + 1}/${preparedMembers.length}: ${prepared.stepDisplayName}: ${describeActivity(state.activeTools, state.responseText)}`,
+                  text: `Chain step ${stepBase + stageIndex + 1}/${totalSteps} parallel ${m + 1}/${preparedMembers.length}: ${prepared.stepDisplayName}: ${describeActivity(state.activeTools, state.responseText)}`,
                 },
               ],
             });
@@ -1825,7 +1875,7 @@ Notes:
           spawnedAgentIds[m] = id;
           const record = manager.getRecord(id);
           if (!record) {
-            throw new Error(`Parallel stage ${stageIndex + 1}: failed to capture spawned member ${m + 1}.`);
+            throw new Error(`Parallel stage ${stepBase + stageIndex + 1}: failed to capture spawned member ${m + 1}.`);
           }
           records[m] = record;
         }
@@ -1843,7 +1893,7 @@ Notes:
         finalizeParallelMembers();
         return {
           fatal: true,
-          fatalMessage: `Chain failed at step ${stageIndex + 1}/${chain.length} parallel stage start: ${err instanceof Error ? err.message : String(err)}`,
+          fatalMessage: `Chain failed at step ${stepBase + stageIndex + 1}/${totalSteps} parallel stage start: ${err instanceof Error ? err.message : String(err)}`,
         };
       }
 
@@ -1870,12 +1920,12 @@ Notes:
         if (record.status === "error" || record.status === "stopped" || record.status === "aborted") {
           const errMsg = record.error ?? record.status;
           if (!stage.continue_on_error) {
-            fatalMessage ??= `Chain failed at step ${stageIndex + 1}/${chain.length} parallel member ${m + 1} (${prepared.stepDisplayName}): ${errMsg}`;
+            fatalMessage ??= `Chain failed at step ${stepBase + stageIndex + 1}/${totalSteps} parallel member ${m + 1} (${prepared.stepDisplayName}): ${errMsg}`;
           } else {
-            warnings.push(`⚠ Stage ${stageIndex + 1} member ${m + 1} (${prepared.stepDisplayName}) failed: ${errMsg}. Surviving outputs preserved.`);
+            warnings.push(`⚠ Stage ${stepBase + stageIndex + 1} member ${m + 1} (${prepared.stepDisplayName}) failed: ${errMsg}. Surviving outputs preserved.`);
           }
           memberRows.push({
-            step: stageIndex + 1,
+            step: stepBase + stageIndex + 1,
             agent: prepared.stepDisplayName,
             summaryAgent: `${prepared.stepDisplayName} (parallel ${m + 1}/${preparedMembers.length})`,
             output: rawOutput || "(no output)",
@@ -1893,15 +1943,15 @@ Notes:
         });
 
         if (saveError) {
-          console.warn(`[pi-subagents] Parallel stage ${stageIndex + 1} member ${m + 1} output file warning: ${saveError}`);
+          console.warn(`[pi-subagents] Parallel stage ${stepBase + stageIndex + 1} member ${m + 1} output file warning: ${saveError}`);
           const fallbackMsg = prepared.readOnly
-            ? `ℹ Parallel stage ${stageIndex + 1} member ${m + 1} used a read-only agent; output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`
-            : `ℹ Parallel stage ${stageIndex + 1} member ${m + 1}: agent did not write to the output file; in-memory output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`;
+            ? `ℹ Parallel stage ${stepBase + stageIndex + 1} member ${m + 1} used a read-only agent; output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`
+            : `ℹ Parallel stage ${stepBase + stageIndex + 1} member ${m + 1}: agent did not write to the output file; in-memory output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`;
           warnings.push(fallbackMsg);
         }
 
         memberRows.push({
-          step: stageIndex + 1,
+          step: stepBase + stageIndex + 1,
           agent: prepared.stepDisplayName,
           summaryAgent: `${prepared.stepDisplayName} (parallel ${m + 1}/${preparedMembers.length})`,
           output: prepared.outputMode === "file-only" && savedPath ? `Output saved to: ${savedPath}` : resolvedOutput,
@@ -1944,7 +1994,7 @@ Notes:
         const persist = persistStepOutput(resolvedStageOutputPath, merged);
         stageSavedPath = persist.savedPath;
         if (persist.saveError) {
-          warnings.push(`⚠ Parallel stage ${stageIndex + 1} merged output save error: ${persist.saveError}`);
+          warnings.push(`⚠ Parallel stage ${stepBase + stageIndex + 1} merged output save error: ${persist.saveError}`);
         }
       }
 
@@ -1969,7 +2019,7 @@ Notes:
     for (let i = 0; i < chain.length; i++) {
       const el = chain[i];
       if (signal?.aborted) {
-        return textResult(`Chain stopped at step ${i + 1}: aborted.`);
+        return textResult(`Chain stopped at step ${stepBase + i + 1}: aborted.`);
       }
 
       if (isParallelStage(el)) {
@@ -1989,7 +2039,7 @@ Notes:
             content: [
               {
                 type: "text",
-                text: `Chain step ${i + 1}/${chain.length}: ${stepState.toolUses} tool uses…`,
+                text: `Chain step ${stepBase + i + 1}/${totalSteps}: ${stepState.toolUses} tool uses…`,
               },
             ],
           });
@@ -2017,7 +2067,7 @@ Notes:
           content: [
             {
               type: "text",
-              text: `Chain step ${i + 1}/${chain.length} — ${prepared.stepDisplayName}: ${describeActivity(stepState.activeTools, stepState.responseText)}`,
+              text: `Chain step ${stepBase + i + 1}/${totalSteps} — ${prepared.stepDisplayName}: ${describeActivity(stepState.activeTools, stepState.responseText)}`,
             },
           ],
         });
@@ -2031,7 +2081,7 @@ Notes:
           prepared.resolvedStepType,
           prepared.stepPrompt,
           {
-            description: el.description ?? `Chain step ${i + 1}: ${prepared.stepDisplayName}`,
+            description: el.description ?? `Chain step ${stepBase + i + 1}: ${prepared.stepDisplayName}`,
             model: prepared.model,
             maxTurns: prepared.effectiveMaxTurns,
             isolated: prepared.resolvedConfig.isolated,
@@ -2057,7 +2107,7 @@ Notes:
 
       if (record.status === "error") {
         return textResult(
-          `Chain failed at step ${i + 1}/${chain.length} (${prepared.stepDisplayName}): ${record.error}\n\n` +
+          `Chain failed at step ${stepBase + i + 1}/${totalSteps} (${prepared.stepDisplayName}): ${record.error}\n\n` +
             (results.length > 0
               ? `Completed steps:\n${results.map((r) => `  ${r.step}. ${r.agent}: ${r.output.slice(0, 100)}…`).join("\n")}`
               : "")
@@ -2066,12 +2116,12 @@ Notes:
 
       if (record.status === "stopped") {
         return textResult(
-          `Chain stopped at step ${i + 1}/${chain.length} (${prepared.stepDisplayName}): agent was stopped.`
+          `Chain stopped at step ${stepBase + i + 1}/${totalSteps} (${prepared.stepDisplayName}): agent was stopped.`
         );
       }
 
       if (record.status === "aborted") {
-        return textResult(`Chain aborted at step ${i + 1}/${chain.length}.`);
+        return textResult(`Chain aborted at step ${stepBase + i + 1}/${totalSteps}.`);
       }
 
       const inMemoryOutput = record.result?.trim() ?? "";
@@ -2088,7 +2138,7 @@ Notes:
       }
 
       results.push({
-        step: i + 1,
+        step: stepBase + i + 1,
         agent: prepared.stepDisplayName,
         output: prepared.outputMode === "file-only" && savedPath
           ? `Output saved to: ${savedPath}`
@@ -2098,11 +2148,41 @@ Notes:
       });
 
       if (saveError) {
-        console.warn(`[pi-subagents] Chain step ${i + 1} output file warning: ${saveError}`);
+        console.warn(`[pi-subagents] Chain step ${stepBase + i + 1} output file warning: ${saveError}`);
         const fallbackMsg = prepared.readOnly
-          ? `ℹ Step ${i + 1} used a read-only agent; output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`
-          : `ℹ Step ${i + 1}: agent did not write to the output file; in-memory output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`;
+          ? `ℹ Step ${stepBase + i + 1} used a read-only agent; output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`
+          : `ℹ Step ${stepBase + i + 1}: agent did not write to the output file; in-memory output was saved by the orchestrator to ${savedPath ?? prepared.resolvedOutputPath}.`;
         chainWarnings.push(fallbackMsg);
+      }
+
+      if (el.pause_after) {
+        saveChainPauseState(chainDir, { previousOutput, results, pausedAtStep: i });
+        const pausedMs = results.reduce((s, r) => s + r.durationMs, 0);
+        const pausedSummary = results
+          .map((r) => {
+            const fileNote = r.savedPath ? `\n  → saved to ${r.savedPath}` : "";
+            return `Step ${r.step} (${r.agent}) — ${formatMs(r.durationMs)}:${fileNote}\n${r.output.slice(0, 200)}${r.output.length > 200 ? "…" : ""}`;
+          })
+          .join("\n\n---\n\n");
+
+        const chainNext = parseChainNext(previousOutput);
+        let proposalBlock: string;
+        if (chainNext.errors.length > 0) {
+          proposalBlock =
+            `\n\n⚠ chain-next block invalid, no auto-proposal:\n${chainNext.errors.map((e) => `  - ${e}`).join("\n")}\n\n` +
+            `Review ${prepared.stepDisplayName}'s output above and author \`remaining\` yourself, then call Agent again with chain_run_id: "${chainDir}".`;
+        } else if (chainNext.proposal) {
+          proposalBlock =
+            `\n\n**Proposed next steps** (from ${prepared.stepDisplayName}'s chain-next block — review before dispatching, do not paste through unreviewed):\n${formatChainNextProposal(chainNext.proposal)}\n\n` +
+            `To continue: call Agent again with chain_run_id: "${chainDir}" and \`remaining\` built from (or overriding) this proposal — e.g. one { parallel: [...] } stage using these entries.`;
+        } else {
+          proposalBlock =
+            `\n\nNo chain-next block found in this step's output. Review the output above and author \`remaining\` yourself, then call Agent again with chain_run_id: "${chainDir}".`;
+        }
+
+        return textResult(
+          `Chain paused after step ${stepBase + i + 1}/${totalSteps} (${prepared.stepDisplayName}). chain_run_id: ${chainDir}\n\n${pausedSummary}${proposalBlock}`
+        );
       }
     }
 
@@ -2122,7 +2202,7 @@ Notes:
         : "";
 
     return textResult(
-      `Chain completed in ${formatMs(totalMs)} (${chain.length} steps). Chain directory: ${chainDir}\n\n${summary}${warningsBlock}`
+      `Chain completed in ${formatMs(totalMs)} (${totalSteps} steps). Chain directory: ${chainDir}\n\n${summary}${warningsBlock}`
     );
   }
 

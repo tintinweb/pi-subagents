@@ -4,15 +4,21 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   buildReadsBlock,
+  consumeChainPauseState,
   createChainDir,
   createChainOutputTool,
+  formatChainNextProposal,
   formatParallelEditHazardWarning,
   injectOutputInstruction,
   isAgentReadOnly,
+  isValidChainRunId,
+  loadChainPauseState,
   mergeParallelOutputs,
+  parseChainNext,
   persistStepOutput,
   resolveOutputPath,
   resolveStepOutput,
+  saveChainPauseState,
   snapshotOutputFile,
   substituteChainPlaceholders,
   validateChainFileOnlyHandoff,
@@ -789,5 +795,201 @@ describe("file-only mode: previousOutput is the raw file path (blocker regressio
     // resolvedReads[0] is now a sentence, not a path
     expect(resolvedReads[0]).toContain("Output saved to:");
     expect(resolvedReads[0]).not.toBe(savedPath);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseChainNext
+// ---------------------------------------------------------------------------
+
+describe("parseChainNext", () => {
+  it("returns no proposal and no errors when there is no chain-next block", () => {
+    const result = parseChainNext("Just a plain plan with no fan-out.");
+    expect(result.proposal).toBeUndefined();
+    expect(result.errors).toEqual([]);
+  });
+
+  it("parses a valid single-chunk proposal", () => {
+    const output = [
+      "Plan text here.",
+      "```chain-next",
+      JSON.stringify([
+        { subagent_type: "worker", prompt: "Do X", files: ["/repo/a.ts"] },
+      ]),
+      "```",
+    ].join("\n");
+    const result = parseChainNext(output);
+    expect(result.errors).toEqual([]);
+    expect(result.proposal).toHaveLength(1);
+    expect(result.proposal?.[0]).toMatchObject({ subagent_type: "worker", prompt: "Do X", files: ["/repo/a.ts"] });
+  });
+
+  it("parses multiple disjoint chunks", () => {
+    const output = [
+      "```chain-next",
+      JSON.stringify([
+        { subagent_type: "worker", prompt: "Backend", files: ["/repo/server.go"] },
+        { subagent_type: "worker", prompt: "Frontend", files: ["/repo/app.tsx"] },
+      ]),
+      "```",
+    ].join("\n");
+    const result = parseChainNext(output);
+    expect(result.errors).toEqual([]);
+    expect(result.proposal).toHaveLength(2);
+  });
+
+  it("rejects invalid JSON", () => {
+    const output = "```chain-next\nnot json\n```";
+    const result = parseChainNext(output);
+    expect(result.proposal).toBeUndefined();
+    expect(result.errors[0]).toContain("not valid JSON");
+  });
+
+  it("rejects an empty array", () => {
+    const output = "```chain-next\n[]\n```";
+    const result = parseChainNext(output);
+    expect(result.errors[0]).toContain("non-empty");
+  });
+
+  it("rejects more than the max chunk count", () => {
+    const chunks = Array.from({ length: 7 }, (_, i) => ({
+      subagent_type: "worker",
+      prompt: `chunk ${i}`,
+      files: [`/repo/f${i}.ts`],
+    }));
+    const output = `\`\`\`chain-next\n${JSON.stringify(chunks)}\n\`\`\``;
+    const result = parseChainNext(output);
+    expect(result.errors[0]).toContain("exceeding the max");
+  });
+
+  it("rejects a chunk missing subagent_type, prompt, or files", () => {
+    const output = `\`\`\`chain-next\n${JSON.stringify([{ subagent_type: "worker", prompt: "x", files: [] }])}\n\`\`\``;
+    const result = parseChainNext(output);
+    expect(result.proposal).toBeUndefined();
+    expect(result.errors.some((e) => e.includes('"files" must be a non-empty array'))).toBe(true);
+  });
+
+  it("rejects overlapping files across chunks without worktree isolation on both sides", () => {
+    const output = `\`\`\`chain-next\n${JSON.stringify([
+      { subagent_type: "worker", prompt: "a", files: ["/repo/shared.ts"] },
+      { subagent_type: "worker", prompt: "b", files: ["/repo/shared.ts"] },
+    ])}\n\`\`\``;
+    const result = parseChainNext(output);
+    expect(result.proposal).toBeUndefined();
+    expect(result.errors[0]).toContain("would clobber");
+  });
+
+  it("allows overlapping files when both chunks declare isolation: worktree", () => {
+    const output = `\`\`\`chain-next\n${JSON.stringify([
+      { subagent_type: "worker", prompt: "a", files: ["/repo/shared.ts"], isolation: "worktree" },
+      { subagent_type: "worker", prompt: "b", files: ["/repo/shared.ts"], isolation: "worktree" },
+    ])}\n\`\`\``;
+    const result = parseChainNext(output);
+    expect(result.errors).toEqual([]);
+    expect(result.proposal).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatChainNextProposal
+// ---------------------------------------------------------------------------
+
+describe("formatChainNextProposal", () => {
+  it("renders each chunk with its type, files, and prompt", () => {
+    const text = formatChainNextProposal([
+      { subagent_type: "worker", prompt: "Do X", files: ["/repo/a.ts"] },
+      { subagent_type: "worker", prompt: "Do Y", files: ["/repo/b.ts"], isolation: "worktree" },
+    ]);
+    expect(text).toContain("1. [worker] files: /repo/a.ts");
+    expect(text).toContain("Do X");
+    expect(text).toContain("2. [worker] (worktree) files: /repo/b.ts");
+    expect(text).toContain("Do Y");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// saveChainPauseState / loadChainPauseState
+// ---------------------------------------------------------------------------
+
+describe("chain pause state", () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = join(tmpdir(), `chain-io-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  it("round-trips state through save and load", () => {
+    const state = {
+      previousOutput: "plan output text",
+      results: [{ step: 1, agent: "Plan", output: "plan output text", durationMs: 1234 }],
+      pausedAtStep: 0,
+    };
+    saveChainPauseState(testDir, state);
+    const loaded = loadChainPauseState(testDir);
+    expect(loaded).toEqual(state);
+  });
+
+  it("returns undefined when no state file exists", () => {
+    expect(loadChainPauseState(testDir)).toBeUndefined();
+  });
+
+  it("rejects malformed files entries instead of silently dropping them", () => {
+    const output = `\`\`\`chain-next\n${JSON.stringify([
+      { subagent_type: "worker", prompt: "a", files: ["/repo/a.ts", 42, "  "] },
+    ])}\n\`\`\``;
+    const result = parseChainNext(output);
+    expect(result.proposal).toBeUndefined();
+    expect(result.errors[0]).toContain("non-empty strings");
+  });
+});
+
+describe("consumeChainPauseState", () => {
+  let testDir: string;
+
+  beforeEach(() => {
+    testDir = join(tmpdir(), `chain-io-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(testDir, { recursive: true });
+  });
+
+  it("returns the state and deletes it, making resume single-use", () => {
+    const state = {
+      previousOutput: "plan output",
+      results: [{ step: 1, agent: "Plan", output: "plan output", durationMs: 10 }],
+      pausedAtStep: 0,
+    };
+    saveChainPauseState(testDir, state);
+
+    const first = consumeChainPauseState(testDir);
+    expect(first).toEqual(state);
+
+    const second = consumeChainPauseState(testDir);
+    expect(second).toBeUndefined();
+  });
+
+  it("returns undefined when no state file exists", () => {
+    expect(consumeChainPauseState(testDir)).toBeUndefined();
+  });
+});
+
+describe("isValidChainRunId", () => {
+  it("accepts a path shaped like createChainDir's own output", () => {
+    const dir = createChainDir();
+    expect(isValidChainRunId(dir)).toBe(true);
+  });
+
+  it("rejects an empty string", () => {
+    expect(isValidChainRunId("")).toBe(false);
+  });
+
+  it("rejects paths outside the chain scratch root", () => {
+    expect(isValidChainRunId("/etc/passwd")).toBe(false);
+    expect(isValidChainRunId(tmpdir())).toBe(false);
+  });
+
+  it("rejects nested/traversal paths under the scratch root", () => {
+    const dir = createChainDir();
+    expect(isValidChainRunId(join(dir, "nested"))).toBe(false);
+    expect(isValidChainRunId(join(dir, "..", "..", "etc", "passwd"))).toBe(false);
   });
 });
