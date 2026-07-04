@@ -18,7 +18,7 @@ import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultExtensions, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultExtensions, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
-import { buildReadsBlock, consumeChainPauseState, createChainDir, createChainOutputTool, formatChainNextProposal, formatConcurrentActivityNote, formatParallelEditHazardWarning, injectOutputInstruction, isAgentReadOnly, isValidChainRunId, mergeParallelOutputs, parseChainNext, persistStepOutput, resolveOutputPath, resolveStepOutput, saveChainPauseState, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateParallelStage, validateStepIO, type ChainPauseState } from "./chain-io.js";
+import { buildReadsBlock, type ChainPauseState, consumeChainPauseState, createChainDir, createChainOutputTool, formatChainNextProposal, formatConcurrentActivityNote, formatParallelEditHazardWarning, formatParallelStageEditWarnings, injectOutputInstruction, isAgentReadOnly, isValidChainRunId, mergeParallelOutputs, parseChainNext, persistStepOutput, resolveOutputPath, resolveStepOutput, saveChainPauseState, snapshotOutputFile, substituteChainPlaceholders, validateChainFileOnlyHandoff, validateParallelStage, validateStepIO } from "./chain-io.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deleteGlobalActivity, setGlobalActivity } from "./global-registry.js";
@@ -229,6 +229,7 @@ type ChainElement =
       isolated?: boolean;
       inherit_context?: boolean;
       isolation?: "worktree";
+      files?: string[];
       pause_after?: boolean;
     }
   | {
@@ -245,6 +246,7 @@ type ChainElement =
         isolated?: boolean;
         inherit_context?: boolean;
         isolation?: "worktree";
+        files?: string[];
       }>;
       continue_on_error?: boolean;
       description?: string;
@@ -929,6 +931,14 @@ Notes:
           description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
         }),
       ),
+      files: Type.Optional(
+        Type.Array(
+          Type.String({ description: "A file path this member owns (relative to cwd or absolute)." }),
+          {
+            description: "Declared file ownership for this member. When all writable non-worktree members of a parallel stage declare non-overlapping files, the clobber warning is suppressed.",
+          },
+        ),
+      ),
       pause_after: Type.Optional(
         Type.Boolean({
           description:
@@ -1004,6 +1014,14 @@ Notes:
             Type.Literal("worktree", {
               description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
             }),
+          ),
+          files: Type.Optional(
+            Type.Array(
+              Type.String({ description: "A file path this member owns (relative to cwd or absolute)." }),
+              {
+                description: "Declared file ownership for this member. When all writable non-worktree members of a parallel stage declare non-overlapping files, the clobber warning is suppressed.",
+              },
+            ),
           ),
         }),
         {
@@ -1686,6 +1704,7 @@ Notes:
       model: any;
       effectiveMaxTurns: number | undefined;
       outputMode: "inline" | "file-only";
+      files?: string[];
     };
 
     const prepareStep = (step: SequentialChainStep, priorOutput: string): PreparedStep => {
@@ -1763,6 +1782,10 @@ Notes:
         model,
         effectiveMaxTurns,
         outputMode,
+        // Normalize declared file ownership to absolute paths so overlap
+        // detection compares like-for-like (a member declaring "src/a.ts"
+        // and another declaring the absolute equivalent must still collide).
+        files: step.files?.map((f) => resolveOutputPath(f, ctx.cwd)).filter((f): f is string => !!f),
       };
     };
 
@@ -1794,11 +1817,20 @@ Notes:
             seenOutputPaths.set(prepared.resolvedOutputPath, m);
           }
         }
-
-        if (!prepared.readOnly && prepared.resolvedConfig.isolation !== "worktree") {
-          warnings.push(formatParallelEditHazardWarning(stageIndex, m, prepared.stepDisplayName));
-        }
       }
+
+      warnings.push(
+        ...formatParallelStageEditWarnings(
+          stageIndex,
+          preparedMembers.map((prepared, idx) => ({
+            memberIndex: idx,
+            displayName: prepared.stepDisplayName,
+            readOnly: prepared.readOnly,
+            isWorktree: prepared.resolvedConfig.isolation === "worktree",
+            files: prepared.files,
+          })),
+        ),
+      );
 
       const memberStates: Array<AgentActivity | undefined> = new Array(preparedMembers.length);
       const memberAgentIds: Array<string | undefined> = new Array(preparedMembers.length);

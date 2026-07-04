@@ -573,8 +573,119 @@ export function formatParallelEditHazardWarning(
 ): string {
   return (
     `⚠ Parallel stage ${stageIndex + 1} member ${memberIndex + 1} (${agentType}) can write files and is not worktree-isolated; ` +
-    `concurrent members may clobber each other if their files overlap. Set isolation: "worktree" or make the agent read-only.`
+    `no \`files\` ownership declared, so the runtime cannot verify their edits stay disjoint. ` +
+    `Declare \`files: string[]\` per member if they own separate files, set isolation: "worktree", or make the agent read-only.`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Parallel member file-overlap detection
+// ---------------------------------------------------------------------------
+
+export interface MemberFileDecl {
+  memberIndex: number;
+  displayName: string;
+  files: string[];
+}
+
+export interface FileOverlap {
+  file: string;
+  members: Array<{ index: number; displayName: string }>;
+}
+
+/**
+ * Given an array of member file declarations, find every file claimed by more
+ * than one member. Only reports the first two claimants per file — additional
+ * claimants beyond the second are not enumerated (the overlap is already
+ * flagged).
+ */
+export function findOverlappingMemberFiles(members: MemberFileDecl[]): FileOverlap[] {
+  const ownerOf = new Map<string, { index: number; displayName: string }>();
+  const overlaps = new Map<string, FileOverlap>();
+
+  for (const member of members) {
+    for (const file of member.files) {
+      const owner = ownerOf.get(file);
+      if (owner === undefined) {
+        ownerOf.set(file, { index: member.memberIndex, displayName: member.displayName });
+      } else {
+        let overlap = overlaps.get(file);
+        if (!overlap) {
+          overlap = { file, members: [owner, { index: member.memberIndex, displayName: member.displayName }] };
+          overlaps.set(file, overlap);
+        } else {
+          // Already flagged — don't add duplicate member pairs.
+          const alreadyFlagged = overlap.members.some(
+            (m) => m.index === member.memberIndex,
+          );
+          if (!alreadyFlagged) {
+            overlap.members.push({ index: member.memberIndex, displayName: member.displayName });
+          }
+        }
+      }
+    }
+  }
+
+  return [...overlaps.values()];
+}
+
+/**
+ * Produce per-stage hazard warnings for writable, non-worktree-isolated
+ * parallel members, using declared \`files\` ownership when available.
+ *
+ * - All writable, non-worktree members declare non-empty, disjoint files → no warning.
+ * - Two or more such members claim the same file → overlap warning naming the file and both members.
+ * - Any member is missing a \`files\` declaration → generic warning for each undeclared member
+ *   (partial declaration prevents overall disjointness verification).
+ */
+export function formatParallelStageEditWarnings(
+  stageIndex: number,
+  members: ReadonlyArray<{
+    memberIndex: number;
+    displayName: string;
+    readOnly: boolean;
+    isWorktree: boolean;
+    files?: string[];
+  }>,
+): string[] {
+  const writable = members.filter((m) => !m.readOnly && !m.isWorktree);
+  if (writable.length === 0) return [];
+
+  const undeclared = writable.filter((m) => !m.files || m.files.length === 0);
+  const allDeclared = undeclared.length === 0;
+
+  if (!allDeclared) {
+    // Partial or zero declaration — generic warning for each undeclared member.
+    return undeclared.map((m) =>
+      formatParallelEditHazardWarning(stageIndex, m.memberIndex, m.displayName),
+    );
+  }
+
+  // All declared — check for overlaps.
+  const overlaps = findOverlappingMemberFiles(
+    writable.map((m) => ({
+      memberIndex: m.memberIndex,
+      displayName: m.displayName,
+      files: m.files!,
+    })),
+  );
+
+  if (overlaps.length === 0) {
+    // Declared and disjoint — safe, no warning.
+    return [];
+  }
+
+  // Overlapping — emit one warning per overlapped file.
+  return overlaps.map((o) => {
+    const memberNames = o.members
+      .map((m) => `member ${m.index + 1} (${m.displayName})`)
+      .join(" and ");
+    return (
+      `⚠ Parallel stage ${stageIndex + 1}: file "${o.file}" is claimed by both ${memberNames} ` +
+      `without worktree isolation — edits may clobber. ` +
+      `Set isolation: "worktree" on both members or split the file ownership.`
+    );
+  });
 }
 
 export function validateParallelStage(

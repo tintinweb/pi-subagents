@@ -56,7 +56,7 @@ Agent({
       output: "{chain_dir}/plan.md",
       output_mode: "file-only",
       pause_after: true,
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe scout findings are prepended above as <context>. Produce an EXHAUSTIVE implementation plan. Use write_output to persist incrementally.\n\nPlan must include:\n- File-by-file changes with absolute paths and exact functions/lines\n- Test strategy: which tests to add/update, which files, what they assert\n- Edge cases enumerated with handling\n- Validation commands (exact shell invocations)\n- Rollback strategy\n- Sequencing if order matters\n- Explicit decisions on every open question from the scout findings; cite which evidence resolved each\n\nDo NOT defer decisions to the worker. If genuinely ambiguous, list options with tradeoffs and pick one with reasoning.\n\nIf, and only if, the implementation splits into independently-scoped, file-disjoint chunks that could be built in parallel, also append a fenced `chain-next` block: a JSON array where each item is {\"subagent_type\": \"worker\", \"prompt\": \"<self-contained outcome-based task for this chunk>\", \"files\": [\"<absolute paths this chunk touches>\"], \"isolation\": \"worktree\"} (omit \"isolation\" only when certain no chunk's files overlap any other chunk's). Do not emit this for single-scope or tightly-coupled work."
+      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe scout findings are prepended above as <context>. Produce an EXHAUSTIVE implementation plan. Use write_output to persist incrementally.\n\nPlan must include:\n- File-by-file changes with absolute paths and exact functions/lines\n- Test strategy: which tests to add/update, which files, what they assert\n- Edge cases enumerated with handling\n- Validation commands (exact shell invocations)\n- Rollback strategy\n- Sequencing if order matters\n- Explicit decisions on every open question from the scout findings; cite which evidence resolved each\n\nDo NOT defer decisions to the worker. If genuinely ambiguous, list options with tradeoffs and pick one with reasoning.\n\nIf, and only if, the implementation splits into independently-scoped, file-disjoint chunks that could be built in parallel, also append a fenced `chain-next` block: a JSON array where each item is {\"subagent_type\": \"worker\", \"prompt\": \"<self-contained outcome-based task for this chunk>\", \"files\": [\"<absolute paths this chunk touches>\"]}. Each chunk's files must be mutually disjoint — if any overlap or you are uncertain, do NOT emit the proposal; produce a single-worker plan instead. Implement chunks must never set `isolation: \"worktree\"` — the reviewer reads `git diff` in the main tree and worktree changes would be invisible. Do not emit this for single-scope or tightly-coupled work."
     }
   ]
 })
@@ -93,9 +93,9 @@ Build `{{IMPLEMENT_STEP}}`: either the single-worker step or a `parallel` stage,
 ```
 {
   parallel: [
-    { subagent_type: "worker", description: "Implement chunk A", output_mode: "file-only",
+    { subagent_type: "worker", description: "Implement chunk A", output: "{chain_dir}/worker-a.md", output_mode: "file-only", files: ["<absolute paths chunk A owns>"],
       prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_chunk>\nCHUNK A. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_chunk>\n\nImplement ONLY your chunk. Edit ONLY your owned files. Do NOT touch files outside your list, edit shared config/lockfiles, or run repo-wide format/build/codegen. Validate ONLY your slice. Use write_output for a verbose report: every file changed (path + summary), every test (file:line), scoped validation commands + full output, any out-of-chunk file you needed (report it, do NOT touch), decisions beyond the plan, open risks." },
-    { subagent_type: "worker", description: "Implement chunk B", output_mode: "file-only",
+    { subagent_type: "worker", description: "Implement chunk B", output: "{chain_dir}/worker-b.md", output_mode: "file-only", files: ["<absolute paths chunk B owns>"],
       prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_chunk>\nCHUNK B. You OWN exactly these files: <absolute paths>. Assigned plan steps: <list>.\n</your_chunk>\n\nSame contract as chunk A: edit ONLY your owned files, no shared/global changes, validate your slice, verbose write_output report." }
   ],
   output: "{chain_dir}/worker.md",
@@ -156,9 +156,9 @@ Apply this ONLY when recon splits into clearly separable domains (e.g. frontend 
 chain: [
   {
     parallel: [
-      { subagent_type: "Explore", description: "Scout frontend", output_mode: "file-only",
+      { subagent_type: "Explore", description: "Scout frontend", output: "{chain_dir}/scout-frontend.md", output_mode: "file-only",
         prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nScout ONLY the frontend/UI layer for everything relevant. Use write_output. Cite every claim file:line." },
-      { subagent_type: "Explore", description: "Scout backend", output_mode: "file-only",
+      { subagent_type: "Explore", description: "Scout backend", output: "{chain_dir}/scout-backend.md", output_mode: "file-only",
         prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nScout ONLY the backend/data layer for everything relevant. Use write_output. Cite every claim file:line." }
     ],
     output: "{chain_dir}/scout.md",

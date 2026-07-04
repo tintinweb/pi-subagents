@@ -90,9 +90,9 @@ Replace the worker step with:
 ```
 {
   parallel: [
-    { subagent_type: "worker", description: "Implement package A", output_mode: "file-only",
+    { subagent_type: "worker", description: "Implement package A", output: "{chain_dir}/worker-a.md", output_mode: "file-only", files: ["<absolute paths package A owns>"],
       prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE A. You OWN exactly these files: <absolute paths>.\n</your_package>\n\nImplement ONLY your package. Edit ONLY your owned files. No shared config/lockfiles, no repo-wide commands. Validate ONLY your slice. Use write_output: every file changed (path + summary), every test (file:line), scoped validation output, any out-of-package file you needed (report it, do NOT touch), decisions, risks." },
-    { subagent_type: "worker", description: "Implement package B", output_mode: "file-only",
+    { subagent_type: "worker", description: "Implement package B", output: "{chain_dir}/worker-b.md", output_mode: "file-only", files: ["<absolute paths package B owns>"],
       prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE B. You OWN exactly these files: <absolute paths>.\n</your_package>\n\nSame contract as package A." }
   ],
   output: "{chain_dir}/worker.md",

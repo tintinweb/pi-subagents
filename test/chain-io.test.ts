@@ -7,9 +7,11 @@ import {
   consumeChainPauseState,
   createChainDir,
   createChainOutputTool,
+  findOverlappingMemberFiles,
   formatChainNextProposal,
   formatConcurrentActivityNote,
   formatParallelEditHazardWarning,
+  formatParallelStageEditWarnings,
   injectOutputInstruction,
   isAgentReadOnly,
   isValidChainRunId,
@@ -554,11 +556,12 @@ describe("parallel stage helpers", () => {
     expect(validateParallelStage(0, { parallel: [{ subagent_type: "worker", prompt: "p" }] })).toBeUndefined();
   });
 
-  it("formats edit hazard warning with isolation guidance", () => {
+  it("formats edit hazard warning with no-files-declared guidance", () => {
     const msg = formatParallelEditHazardWarning(1, 0, "Explore");
     expect(msg).toContain("Parallel stage 2 member 1");
     expect(msg).toContain("Explore");
-    expect(msg).toContain('isolation: "worktree"');
+    expect(msg).toContain("no \`files\` ownership declared");
+    expect(msg).toContain("Declare \`files: string[]\`");
   });
 });
 
@@ -1005,5 +1008,166 @@ describe("isValidChainRunId", () => {
     const dir = createChainDir();
     expect(isValidChainRunId(join(dir, "nested"))).toBe(false);
     expect(isValidChainRunId(join(dir, "..", "..", "etc", "passwd"))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findOverlappingMemberFiles
+// ---------------------------------------------------------------------------
+
+describe("findOverlappingMemberFiles", () => {
+  it("returns empty when members have disjoint files", () => {
+    const result = findOverlappingMemberFiles([
+      { memberIndex: 0, displayName: "worker", files: ["/repo/a.ts"] },
+      { memberIndex: 1, displayName: "worker", files: ["/repo/b.ts"] },
+    ]);
+    expect(result).toHaveLength(0);
+  });
+
+  it("returns empty for a single member", () => {
+    const result = findOverlappingMemberFiles([
+      { memberIndex: 0, displayName: "worker", files: ["/repo/a.ts", "/repo/b.ts"] },
+    ]);
+    expect(result).toHaveLength(0);
+  });
+
+  it("returns empty when members have no files", () => {
+    const result = findOverlappingMemberFiles([
+      { memberIndex: 0, displayName: "worker", files: [] },
+      { memberIndex: 1, displayName: "worker", files: [] },
+    ]);
+    expect(result).toHaveLength(0);
+  });
+
+  it("detects a single overlapping file across two members", () => {
+    const result = findOverlappingMemberFiles([
+      { memberIndex: 0, displayName: "worker-a", files: ["/repo/shared.ts", "/repo/a.ts"] },
+      { memberIndex: 1, displayName: "worker-b", files: ["/repo/shared.ts", "/repo/b.ts"] },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].file).toBe("/repo/shared.ts");
+    expect(result[0].members).toHaveLength(2);
+    expect(result[0].members[0].index).toBe(0);
+    expect(result[0].members[1].index).toBe(1);
+  });
+
+  it("detects multiple overlapping files", () => {
+    const result = findOverlappingMemberFiles([
+      { memberIndex: 0, displayName: "w1", files: ["/repo/x.ts", "/repo/y.ts"] },
+      { memberIndex: 1, displayName: "w2", files: ["/repo/x.ts", "/repo/y.ts"] },
+    ]);
+    expect(result).toHaveLength(2);
+    const files = result.map((o) => o.file).sort();
+    expect(files).toEqual(["/repo/x.ts", "/repo/y.ts"]);
+  });
+
+  it("detects overlap among three members", () => {
+    const result = findOverlappingMemberFiles([
+      { memberIndex: 0, displayName: "w1", files: ["/repo/common.ts"] },
+      { memberIndex: 1, displayName: "w2", files: ["/repo/common.ts"] },
+      { memberIndex: 2, displayName: "w3", files: ["/repo/common.ts"] },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0].file).toBe("/repo/common.ts");
+    // First two claimants are captured; third also flagged.
+    expect(result[0].members.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// formatParallelStageEditWarnings
+// ---------------------------------------------------------------------------
+
+describe("formatParallelStageEditWarnings", () => {
+  // (a) All writable non-worktree members declare disjoint files → no warning
+  it("returns no warning when all writable non-worktree members declare disjoint files", () => {
+    const warnings = formatParallelStageEditWarnings(0, [
+      { memberIndex: 0, displayName: "worker-a", readOnly: false, isWorktree: false, files: ["/repo/a.ts"] },
+      { memberIndex: 1, displayName: "worker-b", readOnly: false, isWorktree: false, files: ["/repo/b.ts"] },
+    ]);
+    expect(warnings).toHaveLength(0);
+  });
+
+  // (a) Read-only and worktree members are skipped entirely
+  it("ignores read-only and worktree-isolated members in the check", () => {
+    const warnings = formatParallelStageEditWarnings(0, [
+      { memberIndex: 0, displayName: "explorer", readOnly: true, isWorktree: false },
+      { memberIndex: 1, displayName: "worker-a", readOnly: false, isWorktree: true, files: ["/repo/a.ts"] },
+      { memberIndex: 2, displayName: "worker-b", readOnly: false, isWorktree: false, files: ["/repo/b.ts"] },
+    ]);
+    // Only member 2 is writable + non-worktree; it declares files and has no peers to clash with.
+    expect(warnings).toHaveLength(0);
+  });
+
+  // (b) Two members declare an overlapping file → warning names the file and both members
+  it("warns with file name and both member names when declared files overlap", () => {
+    const warnings = formatParallelStageEditWarnings(1, [
+      { memberIndex: 0, displayName: "worker-a", readOnly: false, isWorktree: false, files: ["/repo/shared.ts"] },
+      { memberIndex: 1, displayName: "worker-b", readOnly: false, isWorktree: false, files: ["/repo/shared.ts"] },
+    ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("Parallel stage 2");
+    expect(warnings[0]).toContain("/repo/shared.ts");
+    expect(warnings[0]).toContain("member 1 (worker-a)");
+    expect(warnings[0]).toContain("member 2 (worker-b)");
+    expect(warnings[0]).toContain("clobber");
+  });
+
+  // (c) No member declares files → falls back to reworded generic warning
+  it("emits generic warning for each writable non-worktree member when no files declared", () => {
+    const warnings = formatParallelStageEditWarnings(2, [
+      { memberIndex: 0, displayName: "worker-a", readOnly: false, isWorktree: false },
+      { memberIndex: 1, displayName: "worker-b", readOnly: false, isWorktree: false },
+    ]);
+    expect(warnings).toHaveLength(2);
+    expect(warnings[0]).toContain("no \`files\` ownership declared");
+    expect(warnings[0]).toContain("member 1 (worker-a)");
+    expect(warnings[1]).toContain("no \`files\` ownership declared");
+    expect(warnings[1]).toContain("member 2 (worker-b)");
+  });
+
+  // (d) Mixed: one member declares files, another doesn't → generic warning for undeclared
+  it("emits generic warning for undeclared members when declaration is partial", () => {
+    const warnings = formatParallelStageEditWarnings(0, [
+      { memberIndex: 0, displayName: "worker-a", readOnly: false, isWorktree: false, files: ["/repo/a.ts"] },
+      { memberIndex: 1, displayName: "worker-b", readOnly: false, isWorktree: false },
+    ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("no \`files\` ownership declared");
+    expect(warnings[0]).toContain("member 2 (worker-b)");
+  });
+
+  // Edge: empty members array
+  it("returns no warnings for empty members array", () => {
+    const warnings = formatParallelStageEditWarnings(0, []);
+    expect(warnings).toHaveLength(0);
+  });
+
+  // Edge: all members are read-only
+  it("returns no warnings when all members are read-only", () => {
+    const warnings = formatParallelStageEditWarnings(0, [
+      { memberIndex: 0, displayName: "explorer", readOnly: true, isWorktree: false },
+      { memberIndex: 1, displayName: "planner", readOnly: true, isWorktree: false },
+    ]);
+    expect(warnings).toHaveLength(0);
+  });
+
+  // Edge: empty files array treated as undeclared
+  it("treats empty files array as undeclared", () => {
+    const warnings = formatParallelStageEditWarnings(0, [
+      { memberIndex: 0, displayName: "worker", readOnly: false, isWorktree: false, files: [] },
+    ]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("no \`files\` ownership declared");
+  });
+
+  // Edge: all declared but one member has only files that don't overlap another
+  it("returns no warning when declared files are fully disjoint across three members", () => {
+    const warnings = formatParallelStageEditWarnings(0, [
+      { memberIndex: 0, displayName: "w1", readOnly: false, isWorktree: false, files: ["/repo/a.ts"] },
+      { memberIndex: 1, displayName: "w2", readOnly: false, isWorktree: false, files: ["/repo/b.ts", "/repo/c.ts"] },
+      { memberIndex: 2, displayName: "w3", readOnly: false, isWorktree: false, files: ["/repo/d.ts"] },
+    ]);
+    expect(warnings).toHaveLength(0);
   });
 });
