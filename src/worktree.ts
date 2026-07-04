@@ -4,6 +4,13 @@
  * Creates a temporary git worktree so the agent works on an isolated copy of the repo.
  * On completion, if no changes were made, the worktree is cleaned up.
  * If changes exist, a branch is created and returned in the result.
+ *
+ * LIMITATION: this only changes the agent's default `cwd`, so *relative* paths
+ * resolve inside the worktree. `read`/`edit`/`write` are pi-core tools that resolve
+ * absolute paths directly against the real filesystem regardless of `cwd` — an
+ * agent that constructs (or is given) an absolute path to the main tree can still
+ * write there. This is a convention against accidental relative-path collisions
+ * between concurrent writers, not a filesystem sandbox.
  */
 
 import { execFileSync } from "node:child_process";
