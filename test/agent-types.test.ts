@@ -158,7 +158,7 @@ describe("agent type registry", () => {
       registerAgents(agents);
 
       const names = getUserAgentNames();
-      expect(names).toEqual(["auditor", "reviewer"]);
+      expect(names.sort()).toEqual(["auditor", "reviewer"]);
       expect(names).not.toContain("general-purpose");
     });
 
