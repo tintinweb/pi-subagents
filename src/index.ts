@@ -438,14 +438,25 @@ export default function (pi: ExtensionAPI) {
 
   // Expose manager via Symbol.for() global registry for cross-package access.
   // Standard Node.js pattern for cross-package singletons (used by OpenTelemetry, etc.).
+  //
+  // Claim the slot only if it's free: subagent sessions re-activate this
+  // extension in the same process (session.bindExtensions in agent-runner.ts),
+  // and unconditionally overwriting would point the registry at a short-lived
+  // child manager — and the child's shutdown would then delete the root
+  // session's entry. The first activation (the root session) wins; child
+  // activations leave it alone.
   const MANAGER_KEY = Symbol.for("pi-subagents:manager");
-  (globalThis as any)[MANAGER_KEY] = {
+  const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
     spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
       manager.spawn(piRef, ctx, type, prompt, options),
     getRecord: (id: string) => manager.getRecord(id),
   };
+  const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
+  if (ownsManagerRegistry) {
+    (globalThis as any)[MANAGER_KEY] = registryEntry;
+  }
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
@@ -500,7 +511,11 @@ export default function (pi: ExtensionAPI) {
     unsubStopRpc();
     unsubPingRpc();
     currentCtx = undefined;
-    delete (globalThis as any)[MANAGER_KEY];
+    // Only release the global slot if this activation claimed it — a child
+    // session's shutdown must not delete the root session's registry entry.
+    if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
+      delete (globalThis as any)[MANAGER_KEY];
+    }
     scheduler.stop();
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
