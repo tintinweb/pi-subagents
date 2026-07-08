@@ -57,7 +57,9 @@ import {
   type Model,
   registerFauxProvider,
   type ToolCall,
-} from "@earendil-works/pi-ai";
+  // Faux/model test helpers live on the `/compat` subpath as of pi-ai 0.80.x
+  // (they were on the package root in ≤0.75.x).
+} from "@earendil-works/pi-ai/compat";
 import {
   type AgentSession,
   type AgentSessionEvent,

@@ -27,7 +27,9 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registerFauxProvider } from "@earendil-works/pi-ai";
+// `registerFauxProvider` is on the `/compat` subpath as of pi-ai 0.80.x
+// (it was on the package root in ≤0.75.x).
+import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent-runner.js";

@@ -27,7 +27,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { registerFauxProvider } from "@earendil-works/pi-ai";
+// `registerFauxProvider` is a test/compat helper. It lives on the `/compat`
+// subpath export as of pi-ai 0.80.x (it was on the package root in ≤0.75.x).
+import { registerFauxProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extensionCanonicalName, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
