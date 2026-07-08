@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Subagent nesting — a subagent may spawn its own subagents up to a configurable depth.** The `Agent`/`get_subagent_result`/`steer_subagent` tools are no longer unconditionally stripped from every subagent; instead a subagent whose own nesting depth is below `MAX_NESTING_DEPTH` (default `2`) keeps them and may spawn children, while a subagent at or above the cap has them stripped as before. Depth is tracked in-process by AgentSession id: the spawn site reads the parent id via `ctx.sessionManager.getSessionId()`, each child records its depth right after `createAgentSession`, and the grandchild is gated at `childDepth + 1` — `main(0) → child(1) → grandchild(2, capped)`. Single-level callers are unaffected (a depth-1 child behaves exactly as before, it additionally retains the ability to spawn one more level). Resumed/orphaned sessions fall back to depth 0. New `src/depth.ts`.
+
 ## [0.13.0] - 2026-06-30
 
 ### Added

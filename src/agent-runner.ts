@@ -19,6 +19,7 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
+import { canNest, getSessionDepth, recordSessionDepth } from "./depth.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
@@ -551,9 +552,16 @@ export async function runAgent(
   // pi-mono's `allowedToolNames` gates BOTH registration and the initial active
   // set, so listing the exact final set here means the session is correctly
   // scoped from the first instant — no post-construction narrowing required.
+  // Nesting depth: a subagent whose own depth is under MAX_NESTING_DEPTH keeps
+  // the spawn/steer/result tools so it can spawn its own children up to the cap;
+  // at or above the cap the tools are stripped (prevents runaway recursion).
+  const parentSessionId = ctx.sessionManager?.getSessionId?.() ?? "";
+  const childDepth = getSessionDepth(parentSessionId) + 1;
+  const allowNesting = canNest(childDepth);
+
   const builtinToolNameSet = new Set(toolNames);
   const allowedTools = [...toolNames, ...extensionToolNames].filter((t) => {
-    if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
+    if (!allowNesting && EXCLUDED_TOOL_NAMES.includes(t)) return false;
     if (disallowedSet?.has(t)) return false;
     if (builtinToolNameSet.has(t)) return true;
     // Reached only for extension tools. The extension set was already filtered
@@ -584,6 +592,11 @@ export async function runAgent(
   }
 
   const { session } = await createAgentSession(sessionOpts);
+
+  // Record this child's depth so that, if it later spawns a grandchild, its own
+  // ctx.sessionManager.getSessionId() resolves to `childDepth` and the grandchild
+  // is gated at childDepth + 1. Keyed by session id (see depth.ts).
+  recordSessionDepth(session.sessionId, childDepth);
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(

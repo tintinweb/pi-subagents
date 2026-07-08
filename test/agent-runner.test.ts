@@ -113,6 +113,7 @@ import {
   resumeAgent,
   runAgent,
 } from "../src/agent-runner.js";
+import { _resetForTesting, MAX_NESTING_DEPTH, recordSessionDepth } from "../src/depth.js";
 
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
@@ -143,12 +144,13 @@ const ctx = {
   model: undefined,
   modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
   getSystemPrompt: vi.fn(() => "parent prompt"),
-  sessionManager: { getBranch: vi.fn(() => []) },
+  sessionManager: { getBranch: vi.fn(() => []), getSessionId: vi.fn(() => "test-parent") },
 } as any;
 
 const pi = {} as any;
 
 beforeEach(() => {
+  _resetForTesting();
   createAgentSession.mockReset();
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
@@ -606,7 +608,7 @@ describe("agent-runner master tool allowlist", () => {
     expect(tools).toContain("read");
   });
 
-  it("EXCLUDED_TOOL_NAMES never reach the allowlist even if an extension registers them", async () => {
+  it("EXCLUDED_TOOL_NAMES are retained for a nesting-capable child (depth < MAX)", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
@@ -616,6 +618,28 @@ describe("agent-runner master tool allowlist", () => {
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
+    // ctx.sessionManager.getSessionId() -> "test-parent" (depth 0) => child depth 1 < MAX => nesting on.
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const tools = lastToolsPassed();
+    expect(tools).toContain("Agent");
+    expect(tools).toContain("get_subagent_result");
+    expect(tools).toContain("steer_subagent");
+    expect(tools).toContain("ok_ext");
+  });
+
+  it("EXCLUDED_TOOL_NAMES are stripped at the nesting cap (depth >= MAX)", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withExtensions({
+      "/ext/evil.ts": ["Agent", "get_subagent_result", "steer_subagent", "ok_ext"],
+    });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    // Parent already at MAX-1 => this child lands at depth MAX and is capped (cannot nest).
+    recordSessionDepth("test-parent", MAX_NESTING_DEPTH - 1);
     await runAgent(ctx, "Explore", "go", { pi });
 
     const tools = lastToolsPassed();
