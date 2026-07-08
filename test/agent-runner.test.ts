@@ -112,6 +112,7 @@ import {
   parseExtSelectors,
   resumeAgent,
   runAgent,
+  SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
 
 function createSession(finalText: string) {
@@ -132,6 +133,13 @@ function createSession(finalText: string) {
     steer: vi.fn(),
     getActiveToolNames: vi.fn(() => ["read"]),
     setActiveToolsByName: vi.fn(),
+    // Faithfully simulate pi-mono's registry: built-ins plus every loaded
+    // extension tool, gated by the session's allowlist/denylist. Dynamic mode
+    // reads this post-bind to activate the full allowed set.
+    getAllTools: vi.fn(() => {
+      const opts = createAgentSession.mock.calls[0]?.[0];
+      return opts ? effectiveAllowedTools(opts).map((name) => ({ name })) : [];
+    }),
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
   };
@@ -445,11 +453,21 @@ describe("getAgentConversation", () => {
   });
 });
 
-// ─── master tool allowlist (issue #47) ──────────────────────────────────
-// Tool gating happens at `createAgentSession` time via the `tools:`
-// parameter. pi-mono's `allowedToolNames` is the master gate: it controls
-// BOTH which tools get registered and which enter the initial active set.
-// No post-construction `setActiveToolsByName` filter is needed.
+// ─── tool scoping (issues #47, async-MCP fix) ────────────────────────────
+// runAgent scopes a subagent's tools in one of two ways at `createAgentSession`
+// time:
+//   • Static allowlist (`tools:`) — when the exact set is known up front
+//     (`ext:` narrowing, or no extensions). pi-mono's `allowedToolNames` gates
+//     both registration and the initial active set.
+//   • Dynamic denylist (`excludeTools:`, `tools:` unset) — the default when
+//     extension tools flow freely. An unset allowlist lets asynchronously
+//     registered tools (e.g. pi-mcp, which registers on session_start after
+//     connecting to servers) through pi-mono's live `isAllowedTool` gate; the
+//     denylist removes the built-ins the agent didn't ask for plus this
+//     extension's own orchestration tools. The initial active set is repaired
+//     post-bind via `setActiveToolsByName` (an unset allowlist otherwise starts
+//     with only pi's four default built-ins).
+// `lastToolsPassed()` normalizes both into the effective allowed set.
 
 import {
   getAgentConfig,
@@ -499,8 +517,29 @@ function withExtensions(spec: Record<string, string[]>) {
   };
 }
 
+/**
+ * The tool names the agent will actually be allowed to use, derived from the
+ * `createAgentSession` call — normalizing the two scoping shapes:
+ *   - static allowlist → `tools` is the exact set (minus any `excludeTools`).
+ *   - dynamic denylist → `tools` unset; the effective set is every built-in plus
+ *     every loaded extension tool, minus `excludeTools`. This mirrors pi-mono's
+ *     live `isAllowedTool` gate together with the post-bind activation of the
+ *     full registry.
+ */
+function effectiveAllowedTools(opts: Record<string, any>): string[] {
+  const excluded = new Set<string>(opts.excludeTools ?? []);
+  if (opts.tools) {
+    return opts.tools.filter((t: string) => !excluded.has(t));
+  }
+  const all: string[] = [...BUILTINS_7];
+  for (const ext of loaderExtensionsRef.current.extensions) {
+    for (const name of ext.tools.keys()) all.push(name);
+  }
+  return [...new Set(all)].filter((t) => !excluded.has(t));
+}
+
 function lastToolsPassed(): string[] {
-  return createAgentSession.mock.calls[0][0].tools;
+  return effectiveAllowedTools(createAgentSession.mock.calls[0][0]);
 }
 
 function lastLoaderOpts(): Record<string, unknown> {
@@ -641,7 +680,7 @@ describe("agent-runner master tool allowlist", () => {
     expect(tools).toEqual(BUILTINS_7.filter((t) => t !== "bash"));
   });
 
-  it("does not call setActiveToolsByName post-construction (gating is at construction)", async () => {
+  it("dynamic mode: leaves the allowlist unset, denies via excludeTools, activates post-bind", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(
       makeAgentConfig({ extensions: true, disallowedTools: ["bash"] }),
@@ -653,7 +692,25 @@ describe("agent-runner master tool allowlist", () => {
 
     await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(session.setActiveToolsByName).not.toHaveBeenCalled();
+    // Allowlist unset so async tools (e.g. MCP on session_start) can register;
+    // scope is a denylist of this extension's own tools plus `disallowedTools`.
+    const opts = createAgentSession.mock.calls[0][0];
+    expect(opts.tools).toBeUndefined();
+    expect(new Set(opts.excludeTools)).toEqual(
+      new Set([...Object.values(SUBAGENT_TOOL_NAMES), "bash"]),
+    );
+
+    // The active set is repaired AFTER bindExtensions (tools may register during
+    // session_start), activating the full allowed registry — the extension tool
+    // included, the denied built-in excluded.
+    expect(session.setActiveToolsByName).toHaveBeenCalledTimes(1);
+    const setOrder = session.setActiveToolsByName.mock.invocationCallOrder[0];
+    const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
+    expect(setOrder).toBeGreaterThan(bindOrder);
+    const activated = new Set(session.setActiveToolsByName.mock.calls[0][0]);
+    expect(activated.has("mcp")).toBe(true);
+    expect(activated.has("read")).toBe(true);
+    expect(activated.has("bash")).toBe(false);
   });
 });
 
