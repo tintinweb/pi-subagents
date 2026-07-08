@@ -660,20 +660,57 @@ export async function runAgent(
     }
   }
 
-  // Build the master tool allowlist applied at session construction.
-  // pi-mono's `allowedToolNames` gates BOTH registration and the initial active
-  // set, so listing the exact final set here means the session is correctly
-  // scoped from the first instant — no post-construction narrowing required.
+  // Tool scoping runs in one of two modes.
+  //
+  //  • Dynamic denylist (default whenever extension tools flow freely — i.e.
+  //    extensions load and there is no `ext:` narrowing). Some extensions register
+  //    their tools ASYNCHRONOUSLY: pi-mcp, for example, only calls registerTool
+  //    from its `session_start` handler, after connecting to MCP servers — long
+  //    after `loader.reload()` here. A static allowlist snapshot taken now would
+  //    omit those tools permanently, because pi-mono's `allowedToolNames` gates
+  //    tool *registration* (via `_refreshToolRegistry`'s `isAllowedTool`), not just
+  //    the active set — so a name absent from the snapshot is dropped forever, even
+  //    once the tool eventually registers. Instead we leave `allowedToolNames`
+  //    unset (the live `isAllowedTool` then admits tools whenever they register)
+  //    and express scope as a denylist via `excludeTools`: every built-in the agent
+  //    did NOT ask for, this extension's own orchestration tools, and the agent's
+  //    `disallowedTools`. The initial active set is repaired post-bind below, since
+  //    an unset allowlist only activates pi's four default built-ins at turn 1.
+  //
+  //  • Static allowlist (the historical path): used when no extension tools apply
+  //    (`noExtensions`/`isolated`) or when `ext:` selectors narrow them. Here the
+  //    exact final set is known up front — no async tools can appear — so we pass it
+  //    as `allowedToolNames` and the session is correctly scoped from the first
+  //    instant. (Narrowing a specific not-yet-registered async tool via `ext:` still
+  //    has the snapshot limitation, but whole-extension inclusion — the common case
+  //    — goes through the dynamic path.)
+  const dynamicExtensionTools = !noExtensions && extNames.size === 0;
+
   const builtinToolNameSet = new Set(toolNames);
-  const allowedTools = [...toolNames, ...extensionToolNames].filter((t) => {
-    if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
-    if (disallowedSet?.has(t)) return false;
-    if (builtinToolNameSet.has(t)) return true;
-    // Reached only for extension tools. The extension set was already filtered
-    // at the loader (extensionsOverride / noExtensions) and at enumeration
-    // (`ext:` opt-in flip), so any extension tool in `extensionToolNames` is allowed.
-    return !noExtensions;
-  });
+
+  let sessionTools: string[] | undefined;
+  let sessionExcludeTools: string[] | undefined;
+  if (dynamicExtensionTools) {
+    const denyTools = new Set<string>(EXCLUDED_TOOL_NAMES);
+    // Keep only the built-ins the agent asked for — deny the rest.
+    for (const name of BUILTIN_TOOL_NAMES) {
+      if (!builtinToolNameSet.has(name)) denyTools.add(name);
+    }
+    if (disallowedSet) {
+      for (const name of disallowedSet) denyTools.add(name);
+    }
+    sessionExcludeTools = [...denyTools];
+  } else {
+    sessionTools = [...toolNames, ...extensionToolNames].filter((t) => {
+      if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
+      if (disallowedSet?.has(t)) return false;
+      if (builtinToolNameSet.has(t)) return true;
+      // Reached only for extension tools. The extension set was already filtered
+      // at the loader (extensionsOverride / noExtensions) and at enumeration
+      // (`ext:` opt-in flip), so any extension tool in `extensionToolNames` is allowed.
+      return !noExtensions;
+    });
+  }
 
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
@@ -697,9 +734,12 @@ export async function runAgent(
     modelRegistry: ctx.modelRegistry,
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
-    tools: allowedTools,
+    tools: sessionTools,
     resourceLoader: loader,
   };
+  if (sessionExcludeTools) {
+    sessionOpts.excludeTools = sessionExcludeTools;
+  }
   if (thinkingLevel) {
     sessionOpts.thinkingLevel = thinkingLevel;
   }
@@ -723,6 +763,17 @@ export async function runAgent(
       });
     },
   });
+
+  // Dynamic mode: with `allowedToolNames` unset the session starts with only pi's
+  // four default built-ins active. Now that extensions have bound (and any eager
+  // MCP servers connected during session_start), activate the full allowed
+  // registry — the agent's chosen built-ins plus every extension tool registered
+  // so far. Tools that register later (e.g. lazy MCP servers) auto-activate via
+  // pi's tool-refresh path, precisely because the allowlist is unset. The registry
+  // is already scoped by `excludeTools`, so activating all of it stays in scope.
+  if (dynamicExtensionTools) {
+    session.setActiveToolsByName(session.getAllTools().map((t) => t.name));
+  }
 
   options.onSessionCreated?.(session);
 
