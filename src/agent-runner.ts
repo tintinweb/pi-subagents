@@ -2,6 +2,7 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
+import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
@@ -206,6 +207,10 @@ export interface RunOptions {
   thinkingLevel?: ThinkingLevel;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
+  /** Explicit session JSONL file. Implies persistence and resumes/appends when it exists. */
+  sessionFile?: string;
+  /** Base directory used to resolve a relative sessionFile. Defaults to the effective cwd. */
+  sessionFileCwd?: string;
   /**
    * Where .pi config is discovered (project extensions, skills, pi settings,
    * agent memory). Default: same as the working directory. The manager sets
@@ -288,11 +293,20 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
   return () => signal.removeEventListener("abort", onAbort);
 }
 
+function resolveConfiguredPath(path: string | undefined, cwd: string): string | undefined {
+  if (!path) return undefined;
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
+  if (isAbsolute(path)) return path;
+  return resolve(cwd, path);
+}
+
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
-  if (!sessionDir) return undefined;
-  if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
-  if (isAbsolute(sessionDir)) return sessionDir;
-  return resolve(cwd, sessionDir);
+  return resolveConfiguredPath(sessionDir, cwd);
+}
+
+function resolveConfiguredSessionFile(sessionFile: string | undefined, cwd: string): string | undefined {
+  return resolveConfiguredPath(sessionFile, cwd);
 }
 
 export async function runAgent(
@@ -563,11 +577,19 @@ export async function runAgent(
   });
 
   const settingsManager = SettingsManager.create(configCwd, agentDir);
-  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
+  const sessionFileInput = options.sessionFile ?? agentConfig?.sessionFile;
+  const sessionConfigCwd = sessionFileInput ? (options.sessionFileCwd ?? effectiveCwd) : effectiveCwd;
+  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, sessionConfigCwd);
+  const configuredSessionFile = resolveConfiguredSessionFile(sessionFileInput, sessionConfigCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  const sessionManager = agentConfig?.persistSession
-    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
-    : SessionManager.inMemory(effectiveCwd);
+  if (configuredSessionFile) {
+    mkdirSync(dirname(configuredSessionFile), { recursive: true });
+  }
+  const sessionManager = configuredSessionFile
+    ? SessionManager.open(configuredSessionFile, configuredSessionDir ?? dirname(configuredSessionFile), effectiveCwd)
+    : agentConfig?.persistSession
+      ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
+      : SessionManager.inMemory(effectiveCwd);
 
   const sessionOpts: Parameters<typeof createAgentSession>[0] = {
     cwd: effectiveCwd,

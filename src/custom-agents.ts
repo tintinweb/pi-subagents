@@ -67,6 +67,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       maxTurns: nonNegativeInt(fm.max_turns),
       persistSession: fm.persist_session != null ? fm.persist_session === true : undefined,
       sessionDir: str(fm.session_dir),
+      sessionFile: str(fm.session_file),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
