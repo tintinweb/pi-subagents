@@ -36,8 +36,8 @@
  *
  * ONE PARAMETERIZED RUNNER
  * ------------------------
- * The same `runPrintMode()` covers built-in agent types, `.pi/agents/*.md`
- * frontmatter agents, and inline-instruction agents — the difference is purely
+ * The same `runPrintMode()` covers built-in agent types, `.agents/agents/*.md`
+ * / `.pi/agents/*.md` frontmatter agents, and inline-instruction agents — the difference is purely
  * what you register in `beforeRun` and which `subagent_type` the `Agent` call
  * names. See `test/subagents-print-mode-e2e.test.ts` for usage.
  */
@@ -97,7 +97,7 @@ export interface RunPrintModeOptions {
   prompt: string;
   /**
    * Working directory for the run. Defaults to a fresh temp dir that `dispose()`
-   * removes. Pass a fixtures dir to make `.pi/agents/*.md` discoverable.
+   * removes. Pass a fixtures dir to make project custom agents discoverable.
    */
   cwd?: string;
   /** Parent host system prompt. Default: a minimal orchestrator prompt. */
@@ -247,8 +247,8 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const ownsCwd = options.cwd == null;
   const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "subagents-print-"));
 
-  // chdir into cwd: the extension discovers .pi/agents/*.md from process.cwd()
-  // (not ctx.cwd), and re-reads it on every Agent invocation — so a custom agent
+  // chdir into cwd: the extension discovers project custom agents from process.cwd()
+  // (not ctx.cwd), and re-reads them on every Agent invocation — so a custom agent
   // is only spawnable if process.cwd() points at the dir holding it. Restored on
   // dispose. (Vitest isolates test files per process, so this doesn't race.)
   const prevCwd = process.cwd();

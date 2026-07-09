@@ -21,11 +21,11 @@ unless they demonstrate how `pi-subagents` grants that write access or crosses a
 operating-system privilege boundary.
 
 `pi-subagents` relies on the user only loading trustworthy agent definitions
-(`.pi/agents/*.md`), skills, and tools, and only using pi within trusted
-repositories. Files like `AGENTS.md`, custom agent frontmatter/system prompts,
-preloaded skills, or instructions embedded in repository content and comments can
-be used to prompt-inject the coding agent and its sub-agents trivially, and this
-cannot be protected against.
+(`.agents/agents/*.md`, `.pi/agents/*.md`, and global agents), skills, and
+tools, and only using pi within trusted repositories. Files like `AGENTS.md`,
+custom agent frontmatter/system prompts, preloaded skills, or instructions
+embedded in repository content and comments can be used to prompt-inject the
+coding agent and its sub-agents trivially, and this cannot be protected against.
 
 ## Reporting a Vulnerability
 
@@ -67,9 +67,9 @@ tool restriction, denylist, or agent boundary it claims to enforce.
 - Exposed secrets that are third-party/user-controlled credentials
 - Reports requiring the ability to create, modify, delete, or replace files,
   directories, symlinks, environment variables, shell configuration, or other
-  user-controlled local state on the target machine. This includes `.pi/agents/`,
-  agent and extension configuration, persistent agent memory, workspace files,
-  `AGENTS.md`, skills, dotfiles, and files synchronized through NFS, roaming
+  user-controlled local state on the target machine. This includes `.agents/agents/`,
+  `.pi/agents/`, agent and extension configuration, persistent agent memory,
+  workspace files, `AGENTS.md`, skills, dotfiles, and files synchronized through NFS, roaming
   profiles, or dotfile managers, unless the report shows how `pi-subagents`
   itself grants that access.
 - Issues caused by intentionally weakened user configuration

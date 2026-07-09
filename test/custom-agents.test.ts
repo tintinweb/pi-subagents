@@ -8,28 +8,95 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 describe("loadCustomAgents", () => {
   let tmpDir: string;
   let originalHome: string | undefined;
+  let originalAgentDir: string | undefined;
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "pi-test-"));
     originalHome = process.env.HOME;
+    originalAgentDir = process.env.PI_CODING_AGENT_DIR;
     process.env.HOME = tmpDir;
+    delete process.env.PI_CODING_AGENT_DIR;
   });
 
   afterEach(() => {
     if (originalHome == null) delete process.env.HOME;
     else process.env.HOME = originalHome;
+    if (originalAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  function writeAgent(name: string, content: string) {
-    const dir = join(tmpDir, ".pi", "agents");
+  function writeAgentIn(projectDir: ".agents" | ".pi", name: string, content: string) {
+    const dir = join(tmpDir, projectDir, "agents");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${name}.md`), content);
   }
 
-  it("returns empty map when .pi/agents/ does not exist", () => {
+  function writeAgent(name: string, content: string) {
+    writeAgentIn(".pi", name, content);
+  }
+
+  function writePreferredAgent(name: string, content: string) {
+    writeAgentIn(".agents", name, content);
+  }
+
+  it("returns empty map when custom agent dirs do not exist", () => {
     const result = loadCustomAgents(tmpDir);
     expect(result.size).toBe(0);
+  });
+
+  it("loads a preferred project agent from .agents/agents", () => {
+    writePreferredAgent("reviewer", `---
+description: Preferred Reviewer
+---
+
+Preferred prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("reviewer")?.description).toBe("Preferred Reviewer");
+    expect(result.get("reviewer")?.systemPrompt).toBe("Preferred prompt.");
+    expect(result.get("reviewer")?.source).toBe("project");
+  });
+
+  it("preferred project agents override legacy .pi/agents", () => {
+    writeAgent("dupe", `---
+description: Legacy Project
+---
+
+Legacy prompt.`);
+    writePreferredAgent("dupe", `---
+description: Preferred Project
+---
+
+Preferred prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("dupe")?.description).toBe("Preferred Project");
+    expect(result.get("dupe")?.systemPrompt).toBe("Preferred prompt.");
+  });
+
+  it("legacy project agents override global agents", () => {
+    const globalAgentDir = join(tmpDir, "global-agent-dir");
+    process.env.PI_CODING_AGENT_DIR = globalAgentDir;
+    const globalAgents = join(globalAgentDir, "agents");
+    mkdirSync(globalAgents, { recursive: true });
+    writeFileSync(join(globalAgents, "dupe.md"), `---
+description: Global
+---
+
+Global prompt.`);
+    writeAgent("dupe", `---
+description: Legacy Project
+---
+
+Legacy prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.size).toBe(1);
+    expect(result.get("dupe")?.description).toBe("Legacy Project");
+    expect(result.get("dupe")?.systemPrompt).toBe("Legacy prompt.");
   });
 
   it("loads a basic agent with all frontmatter fields", () => {

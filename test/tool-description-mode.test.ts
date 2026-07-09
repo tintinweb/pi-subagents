@@ -12,6 +12,11 @@ import subagentsExtension from "../src/index.js";
 
 const EXAMPLE_TEMPLATE = fileURLToPath(new URL("../examples/agent-tool-description.md", import.meta.url));
 
+interface ToolWithParameters {
+  description: string;
+  parameters?: { properties?: Record<string, { description?: string }> };
+}
+
 function makePi() {
   const tools = new Map<string, any>();
   const handlers = new Map<string, any>();
@@ -92,6 +97,14 @@ describe("toolDescriptionMode", () => {
     expect(desc).toContain("very thorough");
   });
 
+  it("subagent_type schema advertises preferred and legacy project agent dirs", () => {
+    const tools = setup();
+    const agentTool = tools.get("Agent") as ToolWithParameters;
+    const desc = agentTool.parameters?.properties?.subagent_type?.description ?? "";
+    expect(desc).toContain(".agents/agents/*.md");
+    expect(desc).toContain(".pi/agents/*.md");
+  });
+
   it("compact mode swaps in the short description with one-line type list", () => {
     const tools = setup({ toolDescriptionMode: "compact" });
     const desc: string = tools.get("Agent").description;
@@ -122,6 +135,7 @@ describe("toolDescriptionMode", () => {
       "resume",
       "steer_subagent",
       'isolation: "worktree"',
+      ".agents/agents/",
       ".pi/agents/",
       "self-contained",
     ]) {
