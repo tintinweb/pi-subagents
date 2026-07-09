@@ -8,8 +8,10 @@ const {
   getAgentDir,
   sessionManagerInMemory,
   sessionManagerCreate,
+  sessionManagerOpen,
   settingsManagerCreate,
   settingsManagerGetSessionDir,
+  mkdirSync,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
@@ -23,9 +25,13 @@ const {
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
+  sessionManagerOpen: vi.fn(() => ({ kind: "opened-session-manager" })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
+  mkdirSync: vi.fn(),
 }));
+
+vi.mock("node:fs", () => ({ mkdirSync }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
@@ -57,7 +63,7 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
   },
   getAgentDir,
-  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate },
+  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate, open: sessionManagerOpen },
   SettingsManager: { create: settingsManagerCreate },
 }));
 
@@ -154,9 +160,11 @@ beforeEach(() => {
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
   sessionManagerCreate.mockClear();
+  sessionManagerOpen.mockClear();
   settingsManagerGetSessionDir.mockReset();
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
+  mkdirSync.mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
 });
 
@@ -550,6 +558,62 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerCreate).toHaveBeenCalledWith(
       "/repo",
       "/repo/.seams/pi-sessions/seam-plan-reviewer",
+    );
+  });
+
+  it("opens an explicit frontmatter sessionFile and implies persistence", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ sessionFile: ".agents/sessions/KEY.dev.jsonl" }),
+    );
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo" });
+
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(mkdirSync).toHaveBeenCalledWith("/repo/.agents/sessions", { recursive: true });
+    expect(sessionManagerOpen).toHaveBeenCalledWith(
+      "/repo/.agents/sessions/KEY.dev.jsonl",
+      "/repo/.agents/sessions",
+      "/repo",
+    );
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "opened-session-manager" },
+    }));
+  });
+
+  it("uses sessionDir as the branch/new directory when sessionFile is configured", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({
+        sessionDir: ".agents/session-branches",
+        sessionFile: ".agents/sessions/KEY.reviewer.jsonl",
+      }),
+    );
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo" });
+
+    expect(mkdirSync).toHaveBeenCalledWith("/repo/.agents/sessions", { recursive: true });
+    expect(sessionManagerOpen).toHaveBeenCalledWith(
+      "/repo/.agents/sessions/KEY.reviewer.jsonl",
+      "/repo/.agents/session-branches",
+      "/repo",
+    );
+  });
+
+  it("opens a caller-supplied sessionFile when the agent config does not pin one", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo", sessionFile: "~/pi-subagents/KEY.plan.jsonl" });
+
+    expect(sessionManagerOpen).toHaveBeenCalledWith(
+      `${homedir()}/pi-subagents/KEY.plan.jsonl`,
+      `${homedir()}/pi-subagents`,
+      "/repo",
     );
   });
 });

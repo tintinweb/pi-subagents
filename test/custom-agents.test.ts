@@ -41,6 +41,7 @@ thinking: high
 max_turns: 30
 persist_session: true
 session_dir: .seams/pi-sessions/seam-plan-reviewer
+session_file: .agents/sessions/KEY.auditor.jsonl
 prompt_mode: replace
 inherit_context: true
 run_in_background: true
@@ -61,6 +62,7 @@ You are a security auditor.`);
     expect(agent.maxTurns).toBe(30);
     expect(agent.persistSession).toBe(true);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
+    expect(agent.sessionFile).toBe(".agents/sessions/KEY.auditor.jsonl");
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     expect(agent.runInBackground).toBe(true);
@@ -87,6 +89,7 @@ Just a prompt.`);
     expect(agent.maxTurns).toBeUndefined();
     expect(agent.persistSession).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
+    expect(agent.sessionFile).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();

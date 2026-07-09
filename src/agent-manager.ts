@@ -70,6 +70,8 @@ interface SpawnOptions {
   bypassQueue?: boolean;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
+  /** Explicit session JSONL file. Implies persistence and resumes/appends when it exists. */
+  sessionFile?: string;
   /**
    * Working directory for the agent (absolute path). Default: parent session
    * cwd. The agent's tools operate here, but .pi config (extensions, skills,
@@ -252,6 +254,8 @@ export class AgentManager {
       isolated: options.isolated,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
+      sessionFile: options.sessionFile,
+      sessionFileCwd: baseCwd,
       // Worktree wins for the working dir (the agent must run in the copy —
       // which, with a custom cwd, was created from that target). Config stays
       // with the parent project when a caller-supplied cwd is in play; it must
@@ -379,7 +383,7 @@ export class AgentManager {
     while (this.queue.length > 0 && this.runningBackground < this.maxConcurrent) {
       const next = this.queue.shift()!;
       const record = this.agents.get(next.id);
-      if (!record || record.status !== "queued") continue;
+      if (record?.status !== "queued") continue;
       try {
         this.startAgent(next.id, record, next.args);
       } catch (err) {

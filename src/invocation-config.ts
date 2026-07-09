@@ -8,6 +8,7 @@ interface AgentInvocationParams {
   inherit_context?: boolean;
   isolated?: boolean;
   isolation?: IsolationMode;
+  session_file?: string;
 }
 
 export function resolveAgentInvocationConfig(
@@ -22,6 +23,7 @@ export function resolveAgentInvocationConfig(
   runInBackground: boolean;
   isolated: boolean;
   isolation?: IsolationMode;
+  sessionFile?: string;
 } {
   return {
     modelInput: agentConfig?.model ?? params.model,
@@ -32,6 +34,7 @@ export function resolveAgentInvocationConfig(
     runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? false,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,
     isolation: agentConfig?.isolation ?? params.isolation,
+    sessionFile: agentConfig?.sessionFile ?? params.session_file,
   };
 }
 
