@@ -991,6 +991,11 @@ Terse command-style prompts produce shallow, generic work.
           description: "Optional agent ID to resume from. Continues from previous context. Combine with run_in_background to resume detached and be notified on completion. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
+      session_file: Type.Optional(
+        Type.String({
+          description: "Optional explicit session JSONL file. Implies persistence and resumes/appends when the file exists. Relative paths resolve from the requested agent cwd before worktree isolation is applied.",
+        }),
+      ),
       isolated: Type.Optional(
         Type.Boolean({
           description: "If true, agent gets no extension/MCP tools — only built-in tools.",
@@ -1205,6 +1210,7 @@ Terse command-style prompts produce shallow, generic work.
         rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
         writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
+      const sessionFile = resolvedConfig.sessionFile;
 
       const parentModelId = ctx.model?.id;
       const effectiveModelId = model?.id;
@@ -1266,6 +1272,7 @@ Terse command-style prompts produce shallow, generic work.
             max_turns: effectiveMaxTurns,
             isolated: isolated,
             isolation: isolation,
+            session_file: sessionFile,
           });
           const next = scheduler.getNextRun(job.id);
           return textResult(
@@ -1433,6 +1440,7 @@ Terse command-style prompts produce shallow, generic work.
           thinkingLevel: thinking,
           isBackground: true,
           isolation,
+          sessionFile,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
           ...bgCallbacks,
@@ -1556,6 +1564,7 @@ Terse command-style prompts produce shallow, generic work.
           inheritContext,
           thinkingLevel: thinking,
           isolation,
+          sessionFile,
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
