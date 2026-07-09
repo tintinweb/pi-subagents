@@ -69,6 +69,7 @@ interface AgentInvocationParams {
    * for the cross-extension RPC path, where options arrive unvalidated.
    */
   isolation?: unknown;
+  session_file?: string;
 }
 
 interface ResolveOptions {
@@ -116,6 +117,7 @@ export function resolveAgentInvocationConfig(
    * effective turn limit, so recording one would be dead data.
    */
   overridden?: { thinking?: ThinkingLevel; model?: string };
+  sessionFile?: string;
 } {
   // Precedence first, collapse second — reversing these loses the veto, since
   // an agent file's "off" only outranks a caller's "worktree" while it is still
@@ -141,6 +143,7 @@ export function resolveAgentInvocationConfig(
     runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? opts?.defaultRunInBackground ?? false,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,
     isolation,
+    sessionFile: agentConfig?.sessionFile ?? params.session_file,
     // Undefined rather than an empty object when nothing was overridden: callers
     // spread this into the invocation snapshot, and an always-present key would
     // put `requestedThinking: undefined` on every record.

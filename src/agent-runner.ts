@@ -2,7 +2,7 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
@@ -432,6 +432,10 @@ export interface RunOptions {
   workflow?: boolean;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
+  /** Explicit session JSONL file. Implies persistence and resumes/appends when it exists. */
+  sessionFile?: string;
+  /** Base directory used to resolve a relative sessionFile. Defaults to the effective cwd. */
+  sessionFileCwd?: string;
   /**
    * Directory the worktree copy was created from. Set only when `cwd` points
    * into a worktree — the prompt then tells the agent to stay in the copy
@@ -600,11 +604,20 @@ function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => 
   return () => signal.removeEventListener("abort", onAbort);
 }
 
+function resolveConfiguredPath(path: string | undefined, cwd: string): string | undefined {
+  if (!path) return undefined;
+  if (path === "~") return homedir();
+  if (path.startsWith("~/")) return resolve(homedir(), path.slice(2));
+  if (isAbsolute(path)) return path;
+  return resolve(cwd, path);
+}
+
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
-  if (!sessionDir) return undefined;
-  if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
-  if (isAbsolute(sessionDir)) return sessionDir;
-  return resolve(cwd, sessionDir);
+  return resolveConfiguredPath(sessionDir, cwd);
+}
+
+function resolveConfiguredSessionFile(sessionFile: string | undefined, cwd: string): string | undefined {
+  return resolveConfiguredPath(sessionFile, cwd);
 }
 
 export async function runAgent(
@@ -953,27 +966,35 @@ export async function runAgent(
   }
 
   const settingsManager = SettingsManager.create(configCwd, agentDir);
-  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
+  const sessionFileInput = options.sessionFile ?? agentConfig?.sessionFile;
+  const sessionConfigCwd = sessionFileInput ? (options.sessionFileCwd ?? effectiveCwd) : effectiveCwd;
+  const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, sessionConfigCwd);
+  const configuredSessionFile = resolveConfiguredSessionFile(sessionFileInput, sessionConfigCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
   // Frontmatter wins when it says anything; otherwise the project default,
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  if (!options.resumeSessionFile && configuredSessionFile) {
+    mkdirSync(dirname(configuredSessionFile), { recursive: true });
+  }
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
     ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
-    : persistSession
+    : configuredSessionFile
+      ? SessionManager.open(configuredSessionFile, configuredSessionDir ?? dirname(configuredSessionFile), effectiveCwd)
+      : persistSession
       ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
-          // Optional metadata — it only nests the subagent under its spawner in
-          // `/resume`. Until `rememberAgents` this ran solely for the rare
-          // `persist_session: true` agent; now it runs for every spawn, so a
-          // context without a session manager (a bare programmatic ctx) must
-          // still persist rather than take the whole spawn down.
-          parentSession: ctx.sessionManager?.getSessionFile?.(),
-        })
-      : SessionManager.inMemory(effectiveCwd);
+            // Optional metadata — it only nests the subagent under its spawner in
+            // `/resume`. Until `rememberAgents` this ran solely for the rare
+            // `persist_session: true` agent; now it runs for every spawn, so a
+            // context without a session manager (a bare programmatic ctx) must
+            // still persist rather than take the whole spawn down.
+            parentSession: ctx.sessionManager?.getSessionFile?.(),
+          })
+        : SessionManager.inMemory(effectiveCwd);
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.

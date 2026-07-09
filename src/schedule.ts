@@ -45,6 +45,7 @@ export interface NewJobInput {
   max_turns?: number;
   isolated?: boolean;
   isolation?: IsolationMode;
+  session_file?: string;
 }
 
 export class SubagentScheduler {
@@ -108,6 +109,7 @@ export class SubagentScheduler {
       max_turns: input.max_turns,
       isolated: input.isolated,
       isolation: input.isolation,
+      session_file: input.session_file,
       enabled: true,
       createdAt: new Date().toISOString(),
       runCount: 0,
@@ -257,6 +259,7 @@ export class SubagentScheduler {
         isolated: job.isolated,
         thinkingLevel: job.thinking,
         isolation: job.isolation,
+        sessionFile: job.session_file,
         // A scheduled run has no tool call to build this, so without it the
         // conversation viewer shows nothing about how the job was configured.
         // The model is left out on purpose: agent-manager fills in the effective

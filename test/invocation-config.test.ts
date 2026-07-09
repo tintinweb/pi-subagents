@@ -29,6 +29,7 @@ describe("resolveAgentInvocationConfig", () => {
         runInBackground: false,
         isolated: false,
         isolation: "worktree",
+        sessionFile: ".agents/sessions/config.jsonl",
       }),
       {
         model: "provider/param-model",
@@ -38,6 +39,7 @@ describe("resolveAgentInvocationConfig", () => {
         run_in_background: true,
         isolated: true,
         isolation: "worktree",
+        session_file: ".agents/sessions/params.jsonl",
       },
     );
 
@@ -49,6 +51,7 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
     expect(resolved.isolation).toBe("worktree");
+    expect(resolved.sessionFile).toBe(".agents/sessions/config.jsonl");
   });
 
   it("uses tool-call params when no agent config is available", () => {
@@ -60,6 +63,7 @@ describe("resolveAgentInvocationConfig", () => {
       run_in_background: true,
       isolated: true,
       isolation: "worktree",
+      session_file: ".agents/sessions/params.jsonl",
     });
 
     expect(resolved.modelInput).toBe("provider/param-model");
@@ -70,6 +74,7 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
     expect(resolved.isolation).toBe("worktree");
+    expect(resolved.sessionFile).toBe(".agents/sessions/params.jsonl");
   });
 
   it("lets parent fill in booleans when config leaves them undefined", () => {
