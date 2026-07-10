@@ -36,8 +36,8 @@
  *
  * ONE PARAMETERIZED RUNNER
  * ------------------------
- * The same `runPrintMode()` covers built-in agent types, `.agents/agents/*.md`
- * / `.pi/agents/*.md` frontmatter agents, and inline-instruction agents — the difference is purely
+ * The same `runPrintMode()` covers built-in agent types, `.pi/agents/*.md` /
+ * `.agents/agents/*.md` frontmatter agents, and inline-instruction agents — the difference is purely
  * what you register in `beforeRun` and which `subagent_type` the `Agent` call
  * names. See `test/subagents-print-mode-e2e.test.ts` for usage.
  */

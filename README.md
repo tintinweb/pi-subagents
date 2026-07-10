@@ -15,7 +15,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
 - **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too
-- **Custom agent types** — define agents in `.agents/agents/<name>.md` (preferred project), `.pi/agents/<name>.md` (legacy project), or global agents with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
+- **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
 - **Session resume** — pick up where an agent left off, preserving full conversation context
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
@@ -159,7 +159,7 @@ Group completions render each agent as a separate block. The LLM receives struct
 
 The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles.
 
-Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.agents/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
+Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
 
 ## Custom Agents
 
@@ -169,13 +169,13 @@ Agents are discovered from three locations (higher priority wins):
 
 | Priority | Location | Scope |
 |----------|----------|-------|
-| 1 (highest) | `.agents/agents/<name>.md` | Project — preferred per-repo agents |
-| 2 | `.pi/agents/<name>.md` | Project — legacy per-repo agents |
+| 1 (highest) | `.pi/agents/<name>.md` | Project — pi's config dir; authoritative, and where `/agents` writes |
+| 2 | `.agents/agents/<name>.md` | Project — the shared cross-tool `.agents` workspace (same convention as `.agents/skills/`) |
 | 3 | `$PI_CODING_AGENT_DIR/agents/<name>.md` (default `~/.pi/agent/agents/<name>.md`) | Global — available everywhere |
 
-Project-level agents override global ones with the same name, and the preferred `.agents/agents/` directory overrides the legacy `.pi/agents/` directory. This lets you customize a global or legacy agent for a specific project. The global location follows the upstream `PI_CODING_AGENT_DIR` env var — set it to relocate all pi-coding-agent state (agents, skills, settings) to a custom directory.
+Project-level agents override global ones with the same name, so you can customize a global agent for a specific project. If both project locations define the same name, **`.pi/agents/` wins** — `.pi` stays the project authority; `.agents/agents/` is an additional read location for projects that keep their agent assets in the `.agents` workspace. The global location follows the upstream `PI_CODING_AGENT_DIR` env var — set it to relocate all pi-coding-agent state (agents, skills, settings) to a custom directory.
 
-### Example: `.agents/agents/auditor.md`
+### Example: `.pi/agents/auditor.md`
 
 ```markdown
 ---
@@ -326,9 +326,9 @@ Settings                                    ← max concurrency, max turns, grac
   - **Default agents** (ejected/overridden): Edit, Disable, Reset to default, Delete
   - **Custom agents**: Edit, Disable, Delete
   - **Disabled agents**: Enable, Edit, Delete
-- **Eject** — writes the embedded default config as a `.md` file to the preferred project location (`.agents/agents/`) or personal location, so you can customize it
+- **Eject** — writes the embedded default config as a `.md` file to project or personal location, so you can customize it
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
-- **Create new agent** — choose preferred project (`.agents/agents/`) or personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
+- **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
 - **Settings** — configure max concurrency, default max turns, grace turns, and join mode at runtime
 
 ## Graceful Max Turns
@@ -406,7 +406,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 Launch an autonomous agent. Available types:
 {{typeList}}
 
-Custom agents live in .agents/agents/, .pi/agents/, or {{agentDir}}/agents/.
+Custom agents live in .pi/agents/ or {{agentDir}}/agents/.
 ```
 
 Placeholders: `{{typeList}}` (full per-agent descriptions), `{{compactTypeList}}` (first sentence each), `{{agentDir}}`, `{{scheduleGuideline}}` (expands with its own leading newline + `- ` bullet when scheduling is on — place it directly after your last rule line; empty when scheduling is off). Unknown placeholders are left verbatim with a stderr warning; a missing or empty file falls back to `"full"` with a warning. Note the usual trust umbrella: a project-level file shapes the orchestrator's prompt, same as project agents and extensions do.
@@ -611,7 +611,7 @@ src/
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events
   group-join.ts       # Group join manager: batched completion notifications with timeout
-  custom-agents.ts    # Load user-defined agents from .agents/agents/, .pi/agents/, and global agents
+  custom-agents.ts    # Load user-defined agents from .pi/agents/, .agents/agents/, and global agents
   memory.ts           # Persistent agent memory (resolve, read, build prompt blocks)
   skill-loader.ts     # Preload skills (Pi-standard + Agent Skills spec layouts)
   output-file.ts      # Streaming output file transcripts for agent sessions

@@ -10,7 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
@@ -729,7 +729,7 @@ export default function (pi: ExtensionAPI) {
   const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
 ${buildCompactTypeListText()}
 
-Custom agents: .agents/agents/<name>.md (project preferred), .pi/agents/<name>.md (project legacy), or ${getAgentDir()}/agents/<name>.md (global).
+Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
 
 Notes:
 - description: 3-5 words (shown in UI). Prompts must be self-contained — the agent has not seen this conversation.
@@ -743,7 +743,7 @@ Notes:
 Available agent types and the tools they have access to:
 ${buildTypeListText()}
 
-Custom agents can be defined in .agents/agents/<name>.md (project preferred), .pi/agents/<name>.md (project legacy), or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones, and the preferred project directory overrides the legacy project directory. Creating a .md file with the same name as a default agent overrides it.
+Custom agents can be defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
 
 When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 
@@ -847,7 +847,7 @@ Terse command-style prompts produce shallow, generic work.
         description: "A short (3-5 word) description of the task (shown in UI).",
       }),
       subagent_type: Type.String({
-        description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .agents/agents/*.md (project preferred), .pi/agents/*.md (project legacy), or ${getAgentDir()}/agents/*.md (global) are also available.`,
+        description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
       }),
       model: Type.Optional(
         Type.String({
@@ -1485,16 +1485,16 @@ Terse command-style prompts produce shallow, generic work.
 
   // ---- /agents interactive menu ----
 
-  const projectAgentsDir = () => join(process.cwd(), ".agents", "agents");
-  const legacyProjectAgentsDir = () => join(process.cwd(), ".pi", "agents");
+  const projectAgentsDir = () => join(process.cwd(), ".pi", "agents");
+  const workspaceAgentsDir = () => join(process.cwd(), ".agents", "agents");
   const personalAgentsDir = () => join(getAgentDir(), "agents");
 
-  /** Find the file path of a custom agent by name (preferred project, legacy project, then global). */
-  function findAgentFile(name: string): { path: string; location: "project" | "legacy project" | "personal" } | undefined {
+  /** Find the file path of a custom agent by name, in discovery-precedence order (project, workspace, then global). */
+  function findAgentFile(name: string): { path: string; location: "project" | "workspace" | "personal" } | undefined {
     const projectPath = join(projectAgentsDir(), `${name}.md`);
     if (existsSync(projectPath)) return { path: projectPath, location: "project" };
-    const legacyProjectPath = join(legacyProjectAgentsDir(), `${name}.md`);
-    if (existsSync(legacyProjectPath)) return { path: legacyProjectPath, location: "legacy project" };
+    const workspacePath = join(workspaceAgentsDir(), `${name}.md`);
+    if (existsSync(workspacePath)) return { path: workspacePath, location: "workspace" };
     const personalPath = join(personalAgentsDir(), `${name}.md`);
     if (existsSync(personalPath)) return { path: personalPath, location: "personal" };
     return undefined;
@@ -1732,6 +1732,7 @@ Terse command-style prompts produce shallow, generic work.
       const content = readFileSync(file.path, "utf-8");
       const edited = await ctx.ui.editor(`Edit ${name}`, content);
       if (edited !== undefined && edited !== content) {
+        const { writeFileSync } = await import("node:fs");
         writeFileSync(file.path, edited, "utf-8");
         reloadCustomAgents();
         ctx.ui.notify(`Updated ${file.path}`, "info");
@@ -1764,7 +1765,7 @@ Terse command-style prompts produce shallow, generic work.
   /** Eject a default agent: write its embedded config as a .md file. */
   async function ejectAgent(ctx: ExtensionCommandContext, name: string, cfg: AgentConfig) {
     const location = await ctx.ui.select("Choose location", [
-      "Project (.agents/agents/)",
+      "Project (.pi/agents/)",
       `Personal (${personalAgentsDir()})`,
     ]);
     if (!location) return;
@@ -1801,6 +1802,7 @@ Terse command-style prompts produce shallow, generic work.
 
     const content = `---\n${fmFields.join("\n")}\n---\n\n${cfg.systemPrompt}\n`;
 
+    const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Ejected ${name} to ${targetPath}`, "info");
@@ -1817,6 +1819,7 @@ Terse command-style prompts produce shallow, generic work.
         return;
       }
       const updated = content.replace(/^---\n/, "---\nenabled: false\n");
+      const { writeFileSync } = await import("node:fs");
       writeFileSync(file.path, updated, "utf-8");
       reloadCustomAgents();
       ctx.ui.notify(`Disabled ${name} (${file.path})`, "info");
@@ -1825,7 +1828,7 @@ Terse command-style prompts produce shallow, generic work.
 
     // No file (built-in default) — create a stub
     const location = await ctx.ui.select("Choose location", [
-      "Project (.agents/agents/)",
+      "Project (.pi/agents/)",
       `Personal (${personalAgentsDir()})`,
     ]);
     if (!location) return;
@@ -1834,6 +1837,7 @@ Terse command-style prompts produce shallow, generic work.
     mkdirSync(targetDir, { recursive: true });
 
     const targetPath = join(targetDir, `${name}.md`);
+    const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, "---\nenabled: false\n---\n", "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Disabled ${name} (${targetPath})`, "info");
@@ -1846,6 +1850,7 @@ Terse command-style prompts produce shallow, generic work.
 
     const content = readFileSync(file.path, "utf-8");
     const updated = content.replace(/^(---\n)enabled: false\n/, "$1");
+    const { writeFileSync } = await import("node:fs");
 
     // If the file was just a stub ("---\n---\n"), delete it to restore the built-in default
     if (updated.trim() === "---\n---" || updated.trim() === "---\n---\n") {
@@ -1861,7 +1866,7 @@ Terse command-style prompts produce shallow, generic work.
 
   async function showCreateWizard(ctx: ExtensionCommandContext) {
     const location = await ctx.ui.select("Choose location", [
-      "Project (.agents/agents/)",
+      "Project (.pi/agents/)",
       `Personal (${personalAgentsDir()})`,
     ]);
     if (!location) return;
@@ -2037,6 +2042,7 @@ ${systemPrompt}
       if (!overwrite) return;
     }
 
+    const { writeFileSync } = await import("node:fs");
     writeFileSync(targetPath, content, "utf-8");
     reloadCustomAgents();
     ctx.ui.notify(`Created ${targetPath}`, "info");

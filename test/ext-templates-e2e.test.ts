@@ -5,7 +5,7 @@
  * Unlike agent-runner-e2e.test.ts (which builds AgentConfig objects in code),
  * this exercises the FULL chain from frontmatter onward:
  *
- *   test/fixtures/.pi/agents/*.md         (legacy project agent templates)
+ *   test/fixtures/.pi/agents/*.md         (pre-configured agent templates)
  *     → real loadCustomAgents()           (frontmatter → parseToolsField/ext:)
  *     → registerAgents()                  (real registry)
  *     → real runAgent() [headless]        (real DefaultResourceLoader loads the
@@ -82,7 +82,7 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
 
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
 
-    // Load the templates through the REAL loader (legacy project agents come from
+    // Load the templates through the REAL loader (project agents come from
     // <cwd>/.pi/agents → FIXTURES_DIR/.pi/agents) and install them in the
     // registry runAgent reads from.
     registerAgents(loadCustomAgents(FIXTURES_DIR));

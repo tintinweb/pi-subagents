@@ -125,9 +125,9 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   });
 
   it("spawns a FRONTMATTER-defined (.pi/agents/*.md) agent and its prompt reaches the child", async () => {
-    // A legacy project agent whose body is a distinctive system prompt. Proving
-    // the child SAW it proves the full chain: the extension discovers the .md
-    // from process.cwd(), parses its frontmatter, and runAgent's buildAgentPrompt
+    // A project agent whose body is a distinctive system prompt. Proving the
+    // child SAW it proves the full chain: the extension discovers the .md from
+    // process.cwd(), parses its frontmatter, and runAgent's buildAgentPrompt
     // feeds the body into the real child session.
     const MARKER = "SPYMARKER_FRONTMATTER_REACHED_CHILD";
     const cwd = mkdtempSync(join(tmpdir(), "subagents-fm-"));
@@ -170,7 +170,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     mkdirSync(join(cwd, ".agents", "agents"), { recursive: true });
     writeFileSync(
       join(cwd, ".agents", "agents", "agents-spy.md"),
-      `---\ndescription: "Echoes a marker from the preferred project agents dir."\n---\n${MARKER}\n`,
+      `---\ndescription: "Echoes a marker from the .agents/agents workspace dir."\n---\n${MARKER}\n`,
     );
 
     run = await runPrintMode({
@@ -179,7 +179,7 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
       respond: routeBySession({
         parentInitial: agentCall({
           subagent_type: "agents-spy",
-          description: "echo preferred",
+          description: "echo workspace",
           prompt: "Report what you were told.",
           run_in_background: false,
         }),

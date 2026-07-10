@@ -1,7 +1,7 @@
 /**
  * agent-types.ts — Unified agent type registry.
  *
- * Merges embedded default agents with user-defined agents from .agents/agents/*.md, legacy .pi/agents/*.md, and global agents.
+ * Merges embedded default agents with user-defined agents from .pi/agents/*.md, .agents/agents/*.md, and global agents.
  * User agents override defaults with the same name. Disabled agents are kept but excluded from spawning.
  */
 

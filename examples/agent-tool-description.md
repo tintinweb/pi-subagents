@@ -3,7 +3,7 @@ Launch a new agent to handle complex, multi-step tasks autonomously. Each agent 
 Available agent types and the tools they have access to:
 {{typeList}}
 
-Custom agents can be defined in .agents/agents/<name>.md (project preferred), .pi/agents/<name>.md (project legacy), or {{agentDir}}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones, and the preferred project directory overrides the legacy project directory. Creating a .md file with the same name as a default agent overrides it.
+Custom agents can be defined in .pi/agents/<name>.md (project) or {{agentDir}}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
 
 When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
 

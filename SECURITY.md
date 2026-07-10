@@ -21,7 +21,7 @@ unless they demonstrate how `pi-subagents` grants that write access or crosses a
 operating-system privilege boundary.
 
 `pi-subagents` relies on the user only loading trustworthy agent definitions
-(`.agents/agents/*.md`, `.pi/agents/*.md`, and global agents), skills, and
+(`.pi/agents/*.md`, `.agents/agents/*.md`, and global agents), skills, and
 tools, and only using pi within trusted repositories. Files like `AGENTS.md`,
 custom agent frontmatter/system prompts, preloaded skills, or instructions
 embedded in repository content and comments can be used to prompt-inject the
@@ -67,8 +67,8 @@ tool restriction, denylist, or agent boundary it claims to enforce.
 - Exposed secrets that are third-party/user-controlled credentials
 - Reports requiring the ability to create, modify, delete, or replace files,
   directories, symlinks, environment variables, shell configuration, or other
-  user-controlled local state on the target machine. This includes `.agents/agents/`,
-  `.pi/agents/`, agent and extension configuration, persistent agent memory,
+  user-controlled local state on the target machine. This includes `.pi/agents/`,
+  `.agents/agents/`, agent and extension configuration, persistent agent memory,
   workspace files, `AGENTS.md`, skills, dotfiles, and files synchronized through NFS, roaming
   profiles, or dotfile managers, unless the report shows how `pi-subagents`
   itself grants that access.

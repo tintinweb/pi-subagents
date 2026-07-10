@@ -36,7 +36,7 @@ describe("loadCustomAgents", () => {
     writeAgentIn(".pi", name, content);
   }
 
-  function writePreferredAgent(name: string, content: string) {
+  function writeWorkspaceAgent(name: string, content: string) {
     writeAgentIn(".agents", name, content);
   }
 
@@ -45,39 +45,39 @@ describe("loadCustomAgents", () => {
     expect(result.size).toBe(0);
   });
 
-  it("loads a preferred project agent from .agents/agents", () => {
-    writePreferredAgent("reviewer", `---
-description: Preferred Reviewer
+  it("loads a workspace project agent from .agents/agents", () => {
+    writeWorkspaceAgent("reviewer", `---
+description: Workspace Reviewer
 ---
 
-Preferred prompt.`);
+Workspace prompt.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.size).toBe(1);
-    expect(result.get("reviewer")?.description).toBe("Preferred Reviewer");
-    expect(result.get("reviewer")?.systemPrompt).toBe("Preferred prompt.");
+    expect(result.get("reviewer")?.description).toBe("Workspace Reviewer");
+    expect(result.get("reviewer")?.systemPrompt).toBe("Workspace prompt.");
     expect(result.get("reviewer")?.source).toBe("project");
   });
 
-  it("preferred project agents override legacy .pi/agents", () => {
+  it(".pi/agents overrides .agents/agents on a name clash", () => {
+    writeWorkspaceAgent("dupe", `---
+description: Workspace Project
+---
+
+Workspace prompt.`);
     writeAgent("dupe", `---
-description: Legacy Project
+description: Pi Project
 ---
 
-Legacy prompt.`);
-    writePreferredAgent("dupe", `---
-description: Preferred Project
----
-
-Preferred prompt.`);
+Pi prompt.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.size).toBe(1);
-    expect(result.get("dupe")?.description).toBe("Preferred Project");
-    expect(result.get("dupe")?.systemPrompt).toBe("Preferred prompt.");
+    expect(result.get("dupe")?.description).toBe("Pi Project");
+    expect(result.get("dupe")?.systemPrompt).toBe("Pi prompt.");
   });
 
-  it("legacy project agents override global agents", () => {
+  it("workspace project agents override global agents", () => {
     const globalAgentDir = join(tmpDir, "global-agent-dir");
     process.env.PI_CODING_AGENT_DIR = globalAgentDir;
     const globalAgents = join(globalAgentDir, "agents");
@@ -87,16 +87,16 @@ description: Global
 ---
 
 Global prompt.`);
-    writeAgent("dupe", `---
-description: Legacy Project
+    writeWorkspaceAgent("dupe", `---
+description: Workspace Project
 ---
 
-Legacy prompt.`);
+Workspace prompt.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.size).toBe(1);
-    expect(result.get("dupe")?.description).toBe("Legacy Project");
-    expect(result.get("dupe")?.systemPrompt).toBe("Legacy prompt.");
+    expect(result.get("dupe")?.description).toBe("Workspace Project");
+    expect(result.get("dupe")?.systemPrompt).toBe("Workspace prompt.");
   });
 
   it("loads a basic agent with all frontmatter fields", () => {
