@@ -36,6 +36,7 @@ import {
   AgentWidget,
   buildInvocationTags,
   describeActivity,
+  fgPreservingNestedStyles,
   formatDuration,
   formatMs,
   formatTokens,
@@ -903,7 +904,7 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
         if (d.tokens) parts.push(d.tokens);
-        return parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
+        return parts.map(p => fgPreservingNestedStyles(theme, "dim", p)).join(" " + theme.fg("dim", "·") + " ");
       };
 
       // ---- While running (streaming) ----

@@ -90,6 +90,13 @@ export interface AgentDetails {
 
 // ---- Formatting helpers ----
 
+/** Apply foreground styling while restoring it after nested foreground/full ANSI resets. */
+export function fgPreservingNestedStyles(theme: Theme, color: string, text: string): string {
+  const styledEmpty = theme.fg(color, "");
+  const styleStart = styledEmpty.replace(/\u001b\[(?:0|39)m/g, "");
+  return theme.fg(color, text.replace(/\u001b\[(?:0|39)m/g, reset => `${reset}${styleStart}`));
+}
+
 /** Format a token count compactly: "33.8k token", "1.2M token". */
 export function formatTokens(count: number): string {
   if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M token`;
@@ -391,7 +398,7 @@ export class AgentWidget {
       const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
 
       runningLines.push([
-        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", statsText)}`),
+        truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
       ]);
     }
