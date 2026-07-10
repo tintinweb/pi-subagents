@@ -61,6 +61,10 @@ export interface AgentActivity {
   maxTurns?: number;
   /** Lifetime usage breakdown — see LifetimeUsage docs. */
   lifetimeUsage: LifetimeUsage;
+  /** Last visible activity/status text used for per-status elapsed rendering. */
+  currentActivityText?: string;
+  /** Wall-clock timestamp when the current visible activity/status text began. */
+  currentActivityStartedAt?: number;
 }
 
 /** Metadata attached to Agent tool results for custom rendering. */
@@ -74,6 +78,8 @@ export interface AgentDetails {
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error" | "background";
   /** Human-readable description of what the agent is currently doing. */
   activity?: string;
+  /** Milliseconds spent in the current visible activity/status text. */
+  activityDurationMs?: number;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
   /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
@@ -91,7 +97,7 @@ export interface AgentDetails {
 // ---- Formatting helpers ----
 
 /** Apply foreground styling while restoring it after nested foreground/full ANSI resets. */
-export function fgPreservingNestedStyles(theme: Theme, color: string, text: string): string {
+export function fgPreservingNestedStyles(theme: Pick<Theme, "fg">, color: string, text: string): string {
   const styledEmpty = theme.fg(color, "");
   const styleStart = styledEmpty.replace(/\u001b\[(?:0|39)m/g, "");
   return theme.fg(color, text.replace(/\u001b\[(?:0|39)m/g, reset => `${reset}${styleStart}`));
@@ -141,6 +147,20 @@ export function formatTurns(turnCount: number, maxTurns?: number | null): string
 /** Format milliseconds as human-readable duration. */
 export function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** Track how long the current visible activity/status text has been displayed. */
+export function activityDurationMs(activity: AgentActivity, activityText: string, now = Date.now()): number {
+  if (activity.currentActivityText !== activityText || activity.currentActivityStartedAt == null) {
+    activity.currentActivityText = activityText;
+    activity.currentActivityStartedAt = now;
+  }
+  return Math.max(0, now - activity.currentActivityStartedAt);
+}
+
+/** Append the current-status elapsed time to a visible activity/status line. */
+export function formatActivityWithElapsed(activityText: string, elapsedMs: number): string {
+  return `${activityText} · ${formatMs(elapsedMs)}`;
 }
 
 /** Format duration from start/completed timestamps. */
@@ -396,10 +416,13 @@ export class AgentWidget {
       const statsText = parts.join(" · ");
 
       const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
+      const activityText = bg
+        ? formatActivityWithElapsed(activity, activityDurationMs(bg, activity))
+        : formatActivityWithElapsed(activity, Date.now() - a.startedAt);
 
       runningLines.push([
         truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),
-        truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
+        truncate(theme.fg("dim", "│  ") + fgPreservingNestedStyles(theme, "dim", `  ⎿  ${activityText}`)),
       ]);
     }
 
