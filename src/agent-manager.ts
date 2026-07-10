@@ -13,7 +13,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
-import { addUsage } from "./usage.js";
+import { type AssistantUsageRecord, addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
@@ -91,8 +91,8 @@ interface SpawnOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
-  /** Called once per assistant message_end with that message's usage delta. */
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called once per assistant message_end with complete usage and attribution metadata. */
+  onAssistantUsage?: (usage: AssistantUsageRecord) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
 }
@@ -126,6 +126,11 @@ export class AgentManager {
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
+  }
+
+  private recordAssistantUsage(record: AgentRecord, usage: AssistantUsageRecord): void {
+    addUsage(record.lifetimeUsage, usage.usage);
+    record.usageRecords.push(usage);
   }
 
   /** Update the max concurrent background agents limit. */
@@ -166,6 +171,7 @@ export class AgentManager {
       startedAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      usageRecords: [],
       compactionCount: 0,
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
@@ -267,7 +273,7 @@ export class AgentManager {
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
-        addUsage(record.lifetimeUsage, usage);
+        this.recordAssistantUsage(record, usage);
         options.onAssistantUsage?.(usage);
       },
       onCompaction: (info) => {
@@ -445,6 +451,8 @@ export class AgentManager {
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    record.resultConsumed = true;
+    record.usageRecords = [];
 
     try {
       const responseText = await resumeAgent(record.session, prompt, {
@@ -452,7 +460,7 @@ export class AgentManager {
           if (activity.type === "end") record.toolUses++;
         },
         onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
+          this.recordAssistantUsage(record, usage);
         },
         onCompaction: (info) => {
           record.compactionCount++;
@@ -469,6 +477,7 @@ export class AgentManager {
       record.completedAt = Date.now();
     }
 
+    try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
     return record;
   }
 
