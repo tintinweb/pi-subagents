@@ -1,0 +1,10 @@
+# pnpm 11 blocks native build scripts by default and exits non-zero
+# ([ERR_PNPM_IGNORED_BUILDS]) when any are unapproved. This package's
+# transitive dependencies (pulled in through the @earendil-works/pi-* peers)
+# ship install scripts; without an approval entry `pnpm install` returns a
+# failing exit code, which breaks pi's git-package reconciliation
+# (git clean -fdx -> pnpm install -> non-zero -> extension fails to load).
+# Approving them here makes `pnpm install` exit 0.
+allowBuilds:
+  "@google/genai": true
+  protobufjs: true
