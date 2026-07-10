@@ -37,9 +37,11 @@ import {
   type AgentActivity,
   type AgentDetails,
   AgentWidget,
+  activityDurationMs,
   buildInvocationTags,
   describeActivity,
   fgPreservingNestedStyles,
+  formatActivityWithElapsed,
   formatDuration,
   formatMs,
   formatTokens,
@@ -66,10 +68,12 @@ export function renderRunningAgentStatus(
   statsText: string,
   activity: string,
   theme: Pick<Theme, "fg">,
+  activityDuration?: number,
 ): Container {
   const container = new Container();
+  const activityText = activityDuration == null ? activity : formatActivityWithElapsed(activity, activityDuration);
   container.addChild(new Text(theme.fg("accent", frame) + (statsText ? " " + statsText : ""), 0, 0));
-  container.addChild(new Text(theme.fg("dim", `  ⎿  ${activity}`), 0, 0));
+  container.addChild(new Text(fgPreservingNestedStyles(theme, "dim", `  ⎿  ${activityText}`), 0, 0));
   return container;
 }
 
@@ -993,7 +997,7 @@ Terse command-style prompts produce shallow, generic work.
       if (isPartial || details.status === "running") {
         const frame = SPINNER[details.spinnerFrame ?? 0];
         const s = stats(details);
-        return renderRunningAgentStatus(frame, s, details.activity ?? "thinking…", theme);
+        return renderRunningAgentStatus(frame, s, details.activity ?? "thinking…", theme, details.activityDurationMs);
       }
 
       // ---- Background agent launched ----
@@ -1321,6 +1325,7 @@ Terse command-style prompts produce shallow, generic work.
       let fgId: string | undefined;
 
       const streamUpdate = () => {
+        const activity = describeActivity(fgState.activeTools, fgState.responseText);
         const details: AgentDetails = {
           ...detailBase,
           toolUses: fgState.toolUses,
@@ -1329,7 +1334,8 @@ Terse command-style prompts produce shallow, generic work.
           maxTurns: fgState.maxTurns,
           durationMs: Date.now() - startedAt,
           status: "running",
-          activity: describeActivity(fgState.activeTools, fgState.responseText),
+          activity,
+          activityDurationMs: activityDurationMs(fgState, activity),
           spinnerFrame: spinnerFrame % SPINNER.length,
         };
         onUpdate?.({
