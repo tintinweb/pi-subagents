@@ -1049,6 +1049,7 @@ Terse command-style prompts produce shallow, generic work.
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
+      const outputTranscript = customConfig?.outputTranscript !== false;
 
       const parentModelId = ctx.model?.id;
       const effectiveModelId = model?.id;
@@ -1180,8 +1181,10 @@ Terse command-style prompts produce shallow, generic work.
         if (record && joinMode) {
           record.joinMode = joinMode;
           record.toolCallId = toolCallId;
-          record.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
-          writeInitialEntry(record.outputFile, id, params.prompt, ctx.cwd);
+          if (outputTranscript) {
+            record.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
+            writeInitialEntry(record.outputFile, id, params.prompt, ctx.cwd);
+          }
         }
 
         if (joinMode == null || joinMode === 'async') {
@@ -1299,7 +1302,7 @@ Terse command-style prompts produce shallow, generic work.
           // onSpawned: called synchronously after spawn, before onSessionCreated fires.
           // Set up the output file so streamToOutputFile can pick it up.
           const fgRec = manager.getRecord(fgAgentId);
-          if (fgRec) {
+          if (fgRec && outputTranscript) {
             fgRec.outputFile = createOutputFilePath(ctx.cwd, fgAgentId, ctx.sessionManager.getSessionId());
             writeInitialEntry(fgRec.outputFile, fgAgentId, params.prompt, ctx.cwd);
           }
@@ -1796,6 +1799,7 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
     if (cfg.inheritContext) fmFields.push("inherit_context: true");
     if (cfg.runInBackground) fmFields.push("run_in_background: true");
+    if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
     if (cfg.isolated) fmFields.push("isolated: true");
     if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
     if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
@@ -1922,6 +1926,7 @@ skills: <true (inherit all), false (none), or comma-separated skill names to pre
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 run_in_background: <true to run in background by default. Default: false>
+output_transcript: <false to create no sidechain transcript file or path. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
 isolation: <"worktree" to run in isolated git worktree. Omit for normal>
@@ -1937,6 +1942,7 @@ Guidelines for choosing settings:
 - Use prompt_mode: replace for fully custom agents with their own personality/instructions
 - Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
 - Set isolated: true if the agent should NOT have access to MCP servers or other extensions
+- Set output_transcript: false to suppress the sidechain transcript; also keep persist_session false when the full conversation must not be written to disk
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
 
 Write the file using the write tool. Only write the file, nothing else.`;
