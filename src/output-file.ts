@@ -87,6 +87,20 @@ export function streamToOutputFile(
 
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") flush();
+    // Compaction replaces session.messages with a shorter, summarized array,
+    // leaving writtenCount past the new end — without re-anchoring, the flush
+    // loop would never match again and streaming would halt for good (#145).
+    // Flush before it runs so any not-yet-flushed tail still reaches the file,
+    // then re-anchor to the rebuilt array once it lands. The re-anchor is
+    // deferred a microtask because on the overflow-retry path pi trims the
+    // trailing error assistant message AFTER emitting compaction_end —
+    // anchoring synchronously would sit one past the trimmed array and skip
+    // the first post-compaction message. Aborted/failed compactions leave
+    // session.messages untouched, so only successful ones re-anchor.
+    if (event.type === "compaction_start") flush();
+    if (event.type === "compaction_end" && !event.aborted && event.result) {
+      queueMicrotask(() => { writtenCount = session.messages.length; });
+    }
   });
 
   return () => {
