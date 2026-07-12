@@ -199,6 +199,18 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
   it("errors clearly when faux mode is given no script", async () => {
     await expect(runPrintMode({ prompt: "x" })).rejects.toThrow(/provide `respond` or `steps`/);
   });
+
+  it("times out with the runner's own descriptive error and restores the environment", async () => {
+    const prevCwd = process.cwd();
+    // A responder that never resolves — the turn stalls until the wall-clock guard fires.
+    await expect(
+      runPrintMode({ prompt: "stall", respond: () => new Promise(() => {}), timeoutMs: 300 }),
+    ).rejects.toThrow(/print-mode runner timed out after 300ms/);
+    // The failure path ran dispose(): cwd and global isolation were restored even
+    // though the caller never received a dispose handle.
+    expect(process.cwd()).toBe(prevCwd);
+    expect((globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")]).toBeUndefined();
+  });
 });
 
 // Opt-in real-LLM smoke tests — exercise the SAME runner against a live model
@@ -211,8 +223,16 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
 // Per-feature determinism lives in the faux suite above, which scripts exact calls.
 const LIVE_TIMEOUT = 150_000;
 // SELF-SMOKE chains three live spawns in one session; passing runs land ~145s,
-// so it gets extra headroom over the single-feature tests.
-const SELF_SMOKE_TIMEOUT = 300_000;
+// but live variance (slow turns, provider retries, extra polling) has blown past
+// 2× that — give it 4× so the smoke doesn't flake on latency alone.
+const SELF_SMOKE_TIMEOUT = 600_000;
+// The vitest per-test timer starts before runPrintMode and should not fire
+// first: the runner's own timeoutMs guard produces a descriptive error and
+// aborts the live session + subagents, while a vitest timeout is generic and
+// leaks them. The slack covers live setup/teardown outside the runner's guard.
+const VITEST_SLACK = 30_000;
+const LIVE_VITEST_TIMEOUT = LIVE_TIMEOUT + VITEST_SLACK;
+const SELF_SMOKE_VITEST_TIMEOUT = SELF_SMOKE_TIMEOUT + VITEST_SLACK;
 
 describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
   let run: PrintModeRun | undefined;
@@ -236,7 +256,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       expect(agentToolResults(run.parentSession).join("\n")).toMatch(/PONG/i);
       expect(run.responseText).toMatch(/PONG/i);
     },
-    LIVE_TIMEOUT,
+    LIVE_VITEST_TIMEOUT,
   );
 
   it(
@@ -258,7 +278,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       // via get_subagent_result and/or the held final answer).
       expect(run.responseText).toMatch(/BGPONG/i);
     },
-    LIVE_TIMEOUT,
+    LIVE_VITEST_TIMEOUT,
   );
 
   it(
@@ -277,7 +297,7 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       ).toBe(true);
       expect(run.responseText.length).toBeGreaterThan(0);
     },
-    LIVE_TIMEOUT,
+    LIVE_VITEST_TIMEOUT,
   );
 
   it(
@@ -324,6 +344,6 @@ describe.runIf(LIVE)("subagents print-mode e2e (live LLM, opt-in)", () => {
       // The agent ran the whole script to completion and self-reported.
       expect(run.responseText).toMatch(/SELF-SMOKE COMPLETE/i);
     },
-    SELF_SMOKE_TIMEOUT,
+    SELF_SMOKE_VITEST_TIMEOUT,
   );
 });

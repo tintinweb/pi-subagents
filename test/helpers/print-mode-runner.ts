@@ -411,41 +411,6 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const onAbort = () => session.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
-  // --- drive the turn under a wall-clock guard ---
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`print-mode runner timed out after ${timeoutMs}ms`)), timeoutMs);
-  });
-  try {
-    await Promise.race([
-      (async () => {
-        await session.prompt(options.prompt);
-        // Fallback for when the hold patch is unavailable: catch any subagents
-        // still running after prompt() returns and process their results.
-        if (hold) {
-          while (manager?.hasRunning()) {
-            await manager.waitForAll();
-            await session.prompt("Background agents have completed. Process their results.");
-          }
-        }
-      })(),
-      timeout,
-    ]);
-  } finally {
-    clearTimeout(timer);
-    unsubscribe();
-    options.signal?.removeEventListener("abort", onAbort);
-  }
-
-  if (!responseText.trim()) {
-    responseText = lastAssistantText(session);
-  }
-
-  // Snapshot subagent records (manager exposes them via the extension session,
-  // but the cross-package handle only exposes getRecord — read listAgents off
-  // the underlying manager if reachable, else fall back to an empty list).
-  const subagents = snapshotSubagents(manager);
-
   const dispose = async () => {
     // Emit session_shutdown FIRST so extensions tear down cleanly — in live mode
     // the real env loads global extensions (e.g. a status-bar) whose background
@@ -479,6 +444,66 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     }
     if (ownsCwd) rmSync(cwd, { recursive: true, force: true });
   };
+
+  // --- drive the turn under a wall-clock guard ---
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let failed = false;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      const stillRunning = manager?.hasRunning() ? " (background subagents still running)" : "";
+      reject(new Error(`print-mode runner timed out after ${timeoutMs}ms${stillRunning}`));
+    }, timeoutMs);
+  });
+  try {
+    await Promise.race([
+      (async () => {
+        await session.prompt(options.prompt);
+        // Fallback for when the hold patch is unavailable: catch any subagents
+        // still running after prompt() returns and process their results.
+        if (hold) {
+          while (!failed && manager?.hasRunning()) {
+            await manager.waitForAll();
+            // prompt() resolves (not rejects) on abort, so after a timeout this
+            // orphaned race arm keeps running — never re-prompt a torn-down session.
+            if (failed) break;
+            await session.prompt("Background agents have completed. Process their results.");
+          }
+        }
+      })(),
+      timeout,
+    ]);
+  } catch (err) {
+    // On timeout (or any turn failure) we throw, so the caller never receives
+    // the dispose handle — without this, a live session and its background
+    // subagents would keep streaming after the test already failed. Subagents
+    // are aborted by dispose()'s session_shutdown emit (the extension's
+    // shutdown handler calls manager.abortAll()).
+    failed = true;
+    try {
+      session.abort();
+    } catch {
+      /* ignore */
+    }
+    try {
+      await dispose();
+    } catch {
+      /* ignore — the turn error below is the diagnostic that matters */
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    unsubscribe();
+    options.signal?.removeEventListener("abort", onAbort);
+  }
+
+  if (!responseText.trim()) {
+    responseText = lastAssistantText(session);
+  }
+
+  // Snapshot subagent records (manager exposes them via the extension session,
+  // but the cross-package handle only exposes getRecord — read listAgents off
+  // the underlying manager if reachable, else fall back to an empty list).
+  const subagents = snapshotSubagents(manager);
 
   return {
     responseText: responseText.trim(),
