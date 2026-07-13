@@ -1546,9 +1546,13 @@ Notes:
       streamUpdate();
 
       const recoverOnAbort = customConfig?.recoverOnAbort ?? false;
-      const effectivePrompt = recoverOnAbort
+      // Inject turn budget so the agent can pace itself (only when a limit is set).
+      const turnBudgetNote = effectiveMaxTurns != null
+        ? `\n\n[Turn budget: ${effectiveMaxTurns} turns. Pace yourself — land the core change first, then validate if turns remain.]`
+        : "";
+      const effectivePrompt = (recoverOnAbort
         ? params.prompt + CHECKPOINT_PROTOCOL
-        : params.prompt;
+        : params.prompt) + turnBudgetNote;
 
       let record: AgentRecord;
       try {
@@ -1769,6 +1773,11 @@ Notes:
 
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const outputMode = step.output_mode ?? "inline";
+
+      // Inject turn budget so chain steps can pace themselves.
+      if (effectiveMaxTurns != null) {
+        stepPrompt += `\n\n[Turn budget: ${effectiveMaxTurns} turns. Pace yourself \u2014 land the core change first, then validate if turns remain.]`;
+      }
 
       return {
         resolvedStepType,

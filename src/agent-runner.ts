@@ -168,7 +168,7 @@ export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurn
 export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = normalizeMaxTurns(n); }
 
 /** Additional turns allowed after the soft limit steer message. */
-let graceTurns = 5;
+let graceTurns = 8;
 
 /** Get the grace turns value. */
 export function getGraceTurns(): number { return graceTurns; }
