@@ -619,7 +619,7 @@ export default function (pi: ExtensionAPI) {
   // swaps in a ~75% smaller one for small/local models; "custom" reads a
   // user-authored template. Read once at tool registration — flipping it
   // applies on the next pi session.
-  let toolDescriptionMode: ToolDescriptionMode = "full";
+  let toolDescriptionMode: ToolDescriptionMode = "compact";
   function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
   function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
 
@@ -762,9 +762,8 @@ export default function (pi: ExtensionAPI) {
     schedule: Type.Optional(
       Type.String({
         description:
-          'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
-          'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
-          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+          'Schedule: cron ("0 0 9 * * 1"), interval ("5m"/"1h"), or one-shot ("+10m"/ISO). ' +
+          'Forces background. Incompatible with inherit_context/resume.',
       }),
     ),
   };
@@ -865,190 +864,127 @@ Notes:
   })();
 
   // Shared chain element schema — reused by both `chain` (top-level array) and
-  // `remaining` (steps supplied when resuming a paused chain via chain_run_id).
+  // When resuming a paused chain, pass remaining steps via the `chain` param.
+  //
+  // The 13 shared step/member fields are extracted into a single object to
+  // minimize source duplication. The TypeBox serializer still inlines them
+  // (no $ref support in pi-ai validation yet), but this keeps descriptions
+  // consistent and makes future $defs dedup a one-line change.
+  const sharedStepMemberFields = {
+    subagent_type: Type.String({
+      description: "Agent type.",
+    }),
+    prompt: Type.String({
+      description: "Task prompt. {previous} = prior step output.",
+    }),
+    description: Type.Optional(
+      Type.String({
+        description: "Short label (shown in UI).",
+      })
+    ),
+    model: Type.Optional(
+      Type.String({
+        description: "Model override.",
+      })
+    ),
+    thinking: Type.Optional(
+      Type.String({
+        description: "Thinking level override.",
+      })
+    ),
+    max_turns: Type.Optional(
+      Type.Number({
+        description: "Max turns.",
+        minimum: 1,
+      })
+    ),
+    output: Type.Optional(
+      Type.String({
+        description: "Output file path. Supports {chain_dir}.",
+      })
+    ),
+    output_mode: Type.Optional(
+      Type.Union(
+        [Type.Literal("inline"), Type.Literal("file-only")],
+        {
+          description: '"inline" (default): pass content. "file-only": write to disk, pass path.',
+        }
+      )
+    ),
+    reads: Type.Optional(
+      Type.Array(
+        Type.String({ description: "File path." }),
+        {
+          description: "Files to prepend as context.",
+        }
+      )
+    ),
+    isolated: Type.Optional(
+      Type.Boolean({
+        description: "No extension/MCP tools.",
+      }),
+    ),
+    inherit_context: Type.Optional(
+      Type.Boolean({
+        description: "Fork parent conversation. Default: false.",
+      }),
+    ),
+    isolation: Type.Optional(
+      Type.Literal("worktree", {
+        description: "Isolated git worktree. Changes saved to branch.",
+      }),
+    ),
+    files: Type.Optional(
+      Type.Array(
+        Type.String({ description: "Owned file path." }),
+        {
+          description: "Declared file ownership. Non-overlapping files suppress clobber warning.",
+        },
+      ),
+    ),
+  } as const;
+
   const chainElementUnion = Type.Union([
     Type.Object({
-      subagent_type: Type.String({
-        description: "The type of specialized agent to use for this step.",
-      }),
-      prompt: Type.String({
-        description: "Task prompt. Use {previous} to inject output from the prior step.",
-      }),
-      description: Type.Optional(
-        Type.String({
-          description: "Short description of this step (shown in UI).",
-        })
-      ),
-      model: Type.Optional(
-        Type.String({
-          description: "Optional model override for this step.",
-        })
-      ),
-      thinking: Type.Optional(
-        Type.String({
-          description: "Thinking level override for this step.",
-        })
-      ),
-      max_turns: Type.Optional(
-        Type.Number({
-          description: "Max turns for this step.",
-          minimum: 1,
-        })
-      ),
-      output: Type.Optional(
-        Type.String({
-          description: "File path to write this step's output to (relative to cwd or absolute). The agent is instructed to write its findings there. Use {chain_dir} to reference the shared per-run scratch directory.",
-        })
-      ),
-      output_mode: Type.Optional(
-        Type.Union(
-          [Type.Literal("inline"), Type.Literal("file-only")],
-          {
-            description: '"inline" (default): include file content in chain result and pass to next step. "file-only": store to disk only; next step receives the file path, not its content.',
-          }
-        )
-      ),
-      reads: Type.Optional(
-        Type.Array(
-          Type.String({ description: "A file path to read (relative to cwd or absolute)." }),
-          {
-            description: "Files to read at the start of this step and prepend to the prompt as context.",
-          }
-        )
-      ),
-      isolated: Type.Optional(
-        Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-        }),
-      ),
-      inherit_context: Type.Optional(
-        Type.Boolean({
-          description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
-        }),
-      ),
-      isolation: Type.Optional(
-        Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-        }),
-      ),
-      files: Type.Optional(
-        Type.Array(
-          Type.String({ description: "A file path this member owns (relative to cwd or absolute)." }),
-          {
-            description: "Declared file ownership for this member. When all writable non-worktree members of a parallel stage declare non-overlapping files, the clobber warning is suppressed.",
-          },
-        ),
-      ),
+      ...sharedStepMemberFields,
       pause_after: Type.Optional(
         Type.Boolean({
           description:
-            'If true, the chain stops after this step instead of continuing. Returns the step output plus a `chain_run_id`. ' +
-            'If the step\'s output contains a fenced ```chain-next``` JSON array (each item: {subagent_type, prompt, files, isolation?}), ' +
-            'it is parsed and validated (file-overlap, non-empty files, chunk count) and returned as a reviewable proposal — never auto-dispatched. ' +
-            'Resume by calling Agent again with `chain_run_id` and `remaining` (the steps to run next, e.g. a `{parallel:[...]}` stage built from the proposal).',
+            'Pause chain here. Resume with chain_run_id, pass remaining steps in chain. ' +
+            'A ```chain-next``` block in output becomes a reviewable proposal, never auto-dispatched.',
         }),
       ),
     }),
     Type.Object({
       parallel: Type.Array(
         Type.Object({
-          subagent_type: Type.String({
-            description: "The type of specialized agent to use for this member.",
-          }),
-          prompt: Type.String({
-            description: "Task prompt. Use {previous} to inject the stage input into each parallel member.",
-          }),
-          description: Type.Optional(
-            Type.String({
-              description: "Short description of this member (shown in UI).",
-            })
-          ),
-          model: Type.Optional(
-            Type.String({
-              description: "Optional model override for this member.",
-            })
-          ),
-          thinking: Type.Optional(
-            Type.String({
-              description: "Thinking level override for this member.",
-            })
-          ),
-          max_turns: Type.Optional(
-            Type.Number({
-              description: "Max turns for this member.",
-              minimum: 1,
-            })
-          ),
-          output: Type.Optional(
-            Type.String({
-              description: "File path to write this member's output to (relative to cwd or absolute).",
-            })
-          ),
-          output_mode: Type.Optional(
-            Type.Union(
-              [Type.Literal("inline"), Type.Literal("file-only")],
-              {
-                description: '"inline" (default): include file content in member result and pass to stage merge. "file-only": store to disk only; member sees its output file path.',
-              }
-            )
-          ),
-          reads: Type.Optional(
-            Type.Array(
-              Type.String({ description: "A file path to read (relative to cwd or absolute)." }),
-              {
-                description: "Files to read at the start of this member and prepend to the prompt as context.",
-              }
-            )
-          ),
-          isolated: Type.Optional(
-            Type.Boolean({
-              description: "If true, agent gets no extension/MCP tools — only built-in tools.",
-            }),
-          ),
-          inherit_context: Type.Optional(
-            Type.Boolean({
-              description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
-            }),
-          ),
-          isolation: Type.Optional(
-            Type.Literal("worktree", {
-              description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-            }),
-          ),
-          files: Type.Optional(
-            Type.Array(
-              Type.String({ description: "A file path this member owns (relative to cwd or absolute)." }),
-              {
-                description: "Declared file ownership for this member. When all writable non-worktree members of a parallel stage declare non-overlapping files, the clobber warning is suppressed.",
-              },
-            ),
-          ),
+          ...sharedStepMemberFields,
         }),
         {
-          description: "Members run concurrently. Their outputs are labeled, concatenated, and passed to the next chain step via {previous}.",
+          description: "Concurrent members. Outputs merged for next step via {previous}.",
           minItems: 1,
         }
       ),
       continue_on_error: Type.Optional(
         Type.Boolean({
-          description: "If true, a failed member does not abort the chain; surviving outputs are preserved and the failure is noted. Default: false (fail-fast).",
+          description: "Keep surviving outputs on failure. Default: false (fail-fast).",
         })
       ),
       description: Type.Optional(
         Type.String({
-          description: "Short description of this parallel stage (shown in UI).",
+          description: "Short label (shown in UI).",
         })
       ),
       output: Type.Optional(
         Type.String({
-          description: "File path to write the merged stage output to (relative to cwd or absolute).",
+          description: "File path for merged stage output.",
         })
       ),
       output_mode: Type.Optional(
         Type.Union(
           [Type.Literal("inline"), Type.Literal("file-only")],
           {
-            description: '"inline" (default): include the merged stage output in the chain result and pass it to the next step. "file-only": store the merged output to disk only; the next step receives the saved file path in {previous}.',
+            description: '"inline" (default): pass merged content. "file-only": write to disk, pass path.',
           }
         )
       ),
@@ -1064,68 +1000,64 @@ Notes:
         description: "The task for the agent to perform.",
       }),
       description: Type.String({
-        description: "A short (3-5 word) description of the task (shown in UI).",
+        description: "Short (3-5 word) task label for UI.",
       }),
       subagent_type: Type.String({
-        description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
+        description: `Agent type. Available: ${getAvailableTypes().join(", ")}. Custom: .pi/agents/*.md or ${getAgentDir()}/agents/*.md.`,
       }),
       model: Type.Optional(
         Type.String({
-          description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+          description: '"provider/modelId" or fuzzy (e.g. "haiku", "sonnet").',
         }),
       ),
       thinking: Type.Optional(
         Type.String({
-          description: "Thinking level: off, minimal, low, medium, high, xhigh. Overrides agent default.",
+          description: "off, minimal, low, medium, high, xhigh.",
         }),
       ),
       max_turns: Type.Optional(
         Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
+          description: "Max agentic turns. Omit for unlimited.",
           minimum: 1,
         }),
       ),
       run_in_background: Type.Optional(
         Type.Boolean({
-          description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
+          description: "Run in background. Returns agent ID immediately.",
         }),
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context.",
+          description: "Agent ID to resume.",
         }),
       ),
       chain: Type.Optional(
         Type.Array(chainElementUnion, {
-          description: "Chain of agents. Each element is either a single sequential step or a {parallel:[...]} stage. Sequential steps receive the prior output via {previous}; parallel members run concurrently and merge into one labeled concat for downstream handoff. Parallel stages fail-fast by default; set continue_on_error to keep surviving outputs. PREFER PARALLEL: consecutive single-agent steps run serially and accumulate every output in context (slow + bloat). Use a separate step only when it consumes the previous output; otherwise group independent agents into one {parallel:[...]} stage. Set pause_after: true on a step (e.g. a planning step) to stop the chain there and review its output — including any ```chain-next``` fan-out proposal — before dispatching the rest via chain_run_id + remaining.",
-          minItems: 2,
+          description:
+            "Multi-agent workflow. Elements: sequential steps ({previous} = prior output) or {parallel:[...]} stages (concurrent, merged). " +
+            "DEFAULT TO PARALLEL: sequential only when N+1 consumes N's output. " +
+            "pause_after stops chain for review; resume with chain_run_id, passing remaining steps here.",
+          minItems: 1,
         })
       ),
       chain_run_id: Type.Optional(
         Type.String({
-          description: "Resume a paused chain (returned when a step had pause_after: true) by its ID. Must be paired with `remaining`.",
+          description: "Resume paused chain by ID. Pass remaining steps in chain.",
         }),
-      ),
-      remaining: Type.Optional(
-        Type.Array(chainElementUnion, {
-          description: "The steps to run after resuming a paused chain via chain_run_id. Review the paused step's output (and any chain-next proposal) before authoring these — never paste the proposal through unreviewed.",
-          minItems: 1,
-        })
       ),
       isolated: Type.Optional(
         Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
+          description: "No extension/MCP tools.",
         }),
       ),
       inherit_context: Type.Optional(
         Type.Boolean({
-          description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
+          description: "Fork parent conversation. Default: false.",
         }),
       ),
       isolation: Type.Optional(
         Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+          description: "Isolated git worktree. Changes saved to branch.",
         }),
       ),
       ...scheduleParam,
@@ -1269,20 +1201,20 @@ Notes:
       reloadCustomAgents();
 
       if (params.chain_run_id) {
-        if (!params.remaining || params.remaining.length === 0) {
-          return textResult("chain_run_id requires `remaining`: the steps to run after the pause.");
+        if (!params.chain || params.chain.length === 0) {
+          return textResult("chain_run_id requires `chain`: the remaining steps to run after the pause.");
         }
         if (!isValidChainRunId(params.chain_run_id)) {
           return textResult(`Invalid chain_run_id: "${params.chain_run_id}". It must be an ID returned by a previous paused chain, not an arbitrary path.`);
         }
         // Single-use: consuming deletes the state file, so a chain_run_id cannot
-        // be resumed twice (which would otherwise re-dispatch `remaining` and
-        // duplicate whatever file writes/edits it makes).
+        // be resumed twice (which would otherwise re-dispatch the remaining steps
+        // and duplicate whatever file writes/edits they make).
         const pauseState = consumeChainPauseState(params.chain_run_id);
         if (!pauseState) {
           return textResult(`No paused chain found at "${params.chain_run_id}". It may have been cleaned up or already resumed.`);
         }
-        return await executeChain(params.remaining, params, signal, onUpdate, ctx, {
+        return await executeChain(params.chain, params, signal, onUpdate, ctx, {
           chainDir: params.chain_run_id,
           initialPreviousOutput: pauseState.previousOutput,
           priorResults: pauseState.results,
@@ -2225,14 +2157,14 @@ Notes:
         if (chainNext.errors.length > 0) {
           proposalBlock =
             `\n\n⚠ chain-next block invalid, no auto-proposal:\n${chainNext.errors.map((e) => `  - ${e}`).join("\n")}\n\n` +
-            `Review ${prepared.stepDisplayName}'s output above and author \`remaining\` yourself, then call Agent again with chain_run_id: "${chainDir}".`;
+            `Review ${prepared.stepDisplayName}'s output above and author the remaining steps yourself, then call Agent again with chain_run_id: "${chainDir}" and chain: [...steps].`;
         } else if (chainNext.proposal) {
           proposalBlock =
             `\n\n**Proposed next steps** (from ${prepared.stepDisplayName}'s chain-next block — review before dispatching, do not paste through unreviewed):\n${formatChainNextProposal(chainNext.proposal)}\n\n` +
-            `To continue: call Agent again with chain_run_id: "${chainDir}" and \`remaining\` built from (or overriding) this proposal — e.g. one { parallel: [...] } stage using these entries.`;
+            `To continue: call Agent again with chain_run_id: "${chainDir}" and chain: [...] built from (or overriding) this proposal — e.g. one { parallel: [...] } stage using these entries.`;
         } else {
           proposalBlock =
-            `\n\nNo chain-next block found in this step's output. Review the output above and author \`remaining\` yourself, then call Agent again with chain_run_id: "${chainDir}".`;
+            `\n\nNo chain-next block found in this step's output. Review the output above and author the remaining steps yourself, then call Agent again with chain_run_id: "${chainDir}" and chain: [...steps].`;
         }
 
         return textResult(
@@ -2267,19 +2199,19 @@ Notes:
     name: "get_subagent_result",
     label: "Get Agent Result",
     description:
-      "Check status and retrieve results from a background agent. Use the agent ID returned by Agent with run_in_background.",
+      "Check status or get results from a background agent.",
     parameters: Type.Object({
       agent_id: Type.String({
         description: "The agent ID to check.",
       }),
       wait: Type.Optional(
         Type.Boolean({
-          description: "If true, wait for the agent to complete before returning. Default: false.",
+          description: "Wait for completion. Default: false.",
         }),
       ),
       verbose: Type.Optional(
         Type.Boolean({
-          description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
+          description: "Include full conversation. Default: false.",
         }),
       ),
     }),
@@ -2346,14 +2278,13 @@ Notes:
     name: "steer_subagent",
     label: "Steer Agent",
     description:
-      "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
+      "Send a steering message to a running agent. Interrupts after current tool execution.",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to steer (must be currently running).",
+        description: "Agent ID (must be running).",
       }),
       message: Type.String({
-        description: "The steering message to send. This will appear as a user message in the agent's conversation.",
+        description: "Message injected as user message in agent's conversation.",
       }),
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {

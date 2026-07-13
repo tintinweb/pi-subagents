@@ -70,7 +70,7 @@ export function createChainDir(): string {
  *
  * `chain_run_id` is an LLM-controlled string used directly as a filesystem
  * path; without this check it could be pointed at an arbitrary path to read
- * or (via `remaining`'s subsequent writes) write outside the intended scratch
+ * or (via the resumed chain's subsequent writes) write outside the intended scratch
  * directory.
  */
 export function isValidChainRunId(candidate: string): boolean {
@@ -380,7 +380,7 @@ const MAX_CHAIN_NEXT_CHUNKS = 6;
  *  - two items may not declare the same file unless both set `isolation: "worktree"`
  *
  * This never dispatches anything — it only produces a proposal for the parent
- * to review and, if it agrees, hand-build into `remaining` on the follow-up call.
+ * to review and, if it agrees, hand-build into `chain` on the follow-up call.
  */
 export function parseChainNext(output: string): ChainNextResult {
   const match = output.match(CHAIN_NEXT_BLOCK_RE);
@@ -463,7 +463,7 @@ export function formatChainNextProposal(proposal: ChainNextItem[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// Chain pause/resume state (pause_after → chain_run_id + remaining)
+// Chain pause/resume state (pause_after → chain_run_id + chain)
 // ---------------------------------------------------------------------------
 
 export interface ChainPauseState {
@@ -491,7 +491,7 @@ export function loadChainPauseState(chainDir: string): ChainPauseState | undefin
 /**
  * Load and immediately delete a paused chain's state file, making the pause
  * single-use: a `chain_run_id` cannot be resumed twice (which would otherwise
- * let a model dispatch the same `remaining` steps — and their file writes —
+ * let a model dispatch the same chain steps — and their file writes —
  * more than once). Returns undefined if missing/unreadable (already consumed
  * or never existed) without throwing.
  */
