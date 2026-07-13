@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Skill preloading** — inject named skills into agent system prompts, discovered from `.pi/skills/`, `.agents/skills/`, and global locations (Pi-standard `<name>/SKILL.md` directory layout supported)
 - **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
-- **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
+- **Event bus** — lifecycle events (`subagents:created`, `started`, `tools_resolve`, `session_ready`, `completed`, `failed`, `steered`, `compacted`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity. The `tools_resolve` event allows injecting additional tools before session creation; `session_ready` exposes the `AgentSession` for attaching state (e.g., memory systems)
 - **Cross-extension RPC** — other pi extensions can spawn and stop subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on load
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` followUp path as manual background completions; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
@@ -437,6 +437,8 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 |-------|------|------------|
 | `subagents:created` | Background agent registered | `id`, `type`, `description`, `isBackground` |
 | `subagents:started` | Agent transitions to running (including queued→running) | `id`, `type`, `description` |
+| `subagents:tools_resolve` | Tools resolved, before session creation (mutable) | `type`, `tools` (array, mutable), `agentId` |
+| `subagents:session_ready` | Agent session created and ready for use | `id`, `type`, `session` (AgentSession), `record` (AgentRecord) |
 | `subagents:completed` | Agent finished successfully (background and foreground) | `id`, `type`, `durationMs`, `tokens` (lifetime `{ input, output, total }`), `toolUses`, `result` |
 | `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | same as completed + `error`, `status` |
 | `subagents:steered` | Steering message sent | `id`, `message` |
