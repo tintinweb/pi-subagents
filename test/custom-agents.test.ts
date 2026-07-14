@@ -338,6 +338,17 @@ Plain tools.`);
     expect(agent.extSelectors).toBeUndefined();
   });
 
+  it("loads the max thinking level", () => {
+    writeAgent("maxthink", `---
+thinking: max
+---
+
+Maximum thinking.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("maxthink")!.thinking).toBe("max");
+  });
+
   it("passes through thinking level as-is (no validation)", () => {
     writeAgent("anythink", `---
 thinking: turbo

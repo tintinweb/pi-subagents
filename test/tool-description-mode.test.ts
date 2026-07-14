@@ -92,6 +92,12 @@ describe("toolDescriptionMode", () => {
     expect(desc).toContain("very thorough");
   });
 
+  it("advertises max as a supported thinking level", () => {
+    const tools = setup();
+    const thinking = tools.get("Agent").parameters.properties.thinking;
+    expect(thinking.description).toContain("max");
+  });
+
   it("compact mode swaps in the short description with one-line type list", () => {
     const tools = setup({ toolDescriptionMode: "compact" });
     const desc: string = tools.get("Agent").description;

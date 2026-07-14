@@ -8,6 +8,10 @@ import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
 
+/** User-selectable levels; the host Pi/model validates availability at session creation. */
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export const THINKING_LEVELS_DESCRIPTION = THINKING_LEVELS.join(", ");
+
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
 
