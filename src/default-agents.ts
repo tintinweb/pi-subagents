@@ -73,7 +73,7 @@ Use Bash ONLY for read-only operations: ls, git status, git log, git diff, find,
     {
       name: "Plan",
       displayName: "Plan",
-      description: "Software architect for implementation planning (read-only)",
+      description: "Complex multi-step implementation planning after Explore, never simple or one-file tasks (read-only)",
       builtinToolNames: READ_ONLY_TOOLS,
       extensions: true,
       skills: true,
