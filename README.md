@@ -353,6 +353,21 @@ Background agents are subject to a configurable concurrency limit (default: 4). 
 
 Foreground agents bypass the queue — they block the parent anyway.
 
+## Subagent Nesting
+
+By default a subagent cannot spawn further subagents — the `Agent`, `get_subagent_result`, and `steer_subagent` tools are stripped from its toolset to prevent runaway recursion. Nesting lifts this restriction with a depth cap.
+
+A subagent whose own nesting **depth** is below `MAX_NESTING_DEPTH` (default `2`) keeps those tools and may spawn its own children; a subagent at or above the cap has them stripped as before.
+
+```
+main (depth 0) → child (depth 1, can nest) → grandchild (depth 2, capped)
+```
+
+Depth is tracked in-process by AgentSession id: the spawn site reads the parent's id (`ctx.sessionManager.getSessionId()`), and each child records its depth right after it is created, so the grandchild is gated at `childDepth + 1`. A resumed/orphaned session falls back to depth 0 — it is treated as a fresh top-level session and may spawn again (the cap still holds from it downward).
+
+- **Cap:** `MAX_NESTING_DEPTH` in `src/depth.ts` (default `2`). Single-level callers are unaffected — a depth-1 child behaves exactly as before, it simply *also* retains the ability to spawn one more level.
+- **Note:** the gate is name-based. At depth `< MAX`, an extension that registers a tool literally named `steer_subagent` (or `Agent`) is allowed through alongside this extension's own tool, since the filter cannot tell them apart. This matches the pre-existing name-based exclusion.
+
 ## Join Strategies
 
 When background agents complete, they notify the main agent. The **join mode** controls how these notifications are delivered. It applies only to background agents.

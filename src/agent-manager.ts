@@ -12,6 +12,7 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { forgetSessionDepth } from "./depth.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
@@ -537,6 +538,8 @@ export class AgentManager {
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
+    // Drop depth entry before disposing so a resumed session re-seeds from 0.
+    if (record.session) forgetSessionDepth(record.session.sessionId);
     record.session?.dispose?.();
     record.session = undefined;
     this.agents.delete(id);
@@ -617,6 +620,7 @@ export class AgentManager {
     // Clear queue
     this.queue = [];
     for (const record of this.agents.values()) {
+      if (record.session) forgetSessionDepth(record.session.sessionId);
       record.session?.dispose();
     }
     this.agents.clear();
