@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { differsFromDefault, diffFromDefault } from "./agent-diff.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultExtensions, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultExtensions, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
@@ -2425,21 +2426,26 @@ Notes:
       return "   ";
     };
 
+    const diffMarker = (cfg: AgentConfig | undefined) =>
+      cfg && !cfg.isDefault && differsFromDefault(cfg) ? " ⚡" : "";
+
     const entries = allNames.map(name => {
       const cfg = getAgentConfig(name);
       const disabled = cfg?.enabled === false;
       const model = getModelLabel(name, ctx.modelRegistry);
       const indicator = sourceIndicator(cfg);
       const prefix = `${indicator}${name} · ${model}`;
-      const desc = disabled ? "(disabled)" : (cfg?.description ?? name);
+      const desc = disabled ? "(disabled)" : ((cfg?.description ?? name) + diffMarker(cfg));
       return { name, prefix, desc };
     });
     const maxPrefix = Math.max(...entries.map(e => e.prefix.length));
 
     const hasCustom = allNames.some(n => { const c = getAgentConfig(n); return c && !c.isDefault && c.enabled !== false; });
     const hasDisabled = allNames.some(n => getAgentConfig(n)?.enabled === false);
+    const hasDiffs = allNames.some(n => { const c = getAgentConfig(n); return !!c && differsFromDefault(c); });
     const legendParts: string[] = [];
     if (hasCustom) legendParts.push("• = project  ◦ = global");
+    if (hasDiffs) legendParts.push("⚡ = differs from bundled default");
     if (hasDisabled) legendParts.push("✕ = disabled");
     const legend = legendParts.length ? "\n" + legendParts.join("  ") : "";
 
@@ -2516,6 +2522,8 @@ Notes:
     const isDefault = cfg.isDefault === true;
     const disabled = cfg.enabled === false;
 
+    const hasDiff = differsFromDefault(cfg);
+
     let menuOptions: string[];
     if (disabled && file) {
       // Disabled agent with a file — offer Enable
@@ -2531,6 +2539,11 @@ Notes:
     } else {
       // User-defined agent
       menuOptions = ["Edit", "Disable", "Delete", "Back"];
+    }
+
+    // Offer diff view for replace-mode overrides that diverge from the bundled default
+    if (hasDiff) {
+      menuOptions.splice(menuOptions.indexOf("Back"), 0, "View diff vs default");
     }
 
     const choice = await ctx.ui.select(name, menuOptions);
@@ -2567,6 +2580,20 @@ Notes:
       await disableAgent(ctx, name);
     } else if (choice === "Enable") {
       await enableAgent(ctx, name);
+    } else if (choice === "View diff vs default") {
+      const entries = diffFromDefault(cfg);
+      if (!entries || entries.length === 0) {
+        ctx.ui.notify("No differences found.", "info");
+      } else {
+        const lines = [`${name} — differences from bundled default:\n`];
+        const maxField = Math.max(...entries.map(e => e.field.length));
+        for (const e of entries) {
+          lines.push(`${e.field.padEnd(maxField)}  override: ${e.local}`);
+          if (e.default) lines.push(`${''.padEnd(maxField)}  default:   ${e.default}`);
+        }
+        // Show via editor for scrollable read-only display; discard any result
+        await ctx.ui.editor(`${name} diff`, lines.join("\n"));
+      }
     }
   }
 
