@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { detectEnv } from "../src/env.js";
 
 /** Minimal mock of pi.exec() that shells out via child_process. */
@@ -57,5 +57,38 @@ describe("detectEnv", () => {
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  it("passes the abort signal through to pi.exec", async () => {
+    const execMock = vi.fn(async () => ({ code: 0, stdout: "true", stderr: "", killed: false }));
+    const pi = { exec: execMock } as unknown as ExtensionAPI;
+    const ac = new AbortController();
+
+    await detectEnv(pi, "/tmp", ac.signal);
+
+    // Both calls should receive the signal in their options
+    const revParseCall = execMock.mock.calls[0];
+    expect(revParseCall[2]).toMatchObject({ signal: ac.signal });
+    const branchCall = execMock.mock.calls[1];
+    expect(branchCall[2]).toMatchObject({ signal: ac.signal });
+  });
+
+  it("degrades gracefully when exec rejects due to abort", async () => {
+    const ac = new AbortController();
+    ac.abort();
+
+    const execMock = vi.fn(async (_cmd: string, _args: string[], opts?: { signal?: AbortSignal }) => {
+      if (opts?.signal?.aborted) {
+        throw new DOMException("aborted", "AbortError");
+      }
+      return { code: 0, stdout: "true", stderr: "", killed: false };
+    });
+    const pi = { exec: execMock } as unknown as ExtensionAPI;
+
+    const env = await detectEnv(pi, "/tmp", ac.signal);
+
+    expect(env.isGitRepo).toBe(false);
+    expect(env.branch).toBe("");
+    expect(env.platform).toBe(process.platform);
   });
 });

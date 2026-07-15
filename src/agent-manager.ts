@@ -158,6 +158,14 @@ export class AgentManager {
     this.agents.set(id, record);
     registerRecord(record);
 
+    // Parent signal already aborted before queuing or starting — settle immediately.
+    if (options.signal?.aborted) {
+      record.status = "stopped";
+      record.completedAt = Date.now();
+      record.promise = Promise.resolve("");
+      return id;
+    }
+
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
     if (options.isBackground && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
@@ -180,6 +188,15 @@ export class AgentManager {
 
   /** Actually start an agent (called immediately or from queue drain). */
   private startAgent(id: string, record: AgentRecord, { pi, ctx, type, prompt, options }: SpawnArgs) {
+    // Parent signal already aborted (e.g. aborted while queued): settle without
+    // starting — no worktree, no counters, no listeners. The record is terminal.
+    if (options.signal?.aborted) {
+      record.status = "stopped";
+      record.completedAt = Date.now();
+      record.promise = Promise.resolve("");
+      return;
+    }
+
     // Worktree isolation: try to create a temporary git worktree. Strict —
     // fail loud if not possible (no silent fallback to main tree). Done
     // BEFORE state mutation so a throw doesn't leave the record half-running.

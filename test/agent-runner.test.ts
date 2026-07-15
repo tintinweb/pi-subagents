@@ -75,8 +75,9 @@ vi.mock("../src/skill-loader.js", () => ({
   preloadSkills: vi.fn(() => []),
 }));
 
-import { extensionCanonicalName, getDefaultExtensions, parseExtensionsSpec, parseExtSelectors, resumeAgent, runAgent, setDefaultExtensions } from "../src/agent-runner.js";
+import { extensionCanonicalName, forwardAbortSignal, getDefaultExtensions, parseExtensionsSpec, parseExtSelectors, resumeAgent, runAgent, setDefaultExtensions } from "../src/agent-runner.js";
 import { getAgentConfig as mockedGetAgentConfig, getConfig as mockedGetConfig } from "../src/agent-types.js";
+import { detectEnv } from "../src/env.js";
 
 describe("global defaultExtensions resolution", () => {
   const getAgentConfigMock = mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>;
@@ -431,5 +432,166 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     expect(seen).toEqual([{ reason: "threshold", tokensBefore: 12345 }]);
+  });
+});
+
+describe("cancellation correctness", () => {
+  it("passes options.signal to detectEnv", async () => {
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const ac = new AbortController();
+
+    await runAgent(ctx, "Explore", "go", { pi, signal: ac.signal });
+
+    expect(vi.mocked(detectEnv)).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      ac.signal,
+    );
+  });
+
+  it("throws AbortError when signal is pre-aborted before createAgentSession", async () => {
+    const ac = new AbortController();
+    ac.abort();
+
+    await expect(
+      runAgent(ctx, "Explore", "go", { pi, signal: ac.signal }),
+    ).rejects.toThrow(DOMException);
+
+    // createAgentSession should never be invoked when the signal is pre-aborted
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("throws AbortError when signal is pre-aborted and is passed through detectEnv", async () => {
+    // detectEnv mock currently resolves successfully; the checkpoint after it should catch the abort.
+    // Pre-abort the signal so the first throwIfAborted() before detectEnv catches it.
+    const ac = new AbortController();
+    ac.abort();
+
+    await expect(
+      runAgent(ctx, "Explore", "go", { pi, signal: ac.signal }),
+    ).rejects.toThrow(DOMException);
+  });
+
+  describe("forwardAbortSignal", () => {
+    it("aborts the session immediately for an already-aborted signal", () => {
+      const abortSpy = vi.fn();
+      const session = { abort: abortSpy } as any;
+      const ac = new AbortController();
+      ac.abort();
+
+      const cleanup = forwardAbortSignal(session, ac.signal);
+
+      expect(abortSpy).toHaveBeenCalledOnce();
+      expect(cleanup).toBeInstanceOf(Function);
+      // Calling cleanup on an already-aborted no-listener case is a no-op
+      expect(() => cleanup()).not.toThrow();
+    });
+
+    it("attaches a listener for a non-aborted signal and cleanup removes it", () => {
+      const abortSpy = vi.fn();
+      const session = { abort: abortSpy } as any;
+      const ac = new AbortController();
+
+      const cleanup = forwardAbortSignal(session, ac.signal);
+
+      // Session not aborted yet — listener hasn't fired
+      expect(abortSpy).not.toHaveBeenCalled();
+
+      ac.abort();
+      expect(abortSpy).toHaveBeenCalledOnce();
+
+      // Cleanup removes the listener — no further calls on re-abort
+      cleanup();
+      abortSpy.mockClear();
+      // Re-trigger (would be a no-op anyway since the signal is already aborted)
+      expect(abortSpy).not.toHaveBeenCalled();
+    });
+
+    it("returns a no-op cleanup when no signal is provided", () => {
+      const session = { abort: vi.fn() } as any;
+      const cleanup = forwardAbortSignal(session);
+      expect(() => cleanup()).not.toThrow();
+    });
+  });
+
+  it("throws AbortError when signal aborts during createAgentSession and disposes session", async () => {
+    const ac = new AbortController();
+    const disposeSpy = vi.fn();
+    const { session } = createSession("OK");
+    (session as any).dispose = disposeSpy;
+
+    // createAgentSession creates the session, then aborts the signal before
+    // resolving — this triggers the post-create dispose+throw path.
+    createAgentSession.mockImplementation(async () => {
+      ac.abort();
+      return { session };
+    });
+
+    const runPromise = runAgent(ctx, "Explore", "go", { pi, signal: ac.signal });
+
+    await expect(runPromise).rejects.toThrow(DOMException);
+
+    expect(disposeSpy).toHaveBeenCalledOnce();
+    expect(session.bindExtensions).not.toHaveBeenCalled();
+  });
+
+  it("throws AbortError when signal aborts during bindExtensions and disposes session", async () => {
+    const ac = new AbortController();
+    const disposeSpy = vi.fn();
+
+    // Signal that bindExtensions has been entered.
+    let enteredBind!: () => void;
+    const enteredBindPromise = new Promise<void>((resolve) => { enteredBind = resolve; });
+
+    // Deferred bindExtensions: it won't resolve until we say so.
+    let resolveBind!: () => void;
+    const bindPromise = new Promise<void>((resolve) => { resolveBind = resolve; });
+
+    const { session } = createSession("OK");
+    session.bindExtensions = vi.fn(async () => {
+      enteredBind();
+      return bindPromise;
+    });
+    (session as any).dispose = disposeSpy;
+    createAgentSession.mockResolvedValue({ session });
+
+    // Kick off runAgent — it will pass all preceding checkpoints (detectEnv,
+    // loader.reload, createAgentSession all resolve immediately in the mock),
+    // then block inside bindExtensions.
+    const runPromise = runAgent(ctx, "Explore", "go", { pi, signal: ac.signal });
+
+    // Wait until runAgent is definitely inside bindExtensions.
+    await enteredBindPromise;
+
+    // Abort while bindExtensions is still pending.
+    ac.abort();
+
+    // Let bindExtensions complete.
+    resolveBind();
+
+    // The checkpoint after bindExtensions must have caught the abort,
+    // disposed the session, and thrown.
+    await expect(runPromise).rejects.toThrow(DOMException);
+
+    expect(disposeSpy).toHaveBeenCalledOnce();
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("disposes session when bindExtensions rejects and re-throws the error", async () => {
+    const disposeSpy = vi.fn();
+    const bindError = new Error("bind failed");
+
+    const { session } = createSession("OK");
+    session.bindExtensions = vi.fn(async () => { throw bindError; });
+    (session as any).dispose = disposeSpy;
+    createAgentSession.mockResolvedValue({ session });
+
+    const runPromise = runAgent(ctx, "Explore", "go", { pi });
+
+    await expect(runPromise).rejects.toThrow("bind failed");
+
+    expect(disposeSpy).toHaveBeenCalledOnce();
+    expect(session.prompt).not.toHaveBeenCalled();
   });
 });

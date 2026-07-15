@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 
@@ -410,5 +410,147 @@ describe("AgentManager — nesting depth", () => {
     expect(manager.getRecord(nested)!.depth).toBe(2);
     expect(manager.getRecord(nested)!.parentId).toBe("p1");
     expect(manager.getRecord(top)!.parentId).toBeUndefined();
+  });
+});
+
+describe("AgentManager — cancellation correctness", () => {
+  let manager: AgentManager;
+
+  beforeEach(() => {
+    // Reset global mocks between tests to prevent leakage from previous tests.
+    vi.mocked(runAgent).mockReset();
+  });
+
+  afterEach(() => manager?.dispose());
+
+  it("pre-aborted signal at spawn settles immediately as stopped", () => {
+    manager = new AgentManager();
+    const ac = new AbortController();
+    ac.abort(); // signal already aborted
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      signal: ac.signal,
+    });
+
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("stopped");
+    expect(record.completedAt).toBeGreaterThan(0);
+    expect(runAgent).not.toHaveBeenCalled();
+    // must have a promise so get_subagent_result(wait: true) settles
+    expect(record.promise).toBeDefined();
+    return expect(record.promise).resolves.toBe("");
+  });
+
+  it("signal aborted while queued settles when drainQueue runs", async () => {
+    // maxConcurrent=1, so second spawn queues
+    manager = new AgentManager(undefined, 1);
+
+    // Use a deferred promise so we control when A finishes and drainQueue fires.
+    let resolveA: (v: any) => void;
+    const promiseA = new Promise<any>((resolve) => { resolveA = resolve; });
+    vi.mocked(runAgent).mockReturnValueOnce(promiseA);
+
+    const idA = manager.spawn(mockPi, mockCtx, "general-purpose", "a", {
+      description: "a", isBackground: true,
+    });
+    expect(manager.getRecord(idA)!.status).toBe("running");
+
+    // Second agent: queued waiting for slot
+    const ac = new AbortController();
+    const idB = manager.spawn(mockPi, mockCtx, "general-purpose", "b", {
+      description: "b", isBackground: true,
+      signal: ac.signal,
+    });
+    expect(manager.getRecord(idB)!.status).toBe("queued");
+
+    // Abort the signal while B is queued
+    ac.abort();
+
+    // Resolve A so drainQueue processes B
+    resolveA!({
+      responseText: "A done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+
+    // drainQueue is called inside A's .then(); we await A's promise to let it drain
+    await manager.getRecord(idA)!.promise;
+
+    // B should be stopped by startAgent's top guard
+    const recordB = manager.getRecord(idB)!;
+    expect(recordB.status).toBe("stopped");
+    expect(recordB.promise).toBeDefined();
+    await expect(recordB.promise).resolves.toBe("");
+
+    // runAgent called exactly once (for A only; B never reaches runAgent)
+    expect(vi.mocked(runAgent)).toHaveBeenCalledTimes(1);
+  });
+
+  it("stopped-result settlement: await promise on stopped record yields final result", async () => {
+    // Simulate: abort() flips status to stopped before runAgent settles.
+    // The promise must still resolve with the final responseText.
+    manager = new AgentManager();
+
+    let resolveRun: (v: any) => void;
+    const runPromise = new Promise<any>((resolve) => { resolveRun = resolve; });
+    vi.mocked(runAgent).mockReturnValueOnce(runPromise);
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test", isBackground: true,
+    });
+
+    // Abort before runAgent settles
+    manager.abort(id);
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("stopped");
+    expect(record.result).toBeUndefined(); // not settled yet
+
+    // Now resolve runAgent
+    resolveRun!({
+      responseText: "final answer",
+      session: mockSession(),
+      aborted: true,
+      steered: false,
+    });
+
+    // Await the promise — should resolve with "final answer"
+    const result = await record.promise;
+    expect(result).toBe("final answer");
+    // Status stays stopped (the .then guard preserves it)
+    expect(record.status).toBe("stopped");
+    expect(record.result).toBe("final answer");
+  });
+
+  it("startup abort preserved as stopped when runAgent rejects", async () => {
+    // abort() sets stopped, then runAgent rejects — status must remain stopped
+    manager = new AgentManager();
+
+    let rejectRun: (err: any) => void;
+    const runPromise = new Promise<any>((_resolve, reject) => { rejectRun = reject; });
+    vi.mocked(runAgent).mockReturnValueOnce(runPromise);
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test", isBackground: true,
+    });
+
+    manager.abort(id);
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("stopped");
+
+    // Now the runAgent promise rejects — the catch handler in startAgent returns ""
+    // and preserves stopped status. Use a try/catch to suppress the unhandled rejection
+    // warning from vitest (the .catch in startAgent handles it, but vitest may still
+    // see a microtask rejection before the handler is attached).
+    rejectRun!(new Error("some failure"));
+
+    // Await the promise — catch path returns ""
+    const result = await record.promise;
+    expect(result).toBe("");
+    // Status stays stopped (guard in .catch preserves it)
+    expect(record.status).toBe("stopped");
+    expect(record.error).toBeDefined();
   });
 });

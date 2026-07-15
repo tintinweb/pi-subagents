@@ -2223,10 +2223,14 @@ Notes:
       }
 
       // Wait for completion if requested.
+      // Await settlement whenever a promise exists — even if status is already
+      // "stopped": abort() flips status synchronously but record.result is only
+      // assigned when the runAgent promise settles. The promise never rejects
+      // (startAgent attaches .then/.catch that both return a string).
       // Pre-mark resultConsumed BEFORE awaiting: onComplete fires inside .then()
       // (attached earlier at spawn time) and always runs before this await resumes.
       // Setting the flag here prevents a redundant follow-up notification.
-      if (params.wait && record.status === "running" && record.promise) {
+      if (params.wait && record.promise) {
         record.resultConsumed = true;
         cancelNudge(params.agent_id);
         await record.promise;

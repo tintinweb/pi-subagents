@@ -298,8 +298,12 @@ function getLastAssistantText(session: AgentSession): string {
  * Wire an AbortSignal to abort a session.
  * Returns a cleanup function to remove the listener.
  */
-function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
+export function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
+  if (signal.aborted) {
+    session.abort();
+    return () => {};
+  }
   const onAbort = () => session.abort();
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
@@ -317,7 +321,9 @@ export async function runAgent(
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
 
-  const env = await detectEnv(options.pi, effectiveCwd);
+  options.signal?.throwIfAborted();
+  const env = await detectEnv(options.pi, effectiveCwd, options.signal);
+  options.signal?.throwIfAborted();
 
   // Get parent system prompt for append-mode agents
   const parentSystemPrompt = ctx.getSystemPrompt();
@@ -437,6 +443,7 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await loader.reload();
+  options.signal?.throwIfAborted();
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Surface
@@ -555,6 +562,10 @@ export async function runAgent(
   }
 
   const { session } = await createAgentSession(sessionOpts);
+  if (options.signal?.aborted) {
+    session.dispose?.();
+    options.signal.throwIfAborted();
+  }
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -565,14 +576,28 @@ export async function runAgent(
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
-  await session.bindExtensions({
-    onError: (err) => {
-      options.onToolActivity?.({
-        type: "end",
-        toolName: `extension-error:${err.extensionPath}`,
-      });
-    },
-  });
+  try {
+    await session.bindExtensions({
+      onError: (err) => {
+        options.onToolActivity?.({
+          type: "end",
+          toolName: `extension-error:${err.extensionPath}`,
+        });
+      },
+    });
+  } catch (err) {
+    // bindExtensions failed — dispose the session to prevent a leak,
+    // then re-throw the original error.
+    session.dispose?.();
+    throw err;
+  }
+
+  // If the parent signal was aborted during bindExtensions, dispose the
+  // newly created session before throwing so resources are released.
+  if (options.signal?.aborted) {
+    session.dispose?.();
+    options.signal.throwIfAborted();
+  }
 
   options.onSessionCreated?.(session);
 
