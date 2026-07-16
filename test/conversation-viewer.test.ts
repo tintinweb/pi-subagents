@@ -101,6 +101,27 @@ describe("ConversationViewer", () => {
       }
     });
 
+    it("keeps bordered rows exact-width at a double-width truncation boundary", () => {
+      const width = 40;
+      for (let prefixLength = 0; prefixLength < width; prefixLength++) {
+        const viewer = new ConversationViewer(
+          mockTui(30, width),
+          mockSession([]),
+          mockRecord({ description: `${"a".repeat(prefixLength)}界more` }),
+          undefined,
+          ansiTheme(),
+          vi.fn(),
+        );
+
+        for (const line of viewer.render(width)) {
+          expect(
+            visibleWidth(line),
+            `prefix ${prefixLength} produced an under-width bordered row: ${JSON.stringify(line)}`,
+          ).toBe(width);
+        }
+      }
+    });
+
     it("no line exceeds width when text is longer than viewport", () => {
       const longLine = "A".repeat(500);
       const messages = [
