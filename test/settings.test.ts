@@ -125,6 +125,15 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });
 
+  it("round-trips outputTranscript; drops non-boolean", () => {
+    saveSettings({ outputTranscript: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ outputTranscript: false });
+    saveSettings({ outputTranscript: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ outputTranscript: true });
+    writeProject({ outputTranscript: "no" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
     writeProject({ schedulingEnabled: "yes" } as any);
     expect(loadSettings(projectDir)).toEqual({});

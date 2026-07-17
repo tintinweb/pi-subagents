@@ -43,7 +43,7 @@ export interface AgentConfig {
   maxTurns?: number;
   /** Persist this subagent as a normal pi session instead of keeping it in memory only. */
   persistSession?: boolean;
-  /** Write the sidechain .output transcript. Defaults to true; false suppresses only that transcript. */
+  /** Write the subagent's .output transcript. Defaults to true; false suppresses only that transcript. */
   outputTranscript?: boolean;
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;

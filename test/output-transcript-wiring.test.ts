@@ -90,7 +90,7 @@ describe("output_transcript agent wiring", () => {
     vi.clearAllMocks();
   });
 
-  it("creates no sidechain transcript when a custom agent sets output_transcript false", async () => {
+  it("creates no transcript when a custom agent sets output_transcript false", async () => {
     writeFileSync(join(agentDir, "agents", "sensitive.md"), `---\ndescription: Sensitive in-memory agent\noutput_transcript: false\n---\n\nKeep data in memory.`);
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
@@ -109,7 +109,7 @@ describe("output_transcript agent wiring", () => {
     await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
   });
 
-  it("also suppresses the background sidechain transcript", async () => {
+  it("also suppresses the background transcript", async () => {
     writeFileSync(join(agentDir, "agents", "sensitive.md"), `---\ndescription: Sensitive in-memory agent\noutput_transcript: false\nrun_in_background: true\n---\n\nKeep data in memory.`);
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
@@ -135,6 +135,46 @@ describe("output_transcript agent wiring", () => {
     await tools.get("Agent").execute(
       "tool-call",
       { prompt: "ordinary work", description: "Do ordinary work", subagent_type: "general-purpose" },
+      undefined,
+      undefined,
+      makeCtx(cwd),
+    );
+
+    expect(createOutputFilePath).toHaveBeenCalledOnce();
+    expect(writeInitialEntry).toHaveBeenCalledOnce();
+    expect(streamToOutputFile).toHaveBeenCalledOnce();
+    await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
+  });
+
+  it("suppresses the transcript project-wide when subagents.json sets outputTranscript false", async () => {
+    // A plain default agent (no frontmatter) inherits the project default.
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: false }));
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    await tools.get("Agent").execute(
+      "tool-call",
+      { prompt: "ordinary work", description: "Do ordinary work", subagent_type: "general-purpose" },
+      undefined,
+      undefined,
+      makeCtx(cwd),
+    );
+
+    expect(createOutputFilePath).not.toHaveBeenCalled();
+    expect(writeInitialEntry).not.toHaveBeenCalled();
+    expect(streamToOutputFile).not.toHaveBeenCalled();
+    await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
+  });
+
+  it("lets agent frontmatter output_transcript true override a project outputTranscript false", async () => {
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: false }));
+    writeFileSync(join(agentDir, "agents", "audited.md"), `---\ndescription: Always keeps a transcript\noutput_transcript: true\n---\n\nWrite a transcript regardless of the project default.`);
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    await tools.get("Agent").execute(
+      "tool-call",
+      { prompt: "audited work", description: "Do audited work", subagent_type: "audited" },
       undefined,
       undefined,
       makeCtx(cwd),

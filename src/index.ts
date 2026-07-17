@@ -541,6 +541,13 @@ export default function (pi: ExtensionAPI) {
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
 
+  // Project/global default for writing the subagent .output transcript. A custom
+  // agent's `output_transcript` frontmatter overrides this per spawn; when the
+  // frontmatter is silent, this default applies. Read live at spawn time.
+  let outputTranscriptDefault = true;
+  function getOutputTranscriptDefault(): boolean { return outputTranscriptDefault; }
+  function setOutputTranscript(b: boolean): void { outputTranscriptDefault = b; }
+
   // ---- Join mode configuration ----
   let defaultJoinMode: JoinMode = 'smart';
   function getDefaultJoinMode(): JoinMode { return defaultJoinMode; }
@@ -695,6 +702,7 @@ export default function (pi: ExtensionAPI) {
       setToolDescriptionMode: setToolDescriptionMode,
       setFleetView: setFleetViewEnabled,
       setWidgetMode: setWidgetMode,
+      setOutputTranscript: setOutputTranscript,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1049,7 +1057,17 @@ Terse command-style prompts produce shallow, generic work.
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
-      const outputTranscript = customConfig?.outputTranscript !== false;
+      // Whether this spawn writes its .output transcript. Per-agent
+      // frontmatter (`output_transcript`) wins; otherwise the project/global
+      // default applies. `attachTranscript` below is the SOLE gate — every
+      // downstream consumer keys off record.outputFile being set, so no spawn
+      // path can re-enable the transcript by accident.
+      const outputTranscript = customConfig?.outputTranscript ?? getOutputTranscriptDefault();
+      const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
+        if (!rec || !outputTranscript) return;
+        rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
+        writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
+      };
 
       const parentModelId = ctx.model?.id;
       const effectiveModelId = model?.id;
@@ -1181,10 +1199,7 @@ Terse command-style prompts produce shallow, generic work.
         if (record && joinMode) {
           record.joinMode = joinMode;
           record.toolCallId = toolCallId;
-          if (outputTranscript) {
-            record.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
-            writeInitialEntry(record.outputFile, id, params.prompt, ctx.cwd);
-          }
+          attachTranscript(record, id);
         }
 
         if (joinMode == null || joinMode === 'async') {
@@ -1302,10 +1317,7 @@ Terse command-style prompts produce shallow, generic work.
           // onSpawned: called synchronously after spawn, before onSessionCreated fires.
           // Set up the output file so streamToOutputFile can pick it up.
           const fgRec = manager.getRecord(fgAgentId);
-          if (fgRec && outputTranscript) {
-            fgRec.outputFile = createOutputFilePath(ctx.cwd, fgAgentId, ctx.sessionManager.getSessionId());
-            writeInitialEntry(fgRec.outputFile, fgAgentId, params.prompt, ctx.cwd);
-          }
+          attachTranscript(fgRec, fgAgentId);
         });
         record = fgResult.record;
       } catch (err) {
@@ -1926,7 +1938,7 @@ skills: <true (inherit all), false (none), or comma-separated skill names to pre
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
 inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 run_in_background: <true to run in background by default. Default: false>
-output_transcript: <false to create no sidechain transcript file or path. Independent of persist_session. Default: true>
+output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
 isolation: <"worktree" to run in isolated git worktree. Omit for normal>
@@ -1942,7 +1954,7 @@ Guidelines for choosing settings:
 - Use prompt_mode: replace for fully custom agents with their own personality/instructions
 - Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
 - Set isolated: true if the agent should NOT have access to MCP servers or other extensions
-- Set output_transcript: false to suppress the sidechain transcript; also keep persist_session false when the full conversation must not be written to disk
+- Set output_transcript: false to skip writing this agent's transcript; this alone doesn't keep the run off disk (persist_session, isolation: worktree commits, and memory still write) — set those too if that's the goal
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
 
 Write the file using the write tool. Only write the file, nothing else.`;
@@ -2068,6 +2080,7 @@ ${systemPrompt}
       toolDescriptionMode: getToolDescriptionMode(),
       fleetView: isFleetViewEnabled(),
       widgetMode: getWidgetMode(),
+      outputTranscript: getOutputTranscriptDefault(),
     };
   }
 
