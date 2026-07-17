@@ -682,12 +682,20 @@ export async function runAgent(
     ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
     : SessionManager.inMemory(effectiveCwd);
 
-  const sessionOpts: Parameters<typeof createAgentSession>[0] = {
+  // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
+  // modelRuntime, but ExtensionContext still exposes only the registry facade.
+  // Pass both so the full supported Pi range retains the parent's providers.
+  const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
+  const sessionOpts: Parameters<typeof createAgentSession>[0] & {
+    modelRegistry: ExtensionContext["modelRegistry"];
+    modelRuntime?: unknown;
+  } = {
     cwd: effectiveCwd,
     agentDir,
     sessionManager,
     settingsManager,
     modelRegistry: ctx.modelRegistry,
+    ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
     tools: allowedTools,
     resourceLoader: loader,
