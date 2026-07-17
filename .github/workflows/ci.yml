@@ -19,3 +19,22 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test
+
+  # The dev dependency is pinned pre-migration (0.80.6), where the isolated-provider
+  # regression can't occur. This job installs the current Pi so that guard actually
+  # runs against a version where the bug WOULD manifest without PR #152's fix.
+  # See test/e2e/isolated-provider.e2e.test.ts.
+  compat-latest-pi:
+    runs-on: ubuntu-latest
+    continue-on-error: true # current Pi is not a hard support guarantee; surface breakage without blocking
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install current Pi
+        run: npm install --no-save @earendil-works/pi-coding-agent@latest @earendil-works/pi-ai@latest @earendil-works/pi-tui@latest
+      - name: Isolated-provider regression guard against current Pi
+        run: npx vitest run test/e2e/isolated-provider.e2e.test.ts --reporter=verbose
