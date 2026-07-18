@@ -38,3 +38,5 @@ jobs:
         run: npm install --no-save @earendil-works/pi-coding-agent@latest @earendil-works/pi-ai@latest @earendil-works/pi-tui@latest
       - name: Isolated-provider regression guard against current Pi
         run: npx vitest run test/e2e/isolated-provider.e2e.test.ts --reporter=verbose
+      - name: Tool-veto reachability guard against current Pi
+        run: npx vitest run test/e2e/tool-veto-reachability.e2e.test.ts --reporter=verbose

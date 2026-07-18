@@ -118,8 +118,14 @@ import {
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
 
+/** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
+let lastSession: ReturnType<typeof createSession>["session"] | undefined;
+
 function createSession(finalText: string) {
   const listeners: Array<(event: any) => void> = [];
+  // pi activates only these four by default when no allowlist is given
+  // (agent-session.js `defaultActiveToolNames`).
+  let activeToolNames: string[] = ["read", "bash", "edit", "write"];
   const session = {
     messages: [] as any[],
     subscribe: vi.fn((listener: (event: any) => void) => {
@@ -134,18 +140,27 @@ function createSession(finalText: string) {
     }),
     abort: vi.fn(),
     steer: vi.fn(),
-    getActiveToolNames: vi.fn(() => ["read"]),
-    setActiveToolsByName: vi.fn(),
-    // Faithfully simulate pi-mono's registry: built-ins plus every loaded
-    // extension tool, gated by the session's allowlist/denylist. Dynamic mode
-    // reads this post-bind to activate the full allowed set.
+    // Stateful, so the active set reflects what the scope installer actually did
+    // and `renarrow`'s no-op guard behaves as it does against real pi.
+    getActiveToolNames: vi.fn(() => activeToolNames),
+    setActiveToolsByName: vi.fn((names: string[]) => {
+      activeToolNames = [...names];
+    }),
+    // pi's tool REGISTRY (`_toolDefinitions`), read live so tests can simulate an
+    // extension registering after bind by mutating `loaderExtensionsRef`.
     getAllTools: vi.fn(() => {
       const opts = createAgentSession.mock.calls[0]?.[0];
-      return opts ? effectiveAllowedTools(opts).map((name) => ({ name })) : [];
+      return opts ? mockRegistry(opts).map((name) => ({ name })) : [];
     }),
+    // pi's Agent; `beforeToolCall` is an optional, assignable hook the scope
+    // installer wraps to block out-of-scope calls on turn 1.
+    agent: { beforeToolCall: undefined } as {
+      beforeToolCall?: (context: any, signal?: any) => Promise<any>;
+    },
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
   };
+  lastSession = session;
   return { session, listeners };
 }
 
@@ -169,6 +184,7 @@ beforeEach(() => {
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
+  lastSession = undefined;
 });
 
 describe("agent-runner final output capture", () => {
@@ -647,21 +663,18 @@ describe("getAgentConversation", () => {
   });
 });
 
-// ─── tool scoping (issues #47, async-MCP fix) ────────────────────────────
-// runAgent scopes a subagent's tools in one of two ways at `createAgentSession`
-// time:
-//   • Static allowlist (`tools:`) — when the exact set is known up front
-//     (`ext:` narrowing, or no extensions). pi-mono's `allowedToolNames` gates
-//     both registration and the initial active set.
-//   • Dynamic denylist (`excludeTools:`, `tools:` unset) — the default when
-//     extension tools flow freely. An unset allowlist lets asynchronously
-//     registered tools (e.g. pi-mcp, which registers on session_start after
-//     connecting to servers) through pi-mono's live `isAllowedTool` gate; the
-//     denylist removes the built-ins the agent didn't ask for plus this
-//     extension's own orchestration tools. The initial active set is repaired
-//     post-bind via `setActiveToolsByName` (an unset allowlist otherwise starts
-//     with only pi's four default built-ins).
-// `lastToolsPassed()` normalizes both into the effective allowed set.
+// ─── tool scoping (issues #47, #125) ─────────────────────────────────────
+// runAgent scopes a subagent's tools in one of two ways:
+//   • Static allowlist (`tools:`) — ONLY for noExtensions/isolated. Nothing can
+//     register asynchronously there, so pi-mono's `allowedToolNames` gating both
+//     registration and the initial active set is exactly right.
+//   • Live scoping — whenever extensions load. `tools:` is left unset so pi's
+//     live `isAllowedTool` admits tools whenever they register (pi-mcp registers
+//     on session_start, context-mode on before_agent_start); `excludeTools:`
+//     carries the name-stable permanent scope; and `installExtensionToolScope`
+//     narrows the ACTIVE set for `ext:` selectors, re-deriving on every turn_end
+//     so late arrivals are judged too.
+// `lastToolsPassed()` returns what the LLM can actually call under either shape.
 
 import {
   getAgentConfig,
@@ -712,28 +725,37 @@ function withExtensions(spec: Record<string, string[]>) {
 }
 
 /**
- * The tool names the agent will actually be allowed to use, derived from the
- * `createAgentSession` call — normalizing the two scoping shapes:
- *   - static allowlist → `tools` is the exact set (minus any `excludeTools`).
- *   - dynamic denylist → `tools` unset; the effective set is every built-in plus
- *     every loaded extension tool, minus `excludeTools`. This mirrors pi-mono's
- *     live `isAllowedTool` gate together with the post-bind activation of the
- *     full registry.
+ * The tool REGISTRY pi would build for a given `createAgentSession` call —
+ * mirroring `_refreshToolRegistry`'s `isAllowedTool`:
+ *   - `tools:` set   → the allowlist gates the registry (nothing else registers).
+ *   - `tools:` unset → every built-in plus every loaded extension tool, minus
+ *     `excludeTools`, and it keeps growing as extensions register later.
+ * Read live from `loaderExtensionsRef`, so a test can simulate late registration.
  */
-function effectiveAllowedTools(opts: Record<string, any>): string[] {
+function mockRegistry(opts: Record<string, any>): string[] {
   const excluded = new Set<string>(opts.excludeTools ?? []);
-  if (opts.tools) {
-    return opts.tools.filter((t: string) => !excluded.has(t));
-  }
-  const all: string[] = [...BUILTINS_7];
-  for (const ext of loaderExtensionsRef.current.extensions) {
-    for (const name of ext.tools.keys()) all.push(name);
-  }
+  const all: string[] = opts.tools
+    ? [...opts.tools]
+    : [
+        ...BUILTINS_7,
+        ...loaderExtensionsRef.current.extensions.flatMap((e) => [...e.tools.keys()]),
+      ];
   return [...new Set(all)].filter((t) => !excluded.has(t));
 }
 
+/**
+ * What the LLM can actually call.
+ *
+ * Under the static allowlist (`noExtensions`/`isolated`) that is `tools:` verbatim.
+ * Otherwise the registry is scoped by `excludeTools` and then narrowed to the ACTIVE
+ * set by `installExtensionToolScope` — so the active set is the real answer, and
+ * asserting on it means these tests exercise the narrowing rather than a
+ * reimplementation of pi's gate.
+ */
 function lastToolsPassed(): string[] {
-  return effectiveAllowedTools(createAgentSession.mock.calls[0][0]);
+  const opts = createAgentSession.mock.calls[0][0];
+  if (opts.tools) return opts.tools;
+  return lastSession?.getActiveToolNames() ?? [];
 }
 
 function lastLoaderOpts(): Record<string, unknown> {
@@ -905,6 +927,167 @@ describe("agent-runner master tool allowlist", () => {
     expect(activated.has("mcp")).toBe(true);
     expect(activated.has("read")).toBe(true);
     expect(activated.has("bash")).toBe(false);
+  });
+});
+
+// ─── asynchronously-registered extension tools (issue #125) ──────────────
+// pi-mcp calls registerTool from `session_start`, context-mode from
+// `before_agent_start` — both long after loader.reload(). `registerTool` writes
+// into the live `extension.tools` map, which is what these tests simulate.
+describe("agent-runner async extension tool registration", () => {
+  /** Simulate `pi.registerTool` on an already-loaded extension. */
+  function registerLate(extPath: string, toolName: string) {
+    const ext = loaderExtensionsRef.current.extensions.find((e) => e.path === extPath);
+    if (!ext) throw new Error(`no loaded extension at ${extPath}`);
+    ext.tools.set(toolName, {});
+  }
+
+  function setup(o: { builtinToolNames?: string[]; extSelectors?: string[] } = {}) {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: true, extSelectors: o.extSelectors }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(o.builtinToolNames ?? ["read"]);
+  }
+
+  it("a tool registered during session_start reaches the active set", async () => {
+    setup();
+    withExtensions({ "/ext/mcp.ts": [] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    // pi-mcp's real shape: nothing at load, tools appear when bindExtensions
+    // fires session_start and the MCP servers connect.
+    session.bindExtensions.mockImplementation(async () => {
+      registerLate("/ext/mcp.ts", "mcp_search");
+    });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(lastToolsPassed()).toContain("mcp_search");
+  });
+
+  it("a tool registered after bind is picked up on the next turn_end", async () => {
+    setup();
+    withExtensions({ "/ext/mcp.ts": [] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+    expect(session.getActiveToolNames()).not.toContain("mcp_search");
+
+    // A lazy MCP server connects mid-conversation (context-mode registers at
+    // before_agent_start, i.e. after runAgent already installed the scope).
+    registerLate("/ext/mcp.ts", "mcp_search");
+    for (const l of listeners) l({ type: "turn_end" });
+
+    expect(session.getActiveToolNames()).toContain("mcp_search");
+  });
+
+  it("ext: admits a late tool from the selected extension but not from others", async () => {
+    setup({ extSelectors: ["ext:foo"] });
+    withExtensions({ "/ext/foo.ts": [], "/ext/bar.ts": [] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    registerLate("/ext/foo.ts", "foo_late");
+    registerLate("/ext/bar.ts", "bar_late");
+    for (const l of listeners) l({ type: "turn_end" });
+
+    const active = session.getActiveToolNames();
+    expect(active).toContain("foo_late");
+    // This is the case the static allowlist could never express: bar_late did
+    // not exist at construction, so it could not have been denied by name.
+    expect(active).not.toContain("bar_late");
+  });
+
+  it("ext:foo/bar narrowing still applies to late-registered siblings", async () => {
+    setup({ extSelectors: ["ext:foo/keep_me"] });
+    withExtensions({ "/ext/foo.ts": [] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    registerLate("/ext/foo.ts", "keep_me");
+    registerLate("/ext/foo.ts", "drop_me");
+    for (const l of listeners) l({ type: "turn_end" });
+
+    expect(session.getActiveToolNames()).toContain("keep_me");
+    expect(session.getActiveToolNames()).not.toContain("drop_me");
+  });
+
+  it("beforeToolCall blocks an out-of-scope tool and delegates otherwise", async () => {
+    // Turn 1 cannot be narrowed — before_agent_start fires inside prompt() and
+    // may widen the set after the turn's tools are snapshotted — so a call-time
+    // guard is the only correct enforcement there.
+    setup({ extSelectors: ["ext:foo"] });
+    withExtensions({ "/ext/foo.ts": ["foo_tool"], "/ext/bar.ts": ["bar_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    await expect(
+      session.agent.beforeToolCall?.({ toolCall: { name: "bar_tool" } }),
+    ).resolves.toMatchObject({ block: true });
+    await expect(
+      session.agent.beforeToolCall?.({ toolCall: { name: "foo_tool" } }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("beforeToolCall preserves a hook pi installed before us", async () => {
+    setup();
+    withExtensions({ "/ext/foo.ts": ["foo_tool"] });
+    const { session } = createSession("OK");
+    const prior = vi.fn(async () => undefined);
+    session.agent.beforeToolCall = prior;
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+    await session.agent.beforeToolCall?.({ toolCall: { name: "foo_tool" } });
+
+    expect(prior).toHaveBeenCalledTimes(1);
+  });
+
+  it("scope outlives runAgent so resumed turns stay narrowed", async () => {
+    // runAgent tears down its own turn subscription in `finally`; the scope
+    // hooks must NOT be torn down with it, or resume/steer would drift.
+    setup({ extSelectors: ["ext:foo"] });
+    withExtensions({ "/ext/foo.ts": [], "/ext/bar.ts": [] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+    await resumeAgent(session as any, "keep going");
+
+    registerLate("/ext/foo.ts", "foo_late");
+    registerLate("/ext/bar.ts", "bar_late");
+    for (const l of listeners) l({ type: "turn_end" });
+
+    expect(session.getActiveToolNames()).toContain("foo_late");
+    expect(session.getActiveToolNames()).not.toContain("bar_late");
+    await expect(
+      session.agent.beforeToolCall?.({ toolCall: { name: "bar_late" } }),
+    ).resolves.toMatchObject({ block: true });
+  });
+
+  it("isolated keeps the static allowlist — no live scoping installed", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(["read"]);
+    withExtensions({ "/ext/foo.ts": ["foo_tool"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, isolated: true });
+
+    // A hard registry gate is the right boundary here: nothing can register
+    // asynchronously, so there is no active-set narrowing to maintain.
+    expect(createAgentSession.mock.calls[0][0].tools).toEqual(["read"]);
+    expect(session.setActiveToolsByName).not.toHaveBeenCalled();
+    expect(session.agent.beforeToolCall).toBeUndefined();
   });
 });
 
