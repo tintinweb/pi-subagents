@@ -2,18 +2,23 @@
 
 Repo orientation for agents.
 
-## Chain
+## Architecture
 
-- `src/index.ts` owns `executeChain` and `renderCall`.
-- `src/chain-io.ts` owns chain file I/O, placeholder substitution, file-only handoff validation, and parallel merge helpers.
-- Chain elements are a flat union: sequential step or `{ parallel: [...] }` stage.
-- Parallel stages run static members concurrently, merge labeled outputs, and pass merged `{previous}` downstream.
-- Writable parallel members default to `isolation: "worktree"` or read-only. Exception: the /feature and /feature-light pattern intentionally runs parallel workers in the main tree without worktree isolation when they have pre-declared disjoint file ownership and are reviewed together by one shared reviewer after the stage lands. Worktree would hide their changes from that reviewer's `git diff`, so main-tree writable is the correct choice for this pattern. For parallel members without this disjoint-ownership + shared-reviewer structure, worktree or read-only remains the default.
-- `isolation: "worktree"` (`src/worktree.ts`) only redirects the agent's default `cwd` for *relative* path resolution — it is a convention, not a filesystem sandbox. `read`/`edit`/`write` are pi-core tools; a tool call using an absolute path always resolves against the real filesystem regardless of the agent's assigned `cwd`, so it can still touch the main tree. Don't rely on `isolation: "worktree"` as a security boundary against a misbehaving or confused agent — it only prevents *accidental* relative-path collisions between concurrent writers.
-- A sequential step can set `pause_after: true` to stop the chain there instead of continuing. The caller resumes with a second `Agent({ chain_run_id, chain: [...remaining steps] })` call. If the paused step's output contains a fenced ```chain-next``` JSON array, `parseChainNext` (`src/chain-io.ts`) validates it (file-overlap, non-empty files, chunk count) and it is returned as a reviewable proposal only — the runtime never auto-dispatches it.
-- `prepareStep` (in `executeChain`) checks `manager.listAgents()` for any other `running`, writable, non-worktree agent before building a step's prompt, and appends `formatConcurrentActivityNote` if found. This exists because chain-internal validation (`validateParallelStage`, `formatParallelEditHazardWarning`) only sees members of the current chain's own `parallel` stage — it's blind to a separate, concurrently dispatched top-level `Agent` call sharing the same cwd. The note tells the step not to misattribute a concurrent sibling's legitimate changes as its own task's issues.
+- `src/index.ts` owns the `Agent` tool definition, `renderCall`, and single-agent dispatch.
+- `src/agent-guards.ts` owns reusable guard functions: `guardAgentSpawn` (concurrency/overlap checks), `formatConcurrentActivityNote`, and `validateFilesOverlap`.
+- `src/agent-runner.ts` and `src/agent-manager.ts` handle agent lifecycle and tracking.
+- `src/default-agents.ts` defines built-in agent types (Explore, Plan, worker, reviewer, oracle, designer, etc.).
+
+## Coordinator Pattern
+
+There is no chain mechanism. The parent agent drives multi-step workflows by:
+1. Dispatching individual `Agent()` calls sequentially or with `run_in_background: true` for parallel work.
+2. Reading each agent's result before deciding the next step.
+3. Synthesizing understanding between steps — the parent is the coordinator, not a chain conductor.
+
+Parallel workers declare file ownership via `files: [...]` for collision detection. `isolation: "worktree"` redirects the agent's `cwd` for relative path resolution but is not a security sandbox.
 
 ## Tests
 
-- `test/chain-io.test.ts` covers chain I/O helpers and parallel merge/validation logic.
-- Keep changes narrow; match existing sequential semantics unless feature explicitly changes them.
+- `test/agent-guards.test.ts` covers guard functions (concurrency checks, file overlap validation).
+- Keep changes narrow; match existing semantics unless feature explicitly changes them.
