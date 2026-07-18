@@ -178,8 +178,9 @@ export function buildInvocationTags(
 /** Truncate text to a single line, max `len` chars. */
 function truncateLine(text: string, len = 60): string {
   const line = text.split("\n").find(l => l.trim())?.trim() ?? "";
-  if (line.length <= len) return line;
-  return line.slice(0, len) + "…";
+  const codePoints = Array.from(line);
+  if (codePoints.length <= len) return line;
+  return codePoints.slice(0, len).join("") + "…";
 }
 
 /** Build a human-readable activity string from currently-running tools or response text. */
