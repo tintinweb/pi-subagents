@@ -72,7 +72,7 @@ interface SpawnOptions {
   onCompaction?: (info: CompactionInfo) => void;
   /**
    * Custom tools to inject into the agent session.
-   * Used by chain execution to provide a scoped `write_output` tool.
+   * Used by extension-injected custom tools (e.g. scoped `write_output`).
    */
   customTools?: ToolDefinition[];
   /**

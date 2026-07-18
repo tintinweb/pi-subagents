@@ -10,9 +10,9 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 Most sub-agent tools just spawn a child and wait. pi-subagents is a multi-agent workflow engine, with the observability and control to run it on serious work.
 
-- **Real parallelism, not just background jobs.** Fan out many agents at once with automatic queuing, and compose `chain: [{ parallel: [...] }]` stages that run concurrently and merge their results into the next step. Recon, implementation, and review scale horizontally.
+- **Real parallelism, not just background jobs.** Fan out many agents at once with automatic queuing. Launch parallel background agents in a single message with `run_in_background: true` — recon, implementation, and review scale horizontally.
 - **Subagents that spawn subagents.** A worker can delegate its own recon or review, nested up to a safe depth cap. The widget renders the whole tree live, so deep workflows stay legible instead of opaque.
-- **A working roster out of the box.** Ships `worker`, `reviewer`, `oracle`, `Explore`, and `Plan`, plus `/feature` and `/execute-plan` chains that wire them into scout, plan, implement, review, fix-up pipelines. You get a real workflow on install, not an empty `Agent` tool.
+- **A working roster out of the box.** Ships `worker`, `reviewer`, `oracle`, `Explore`, and `Plan`, plus `/feature` and `/execute-plan` workflows that wire them into scout, plan, implement, review, fix-up pipelines. You get a real workflow on install, not an empty `Agent` tool.
 - **You can see what is happening.** A live above-editor widget shows per-agent spinners, tool activity, token and context-window usage, and status icons. Open any agent's full conversation in a scrolling overlay while it runs.
 - **Built for long-running autonomous work.** Steer agents mid-run, resume finished sessions, cap turns gracefully with a wrap-up warning before abort, isolate risky edits in git worktrees, and schedule agents on cron or intervals.
 
@@ -22,9 +22,9 @@ The full capability list is below.
 
 - **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
-- **Parallel chain stages** — `chain: [{ parallel: [...] }]` runs static member sets concurrently, then passes a labeled concat to the next step
+- **Parallel background agents** — launch multiple agents in ONE message with `run_in_background: true` to execute independent work concurrently
 - **Nested subagents** — a subagent can spawn its own subagents up to a fixed depth (default 2 levels). Grandchildren render indented under their parent in the tree-view widget. The depth cap stops runaway recursion
-- **Bundled prompt templates** — installs `/feature`, `/feature-light`, `/execute-plan`, and `/orchestrate` slash commands that drive ready-made scout/plan/implement/review chains
+- **Bundled prompt templates** — installs `/feature`, `/feature-light`, `/execute-plan`, and `/orchestrate` slash commands that drive ready-made scout/plan/implement/review workflows using the coordinator pattern
 - **Bundled default agents** — ships `worker`, `reviewer`, and `oracle` alongside `general-purpose`, `Explore`, and `Plan`, all inheriting the parent model
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons
 - **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause)
@@ -71,37 +71,35 @@ Agent({
 
 Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
 
-### Parallel Chain Stages
+### Parallel Background Agents
 
-Use a `parallel` chain element when a fixed set of steps can run side by side:
+Launch multiple agents in a single message with `run_in_background: true` to execute independent work concurrently:
 
 ```ts
 Agent({
-  chain: [
-    {
-      parallel: [
-        { subagent_type: "Explore", prompt: "Scan frontend files" },
-        { subagent_type: "Explore", prompt: "Scan backend files" },
-      ],
-      continue_on_error: true,
-      output: "{chain_dir}/parallel.md",
-      output_mode: "file-only",
-    },
-    {
-      subagent_type: "Plan",
-      prompt: "Review results:\n{previous}",
-    },
-  ],
-});
+  subagent_type: "Explore",
+  description: "Scout frontend",
+  prompt: "Find all frontend components related to authentication",
+  run_in_background: true,
+})
+
+Agent({
+  subagent_type: "Explore",
+  description: "Scout backend",
+  prompt: "Find all backend endpoints related to authentication",
+  run_in_background: true,
+})
 ```
+
+Both agents run at the same time. Use `get_subagent_result(id)` to check their status and read results when they complete. The **coordinator** (your parent agent) reads each result, synthesizes understanding, and dispatches the next step.
 
 Notes:
 
-- Members run concurrently and each sees same `{previous}` input.
-- Downstream `{previous}` becomes labeled concat (`### Member 1 (...)`, `### Member 2 (...)`, ...).
-- `output_mode: "file-only"` on stage writes merged concat to single `output` file; next step should read it via `reads: ["{previous}"]` or that path.
-- Writable members that are not `isolation: "worktree"` emit warning, since concurrent edits can clobber each other.
-- Default behavior is fail-fast; set `continue_on_error: true` to keep surviving outputs.
+- Launch all agents in ONE message — if you separate them into sequential messages, they won't run in parallel.
+- Each agent runs independently — there is no automatic result merging. The coordinator reads and synthesizes.
+- Use `files: [...]` to restrict which files each agent can edit, preventing collisions.
+- Use `isolation: "worktree"` for agents that must not share a working tree (e.g. orchestrators).
+- For complex multi-step workflows, use the bundled `/feature` or `/execute-plan` templates which handle the coordinator loop for you.
 
 ### Scheduling
 
@@ -206,7 +204,7 @@ Group completions render each agent as a separate block. The LLM receives struct
 | `reviewer`        | all 7                      | inherit                       | `replace`              | Review specialist for diffs, plans, solutions, codebase health, and PR/issue validation (max 30 turns) |
 | `oracle`          | read, bash, grep, find, ls | inherit                       | `replace`              | High-context decision-consistency advisor. Forks parent context, read-only (max 30 turns)              |
 
-The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles. `worker`, `reviewer`, and `oracle` back the bundled prompt-template chains: `worker` is the single writer thread, `reviewer` inspects and reports with evidence, and `oracle` is a read-only advisor that forks the parent conversation to catch drift before risky decisions.
+The `general-purpose` agent is a **parent twin** — it receives the parent's entire system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. Explore and Plan use standalone prompts tailored to their read-only roles. `worker`, `reviewer`, and `oracle` back the bundled prompt-template workflows: `worker` is the single writer thread, `reviewer` inspects and reports with evidence, and `oracle` is a read-only advisor that forks the parent conversation to catch drift before risky decisions.
 
 Default agents can be **ejected** (`/agents` → select agent → Eject) to export them as `.md` files for customization, **overridden** by creating a `.md` file with the same name (e.g. `.pi/agents/general-purpose.md`), or **disabled** per-project with `enabled: false` frontmatter.
 
@@ -320,8 +318,8 @@ Send a steering message to a running agent. The message interrupts after the cur
 | ---------------- | ------------------------------------------------------------------------ |
 | `/agents`        | Interactive agent management menu                                        |
 | `/agents-view`   | Toggle the widget display between cards and tree                         |
-| `/feature`       | Full feature chain: scout, plan, implement, review, fix-up               |
-| `/feature-light` | Lightweight chain for small/scoped changes: implement, review, fix-up    |
+| `/feature`       | Full feature workflow: scout, plan, implement, review, fix-up               |
+| `/feature-light` | Lightweight workflow for small/scoped changes: implement, review, fix-up    |
 | `/execute-plan`  | Run an existing plan: parallel implement, review, fix-up                 |
 | `/orchestrate`   | Fan out independent threads to autonomous orchestrators, one per feature |
 
@@ -346,22 +344,24 @@ Settings                                    ← max concurrency, max turns, grac
 
 ## Prompt Templates
 
-The package ships four prompt templates (under `prompts/`) that pi auto-loads on install as slash commands. Each issues a single `Agent({ chain: [...] })` call and handles `{previous}` / `{chain_dir}` handoff between steps.
+The package ships four prompt templates (under `prompts/`) that pi auto-loads on install as slash commands. Each guides the parent agent through a **coordinator pattern**: dispatch Agent() calls, read results, synthesize understanding, write the next prompt. No chains — the parent is the orchestrator.
 
-| Command                  | When to use                                             | Chain steps                                |
+| Command                  | When to use                                             | Flow                                       |
 | ------------------------ | ------------------------------------------------------- | ------------------------------------------ |
-| `/feature <task>`        | Normal feature work, default choice                     | Explore, Plan, worker, reviewer, worker    |
-| `/feature-light <task>`  | Small or scoped change with no behavioral ambiguity     | worker, reviewer, worker                   |
-| `/execute-plan <plan>`   | Run a plan that already exists, no scouting or planning | parallel worker(s), reviewer, worker       |
-| `/orchestrate <threads>` | Two or more independent features in one conversation    | parallel orchestrators, each self-managing |
+| `/feature <task>`        | Normal feature work, default choice                     | scout → plan → implement → review → fix-up |
+| `/feature-light <task>`  | Small or scoped change with no behavioral ambiguity     | implement → review → fix-up                |
+| `/execute-plan <plan>`   | Run a plan that already exists, no scouting or planning | implement (parallel) → review → fix-up     |
+| `/orchestrate <threads>` | Two or more independent features in one conversation    | parallel orchestrators, each self-managing  |
 
-`/execute-plan` takes a plan path, inline plan text, or a reference to a plan written earlier in the session. It partitions the plan into disjoint file packages, implements them as a `parallel` worker stage (each worker owns a non-overlapping set of files, so no worktree isolation is needed and all edits land in one tree), then runs a review and fix-up pass against the combined diff. If the plan cannot be cleanly partitioned, it falls back to a single worker.
+`/execute-plan` takes a plan path, inline plan text, or a reference to a plan written earlier in the session. The coordinator partitions the plan into disjoint file packages, launches parallel workers (each owns a non-overlapping set of files, so no worktree isolation is needed and all edits land in one tree), then runs a review and fix-up pass against the combined diff. If the plan cannot be cleanly partitioned, it falls back to a single worker.
 
-`/orchestrate` is for when one conversation holds several independent pieces of work. It splits the request into threads and hands each to its own `general-purpose` orchestrator subagent running in an isolated git worktree. Each orchestrator owns its feature end to end and freely spawns its own scout, implement, and review subagents (this relies on [nested subagents](#nested-subagents)). Threads run concurrently and never collide, since each worktree commits to its own branch; you merge the branches afterward. For a single feature, use `/feature` instead.
+`/orchestrate` is for when one conversation holds several independent pieces of work. It splits the request into threads and hands each to its own `general-purpose` orchestrator subagent running in an isolated git worktree with `run_in_background: true`. Each orchestrator owns its feature end to end and freely spawns its own scout, implement, and review subagents (this relies on [nested subagents](#nested-subagents)). Threads run concurrently and never collide, since each worktree commits to its own branch; you merge the branches afterward. For a single feature, use `/feature` instead.
 
-Both templates open with a required clarifying-questions step so the chain runs against a well-bounded requirement. Each step writes its output to `{chain_dir}` and downstream steps read those files via `reads:` (full content, bypasses compaction).
+All templates open with a required clarifying-questions step so the workflow runs against a well-bounded requirement. The coordinator creates a scratch directory (`/tmp/pi-feature-XXXXX/`) and tells each agent to write its report there. The coordinator reads reports between steps, synthesizes understanding, and writes the next agent's prompt — never pasting raw output through.
 
-`/feature` documents an optional parallel scout stage: when recon splits into separable domains (for example frontend and backend), the first Explore step can be replaced with a `parallel` stage that fans out concurrent scouts and merges their findings into one file for the planner. Use it only when domains are clearly separable; the single Explore step is the default.
+`/feature` documents parallel scout: when recon splits into separable domains (for example frontend and backend), the coordinator launches parallel Explorers in one message with `run_in_background: true`. Parallel implementation follows the same pattern: workers are launched in one message, each with `files: [...]` for disjoint ownership.
+
+> **⚠️ Breaking change:** The `chain` parameter and `chain_run_id` have been removed from the `Agent` tool. The chain runtime (`chain-io.ts`) is deleted. Workflows now use the coordinator pattern: the parent agent dispatches individual `Agent()` calls and orchestrates the flow. All prompt templates have been rewritten accordingly.
 
 To customize, copy a template into `~/.pi/agent/prompts/` (global) or `.pi/agent/prompts/` (project) and edit it there. A local copy overrides the bundled one.
 
@@ -394,7 +394,7 @@ A subagent can spawn its own subagents. The `Agent`, `get_subagent_result`, and 
 - **Display:** grandchildren appear indented under their parent in the tree-view widget (see [UI](#ui)). The depth cap means the tree is at most one level deep.
 - **Each level is independent:** a nested child has its own context window, tools, model, and turn limit, exactly like a top-level subagent. Depth and parentage are tracked per spawn so concurrent siblings never cross wires.
 
-Use it when a subagent's task naturally fans out (a `worker` delegating recon to `Explore`, or running its own review pass), not as a default. Flat parallelism via [parallel chain stages](#parallel-chain-stages) is usually the better tool when the work is known up front.
+Use it when a subagent's task naturally fans out (a `worker` delegating recon to `Explore`, or running its own review pass), not as a default. Flat parallelism via [parallel background agents](#parallel-background-agents) is usually the better tool when the work is known up front.
 
 ## Join Strategies
 
@@ -624,6 +624,8 @@ src/
     agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
 ```
+
+> **v2 breaking change:** `chain-io.ts` has been removed. The chain runtime is replaced by the coordinator pattern — the parent agent dispatches individual `Agent()` calls and orchestrates the workflow directly.
 
 ## License
 

@@ -247,7 +247,7 @@ export interface RunOptions {
   onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
   /**
    * Custom tools to inject into the agent session.
-   * Used by chain execution to provide a scoped `write_output` tool.
+   * Used by extension-injected custom tools (e.g. scoped `write_output`).
    */
   customTools?: ToolDefinition[];
   /**
@@ -527,7 +527,7 @@ export async function runAgent(
   // pi-mono's `allowedToolNames` gates BOTH registration and the initial active
   // set, so listing the exact final set here means the session is correctly
   // scoped from the first instant — no post-construction narrowing required.
-  // Custom tools injected via options (e.g. chain-scoped write_output) are added
+  // Custom tools injected via options (e.g. extension-scoped write_output) are added
   // to the allowlist so they survive the gate even for read-only agent types.
   const customToolNames = options.customTools?.map(t => t.name) ?? [];
   const builtinToolNameSet = new Set([...toolNames, ...customToolNames]);

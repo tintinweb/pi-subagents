@@ -1,10 +1,12 @@
 ---
-description: "Lightweight feature/fix chain: implement, review, fix-up (file-handoff)"
+description: "Lightweight feature/fix workflow: implement, review, fix-up (coordinator-driven)"
 ---
 
 # /feature-light
 
-Run a 3-step chain via the `Agent` tool's native `chain` parameter. Each step writes to `{chain_dir}` and downstream steps consume via `reads:` (full content, bypasses compaction).
+You are the **coordinator** for a small, scoped change. You dispatch individual Agent() calls, read their results, synthesize understanding, and write the next agent's prompt.
+
+The flow is: implement → review → fix-up. Each step is a separate Agent() call. You wait for each to complete before deciding the next. No scout, no plan.
 
 **User task**: $@
 
@@ -22,7 +24,7 @@ Only proceed past this gate when the task is truly one tightly-coupled, single-l
 
 ## Step 0: Tighten the requirement (REQUIRED, do not skip)
 
-Turn the user task ($@) into a clearly bounded requirement before invoking the chain.
+Turn the user task ($@) into a clearly bounded requirement before dispatching any work.
 
 Use the ask-user / interview tool to ask pointed clarifying questions. One upfront round prevents wasted worker/reviewer turns.
 
@@ -42,69 +44,100 @@ The refined requirement becomes `{{TASK}}`.
 
 With the requirement locked, condense the full conversation (clarifying Q&A plus prior chat) into one block: requirements clarified, decisions, constraints, files/symbols mentioned, things ruled out, current branch/PR state. Factual, no speculation. Substitute into `{{CONVO_CONTEXT}}`. Substitute `{{TASK}}` with the refined requirement from Step 0.
 
-## Invoke as a single tool call
+## Step 0.6: Create scratch directory
+
+```bash
+mkdir -p /tmp/pi-fl-XXXXX
+```
+
+Replace `XXXXX` with a random short identifier.
+
+---
+
+## Step 1: Check for a parallel split before defaulting to a single worker
+
+Even on small tasks, check: does the task touch 2+ files with no overlap? If yes, you can split into parallel workers. The decision is mechanical: list the files, check if any file appears in two groups. If not, it's parallel.
+
+There is no Plan step here, so YOU (the coordinator) must list the files and synthesize what changes each needs. Per file: path, what to change and why, what it exports/imports from other changed files.
+
+Most tasks that pass the escalation gate above are small enough that this won't apply. But do the check; don't skip straight to a single worker out of habit.
+
+Same rules as `/feature`'s parallel implement: disjoint file ownership (no two packages edit the same file), shared files + repo-wide commands deferred to the fix-up worker, NO `isolation: "worktree"`. **Five files that import from each other are five disjoint files** — the cross-file contracts tell workers what to expect. The fix-up worker resolves mismatches.
+
+**Parallel implementation (example with 2 packages):**
 
 ```
 Agent({
-  subagent_type: "general-purpose",
-  description: "feature-light chain",
-  prompt: "chain",
-  chain: [
-    {
-      subagent_type: "worker",
-      description: "Implement task",
-      output: "{chain_dir}/worker.md",
-      output_mode: "file-only",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nImplement the task. Edit files directly, add or update tests, run validations. If a decision is ambiguous, pick the least-risky option and log it.\n\nUse write_output to persist your implementation report INCREMENTALLY. Must include:\n- Every file changed (absolute path) with one-line change summary\n- Every test added/modified with file:line\n- Exact validation commands run and full output\n- Every decision you made, with reasoning\n- Open risks discovered during implementation\n- `Need decision:` section only if you stopped on an unapproved decision\n\nVerbose receipts. The reviewer cross-checks against this."
-    },
-    {
-      subagent_type: "reviewer",
-      description: "Review diff",
-      reads: ["{chain_dir}/worker.md"],
-      output: "{chain_dir}/review.md",
-      output_mode: "file-only",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe worker report is prepended above. Inspect the actual diff via `git diff` (and `git status` for untracked files). Cross-check against the worker report.\n\nUse write_output to persist findings. Cover:\n- Correctness/contract violations (file:line)\n- Test coverage gaps (cite missing case names)\n- Unnecessary complexity, dead code (file:line)\n- Mismatches between worker report and actual diff\n\nPer finding: severity (blocker/note), exact location, recommended fix. Flag only fixes worth doing now. Do not edit."
-    },
-    {
-      subagent_type: "worker",
-      description: "Apply review fixes",
-      reads: ["{chain_dir}/review.md"],
-      output: "{chain_dir}/worker-final.md",
-      output_mode: "inline",
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nThe review is prepended above. Apply only the fixes worth doing now. Re-run validations.\n\nUse write_output to persist final report. Must include:\n- Every fix applied (file:line)\n- Every review finding marked applied/deferred/disagreed with reasoning\n- Final validation command output\n- Final list of changed files\n- Remaining risks"
-    }
-  ]
+  subagent_type: "worker",
+  description: "Implement package A",
+  files: ["/absolute/path/to/file1.ts"],
+  prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_files>\n<SYNTHESIZED_DIRECTIVE_FOR_PACKAGE_A>\n</your_files>\n\nImplement ONLY the files described above. Edit ONLY your listed files. No shared config/lockfiles, no repo-wide commands. Validate ONLY your slice.\n\nWrite your report to /tmp/pi-fl-XXXXX/worker-a.md. Include: every file changed (path + summary), every test (file:line), scoped validation output, any out-of-scope file you needed (report it, do NOT touch), decisions, risks.",
+  run_in_background: true,
+})
+
+Agent({
+  subagent_type: "worker",
+  description: "Implement package B",
+  files: ["/absolute/path/to/file2.ts"],
+  prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_files>\n<SYNTHESIZED_DIRECTIVE_FOR_PACKAGE_B>\n</your_files>\n\nSame contract as package A: implement ONLY your listed files, no shared/global changes, validate your slice. Write your report to /tmp/pi-fl-XXXXX/worker-b.md.",
+  run_in_background: true,
 })
 ```
 
-## Check for a parallel implement stage before defaulting to a single worker
+---
 
-Check every task against this, even here: does it touch 2-3 files with NO overlap between them (e.g. one change in file A, an unrelated change in file B)? If yes, replace the worker step with a parallel stage instead of doing them one after another. There is no Plan step here, so YOU (the parent) must define the disjoint partition up front in Step 0.
-
-Most tasks that pass the escalation gate above are small enough that this won't apply — the gate already filtered out cross-cutting, multi-layer work. But do the check; don't skip straight to a single worker out of habit when a task genuinely has two independent parts.
-
-Same rules as `/feature`'s parallel implement: disjoint file ownership (no two packages edit the same file), shared files + repo-wide commands (format-all, codegen, global build) deferred to the fix-up worker, NO `isolation: "worktree"` (the reviewer reads `git diff` in the main tree, so worktree changes would be invisible), `continue_on_error` left at its fail-fast default.
-
-Replace the worker step with:
+## Step 2: Implement (single worker when no clean split)
 
 ```
-{
-  parallel: [
-    { subagent_type: "worker", description: "Implement package A", output: "{chain_dir}/worker-a.md", output_mode: "file-only", files: ["<absolute paths package A owns>"],
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE A. You OWN exactly these files: <absolute paths>.\n</your_package>\n\nImplement ONLY your package. Edit ONLY your owned files. No shared config/lockfiles, no repo-wide commands. Validate ONLY your slice. Use write_output: every file changed (path + summary), every test (file:line), scoped validation output, any out-of-package file you needed (report it, do NOT touch), decisions, risks." },
-    { subagent_type: "worker", description: "Implement package B", output: "{chain_dir}/worker-b.md", output_mode: "file-only", files: ["<absolute paths package B owns>"],
-      prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<your_package>\nPACKAGE B. You OWN exactly these files: <absolute paths>.\n</your_package>\n\nSame contract as package A." }
-  ],
-  output: "{chain_dir}/worker.md",
-  output_mode: "file-only"
-}
+Agent({
+  subagent_type: "worker",
+  description: "Implement task",
+  prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\nImplement the task. Edit files directly, add or update tests, run validations. If a decision is ambiguous, pick the least-risky option and log it.\n\nWrite your implementation report to /tmp/pi-fl-XXXXX/worker.md. Include:\n- Every file changed (absolute path) with one-line change summary\n- Every test added/modified with file:line\n- Exact validation commands run and full output\n- Every decision you made, with reasoning\n- Open risks discovered during implementation\n- `Need decision:` section only if you stopped on an unapproved decision\n\nVerbose receipts. The reviewer cross-checks against this.",
+})
 ```
 
-The reviewer reads the merged `worker.md` + the combined `git diff`. The fix-up worker (full tree, no restriction) wires cross-package integration and runs the deferred shared-file + repo-wide validation.
+Wait for the worker (or parallel workers) to complete. Read the report(s).
+
+---
+
+## Step 3: Review
+
+Read the worker report(s). Synthesize: extract changed files, tests, risks. Do NOT paste raw output.
+
+```
+Agent({
+  subagent_type: "reviewer",
+  description: "Review diff",
+  prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<worker_synthesis>\n<YOUR_SYNTHESIZED_WORKER_FINDINGS>\n</worker_synthesis>\n\nInspect the actual diff via `git diff` (and `git status` for untracked files). Cross-check against what the worker(s) reported.\n\nWrite your review to /tmp/pi-fl-XXXXX/review.md. Cover:\n- Correctness/contract violations (file:line)\n- Test coverage gaps (cite missing case names)\n- Unnecessary complexity, dead code (file:line)\n- Mismatches between worker report and actual diff\n- Integration gaps if multiple workers were used (file:line)\n\nPer finding: severity (blocker/note), exact location, recommended fix. Flag only fixes worth doing now. Do NOT edit files.",
+})
+```
+
+Wait for the reviewer. Read the review.
+
+---
+
+## Step 4: Fix-up
+
+Read the review. Synthesize the blocker findings. Launch a fix-up worker:
+
+```
+Agent({
+  subagent_type: "worker",
+  description: "Apply review fixes",
+  prompt: "<conversation_context>\n{{CONVO_CONTEXT}}\n</conversation_context>\n\n<task>\n{{TASK}}\n</task>\n\n<review_synthesis>\n<SYNTHESIZED_REVIEW_FINDINGS>\n</review_synthesis>\n\nApply only the fixes worth doing now. If multiple workers were used, wire up cross-package integration and run deferred shared-file/repo-wide validation. Re-run validations.\n\nWrite your final report to /tmp/pi-fl-XXXXX/worker-final.md. Include:\n- Every fix applied (file:line)\n- Every review finding marked applied/deferred/disagreed with reasoning\n- Final validation command output\n- Final list of changed files\n- Remaining risks",
+})
+```
+
+Wait for the fix-up worker. Read the final report. Summarize to the user.
+
+---
 
 ## Rules
 
-- Substitute `{{CONVO_CONTEXT}}` and `{{TASK}}` in every step's `prompt` BEFORE calling `Agent`. Runtime substitutes `{previous}` and `{chain_dir}`.
-- Do NOT collapse, skip, or modify chain steps.
-- Check for a disjoint-file split before defaulting to a single worker, even on small tasks. Use it when the task splits into non-overlapping files; never with `isolation: "worktree"` (the reviewer needs the main tree).
-- Wait for the chain to complete, then report the final summary to the user.
+- You are the coordinator. You dispatch Agent() calls, read results, synthesize, write the next prompt. Each step is a separate dispatch.
+- **Synthesis rule**: never paste an agent's raw output into another agent's prompt. Read the result, extract specific paths/facts/directives, and write a fresh prompt.
+- **Large handoffs**: tell agents to write to file paths in the scratch directory. Read those files yourself, synthesize, pass key findings to the next agent.
+- Check for a disjoint-file split before defaulting to a single worker, even on small tasks. The decision is mechanical: list the files, check for overlap. If disjoint, it's parallel. Five files that import from each other are five disjoint files. Each worker's prompt must include synthesized directives for its files.
+- Do NOT collapse, skip, or modify the review or fix-up steps.
+- Never use `isolation: "worktree"` for implement workers — the reviewer needs the main tree.
+- Wait for each step's agents to complete before issuing the next step.

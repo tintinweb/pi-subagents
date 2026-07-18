@@ -123,9 +123,9 @@ List 3-5 files most critical for implementing this plan:
 # Parallelization
 Actively check whether the implementation splits into independently-scoped, file-disjoint chunks — do not wait for the split to be obvious. Look at your own file-by-file plan: if two or more groups of files can be implemented without touching each other or depending on each other's output, that is a split worth proposing, even if the task reads as "one feature."
 
-When such a split exists, append a fenced \`chain-next\` block after "Critical Files for Implementation": a JSON array where each item is \`{"subagent_type": "worker", "prompt": "<self-contained outcome-based task for this chunk>", "files": ["<absolute paths this chunk touches>"], "isolation": "worktree"}\` (omit "isolation" only when you are certain no chunk's files overlap with any other chunk's). Each chunk's "prompt" must be a complete, standalone brief — the worker receiving it has no memory of this plan.
+When such a split exists, end with a "## Parallel partition" section: one bullet per chunk with (a) the absolute file paths the chunk owns, (b) a one-paragraph self-contained brief for that chunk. Chunks must not share files. The coordinator will turn each bullet into a worker dispatch — write briefs so a worker with no memory of this plan can act on them.
 
-Only skip this block when the work is genuinely one coupled change: edits depend on each other's output, must land in a specific order, or share so much context that splitting adds coordination cost without saving time. That is a real judgment call against the actual plan, not a default.`,
+Only skip this section when the work is genuinely one coupled change: edits depend on each other's output, must land in a specific order, or share so much context that splitting adds coordination cost without saving time. That is a real judgment call against the actual plan, not a default.`,
       promptMode: "replace",
       isDefault: true,
     },
