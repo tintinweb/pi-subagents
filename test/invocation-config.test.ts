@@ -23,6 +23,7 @@ describe("resolveAgentInvocationConfig", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
         model: "provider/config-model",
+        lockModel: true,
         thinking: "high",
         maxTurns: 42,
         inheritContext: false,

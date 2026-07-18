@@ -21,15 +21,15 @@ describe("formatSessionTokens", () => {
     expect(formatSessionTokens(1234, 50, plainTheme)).toBe("1.2k token (<dim>50%</dim>)");
     expect(formatSessionTokens(1234, 70, plainTheme)).toBe("1.2k token (<warning>70%</warning>)");
     expect(formatSessionTokens(1234, 84, plainTheme)).toBe("1.2k token (<warning>84%</warning>)");
-    expect(formatSessionTokens(1234, 85, plainTheme)).toBe("1.2k token (<error>85%</error>)");
-    expect(formatSessionTokens(1234, 99, plainTheme)).toBe("1.2k token (<error>99%</error>)");
+    expect(formatSessionTokens(1234, 85, plainTheme)).toBe("1.2k token (<error>85% ⚠</error>)");
+    expect(formatSessionTokens(1234, 99, plainTheme)).toBe("1.2k token (<error>99% ⚠</error>)");
   });
 
   it("annotates compaction count alongside percent", () => {
     expect(formatSessionTokens(1234, null, plainTheme, 1)).toBe("1.2k token (<dim>↻1</dim>)");
     expect(formatSessionTokens(1234, null, plainTheme, 3)).toBe("1.2k token (<dim>↻3</dim>)");
     expect(formatSessionTokens(1234, 45, plainTheme, 2)).toBe("1.2k token (<dim>45%</dim> · <dim>↻2</dim>)");
-    expect(formatSessionTokens(1234, 88, plainTheme, 4)).toBe("1.2k token (<error>88%</error> · <dim>↻4</dim>)");
+    expect(formatSessionTokens(1234, 88, plainTheme, 4)).toBe("1.2k token (<error>88% ⚠</error> · <dim>↻4</dim>)");
     expect(formatSessionTokens(1234, 45, plainTheme, 0)).toBe("1.2k token (<dim>45%</dim>)");
   });
 });
@@ -78,7 +78,6 @@ describe("AgentWidget", () => {
 
     const widget = new AgentWidget(manager, activity);
     widget.setUICtx(uiCtx);
-    widget.setDisplayMode("tree");
     widget.update();
 
     expect(statusText).toBe("1 running agent · haiku:high");
@@ -162,7 +161,6 @@ describe("AgentWidget", () => {
 
     const widget = new AgentWidget(manager, new Map());
     widget.setUICtx(uiCtx);
-    widget.setDisplayMode("tree");
     widget.update();
 
     const rendered = widgetFactory!({ terminal: { columns: 200 } }, theme).render(200);

@@ -47,7 +47,6 @@ import {
   getPromptModeLabel,
   SPINNER,
   type UICtx,
-  type WidgetDisplayMode,
 } from "./ui/agent-widget.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
@@ -85,14 +84,20 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
   };
 
   const callbacks = {
-    onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => {
+    onToolActivity: (activity: { type: "start" | "end"; toolName: string; success?: boolean }) => {
       if (activity.type === "start") {
         state.activeTools.set(activity.toolName + "_" + Date.now(), activity.toolName);
+        // Clear previous tool result when a new tool starts
+        state.lastToolResult = undefined;
       } else {
         for (const [key, name] of state.activeTools) {
           if (name === activity.toolName) { state.activeTools.delete(key); break; }
         }
         state.toolUses++;
+        // Record tool result for display glyph
+        if (activity.success !== undefined) {
+          state.lastToolResult = { success: activity.success };
+        }
       }
       onStreamUpdate?.();
     },
@@ -1204,7 +1209,7 @@ Notes:
           maxTurns: fgState.maxTurns,
           durationMs: Date.now() - startedAt,
           status: "running",
-          activity: describeActivity(fgState.activeTools, fgState.responseText),
+          activity: describeActivity(fgState.activeTools, fgState.responseText, fgState.lastToolResult),
           spinnerFrame: spinnerFrame % SPINNER.length,
         };
         onUpdate?.({
@@ -1639,6 +1644,30 @@ Notes:
     const idx = options.indexOf(choice);
     if (idx < 0) return;
     const record = agents[idx];
+
+    const isStoppable = record.status === "running" || record.status === "queued";
+    if (isStoppable) {
+      const action = await ctx.ui.select(
+        `${record.description}`,
+        ["View conversation", "Stop agent", "Back"],
+      );
+      if (!action || action === "Back") {
+        await showRunningAgents(ctx);
+        return;
+      }
+      if (action === "Stop agent") {
+        const confirmed = await ctx.ui.confirm(
+          "Stop agent",
+          `Stop "${record.description}"? Any work in progress will be lost.`,
+        );
+        if (confirmed) {
+          manager.abort(record.id);
+          ctx.ui.notify(`Stopped "${record.description}".`, "info");
+        }
+        await showRunningAgents(ctx);
+        return;
+      }
+    }
 
     await viewAgentConversation(ctx, record);
     // Back-navigation: re-show the list
@@ -2227,13 +2256,5 @@ ${systemPrompt}
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
   });
 
-  pi.registerCommand("agents-view", {
-    description: "Toggle agent widget display between cards and tree",
-    handler: async (_args, ctx) => {
-      const next: WidgetDisplayMode =
-        widget.getDisplayMode() === "cards" ? "tree" : "cards";
-      widget.setDisplayMode(next);
-      ctx.ui.notify(`Agent view: ${next}`, "info");
-    },
-  });
+
 }

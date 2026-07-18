@@ -10,7 +10,6 @@ import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import { getGlobalActivity, listGlobalRecords } from "../global-registry.js";
 import type { AgentInvocation, AgentRecord, SubagentType, ThinkingLevel } from "../types.js";
-import { CARD_THEMES, formatElapsed, renderCard } from "../ui/tui-draw.js";
 import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
@@ -63,6 +62,8 @@ export interface AgentActivity {
   maxTurns?: number;
   /** Lifetime usage breakdown — see LifetimeUsage docs. */
   lifetimeUsage: LifetimeUsage;
+  /** Result of the most recently completed tool (undefined while a tool is active). */
+  lastToolResult?: { success: boolean };
 }
 
 /** Metadata attached to Agent tool results for custom rendering. */
@@ -121,7 +122,8 @@ export function formatSessionTokens(
   const annot: string[] = [];
   if (percent !== null) {
     const color = percent >= 85 ? "error" : percent >= 70 ? "warning" : "dim";
-    annot.push(theme.fg(color, `${Math.round(percent)}%`));
+    const warn = percent >= 85 ? " ⚠" : "";
+    annot.push(theme.fg(color, `${Math.round(percent)}%${warn}`));
   }
   if (compactions > 0) {
     annot.push(theme.fg("dim", `↻${compactions}`));
@@ -158,10 +160,9 @@ export function getDisplayName(type: SubagentType): string {
   return getConfig(type).displayName;
 }
 
-/** Short label for prompt mode: "twin" for append, nothing for replace (the default). */
-export function getPromptModeLabel(type: SubagentType): string | undefined {
-  const config = getConfig(type);
-  return config.promptMode === "append" ? "twin" : undefined;
+/** @deprecated No longer displays a mode label — kept as a no-op for callers. */
+export function getPromptModeLabel(_type: SubagentType): string | undefined {
+  return undefined;
 }
 
 /** Mode label is not included — callers add it where they want it. */
@@ -187,7 +188,11 @@ function truncateLine(text: string, len = 60): string {
 }
 
 /** Build a human-readable activity string from currently-running tools or response text. */
-export function describeActivity(activeTools: Map<string, string>, responseText?: string): string {
+export function describeActivity(
+  activeTools: Map<string, string>,
+  responseText?: string,
+  lastToolResult?: { success: boolean },
+): string {
   if (activeTools.size > 0) {
     const groups = new Map<string, number>();
     for (const toolName of activeTools.values()) {
@@ -203,12 +208,19 @@ export function describeActivity(activeTools: Map<string, string>, responseText?
         parts.push(action);
       }
     }
-    return parts.join(", ") + "…";
+    let activity = parts.join(", ") + "…";
+
+    // Append tool result glyph if available
+    if (lastToolResult) {
+      activity += lastToolResult.success ? " ✓" : " ✗";
+    }
+
+    return activity;
   }
 
-  // No tools active — show truncated response text if available
+  // No tools active — show "generating response…" if text is streaming, else "thinking…"
   if (responseText && responseText.trim().length > 0) {
-    return truncateLine(responseText);
+    return "generating response…";
   }
 
   return "thinking…";
@@ -256,11 +268,19 @@ function buildFinishedLineBody(
   return `${icon} ${theme.fg("dim", name)}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", parts.join(" · "))}${statusText}`;
 }
 
-function buildQueuedLineBody(a: { type: SubagentType; description: string }, theme: Theme): string {
+function buildQueuedLineBody(
+  a: { type: SubagentType; description: string },
+  theme: Theme,
+  queueIndex?: number,
+  queueTotal?: number,
+): string {
   const name = getDisplayName(a.type);
   const modeLabel = getPromptModeLabel(a.type);
   const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
-  return `${theme.fg("muted", "◦")} ${theme.fg("dim", name)}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", "queued")}`;
+  const queueInfo = queueIndex != null && queueTotal != null
+    ? ` (${queueIndex} of ${queueTotal})`
+    : "";
+  return `${theme.fg("muted", "◦")} ${theme.fg("dim", name)}${modeTag}  ${theme.fg("dim", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", `queued${queueInfo}`)}`;
 }
 
 export function buildTreeRows(
@@ -274,6 +294,13 @@ export function buildTreeRows(
   },
 ): TreeRow[] {
   const byId = new Map(records.map((record) => [record.id, record] as const));
+
+  // Compute queue positions: sort queued agents by startedAt ascending
+  const queuedRecords = records.filter(r => r.status === "queued").sort((a, b) => a.startedAt - b.startedAt);
+  const queuePos = new Map<string, { index: number; total: number }>();
+  const total = queuedRecords.length;
+  queuedRecords.forEach((r, i) => queuePos.set(r.id, { index: i + 1, total }));
+
   const children = new Map<string | undefined, AgentRecord[]>();
   for (const record of records) {
     const parentKey = record.parentId && byId.has(record.parentId) ? record.parentId : undefined;
@@ -320,7 +347,7 @@ export function buildTreeRows(
       if (tokenText) parts.push(tokenText);
       parts.push(elapsed);
       const statsText = parts.join(" · ");
-      const activityText = activity ? describeActivity(activity.activeTools, activity.responseText) : "thinking…";
+      const activityText = activity ? describeActivity(activity.activeTools, activity.responseText, activity.lastToolResult) : "thinking…";
       rows.push({
         lines: [
           opts.truncate(opts.theme.fg("dim", headerPrefix) + `${opts.theme.fg("accent", opts.frame)} ${opts.theme.bold(name)}${modeTag}  ${opts.theme.fg("muted", record.description)} ${opts.theme.fg("dim", "·")} ${opts.theme.fg("dim", statsText)}`),
@@ -328,8 +355,9 @@ export function buildTreeRows(
         ],
       });
     } else if (record.status === "queued") {
+      const qp = queuePos.get(record.id);
       rows.push({
-        lines: [opts.truncate(opts.theme.fg("dim", headerPrefix) + buildQueuedLineBody(record, opts.theme))],
+        lines: [opts.truncate(opts.theme.fg("dim", headerPrefix) + buildQueuedLineBody(record, opts.theme, qp?.index, qp?.total))],
       });
     } else {
       rows.push({
@@ -355,13 +383,11 @@ export function buildTreeRows(
 
 // ---- Widget manager ----
 
-export type WidgetDisplayMode = "cards" | "tree";
 
 export class AgentWidget {
   private uiCtx: UICtx | undefined;
   private widgetFrame = 0;
   private widgetInterval: ReturnType<typeof setInterval> | undefined;
-  private displayMode: WidgetDisplayMode = "tree";
   /** Tracks how many turns each finished agent has survived. Key: agent ID, Value: turns since finished. */
   private finishedTurnAge = new Map<string, number>();
   /** How many extra turns errors/aborted agents linger (completed agents clear after 1 turn). */
@@ -378,16 +404,6 @@ export class AgentWidget {
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
   ) {}
-
-  /** Toggle or set the running-agent display mode and force a widget refresh. */
-  setDisplayMode(mode: WidgetDisplayMode): void {
-    this.displayMode = mode;
-    this.update();
-  }
-
-  getDisplayMode(): WidgetDisplayMode {
-    return this.displayMode;
-  }
 
   /** Set the UI context (grabbed from first tool execution). */
   setUICtx(ctx: UICtx) {
@@ -432,65 +448,6 @@ export class AgentWidget {
     return this.agentActivity.get(id) ?? getGlobalActivity(id);
   }
 
-  /** Render running agents as a card grid. */
-  private renderAgentCards(
-    running: Array<{
-      id: string;
-      type: SubagentType;
-      status: string;
-      description: string;
-      toolUses: number;
-      startedAt: number;
-      modelName?: string;
-      thinkingLevel?: ThinkingLevel;
-    }>,
-    agentActivity: Map<string, AgentActivity>,
-    theme: Theme,
-    width: number
-  ): string[] {
-    if (running.length === 0) {
-      return [];
-    }
-
-    const cols = Math.max(1, Math.min(3, running.length));
-    const gap = 1;
-    const colWidth = Math.max(2, Math.floor((width - gap * (cols - 1)) / cols));
-    const phase = Math.floor((Date.now() / 2000) % 3);
-    const linesByCard: string[][] = [];
-
-    for (let i = 0; i < running.length; i++) {
-      const a = running[i];
-      const bg = agentActivity.get(a.id);
-      const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking...";
-      const status = `\u26a1 working${"." .repeat(phase + 1)}`;
-      const elapsed = formatElapsed(a.startedAt);
-      const name = getDisplayName(a.type);
-      const configTag = formatAgentConfigTag(a.modelName, a.thinkingLevel);
-      const shortType = configTag ? `${name} · ${configTag}` : name;
-      const card = renderCard({
-        title: a.description,
-        badge: `#${i + 1}`,
-        content: activity,
-        footer: `${status} ${elapsed}`,
-        footerRight: shortType,
-        colWidth,
-        theme,
-        cardTheme: CARD_THEMES[i % CARD_THEMES.length],
-      });
-      linesByCard.push(card);
-    }
-
-    const rows: string[] = [];
-    for (let i = 0; i < linesByCard.length; i += cols) {
-      const chunk = linesByCard.slice(i, i + cols);
-      const rowHeight = Math.max(...chunk.map((card) => card.length));
-      for (let lineIdx = 0; lineIdx < rowHeight; lineIdx++) {
-        const parts = chunk.map((card) => card[lineIdx] ?? " ".repeat(colWidth));
-        rows.push(parts.join(" ".repeat(gap)));
-      }
-    }
-    return rows;
-  }
 
   /** Record an agent as finished (call when agent completes). */
   markFinished(agentId: string) {
@@ -553,7 +510,7 @@ export class AgentWidget {
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
-      const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
+      const activity = bg ? describeActivity(bg.activeTools, bg.responseText, bg.lastToolResult) : "thinking…";
       runningLines.push([
         truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${theme.bold(name)}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${theme.fg("dim", statsText)}`),
         truncate(theme.fg("dim", "│  ") + theme.fg("dim", `  ⎿  ${activity}`)),
@@ -566,33 +523,6 @@ export class AgentWidget {
 
     const maxBody = MAX_WIDGET_LINES - 1;
     const lines: string[] = [truncate(theme.fg(headingColor, headingIcon) + " " + theme.fg(headingColor, "Agents"))];
-
-    if (this.displayMode === "cards") {
-      const runningCards = this.renderAgentCards(running, this.agentActivity, theme, w);
-      const bodyLines = running.length > 0
-        ? [...runningCards, ...finishedLines]
-        : [...finishedLines, ...(queuedLine ? [queuedLine] : [])];
-
-      if (bodyLines.length <= maxBody) {
-        lines.push(...bodyLines);
-        if (lines.length > 1) {
-          lines[lines.length - 1] = lines[lines.length - 1].replace("├─", "└─");
-        }
-      } else {
-        let budget = maxBody - 1;
-        let hiddenCount = 0;
-        for (const line of bodyLines) {
-          if (budget >= 1) {
-            lines.push(line);
-            budget--;
-          } else {
-            hiddenCount++;
-          }
-        }
-        lines.push(truncate(theme.fg("dim", "└─") + " " + theme.fg("dim", `+${hiddenCount} more`)));
-      }
-      return lines;
-    }
 
     const treeRecords = listGlobalRecords();
     const treeIds = new Set(treeRecords.map((record) => record.id));

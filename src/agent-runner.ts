@@ -176,8 +176,9 @@ export function getGraceTurns(): number { return graceTurns; }
 export function setGraceTurns(n: number): void { graceTurns = Math.max(1, n); }
 
 /**
- * Try to find the right model for an agent type.
- * Priority: explicit option > config.model > parent model.
+ * Fallback model resolver — used only when no explicit model was passed
+ * (the caller already handled parent-override vs agent-config priority).
+ * Priority: agent config model > parent model.
  */
 function resolveDefaultModel(
   parentModel: Model<any> | undefined,
@@ -210,6 +211,7 @@ function resolveDefaultModel(
 export interface ToolActivity {
   type: "start" | "end";
   toolName: string;
+  success?: boolean;
 }
 
 export interface RunOptions {
@@ -633,7 +635,7 @@ export async function runAgent(
       options.onToolActivity?.({ type: "start", toolName: event.toolName });
     }
     if (event.type === "tool_execution_end") {
-      options.onToolActivity?.({ type: "end", toolName: event.toolName });
+      options.onToolActivity?.({ type: "end", toolName: event.toolName, success: !(event as any).isError });
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
@@ -695,7 +697,7 @@ export async function resumeAgent(
   const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
+        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName, success: !(event as any).isError });
         if (event.type === "message_end" && event.message.role === "assistant") {
           const u = (event.message as any).usage;
           if (u) options.onAssistantUsage?.({

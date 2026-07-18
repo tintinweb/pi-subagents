@@ -57,6 +57,9 @@ export interface AgentConfig {
   enabled?: boolean;
   /** true = automatically attempt recovery when the agent aborts (max turns exceeded) */
   recoverOnAbort?: boolean;
+  /** true = refuse parent model override; agent-defined model is always used. Useful for read-only agents
+   * like Explore/Plan where the model is load-bearing for their design. */
+  lockModel?: boolean;
   /** Where this agent was loaded from */
   source?: "default" | "project" | "global";
 }
