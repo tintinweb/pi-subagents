@@ -214,7 +214,7 @@ const ctx = {
   model: undefined,
   modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
   getSystemPrompt: vi.fn(() => "parent prompt"),
-  sessionManager: { getBranch: vi.fn(() => []) },
+  sessionManager: { getBranch: vi.fn(() => []), getSessionId: vi.fn(() => "orchestrator-session-id") },
 } as any;
 
 const pi = {} as any;

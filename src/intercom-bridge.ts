@@ -12,17 +12,24 @@
  *    restored after, to stay invisible to sibling spawns.
  *  - `PI_SUBAGENT_ORCHESTRATOR_SESSION_ID` is resolved by intercom against its
  *    broker session list; `PI_SUBAGENT_ORCHESTRATOR_TARGET` is the display
- *    fallback. We set both to the orchestrator's broker session id, which is the
- *    `PI_INTERCOM_SESSION_ID` the orchestrator's own intercom runtime stashed in
- *    env at its startup.
+ *    fallback. Both are set to the orchestrator's pi session id, which is the
+ *    same value intercom registers with its broker (intercom index.ts:938 uses
+ *    `ctx.sessionManager.getSessionId()`). We read it from our own `ctx` in
+ *    agent-runner — NOT from `PI_INTERCOM_SESSION_ID` — so the bridge works with
+ *    any intercom version and has no timing dependency on the orchestrator's
+ *    intercom session_start having fired.
  *  - The child's intercom `session_start` handler overwrites
  *    `PI_INTERCOM_SESSION_ID` with the child's own broker id. We snapshot/restore
- *    it around bindExtensions so a later sibling spawn still sees the
- *    orchestrator's id when it reads env.
+ *    it around bindExtensions so the orchestrator-side intercom runtime keeps a
+ *    stable view of its own id across spawns.
  *
- * When pi-intercom is not installed in the orchestrator, PI_INTERCOM_SESSION_ID
- * is absent and this module is a no-op: no bridge env is emitted, children are
- * unaffected and behave as plain ephemeral subagents.
+ * When pi-intercom is not installed, the PI_SUBAGENT_* env is emitted but nothing
+ * reads it — harmless. Children behave as plain ephemeral subagents and any
+ * `contact_supervisor` call would simply fail to deliver (no broker peer).
+ *
+ * Nested subagents: because the orchestrator id is read from each spawner's own
+ * `ctx`, a grandchild's contact_supervisor routes to its immediate parent worker,
+ * not the top user session.
  */
 
 const SUBAGENT_BRIDGE_KEYS = [
@@ -55,19 +62,14 @@ export function withIntercomBridgeLock<T>(task: () => Promise<T>): Promise<T> {
 }
 
 /**
- * Read the orchestrator's intercom broker session id from env. Present iff
- * pi-intercom is installed in the orchestrator session. Must be called while
- * holding {@link withIntercomBridgeLock} (so a sibling hasn't temporarily
- * overwritten it mid-bindExtensions).
- */
-export function readOrchestratorIntercomSessionId(): string | undefined {
-  return process.env[INTERCOM_SESSION_ID_ENV]?.trim() || undefined;
-}
-
-/**
  * Set the PI_SUBAGENT_* bridge env for the child about to load extensions.
  * Returns a restore function that resets each key to its prior value. Caller
  * invokes it after `await loader.reload()` resolves, inside the same lock.
+ *
+ * `orchestratorSessionId` is the spawner's pi session id
+ * (`ctx.sessionManager.getSessionId()`), which is the value intercom registers
+ * with its broker — so the child's contact_supervisor routes back to the
+ * spawner regardless of intercom version.
  */
 export function applySubagentBridgeEnv(values: {
   orchestratorSessionId: string;

@@ -23,7 +23,7 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getR
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
-import { applySubagentBridgeEnv, readOrchestratorIntercomSessionId, snapshotIntercomSessionId, withIntercomBridgeLock } from "./intercom-bridge.js";
+import { applySubagentBridgeEnv, snapshotIntercomSessionId, withIntercomBridgeLock } from "./intercom-bridge.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
@@ -446,19 +446,17 @@ export async function runAgent(
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });
-  // Optional pi-intercom bridge: advertise the orchestrator + this child's run
+  // Optional pi-intercom bridge: advertise this spawner + the child's run
   // metadata via process.env so pi-intercom's child factory (which runs during
   // `loader.reload()`) registers the `contact_supervisor` tool on this session.
-  // No-op when pi-intercom isn't installed in the orchestrator. The lock keeps a
-  // sibling spawn from overwriting these process-global keys mid-read.
+  // The orchestrator id comes from our own `ctx`, not from intercom's env, so the
+  // bridge works with any intercom version and routes correctly under nesting
+  // (a grandchild's contact_supervisor targets its immediate parent). The lock
+  // keeps a sibling spawn from overwriting these process-global keys mid-read.
   const baseSessionName = agentConfig?.name ?? type;
   const childRunId = options.agentId ?? randomUUID();
+  const orchestratorSessionId = ctx.sessionManager.getSessionId();
   await withIntercomBridgeLock(async () => {
-    const orchestratorSessionId = readOrchestratorIntercomSessionId();
-    if (!orchestratorSessionId) {
-      await loader.reload();
-      return;
-    }
     const childSessionName = options.agentId
       ? `${baseSessionName}#${options.agentId.slice(0, 8)}`
       : baseSessionName;

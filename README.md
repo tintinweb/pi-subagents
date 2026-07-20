@@ -604,7 +604,7 @@ This is useful for creating agents that inherit extension tools but should not h
 pi-subagents optionally integrates with [pi-intercom](https://github.com/nicobailon/pi-intercom) to give spawned subagents a child-only `contact_supervisor` tool for talking back to the orchestrator mid-run — decisions, structured interviews, and plan-changing progress updates — without returning a final result.
 
 - **Optional dependency.** pi-intercom is *not* required. Without it installed, pi-subagents behaves exactly as before: ephemeral dispatch, one result back, no child↔parent channel.
-- **Install pi-intercom** in the orchestrator session (`pi install npm:pi-intercom`) and restart. When the orchestrator's intercom runtime is connected, pi-subagents advertises bridge metadata (`PI_SUBAGENT_*` env) to each spawned child so pi-intercom's child factory registers `contact_supervisor` on it. No config needed.
+- **Install pi-intercom** in the orchestrator session (`pi install npm:pi-intercom`) and restart. pi-subagents advertises bridge metadata (`PI_SUBAGENT_*` env) to each spawned child so pi-intercom's child factory registers `contact_supervisor` on it. No config needed. The orchestrator id comes from pi-subagents' own session context (`ctx.sessionManager.getSessionId()`) — the same value intercom registers with its broker — so the bridge works with any intercom version and routes correctly under nesting (a grandchild's `contact_supervisor` targets its immediate parent worker, not the top user session).
 - **What you get.** A blocked worker can `contact_supervisor({ reason: "need_decision", ... })` and the orchestrator session renders it inline and can reply; `reason: "interview_request"` for multiple structured answers in one blocking exchange; `reason: "progress_update"` for non-blocking discoveries that change the plan.
 - **Out of scope here.** Peer-to-peer `intercom` messaging between *separate* pi sessions is entirely pi-intercom's feature — pi-subagents only wires the child↔supervisor channel inside spawned subagents.
 
@@ -613,7 +613,7 @@ Worker hits a decision ──contact_supervisor──▶ Orchestrator session re
               ◀────────── reply ────────────────── and replies inline
 ```
 
-Because subagents run in-process, the bridge metadata is carried via `process.env` and serialized across concurrent spawns (see `src/intercom-bridge.ts`); this is invisible to callers and restores prior env after each child loads.
+Because subagents run in-process, the bridge metadata is carried via `process.env` and serialized across concurrent spawns (see `src/intercom-bridge.ts`); this is invisible to callers and restores prior env after each child loads. The orchestrator id is read from the spawner's own context, not from an env var, so there is no timing dependency on pi-intercom's session startup.
 
 ## Architecture
 

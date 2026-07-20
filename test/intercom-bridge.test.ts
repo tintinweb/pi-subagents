@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   applySubagentBridgeEnv,
-  readOrchestratorIntercomSessionId,
   snapshotIntercomSessionId,
   withIntercomBridgeLock,
 } from "../src/intercom-bridge.js";
@@ -122,18 +121,6 @@ describe("snapshotIntercomSessionId", () => {
     } finally {
       restore(snap);
     }
-  });
-});
-
-describe("readOrchestratorIntercomSessionId", () => {
-  it("returns undefined when env is absent", () => {
-    delete process.env.PI_INTERCOM_SESSION_ID;
-    expect(readOrchestratorIntercomSessionId()).toBeUndefined();
-  });
-
-  it("trims whitespace", () => {
-    process.env.PI_INTERCOM_SESSION_ID = "  abc  ";
-    expect(readOrchestratorIntercomSessionId()).toBe("abc");
   });
 });
 
