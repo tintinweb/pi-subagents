@@ -5,7 +5,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@mariozechner/pi-coding-agent";
 import {
@@ -69,10 +69,9 @@ export function extensionCanonicalName(extPath: string): string {
  * An entry is a PATH iff it contains a path separator or starts with `~`; otherwise
  * it is a NAME. `"*"` sets the wildcard flag (keep all default-discovered extensions).
  *
- * Path entries are resolved (`~` expanded, made absolute against `cwd`) into `paths`
- * — and their canonical name is also added to `names`. The loader override matches
- * everything by canonical name, so path-loaded extensions are matched via their name
- * rather than their post-staging `Extension.path`.
+ * Path entries are resolved (`~` expanded, made absolute against `cwd`) into `paths`.
+ * The loader override compares those resolved resource paths exactly. Bare names stay
+ * in `names` and continue to match extensions by canonical name.
  */
 export function parseExtensionsSpec(
   entries: string[],
@@ -96,9 +95,7 @@ export function parseExtensionsSpec(
     if (p === "~" || p.startsWith("~/") || p.startsWith("~\\")) {
       p = homedir() + p.slice(1);
     }
-    const abs = isAbsolute(p) ? p : resolve(cwd, p);
-    paths.push(abs);
-    names.add(extensionCanonicalName(abs));
+    paths.push(resolve(cwd, p));
   }
   return { names, paths, wildcard };
 }
@@ -429,9 +426,10 @@ export async function runAgent(
     ? parseExtensionsSpec(extensions, effectiveCwd)
     : undefined;
   const keepNames = extensionsSpec?.names ?? new Set<string>();
-  // The override filters loaded extensions down to `keepNames`. It's only needed
-  // when we're neither loading everything (`extensions: true` or a `"*"` wildcard)
-  // nor nothing (`noExtensions`).
+  const keepPaths = new Set(extensionsSpec?.paths);
+  // The override filters loaded extensions down to bare-name or exact resolved-path
+  // matches. It's only needed when we're neither loading everything (`extensions:
+  // true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
   const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
@@ -439,7 +437,8 @@ export async function runAgent(
       ? undefined
       : (base) => ({
           ...base,
-          extensions: base.extensions.filter((e) => keepNames.has(extensionCanonicalName(e.path))),
+          extensions: base.extensions.filter((e) =>
+            keepNames.has(extensionCanonicalName(e.path)) || keepPaths.has(resolve(e.path))),
         });
 
   const loader = new DefaultResourceLoader({

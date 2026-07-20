@@ -162,13 +162,67 @@ describe("parseExtensionsSpec", () => {
     const spec = parseExtensionsSpec(["mcp", "*", "/abs/extra.ts"], "/cwd");
     expect(spec.wildcard).toBe(true);
     expect(spec.paths).toEqual(["/abs/extra.ts"]);
-    // path entries fold their canonical name into names too
-    expect([...spec.names].sort()).toEqual(["extra", "mcp"]);
+    expect([...spec.names]).toEqual(["mcp"]);
   });
-  it("resolves relative path entries against cwd and lowercases names", () => {
-    const spec = parseExtensionsSpec(["Foo", "./rel/Bar.ts"], "/cwd");
-    expect(spec.paths).toEqual(["/cwd/rel/Bar.ts"]);
-    expect([...spec.names].sort()).toEqual(["bar", "foo"]);
+  it("resolves path entries against cwd and lowercases names", () => {
+    const spec = parseExtensionsSpec(["Foo", "./rel/Bar.ts", "/abs/dir/../Bar.ts"], "/cwd");
+    expect(spec.paths).toEqual(["/cwd/rel/Bar.ts", "/abs/Bar.ts"]);
+    expect([...spec.names]).toEqual(["foo"]);
+  });
+});
+
+describe("extension allowlist filtering", () => {
+  afterEach(() => {
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReset();
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+      name: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions: false, skills: false, systemPrompt: "You are Explore.", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+    });
+  });
+
+  it("matches a path entry only against that resolved extension resource path", async () => {
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+      name: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions: ["./pi-quiet-tools/src/index.ts"], skills: false, systemPrompt: "x", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+    });
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const { extensionsOverride } = defaultResourceLoaderCtor.mock.calls.at(-1)![0];
+    const base = {
+      extensions: [
+        { path: "/tmp/pi-quiet-tools/src/index.ts" },
+        { path: "/tmp/pi-caveman/extensions/index.ts" },
+        { path: "/tmp/unrelated/src/index.ts" },
+      ],
+    } as any;
+    expect(extensionsOverride(base).extensions.map((extension: { path: string }) => extension.path))
+      .toEqual(["/tmp/pi-quiet-tools/src/index.ts"]);
+  });
+
+  it("keeps canonical-name matching for bare name entries", async () => {
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+      name: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions: ["src"], skills: false, systemPrompt: "x", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+    });
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const { extensionsOverride } = defaultResourceLoaderCtor.mock.calls.at(-1)![0];
+    const base = {
+      extensions: [
+        { path: "/tmp/pi-quiet-tools/src/index.ts" },
+        { path: "/tmp/unrelated/src/index.ts" },
+        { path: "/tmp/pi-caveman/extensions/index.ts" },
+      ],
+    } as any;
+    expect(extensionsOverride(base).extensions.map((extension: { path: string }) => extension.path))
+      .toEqual(["/tmp/pi-quiet-tools/src/index.ts", "/tmp/unrelated/src/index.ts"]);
   });
 });
 
