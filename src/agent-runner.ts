@@ -381,12 +381,15 @@ export async function runAgent(
       // Read-write memory: add any missing memory tool names (read/write/edit)
       const extraNames = getMemoryToolNames(existingNames);
       if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
-      extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
+      // Resolve against ctx.cwd (main repo), not effectiveCwd (which may be a
+      // temporary worktree that gets force-removed on cleanup). Memory must
+      // persist across worktree-isolated spawns.
+      extras.memoryBlock = buildMemoryBlock(agentConfig.name, agentConfig.memory, ctx.cwd);
     } else {
       // Read-only memory: only add read tool name, use read-only prompt
       const extraNames = getReadOnlyMemoryToolNames(existingNames);
       if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
-      extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, effectiveCwd);
+      extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, ctx.cwd);
     }
   }
 

@@ -144,6 +144,7 @@ Only skip this section when the work is genuinely one coupled change: edits depe
       skills: false,
       thinking: "medium",
       inheritContext: true,
+      memory: "local",
       recoverOnAbort: true,
       systemPrompt: `You are \`worker\`: the implementation subagent.
 
@@ -204,6 +205,7 @@ Recommended next step: N.
       extensions: true,
       skills: false,
       thinking: "medium",
+      memory: "local",
       maxTurns: 30,
       systemPrompt: `You are a disciplined review subagent. Your job is to inspect, evaluate, and report findings with evidence. You do not guess; you verify from the code, tests, docs, or requirements.
 

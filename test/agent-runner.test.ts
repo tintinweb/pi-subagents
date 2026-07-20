@@ -7,6 +7,9 @@ const {
   packageManagerResolve,
   sessionManagerInMemory,
   settingsManagerCreate,
+  buildMemoryBlock,
+  buildReadOnlyMemoryBlock,
+  getToolNamesForType,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
@@ -14,6 +17,9 @@ const {
   packageManagerResolve: vi.fn(async () => ({ extensions: [] })),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", reload: vi.fn(async () => {}) })),
+  buildMemoryBlock: vi.fn(() => ""),
+  buildReadOnlyMemoryBlock: vi.fn(() => ""),
+  getToolNamesForType: vi.fn(() => ["read"]),
 }));
 
 vi.mock("@mariozechner/pi-coding-agent", () => ({
@@ -62,7 +68,7 @@ vi.mock("../src/agent-types.js", () => ({
   })),
   getMemoryToolNames: vi.fn(() => []),
   getReadOnlyMemoryToolNames: vi.fn(() => []),
-  getToolNamesForType: vi.fn(() => ["read"]),
+  getToolNamesForType,
 }));
 
 vi.mock("../src/env.js", () => ({
@@ -74,8 +80,8 @@ vi.mock("../src/prompts.js", () => ({
 }));
 
 vi.mock("../src/memory.js", () => ({
-  buildMemoryBlock: vi.fn(() => ""),
-  buildReadOnlyMemoryBlock: vi.fn(() => ""),
+  buildMemoryBlock,
+  buildReadOnlyMemoryBlock,
 }));
 
 vi.mock("../src/skill-loader.js", () => ({
@@ -182,11 +188,13 @@ describe("parseExtensionsSpec", () => {
       "npm:pi-sessions",
       "npm:@aliou/pi-neuralwatt",
       "git:github.com/anh-chu/pi-rewind-lite",
+      "https://github.com/nicobailon/pi-intercom",
     ], "/cwd");
     expect([...spec.sources]).toEqual([
       "npm:pi-sessions",
       "npm:@aliou/pi-neuralwatt",
       "git:github.com/anh-chu/pi-rewind-lite",
+      "https://github.com/nicobailon/pi-intercom",
     ]);
     expect(spec.names.size).toBe(0);
     expect(spec.paths).toEqual([]);
@@ -281,7 +289,35 @@ describe("extension allowlist filtering", () => {
       .toEqual(["/packages/neuralwatt/src/index.ts"]);
   });
 
-  it("keeps canonical-name matching for bare name entries", async () => {    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+  it("matches HTTPS package source IDs exactly", async () => {
+    packageManagerResolve.mockResolvedValue({
+      extensions: [
+        { path: "/packages/pi-intercom/src/index.ts", enabled: true, metadata: { source: "https://github.com/nicobailon/pi-intercom" } },
+        { path: "/packages/other/src/index.ts", enabled: true, metadata: { source: "https://github.com/nicobailon/pi-intercom-fork" } },
+      ],
+    });
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+      name: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions: ["https://github.com/nicobailon/pi-intercom"], skills: false, systemPrompt: "x", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+    });
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const { extensionsOverride } = defaultResourceLoaderCtor.mock.calls.at(-1)![0];
+    const base = {
+      extensions: [
+        { path: "/packages/pi-intercom/src/index.ts" },
+        { path: "/packages/other/src/index.ts" },
+      ],
+    } as any;
+    expect(extensionsOverride(base).extensions.map((extension: { path: string }) => extension.path))
+      .toEqual(["/packages/pi-intercom/src/index.ts"]);
+  });
+
+  it("keeps canonical-name matching for bare name entries", async () => {
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
       name: "Explore", description: "Explore", builtinToolNames: ["read"],
       extensions: ["src"], skills: false, systemPrompt: "x", promptMode: "replace",
       inheritContext: false, runInBackground: false, isolated: false,
@@ -358,6 +394,12 @@ beforeEach(() => {
   settingsManagerCreate.mockClear();
   packageManagerResolve.mockReset();
   packageManagerResolve.mockResolvedValue({ extensions: [] });
+  getToolNamesForType.mockReturnValue(["read"]);
+  (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+    name: "Explore", description: "Explore", builtinToolNames: ["read"],
+    extensions: false, skills: false, systemPrompt: "x", promptMode: "replace",
+    inheritContext: false, runInBackground: false, isolated: false,
+  });
 });
 
 describe("agent-runner final output capture", () => {
@@ -403,6 +445,24 @@ describe("agent-runner final output capture", () => {
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
     }));
+  });
+
+  it("resolves memory against ctx.cwd, not worktree cwd", async () => {
+    const { session } = createSession("MEM");
+    createAgentSession.mockResolvedValue({ session });
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+      name: "worker", description: "worker", builtinToolNames: ["read", "write", "edit"],
+      extensions: false, skills: false, systemPrompt: "x", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+      memory: "local",
+    });
+    getToolNamesForType.mockReturnValue(["read", "write", "edit"]);
+    buildMemoryBlock.mockClear();
+
+    await runAgent(ctx, "worker", "go", { pi, cwd: "/tmp/worktree" });
+
+    expect(buildMemoryBlock).toHaveBeenCalledWith("worker", "local", "/tmp");
+    expect(buildMemoryBlock).not.toHaveBeenCalledWith("worker", "local", "/tmp/worktree");
   });
 
   it("suppresses AGENTS.md/CLAUDE.md/APPEND_SYSTEM.md for subagents", async () => {
