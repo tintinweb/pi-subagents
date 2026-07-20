@@ -237,6 +237,7 @@ export class AgentManager {
       thinkingLevel: options.thinkingLevel,
       depth: options.depth,
       cwd: worktreeCwd,
+      isBackground: options.isBackground,
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;

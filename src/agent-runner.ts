@@ -259,6 +259,15 @@ export interface RunOptions {
    * When omitted, the default wrap-up message is used.
    */
   softLimitSteer?: string;
+  /**
+   * True for background spawns (parent keeps a live turn to answer questions).
+   * The pi-intercom `contact_supervisor` bridge is only wired for background
+   * children: a foreground child's parent is blocked on `await record.promise`,
+   * so a mid-run question would queue unanswered until the child itself finishes
+   * — a dead tool. Foreground children skip the bridge env entirely (no mutex
+   * overhead on the hot serial path).
+   */
+  isBackground?: boolean;
 }
 
 export interface RunResult {
@@ -453,26 +462,37 @@ export async function runAgent(
   // bridge works with any intercom version and routes correctly under nesting
   // (a grandchild's contact_supervisor targets its immediate parent). The lock
   // keeps a sibling spawn from overwriting these process-global keys mid-read.
+  //
+  // Background-only: a foreground child's parent is blocked on
+  // `await record.promise`, so contact_supervisor would be a dead tool (the
+  // parent can't take a turn to answer mid-run). Foreground children skip the
+  // bridge env and just reload extensions plainly — no mutex on the hot serial
+  // path. The bindExtensions snapshot/restore below still runs for both, since
+  // intercom's session_start overwrites PI_INTERCOM_SESSION_ID regardless.
   const baseSessionName = agentConfig?.name ?? type;
   const childRunId = options.agentId ?? randomUUID();
-  const orchestratorSessionId = ctx.sessionManager.getSessionId();
-  await withIntercomBridgeLock(async () => {
-    const childSessionName = options.agentId
-      ? `${baseSessionName}#${options.agentId.slice(0, 8)}`
-      : baseSessionName;
-    const restore = applySubagentBridgeEnv({
-      orchestratorSessionId,
-      runId: childRunId,
-      agent: type,
-      index: String(options.depth ?? 1),
-      sessionName: childSessionName,
+  if (options.isBackground) {
+    const orchestratorSessionId = ctx.sessionManager.getSessionId();
+    await withIntercomBridgeLock(async () => {
+      const childSessionName = options.agentId
+        ? `${baseSessionName}#${options.agentId.slice(0, 8)}`
+        : baseSessionName;
+      const restore = applySubagentBridgeEnv({
+        orchestratorSessionId,
+        runId: childRunId,
+        agent: type,
+        index: String(options.depth ?? 1),
+        sessionName: childSessionName,
+      });
+      try {
+        await loader.reload();
+      } finally {
+        restore();
+      }
     });
-    try {
-      await loader.reload();
-    } finally {
-      restore();
-    }
-  });
+  } else {
+    await loader.reload();
+  }
   options.signal?.throwIfAborted();
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
