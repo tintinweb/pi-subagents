@@ -12,6 +12,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
+  DefaultPackageManager,
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
@@ -66,24 +67,32 @@ export function extensionCanonicalName(extPath: string): string {
 /**
  * Classify `extensions: string[]` frontmatter entries for the loader-level filter.
  *
- * An entry is a PATH iff it contains a path separator or starts with `~`; otherwise
- * it is a NAME. `"*"` sets the wildcard flag (keep all default-discovered extensions).
+ * An entry beginning with `npm:` or `git:` is a package SOURCE selector and matches
+ * Pi's exact package source ID. An entry is otherwise a PATH iff it contains a path
+ * separator or starts with `~`; otherwise it is a NAME. `"*"` sets the wildcard flag
+ * (keep all default-discovered extensions).
  *
  * Path entries are resolved (`~` expanded, made absolute against `cwd`) into `paths`.
- * The loader override compares those resolved resource paths exactly. Bare names stay
- * in `names` and continue to match extensions by canonical name.
+ * The loader override compares those resolved resource paths exactly. Package source
+ * selectors match all enabled resources from that source. Bare names stay in `names`
+ * and continue to match extensions by canonical name.
  */
 export function parseExtensionsSpec(
   entries: string[],
   cwd: string,
-): { names: Set<string>; paths: string[]; wildcard: boolean } {
+): { names: Set<string>; paths: string[]; sources: Set<string>; wildcard: boolean } {
   const names = new Set<string>();
   const paths: string[] = [];
+  const sources = new Set<string>();
   let wildcard = false;
   for (const entry of entries) {
     if (!entry) continue;
     if (entry === "*") {
       wildcard = true;
+      continue;
+    }
+    if (entry.startsWith("npm:") || entry.startsWith("git:")) {
+      sources.add(entry);
       continue;
     }
     const isPathEntry = entry.includes("/") || entry.includes("\\") || entry.startsWith("~");
@@ -97,7 +106,7 @@ export function parseExtensionsSpec(
     }
     paths.push(resolve(cwd, p));
   }
-  return { names, paths, wildcard };
+  return { names, paths, sources, wildcard };
 }
 
 /**
@@ -427,7 +436,25 @@ export async function runAgent(
     : undefined;
   const keepNames = extensionsSpec?.names ?? new Set<string>();
   const keepPaths = new Set(extensionsSpec?.paths);
-  // The override filters loaded extensions down to bare-name or exact resolved-path
+  const keepSources = extensionsSpec?.sources ?? new Set<string>();
+  const keepSourcePaths = new Set<string>();
+  if (keepSources.size > 0) {
+    const sourceSettings = SettingsManager.create(effectiveCwd, agentDir);
+    await sourceSettings.reload();
+    const resolvedSources = await new DefaultPackageManager({
+      cwd: effectiveCwd,
+      agentDir,
+      settingsManager: sourceSettings,
+    }).resolve();
+    for (const resource of resolvedSources.extensions) {
+      if (resource.enabled && keepSources.has(resource.metadata.source)) {
+        keepSourcePaths.add(resolve(resource.path));
+      }
+    }
+  }
+  // The override filters loaded extensions down to bare-name, exact resolved-path,
+  // or exact package-source matches. Pi attaches sourceInfo after this override, so
+  // package source selectors are resolved from DefaultPackageManager first.
   // matches. It's only needed when we're neither loading everything (`extensions:
   // true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
@@ -438,7 +465,9 @@ export async function runAgent(
       : (base) => ({
           ...base,
           extensions: base.extensions.filter((e) =>
-            keepNames.has(extensionCanonicalName(e.path)) || keepPaths.has(resolve(e.path))),
+            keepNames.has(extensionCanonicalName(e.path))
+            || keepPaths.has(resolve(e.path))
+            || keepSourcePaths.has(resolve(e.path))),
         });
 
   const loader = new DefaultResourceLoader({
@@ -516,15 +545,25 @@ export async function runAgent(
   //   - `tools: ext:foo` but foo isn't in the loaded set (because `extensions:`
   //     didn't include it). `ext:` does not pull extensions in; loading is
   //     `extensions:`-authoritative.
-  if (keepNames.size > 0 || extNames.size > 0) {
+  if (keepNames.size > 0 || keepSources.size > 0 || extNames.size > 0) {
+    const survivingExtensions = loader.getExtensions().extensions;
     const survivingNames = new Set(
-      loader.getExtensions().extensions.map((e) => extensionCanonicalName(e.path)),
+      survivingExtensions.map((e) => extensionCanonicalName(e.path)),
     );
+    const survivingPaths = new Set(survivingExtensions.map((e) => resolve(e.path)));
     for (const name of keepNames) {
       if (!survivingNames.has(name)) {
         options.onToolActivity?.({
           type: "end",
           toolName: `extension-error:extension "${name}" requested by agent "${type}" was not loaded`,
+        });
+      }
+    }
+    for (const source of keepSources) {
+      if (![...keepSourcePaths].some(path => survivingPaths.has(path))) {
+        options.onToolActivity?.({
+          type: "end",
+          toolName: `extension-error:package source "${source}" requested by agent "${type}" was not loaded`,
         });
       }
     }

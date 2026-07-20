@@ -4,18 +4,25 @@ const {
   createAgentSession,
   defaultResourceLoaderCtor,
   getAgentDir,
+  packageManagerResolve,
   sessionManagerInMemory,
   settingsManagerCreate,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
+  packageManagerResolve: vi.fn(async () => ({ extensions: [] })),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
-  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager" })),
+  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", reload: vi.fn(async () => {}) })),
 }));
 
 vi.mock("@mariozechner/pi-coding-agent", () => ({
   createAgentSession,
+  DefaultPackageManager: class {
+    async resolve() {
+      return packageManagerResolve();
+    }
+  },
   DefaultResourceLoader: class {
     constructor(options: any) {
       defaultResourceLoaderCtor(options);
@@ -163,11 +170,26 @@ describe("parseExtensionsSpec", () => {
     expect(spec.wildcard).toBe(true);
     expect(spec.paths).toEqual(["/abs/extra.ts"]);
     expect([...spec.names]).toEqual(["mcp"]);
+    expect([...spec.sources]).toEqual([]);
   });
   it("resolves path entries against cwd and lowercases names", () => {
     const spec = parseExtensionsSpec(["Foo", "./rel/Bar.ts", "/abs/dir/../Bar.ts"], "/cwd");
     expect(spec.paths).toEqual(["/cwd/rel/Bar.ts", "/abs/Bar.ts"]);
     expect([...spec.names]).toEqual(["foo"]);
+  });
+  it("classifies exact npm and git package source IDs separately from names and paths", () => {
+    const spec = parseExtensionsSpec([
+      "npm:pi-sessions",
+      "npm:@aliou/pi-neuralwatt",
+      "git:github.com/anh-chu/pi-rewind-lite",
+    ], "/cwd");
+    expect([...spec.sources]).toEqual([
+      "npm:pi-sessions",
+      "npm:@aliou/pi-neuralwatt",
+      "git:github.com/anh-chu/pi-rewind-lite",
+    ]);
+    expect(spec.names.size).toBe(0);
+    expect(spec.paths).toEqual([]);
   });
 });
 
@@ -203,8 +225,63 @@ describe("extension allowlist filtering", () => {
       .toEqual(["/tmp/pi-quiet-tools/src/index.ts"]);
   });
 
-  it("keeps canonical-name matching for bare name entries", async () => {
+  it("selects every extension resource from a package source", async () => {
+    packageManagerResolve.mockResolvedValue({
+      extensions: [
+        { path: "/packages/pi-sessions/src/index.ts", enabled: true, metadata: { source: "npm:pi-sessions" } },
+        { path: "/packages/pi-sessions/extensions/hooks.ts", enabled: true, metadata: { source: "npm:pi-sessions" } },
+        { path: "/packages/other/src/index.ts", enabled: true, metadata: { source: "npm:other" } },
+      ],
+    });
     (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+      name: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions: ["npm:pi-sessions"], skills: false, systemPrompt: "x", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+    });
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const { extensionsOverride } = defaultResourceLoaderCtor.mock.calls.at(-1)![0];
+    const base = {
+      extensions: [
+        { path: "/packages/pi-sessions/src/index.ts" },
+        { path: "/packages/pi-sessions/extensions/hooks.ts" },
+        { path: "/packages/other/src/index.ts" },
+      ],
+    } as any;
+    expect(extensionsOverride(base).extensions.map((extension: { path: string }) => extension.path))
+      .toEqual(["/packages/pi-sessions/src/index.ts", "/packages/pi-sessions/extensions/hooks.ts"]);
+  });
+
+  it("matches scoped npm package source IDs exactly", async () => {
+    packageManagerResolve.mockResolvedValue({
+      extensions: [
+        { path: "/packages/neuralwatt/src/index.ts", enabled: true, metadata: { source: "npm:@aliou/pi-neuralwatt" } },
+        { path: "/packages/other/src/index.ts", enabled: true, metadata: { source: "npm:@aliou/pi-neuralwatt-extra" } },
+      ],
+    });
+    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+      name: "Explore", description: "Explore", builtinToolNames: ["read"],
+      extensions: ["npm:@aliou/pi-neuralwatt"], skills: false, systemPrompt: "x", promptMode: "replace",
+      inheritContext: false, runInBackground: false, isolated: false,
+    });
+    createAgentSession.mockResolvedValue({ session: createSession("x").session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const { extensionsOverride } = defaultResourceLoaderCtor.mock.calls.at(-1)![0];
+    const base = {
+      extensions: [
+        { path: "/packages/neuralwatt/src/index.ts" },
+        { path: "/packages/other/src/index.ts" },
+      ],
+    } as any;
+    expect(extensionsOverride(base).extensions.map((extension: { path: string }) => extension.path))
+      .toEqual(["/packages/neuralwatt/src/index.ts"]);
+  });
+
+  it("keeps canonical-name matching for bare name entries", async () => {    (mockedGetAgentConfig as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
       name: "Explore", description: "Explore", builtinToolNames: ["read"],
       extensions: ["src"], skills: false, systemPrompt: "x", promptMode: "replace",
       inheritContext: false, runInBackground: false, isolated: false,
@@ -279,6 +356,8 @@ beforeEach(() => {
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
   settingsManagerCreate.mockClear();
+  packageManagerResolve.mockReset();
+  packageManagerResolve.mockResolvedValue({ extensions: [] });
 });
 
 describe("agent-runner final output capture", () => {
