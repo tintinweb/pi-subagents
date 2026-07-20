@@ -642,13 +642,14 @@ export default function (pi: ExtensionAPI) {
 
     const defaultDescs = defaultNames.map((name) => {
       const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
+      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)}${cfg.lockModel ? ", locked" : ""})` : "";
       return `- ${name}: ${cfg?.description ?? name}${modelSuffix}`;
     });
 
     const customDescs = userNames.map((name) => {
       const cfg = getAgentConfig(name);
-      return `- ${name}: ${cfg?.description ?? name}`;
+      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)}${cfg.lockModel ? ", locked" : ""})` : "";
+      return `- ${name}: ${cfg?.description ?? name}${modelSuffix}`;
     });
 
     return [
@@ -678,7 +679,7 @@ export default function (pi: ExtensionAPI) {
   const buildCompactTypeListText = () =>
     getAvailableTypes().map((name) => {
       const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
+      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)}${cfg.lockModel ? ", locked" : ""})` : "";
       return `- ${name}: ${firstSentence(cfg?.description ?? name)}${modelSuffix}`;
     }).join("\n");
 
@@ -840,7 +841,7 @@ Notes:
       }),
       model: Type.Optional(
         Type.String({
-          description: '"provider/modelId" or fuzzy (e.g. "haiku", "sonnet").',
+          description: '"provider/modelId" or fuzzy (e.g. "haiku", "sonnet"). Agents marked "locked" in the type list reject model overrides.',
         }),
       ),
       thinking: Type.Optional(
