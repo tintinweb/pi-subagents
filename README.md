@@ -599,6 +599,22 @@ disallowed_tools: write, edit
 
 This is useful for creating agents that inherit extension tools but should not have write access.
 
+## Optional: pi-intercom bridge
+
+pi-subagents optionally integrates with [pi-intercom](https://github.com/nicobailon/pi-intercom) to give spawned subagents a child-only `contact_supervisor` tool for talking back to the orchestrator mid-run — decisions, structured interviews, and plan-changing progress updates — without returning a final result.
+
+- **Optional dependency.** pi-intercom is *not* required. Without it installed, pi-subagents behaves exactly as before: ephemeral dispatch, one result back, no child↔parent channel.
+- **Install pi-intercom** in the orchestrator session (`pi install npm:pi-intercom`) and restart. When the orchestrator's intercom runtime is connected, pi-subagents advertises bridge metadata (`PI_SUBAGENT_*` env) to each spawned child so pi-intercom's child factory registers `contact_supervisor` on it. No config needed.
+- **What you get.** A blocked worker can `contact_supervisor({ reason: "need_decision", ... })` and the orchestrator session renders it inline and can reply; `reason: "interview_request"` for multiple structured answers in one blocking exchange; `reason: "progress_update"` for non-blocking discoveries that change the plan.
+- **Out of scope here.** Peer-to-peer `intercom` messaging between *separate* pi sessions is entirely pi-intercom's feature — pi-subagents only wires the child↔supervisor channel inside spawned subagents.
+
+```text
+Worker hits a decision ──contact_supervisor──▶ Orchestrator session renders it
+              ◀────────── reply ────────────────── and replies inline
+```
+
+Because subagents run in-process, the bridge metadata is carried via `process.env` and serialized across concurrent spawns (see `src/intercom-bridge.ts`); this is invisible to callers and restores prior env after each child loads.
+
 ## Architecture
 
 ```
@@ -611,6 +627,7 @@ src/
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
   global-registry.ts  # Process-global record/activity registry for cross-manager nested display
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events
+  intercom-bridge.ts  # Optional pi-intercom contact_supervisor bridge (env injection)
   group-join.ts       # Group join manager: batched completion notifications with timeout
   custom-agents.ts    # Load user-defined agents from .pi/agents/*.md
   memory.ts           # Persistent agent memory (resolve, read, build prompt blocks)

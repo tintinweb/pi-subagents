@@ -3,6 +3,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { Model } from "@mariozechner/pi-ai";
@@ -22,6 +23,7 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getR
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
+import { applySubagentBridgeEnv, readOrchestratorIntercomSessionId, snapshotIntercomSessionId, withIntercomBridgeLock } from "./intercom-bridge.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
@@ -444,7 +446,35 @@ export async function runAgent(
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });
-  await loader.reload();
+  // Optional pi-intercom bridge: advertise the orchestrator + this child's run
+  // metadata via process.env so pi-intercom's child factory (which runs during
+  // `loader.reload()`) registers the `contact_supervisor` tool on this session.
+  // No-op when pi-intercom isn't installed in the orchestrator. The lock keeps a
+  // sibling spawn from overwriting these process-global keys mid-read.
+  const baseSessionName = agentConfig?.name ?? type;
+  const childRunId = options.agentId ?? randomUUID();
+  await withIntercomBridgeLock(async () => {
+    const orchestratorSessionId = readOrchestratorIntercomSessionId();
+    if (!orchestratorSessionId) {
+      await loader.reload();
+      return;
+    }
+    const childSessionName = options.agentId
+      ? `${baseSessionName}#${options.agentId.slice(0, 8)}`
+      : baseSessionName;
+    const restore = applySubagentBridgeEnv({
+      orchestratorSessionId,
+      runId: childRunId,
+      agent: type,
+      index: String(options.depth ?? 1),
+      sessionName: childSessionName,
+    });
+    try {
+      await loader.reload();
+    } finally {
+      restore();
+    }
+  });
   options.signal?.throwIfAborted();
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
@@ -569,7 +599,6 @@ export async function runAgent(
     options.signal.throwIfAborted();
   }
 
-  const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
     options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
   );
@@ -578,14 +607,26 @@ export async function runAgent(
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
+  //
+  // The pi-intercom bridge lock also covers this window: the child's intercom
+  // session_start overwrites PI_INTERCOM_SESSION_ID with the child's broker id,
+  // and we restore the orchestrator's value afterward so sibling spawns still
+  // resolve the orchestrator. No new PI_SUBAGENT_* env is needed here.
   try {
-    await session.bindExtensions({
-      onError: (err) => {
-        options.onToolActivity?.({
-          type: "end",
-          toolName: `extension-error:${err.extensionPath}`,
+    await withIntercomBridgeLock(async () => {
+      const restoreIntercom = snapshotIntercomSessionId();
+      try {
+        await session.bindExtensions({
+          onError: (err) => {
+            options.onToolActivity?.({
+              type: "end",
+              toolName: `extension-error:${err.extensionPath}`,
+            });
+          },
         });
-      },
+      } finally {
+        restoreIntercom();
+      }
     });
   } catch (err) {
     // bindExtensions failed — dispose the session to prevent a leak,
