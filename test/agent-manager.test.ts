@@ -14,7 +14,7 @@ vi.mock("../src/worktree.js", () => ({
   pruneWorktrees: vi.fn(),
 }));
 
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -159,6 +159,47 @@ describe("AgentManager — spawnAndWait onSpawned + foreground output file wirin
     }, (fgId) => { spawnedId = fgId; });
 
     expect(spawnedId).toBe(id);
+  });
+
+  it("passes goal mode through to runAgent", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      goal: true,
+    });
+
+    expect(runAgent).toHaveBeenCalledWith(
+      mockCtx,
+      "general-purpose",
+      "test",
+      expect.objectContaining({ goal: true }),
+    );
+  });
+
+  it("does not resume a session created in goal mode", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      goal: true,
+    });
+
+    await expect(manager.resume(record.id, "continue")).resolves.toBeUndefined();
+    expect(resumeAgent).not.toHaveBeenCalled();
+  });
+
+  it("rejects isolated goal mode before creating a record", () => {
+    manager = new AgentManager();
+
+    expect(() => manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      goal: true,
+      isolated: true,
+    })).toThrow(/isolated: true/);
+    expect(manager.listAgents()).toEqual([]);
   });
 
   it("onComplete fires on the error path with resultConsumed=true", async () => {
@@ -578,6 +619,36 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
       expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp" }),
     );
     expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
+  });
+
+  it("does not clean a goal-mode worktree until the goal run promise settles", async () => {
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy",
+    });
+    vi.mocked(cleanupWorktree).mockClear();
+    let finishRun!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementationOnce(() => new Promise((resolve) => {
+      finishRun = resolve;
+    }));
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      goal: true,
+      isolation: "worktree",
+    });
+    await Promise.resolve();
+
+    expect(cleanupWorktree).not.toHaveBeenCalled();
+    finishRun({
+      responseText: "Goal complete: done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    await manager.getRecord(id)!.promise;
+    expect(cleanupWorktree).toHaveBeenCalledOnce();
   });
 
   it("plain worktree (no cwd) keeps the historical root working dir even when workPath differs", async () => {

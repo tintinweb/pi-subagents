@@ -139,7 +139,8 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
  */
 function partialOutputSuffix(record: AgentRecord): string {
   const partial = record.result?.trim();
-  return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
+  if (!partial || partial === record.error?.trim()) return "";
+  return `\n\nPartial output before the failure:\n${partial}`;
 }
 
 /** Human-readable status label for agent completion. */
@@ -778,6 +779,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
+- goal: true runs the child through pi-goal until it completes or stops.
 - isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
@@ -808,6 +810,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
+- Use goal: true to run the child through pi-goal until it completes or reaches another terminal state. Goal mode requires pi-goal and cannot be combined with isolated, resume, or schedule.
 - Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
 
 ## Writing the prompt
@@ -911,6 +914,11 @@ Terse command-style prompts produce shallow, generic work.
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Set to true to run in background. Returns agent ID immediately. You will be notified on completion.",
+        }),
+      ),
+      goal: Type.Optional(
+        Type.Boolean({
+          description: "Run through pi-goal until complete, blocked, paused, usage-limited, or budget-limited.",
         }),
       ),
       resume: Type.Optional(
@@ -1091,6 +1099,7 @@ Terse command-style prompts produce shallow, generic work.
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
+      const goal = params.goal ?? false;
       // Whether this spawn writes its .output transcript. Per-agent
       // frontmatter (`output_transcript`) wins; otherwise the project/global
       // default applies. `attachTranscript` below is the SOLE gate — every
@@ -1131,6 +1140,16 @@ Terse command-style prompts produce shallow, generic work.
         modelName,
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
+
+      if (goal && isolated) {
+        return textResult("Cannot combine `goal: true` with `isolated: true` — goal mode requires the pi-goal extension.");
+      }
+      if (goal && params.resume) {
+        return textResult("Cannot combine `goal: true` with `resume` — goal mode starts a fresh goal.");
+      }
+      if (goal && params.schedule) {
+        return textResult("Cannot combine `goal: true` with `schedule`.");
+      }
 
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
@@ -1179,6 +1198,9 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing) {
           return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
         }
+        if (existing.goal) {
+          return textResult(`Cannot resume goal-mode agent "${params.resume}"; start a fresh goal-mode agent instead.`);
+        }
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
@@ -1220,6 +1242,7 @@ Terse command-style prompts produce shallow, generic work.
             model,
             maxTurns: effectiveMaxTurns,
             isolated,
+            goal,
             inheritContext,
             thinkingLevel: thinking,
             isBackground: true,
@@ -1346,6 +1369,7 @@ Terse command-style prompts produce shallow, generic work.
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
+          goal,
           inheritContext,
           thinkingLevel: thinking,
           isolation,

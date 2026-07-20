@@ -59,6 +59,7 @@ interface SpawnOptions {
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
+  goal?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isBackground?: boolean;
@@ -154,6 +155,9 @@ export class AgentManager {
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.
     assertValidSpawnCwd(options.cwd);
+    if (options.goal && options.isolated) {
+      throw new Error("Cannot combine goal mode with isolated: true because pi-goal is an extension");
+    }
 
     const id = randomUUID().slice(0, 17);
     const abortController = new AbortController();
@@ -173,6 +177,7 @@ export class AgentManager {
       // only filter excludes only explicit `false`, so undefined agents — which
       // have no inline surface — stay visible instead of vanishing.
       isBackground: options.isBackground,
+      goal: options.goal,
       invocation: options.invocation,
     };
     this.agents.set(id, record);
@@ -250,6 +255,7 @@ export class AgentManager {
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,
+      goal: options.goal,
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
       // Worktree wins for the working dir (the agent must run in the copy —
@@ -448,7 +454,7 @@ export class AgentManager {
     signal?: AbortSignal,
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
-    if (!record?.session) return undefined;
+    if (!record?.session || record.goal) return undefined;
 
     record.status = "running";
     record.startedAt = Date.now();

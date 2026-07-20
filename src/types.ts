@@ -97,6 +97,8 @@ export interface AgentRecord {
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
+  /** True when the initial run is owned by pi-goal and cannot use ordinary resume. */
+  goal?: boolean;
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */

@@ -21,6 +21,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work. Unknown types fall back to general-purpose with a note
 - **Fuzzy model selection** — specify models by name (`"haiku"`, `"sonnet"`) instead of full IDs, with automatic filtering to only available/configured models
+- **Goal mode** — opt into `@narumitw/pi-goal` so a child keeps working until it completes, blocks, pauses, or hits a limit
 - **Context inheritance** — optionally fork the parent conversation into a sub-agent so it knows what's been discussed
 - **Persistent agent memory** — three scopes (project, local, user) with automatic read-only fallback for agents without write tools
 - **Git worktree isolation** — run agents in isolated repo copies; changes auto-committed to branches on completion
@@ -58,6 +59,21 @@ Agent({
 ```
 
 Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
+
+### Goal mode
+
+Set `goal: true` to run the child through an installed `@narumitw/pi-goal` extension instead of stopping after its first response:
+
+```
+Agent({
+  subagent_type: "general-purpose",
+  prompt: "Implement the change and verify it",
+  description: "Implement verified change",
+  goal: true,
+})
+```
+
+The call waits for a terminal Goal state (`complete`, `blocked`, `paused`, `usage_limited`, or `budget_limited`) before returning and before cleaning up a worktree. Only `complete` is reported as success; other terminal states retain their Goal result and use the normal failed/stopped agent lifecycle. Goal mode fails fast when `pi-goal` is missing or excluded, and cannot be combined with `isolated: true`, `resume`, or `schedule`. `isolation: "worktree"` remains supported.
 
 ### Scheduling
 
@@ -283,6 +299,7 @@ Launch a sub-agent.
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Run without blocking |
+| `goal` | boolean | no | Run through `pi-goal` until it reaches a terminal state |
 | `resume` | string | no | Agent ID to resume a previous session |
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"worktree"` | no | Run in an isolated git worktree |

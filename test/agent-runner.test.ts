@@ -5,32 +5,56 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createAgentSession,
+  createEventBus,
   defaultResourceLoaderCtor,
+  eventBusRef,
   loaderExtensionsRef,
   getAgentDir,
   sessionManagerInMemory,
   sessionManagerCreate,
   settingsManagerCreate,
   settingsManagerGetSessionDir,
-} = vi.hoisted(() => ({
-  createAgentSession: vi.fn(),
-  defaultResourceLoaderCtor: vi.fn(),
-  loaderExtensionsRef: {
-    current: { extensions: [], errors: [], runtime: {} } as {
-      extensions: Array<{ path: string; tools: Map<string, unknown> }>;
-      errors: Array<{ path: string; error: string }>;
-      runtime: Record<string, unknown>;
+} = vi.hoisted(() => {
+  const eventBusRef = { current: undefined as any };
+  return {
+    createAgentSession: vi.fn(),
+    createEventBus: vi.fn(() => {
+      const handlers = new Map<string, Set<(data: unknown) => void>>();
+      const bus = {
+        emit: vi.fn((channel: string, data: unknown) => {
+          for (const handler of handlers.get(channel) ?? []) handler(data);
+        }),
+        on: vi.fn((channel: string, handler: (data: unknown) => void) => {
+          const listeners = handlers.get(channel) ?? new Set();
+          listeners.add(handler);
+          handlers.set(channel, listeners);
+          return () => listeners.delete(handler);
+        }),
+        clear: vi.fn(() => handlers.clear()),
+      };
+      eventBusRef.current = bus;
+      return bus;
+    }),
+    defaultResourceLoaderCtor: vi.fn(),
+    eventBusRef,
+    loaderExtensionsRef: {
+      current: { extensions: [], errors: [], runtime: {} } as {
+        extensions: Array<{ path: string; tools: Map<string, unknown> }>;
+        errors: Array<{ path: string; error: string }>;
+        runtime: Record<string, unknown>;
+      },
     },
-  },
-  getAgentDir: vi.fn(() => "/mock/agent-dir"),
-  sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
-  sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
-  settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
-  settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
-}));
+    getAgentDir: vi.fn(() => "/mock/agent-dir"),
+    sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
+    sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
+    settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
+    settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
+  };
+});
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  createEventBus,
   // Mock loader simulates pi-mono: reload() applies additionalExtensionPaths
   // (an unknown path becomes an error row, mirroring a failed load) and then
   // runs extensionsOverride over the result.
@@ -132,6 +156,7 @@ function createSession(finalText: string) {
       });
     }),
     abort: vi.fn(),
+    waitForIdle: vi.fn(async () => {}),
     steer: vi.fn(),
     getActiveToolNames: vi.fn(() => ["read"]),
     setActiveToolsByName: vi.fn(),
@@ -153,6 +178,8 @@ const pi = {} as any;
 
 beforeEach(() => {
   createAgentSession.mockReset();
+  createEventBus.mockClear();
+  eventBusRef.current = undefined;
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
@@ -700,6 +727,218 @@ function lastToolsPassed(): string[] {
 function lastLoaderOpts(): Record<string, unknown> {
   return defaultResourceLoaderCtor.mock.calls[0][0];
 }
+
+function setupGoalAgent(overrides: Record<string, unknown> = {}) {
+  vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true, ...overrides }));
+  vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true, ...overrides }));
+  vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+  withExtensions({
+    "/ext/goal.ts": ["goal_complete", "goal_blocked"],
+    "/ext/other.ts": ["other_tool"],
+  });
+}
+
+function bindGoalRpc(
+  session: ReturnType<typeof createSession>["session"],
+  terminal: { status: string; summary?: string; reason?: string },
+  terminalBeforeReply = false,
+) {
+  session.bindExtensions.mockImplementation(async () => {
+    const bus = eventBusRef.current;
+    bus.on("pi-goal:rpc:start", (request: any) => {
+      const state = { goalId: "goal-1", ...terminal };
+      if (terminalBeforeReply) bus.emit("pi-goal:state", state);
+      bus.emit(`pi-goal:rpc:start:reply:${request.requestId}`, {
+        success: true,
+        data: { goalId: "goal-1", status: terminalBeforeReply ? terminal.status : "active" },
+      });
+      if (!terminalBeforeReply) queueMicrotask(() => bus.emit("pi-goal:state", state));
+    });
+  });
+}
+
+function bindPauseBeforeReplyRpc(session: ReturnType<typeof createSession>["session"]) {
+  session.bindExtensions.mockImplementation(async () => {
+    const bus = eventBusRef.current;
+    let startRequest: any;
+    bus.on("pi-goal:rpc:start", (request: any) => {
+      startRequest = request;
+    });
+    bus.on("pi-goal:rpc:pause", (request: any) => {
+      bus.emit("pi-goal:state", {
+        goalId: "goal-1",
+        status: "paused",
+        reason: request.reason,
+      });
+      bus.emit(`pi-goal:rpc:start:reply:${startRequest.requestId}`, {
+        success: true,
+        data: { goalId: "goal-1", status: "paused" },
+      });
+    });
+  });
+}
+
+function bindActiveGoalRpc(session: ReturnType<typeof createSession>["session"]) {
+  session.bindExtensions.mockImplementation(async () => {
+    const bus = eventBusRef.current;
+    bus.on("pi-goal:rpc:start", (request: any) => {
+      bus.emit(`pi-goal:rpc:start:reply:${request.requestId}`, {
+        success: true,
+        data: { goalId: "goal-1", status: "active" },
+      });
+    });
+    bus.on("pi-goal:rpc:pause", (request: any) => {
+      bus.emit("pi-goal:state", {
+        goalId: request.goalId ?? "goal-1",
+        status: "paused",
+        reason: request.reason,
+      });
+    });
+  });
+}
+
+describe("agent-runner goal mode", () => {
+  it("starts pi-goal over the private event bus and waits for session idle before returning", async () => {
+    setupGoalAgent();
+    const { session } = createSession("ignored");
+    bindGoalRpc(session, { status: "complete", summary: "verified result" });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "implement it", { pi, goal: true });
+
+    expect(result.responseText).toBe("Goal complete: verified result");
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(session.waitForIdle).toHaveBeenCalledOnce();
+    expect(lastLoaderOpts().eventBus).toBe(eventBusRef.current);
+    expect(eventBusRef.current.emit).toHaveBeenCalledWith(
+      "pi-goal:rpc:start",
+      expect.objectContaining({ objective: "implement it", requestId: expect.any(String) }),
+    );
+  });
+
+  it("does not miss an immediate blocked state emitted before the start reply", async () => {
+    setupGoalAgent();
+    const { session } = createSession("ignored");
+    bindGoalRpc(session, { status: "blocked", reason: "dependency missing" }, true);
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "implement it", { pi, goal: true });
+
+    expect(result.responseText).toBe("Goal blocked: dependency missing");
+    expect(result.failure).toBe("Goal blocked: dependency missing");
+    expect(session.waitForIdle).toHaveBeenCalledOnce();
+  });
+
+  it("pauses a goal during startup after a parent abort", async () => {
+    setupGoalAgent();
+    const { session } = createSession("ignored");
+    bindPauseBeforeReplyRpc(session);
+    createAgentSession.mockResolvedValue({ session });
+    const controller = new AbortController();
+
+    const run = runAgent(ctx, "Explore", "go", { pi, goal: true, signal: controller.signal });
+    await vi.waitFor(() => {
+      expect(eventBusRef.current.emit).toHaveBeenCalledWith(
+        "pi-goal:rpc:start",
+        expect.anything(),
+      );
+    });
+    controller.abort();
+    const result = await run;
+
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(eventBusRef.current.emit).toHaveBeenCalledWith(
+      "pi-goal:rpc:pause",
+      { goalId: undefined, reason: "agent run aborted" },
+    );
+    expect(session.waitForIdle).toHaveBeenCalled();
+    expect(result.responseText).toBe("Goal paused: agent run aborted");
+    expect(result.failure).toBe(result.responseText);
+  });
+
+  it("pauses a goal over RPC when the hard turn limit aborts", async () => {
+    setupGoalAgent();
+    const { session, listeners } = createSession("ignored");
+    bindActiveGoalRpc(session);
+    createAgentSession.mockResolvedValue({ session });
+
+    const run = runAgent(ctx, "Explore", "go", { pi, goal: true, maxTurns: 1 });
+    await vi.waitFor(() => {
+      expect(eventBusRef.current.emit).toHaveBeenCalledWith(
+        "pi-goal:rpc:start",
+        expect.anything(),
+      );
+    });
+    for (let turn = 0; turn < 6; turn++) {
+      for (const listener of listeners) listener({ type: "turn_end" });
+    }
+    const result = await run;
+
+    expect(session.steer).toHaveBeenCalledOnce();
+    expect(session.abort).toHaveBeenCalledOnce();
+    expect(eventBusRef.current.emit).toHaveBeenCalledWith(
+      "pi-goal:rpc:pause",
+      { goalId: "goal-1", reason: "turn limit reached" },
+    );
+    expect(result.aborted).toBe(true);
+    expect(result.responseText).toBe("Goal paused: turn limit reached");
+    expect(result.failure).toBe(result.responseText);
+  });
+
+  it("fails fast when isolated mode disables extensions", async () => {
+    await expect(runAgent(ctx, "Explore", "go", { pi, goal: true, isolated: true }))
+      .rejects.toThrow(/isolated: true/);
+    expect(defaultResourceLoaderCtor).not.toHaveBeenCalled();
+  });
+
+  it("does not start a goal when its signal was already aborted", async () => {
+    setupGoalAgent();
+    const { session } = createSession("ignored");
+    createAgentSession.mockResolvedValue({ session });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(runAgent(ctx, "Explore", "go", { pi, goal: true, signal: controller.signal }))
+      .rejects.toThrow(/aborted before it started/);
+    expect(eventBusRef.current.emit).not.toHaveBeenCalledWith(
+      "pi-goal:rpc:start",
+      expect.anything(),
+    );
+  });
+
+  it("fails fast when pi-goal is missing or excluded", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    await expect(runAgent(ctx, "Explore", "go", { pi, goal: true }))
+      .rejects.toThrow(/requires @narumitw\/pi-goal/);
+
+    setupGoalAgent({ excludeExtensions: ["goal"] });
+    await expect(runAgent(ctx, "Explore", "go", { pi, goal: true }))
+      .rejects.toThrow(/requires @narumitw\/pi-goal/);
+  });
+
+  it("adds pi-goal tools despite an unrelated ext: opt-in selector", async () => {
+    setupGoalAgent({ extSelectors: ["ext:other"] });
+    const { session } = createSession("ignored");
+    bindGoalRpc(session, { status: "paused", reason: "turn limit" });
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, goal: true });
+
+    expect(lastToolsPassed()).toEqual(expect.arrayContaining([
+      "goal_complete",
+      "goal_blocked",
+      "other_tool",
+    ]));
+  });
+
+  it("rejects a denylist that removes a required pi-goal tool", async () => {
+    setupGoalAgent({ disallowedTools: ["goal_complete"] });
+
+    await expect(runAgent(ctx, "Explore", "go", { pi, goal: true }))
+      .rejects.toThrow(/requires goal_complete and goal_blocked/);
+  });
+});
 
 describe("agent-runner session persistence", () => {
   it("uses an in-memory session by default", async () => {

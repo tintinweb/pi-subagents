@@ -40,6 +40,7 @@ import { registerFauxProvider } from "./helpers/pi-ai.js";
 vi.setConfig({ testTimeout: 30_000 });
 
 const FIXTURE = resolve(fileURLToPath(new URL("./fixtures/e2e-probe-ext.mjs", import.meta.url)));
+const GOAL_FIXTURE = resolve(fileURLToPath(new URL("./fixtures/goal.js", import.meta.url)));
 /** The fixture registers exactly this tool. */
 const EXT_TOOL = "e2e_probe";
 const BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -157,5 +158,43 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     expect(active).toContain(EXT_TOOL); // selected → surfaces despite the flip
     expect(active).toContain("read");
     expect(active).not.toContain("bash"); // builtinToolNames: ["read"] only
+  });
+
+  it("goal mode completes over a private event bus with the real loader and session", async () => {
+    registerAgents(new Map([["e2e", {
+      name: "e2e",
+      description: "e2e",
+      builtinToolNames: BUILTINS,
+      extensions: [GOAL_FIXTURE],
+      skills: false,
+      systemPrompt: "You are e2e.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+    } as AgentConfig]]));
+    const model = faux.getModel();
+    const modelRegistry: any = {
+      find: () => model,
+      getAll: () => [model],
+      getAvailable: () => [model],
+      hasConfiguredAuth: () => true,
+      isUsingOAuth: () => false,
+      getApiKeyAndHeaders: async () => ({ apiKey: "faux", headers: {} }),
+      registerProvider: () => {},
+      unregisterProvider: () => {},
+    };
+
+    const result = await runAgent(
+      { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry } as any,
+      "e2e",
+      "complete through Goal",
+      { pi: makePi(), model, goal: true },
+    );
+    try {
+      expect(result.responseText).toBe("Goal complete: real loader verified");
+    } finally {
+      await result.session.dispose();
+    }
   });
 });
