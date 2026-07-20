@@ -478,6 +478,14 @@ export class AgentManager {
     }
 
     if (record.status !== "running") return false;
+    // Idle spawn: reject the gate so runAgent's `await idleGate` throws and the
+    // settle handler respects the pre-set `stopped` status below.
+    if (record.idleReject) {
+      const reject = record.idleReject;
+      record.idleResolve = undefined;
+      record.idleReject = undefined;
+      reject(new Error("idle agent aborted"));
+    }
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();

@@ -776,6 +776,13 @@ export async function runAgent(
   }
 
   try {
+    // Idle spawn: session is prepared, but hold the loop until the first real
+    // task arrives via manager.resume (which resolves `idleGate`) or abort()
+    // (which rejects it via record.idleReject + the abort signal listener).
+    if (options.idleGate) {
+      effectivePrompt = await options.idleGate;
+      options.signal?.throwIfAborted();
+    }
     // Run inside the depth store so any Agent tool the child invokes stamps its
     // own children at depth+1 (read synchronously by manager.spawn).
     await agentDepth.run({ depth: options.depth ?? 1, id: options.agentId }, () => session.prompt(effectivePrompt));
