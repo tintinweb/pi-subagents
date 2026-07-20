@@ -19,7 +19,6 @@ import { differsFromDefault, diffFromDefault } from "./agent-diff.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultExtensions, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultExtensions, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
-import { findOverlappingMemberFiles, formatConcurrentActivityNote, isAgentReadOnly } from "./agent-guards.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { deleteGlobalActivity, setGlobalActivity } from "./global-registry.js";
@@ -1695,6 +1694,117 @@ Notes:
     );
   }
 
+  /**
+   * Spawn a background agent directly from the /agents menu, without routing
+   * through the LLM-callable Agent tool. Mirrors the tool's background path:
+   * activity tracker, output file, lifecycle events, completion nudge. The
+   * prompt is optional — empty spawns the agent idle on a cheap heartbeat so it
+   * is immediately steer/resume-able. An ack is injected into the orchestrator
+   * so it knows the worker exists and can incorporate it without an extra
+   * `Agent` tool call.
+   */
+  async function spawnBackgroundFromMenu(
+    ctx: ExtensionCommandContext,
+    name: string,
+    cfg: AgentConfig,
+  ) {
+    const spawnCtx = currentCtx;
+    if (!spawnCtx) {
+      ctx.ui.notify("Session not ready — try again after startup.", "warning");
+      return;
+    }
+
+    const input = await ctx.ui.input(
+      `Task for ${name} (optional — empty spawns idle)`,
+      "Describe the task, or leave empty to spawn an idle worker",
+    );
+    if (input === undefined) return; // escape
+    const prompt = input.trim();
+    const idle = prompt.length === 0;
+    // Cheap heartbeat: one turn, no tools. Keeps the session alive for steer/resume.
+    const effectivePrompt = idle
+      ? "[idle spawn] Stand by for instructions. Do not take any action until you receive a task via a follow-up message or a steer. Acknowledge in one sentence."
+      : prompt;
+
+    const resolvedConfig = resolveAgentInvocationConfig(cfg, { run_in_background: true });
+    let model = spawnCtx.model;
+    if (resolvedConfig.modelInput) {
+      const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
+      if (typeof resolved !== "string") model = resolved;
+      // config-specified fallback to parent is silent, matching the tool path
+    }
+    const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
+    const thinking = resolvedConfig.thinking;
+    const isolated = resolvedConfig.isolated;
+    const inheritContext = resolvedConfig.inheritContext;
+    const isolation = resolvedConfig.isolation;
+    const displayName = getDisplayName(name);
+    const agentInvocation: AgentInvocation = {
+      modelName: model?.id && model.id !== spawnCtx.model?.id
+        ? (model.name ?? model.id).replace(/^Claude\s+/i, "").toLowerCase()
+        : undefined,
+      thinking,
+      maxTurns: resolvedConfig.maxTurns,
+      isolated,
+      inheritContext,
+      runInBackground: true,
+      isolation,
+    };
+
+    const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
+    let id: string;
+    const origBgOnSession = bgCallbacks.onSessionCreated;
+    bgCallbacks.onSessionCreated = (session: any) => {
+      origBgOnSession(session);
+      const rec = manager.getRecord(id);
+      if (rec?.outputFile) {
+        rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, spawnCtx.cwd);
+      }
+    };
+
+    try {
+      id = manager.spawn(pi, spawnCtx, name, effectivePrompt, {
+        description: idle ? `${displayName} (idle)` : prompt.slice(0, 60),
+        model,
+        maxTurns: effectiveMaxTurns,
+        isolated,
+        inheritContext,
+        thinkingLevel: thinking,
+        isBackground: true,
+        isolation,
+        invocation: agentInvocation,
+        ...bgCallbacks,
+      });
+    } catch (err) {
+      ctx.ui.notify(`Spawn failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+
+    const record = manager.getRecord(id);
+    if (record) {
+      record.outputFile = createOutputFilePath(spawnCtx.cwd, id, spawnCtx.sessionManager.getSessionId());
+      writeInitialEntry(record.outputFile, id, effectivePrompt, spawnCtx.cwd);
+    }
+    agentActivity.set(id, bgState);
+    setGlobalActivity(id, bgState);
+    widget.ensureTimer();
+    widget.update();
+    pi.events.emit("subagents:created", {
+      id,
+      type: name,
+      description: idle ? `${displayName} (idle)` : prompt.slice(0, 60),
+      isBackground: true,
+    });
+
+    // Ack into the orchestrator so it can incorporate the worker without a
+    // separate Agent tool call. One cheap turn.
+    const ack = idle
+      ? `Background worker spawned idle: ${displayName} (id: ${id}). No task assigned yet. Send instructions via steer_subagent, or assign work in your next message.`
+      : `Background worker spawned: ${displayName} (id: ${id}). Task: ${prompt}. You will be notified on completion. Use get_subagent_result for full results or steer_subagent to send more instructions.`;
+    pi.sendUserMessage(ack);
+    ctx.ui.notify(`Spawned ${displayName} ${idle ? "(idle)" : "in background"}.`, "info");
+  }
+
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
     const cfg = getAgentConfig(name);
     if (!cfg) {
@@ -1729,6 +1839,8 @@ Notes:
     if (hasDiff) {
       menuOptions.splice(menuOptions.indexOf("Back"), 0, "View diff vs default");
     }
+    // Always offer a direct background spawn (no orchestrator prompt needed).
+    menuOptions.splice(menuOptions.indexOf("Back"), 0, "Spawn (background)");
 
     const choice = await ctx.ui.select(name, menuOptions);
     if (!choice || choice === "Back") return;
@@ -1778,6 +1890,8 @@ Notes:
         // Show via editor for scrollable read-only display; discard any result
         await ctx.ui.editor(`${name} diff`, lines.join("\n"));
       }
+    } else if (choice === "Spawn (background)") {
+      await spawnBackgroundFromMenu(ctx, name, cfg);
     }
   }
 
