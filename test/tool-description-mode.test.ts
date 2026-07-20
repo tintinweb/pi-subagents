@@ -119,6 +119,7 @@ describe("toolDescriptionMode", () => {
     // If you change one of these behaviors, update BOTH descriptions.
     for (const contract of [
       "run_in_background",
+      "goal: true",
       "resume",
       "steer_subagent",
       'isolation: "worktree"',

@@ -2,6 +2,7 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -11,7 +12,9 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
+  createEventBus,
   DefaultResourceLoader,
+  type EventBus,
   type ExtensionAPI,
   getAgentDir,
   SessionManager,
@@ -40,6 +43,21 @@ export const SUBAGENT_TOOL_NAMES = {
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
 const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
+const GOAL_TOOL_NAMES = ["goal_complete", "goal_blocked"] as const;
+const GOAL_TERMINAL_STATUSES = new Set([
+  "complete",
+  "blocked",
+  "paused",
+  "usage_limited",
+  "budget_limited",
+]);
+
+type GoalState = {
+  goalId: string;
+  status: string;
+  summary?: string;
+  reason?: string;
+};
 
 /**
  * Canonical name of an extension for `extensions: [...]` allowlist matching.
@@ -265,6 +283,8 @@ export interface RunOptions {
   maxTurns?: number;
   signal?: AbortSignal;
   isolated?: boolean;
+  /** Run the child through @narumitw/pi-goal until it reaches a terminal state. */
+  goal?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   /** Override working directory (e.g. for worktree isolation). */
@@ -406,6 +426,112 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+function isGoalExtension(path: string, tools: Map<string, unknown>): boolean {
+  const names = extensionCanonicalNames(path);
+  return names.includes("pi-goal") || (
+    names.includes("goal") && GOAL_TOOL_NAMES.every((name) => tools.has(name))
+  );
+}
+
+function isGoalState(value: unknown): value is GoalState {
+  if (!value || typeof value !== "object") return false;
+  const state = value as Record<string, unknown>;
+  return typeof state.goalId === "string" && typeof state.status === "string";
+}
+
+function formatGoalResult(state: GoalState): string {
+  const detail = state.summary ?? state.reason;
+  return `Goal ${state.status.replaceAll("_", " ")}${detail ? `: ${detail}` : ""}`;
+}
+
+async function runGoal(
+  eventBus: EventBus,
+  objective: string,
+  signal?: AbortSignal,
+): Promise<GoalState> {
+  const requestId = randomUUID();
+  return new Promise((resolveGoal, rejectGoal) => {
+    let goalId: string | undefined;
+    let started = false;
+    let settled = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let unsubscribeReply = () => {};
+    let unsubscribeState = () => {};
+    const pendingTerminal = new Map<string, GoalState>();
+
+    const cleanup = () => {
+      if (timeout) clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+      unsubscribeReply();
+      unsubscribeState();
+    };
+    const finish = (state: GoalState) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolveGoal(state);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      rejectGoal(error);
+    };
+    const onAbort = () => {
+      if (!started) {
+        fail(new Error("Goal-mode agent was aborted before it started"));
+        return;
+      }
+      if (timeout) clearTimeout(timeout);
+      const reason = typeof signal?.reason === "string" ? signal.reason : "agent run aborted";
+      eventBus.emit("pi-goal:rpc:pause", { goalId, reason });
+      timeout = setTimeout(() => {
+        fail(new Error("pi-goal did not acknowledge the goal pause request"));
+      }, 1_000);
+    };
+
+    unsubscribeState = eventBus.on("pi-goal:state", (value) => {
+      if (!isGoalState(value) || !GOAL_TERMINAL_STATUSES.has(value.status)) return;
+      if (goalId === value.goalId) finish(value);
+      else pendingTerminal.set(value.goalId, value);
+    });
+    unsubscribeReply = eventBus.on(`pi-goal:rpc:start:reply:${requestId}`, (value) => {
+      if (!value || typeof value !== "object") return;
+      const reply = value as {
+        success?: unknown;
+        error?: unknown;
+        data?: { goalId?: unknown; status?: unknown };
+      };
+      if (reply.success !== true) {
+        fail(new Error(typeof reply.error === "string" ? reply.error : "pi-goal rejected the objective"));
+        return;
+      }
+      if (typeof reply.data?.goalId !== "string" || typeof reply.data.status !== "string") {
+        fail(new Error("pi-goal returned an invalid start reply"));
+        return;
+      }
+      goalId = reply.data.goalId;
+      if (timeout) clearTimeout(timeout);
+      const pending = pendingTerminal.get(goalId);
+      if (pending) finish(pending);
+      else if (GOAL_TERMINAL_STATUSES.has(reply.data.status)) {
+        finish({ goalId, status: reply.data.status });
+      }
+    });
+    timeout = setTimeout(() => {
+      fail(new Error("pi-goal is loaded but does not support goal-mode RPC; update @narumitw/pi-goal"));
+    }, 1_000);
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    started = true;
+    eventBus.emit("pi-goal:rpc:start", { requestId, objective });
+  });
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -414,6 +540,10 @@ export async function runAgent(
 ): Promise<RunResult> {
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
+
+  if (options.goal && options.isolated) {
+    throw new Error("Cannot combine goal mode with isolated: true because pi-goal is an extension");
+  }
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
@@ -541,8 +671,10 @@ export async function runAgent(
           };
         };
 
+  const eventBus = options.goal ? createEventBus() : undefined;
   const loader = new DefaultResourceLoader({
     cwd: configCwd,
+    eventBus,
     agentDir,
     noExtensions,
     additionalExtensionPaths,
@@ -555,6 +687,15 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await loader.reload();
+
+  if (
+    options.goal &&
+    !loader.getExtensions().extensions.some((extension) =>
+      isGoalExtension(extension.path, extension.tools)
+    )
+  ) {
+    throw new Error("Goal mode requires @narumitw/pi-goal to be loaded by this agent");
+  }
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -649,7 +790,8 @@ export async function runAgent(
     const optInActive = extNames.size > 0;
     for (const extension of loader.getExtensions().extensions) {
       const canons = extensionCanonicalNames(extension.path);
-      if (optInActive && !canons.some((c) => extNames.has(c))) continue;
+      const requiredForGoal = options.goal && isGoalExtension(extension.path, extension.tools);
+      if (optInActive && !requiredForGoal && !canons.some((c) => extNames.has(c))) continue;
       // First alias that carries a narrowing set — a user won't narrow one
       // extension under two different names, so first-match is correct.
       const narrowed = canons.map((c) => narrowing.get(c)).find(Boolean);
@@ -674,6 +816,9 @@ export async function runAgent(
     // (`ext:` opt-in flip), so any extension tool in `extensionToolNames` is allowed.
     return !noExtensions;
   });
+  if (options.goal && !GOAL_TOOL_NAMES.every((name) => allowedTools.includes(name))) {
+    throw new Error("Goal mode requires goal_complete and goal_blocked in the active tool allowlist");
+  }
 
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
@@ -726,6 +871,11 @@ export async function runAgent(
 
   options.onSessionCreated?.(session);
 
+  const goalAbortController = options.goal ? new AbortController() : undefined;
+  const abortGoalFromParent = () => goalAbortController?.abort("agent run aborted");
+  if (options.signal?.aborted) abortGoalFromParent();
+  else options.signal?.addEventListener("abort", abortGoalFromParent, { once: true });
+
   // Track turns for graceful max_turns enforcement
   let turnCount = 0;
   const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
@@ -744,6 +894,7 @@ export async function runAgent(
         } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
           aborted = true;
           session.abort();
+          goalAbortController?.abort("turn limit reached");
         }
       }
     }
@@ -788,16 +939,32 @@ export async function runAgent(
   // Boundary for the history fallback: only assistant text produced from here
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
+  let goalState: GoalState | undefined;
   try {
-    await session.prompt(effectivePrompt);
+    if (options.goal) {
+      if (!eventBus) throw new Error("Goal mode event bus was not initialized");
+      goalState = await runGoal(eventBus, effectivePrompt, goalAbortController?.signal);
+    } else {
+      await session.prompt(effectivePrompt);
+    }
   } finally {
-    unsubTurns();
-    collector.unsubscribe();
-    cleanupAbort();
+    try {
+      if (options.goal) await session.waitForIdle();
+    } finally {
+      options.signal?.removeEventListener("abort", abortGoalFromParent);
+      unsubTurns();
+      collector.unsubscribe();
+      cleanupAbort();
+    }
   }
 
-  const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
-  return { responseText, session, aborted, steered: softLimitReached, failure: finalTurnError(session, startLen) };
+  const responseText = goalState
+    ? formatGoalResult(goalState)
+    : collector.getText().trim() || getLastAssistantText(session, startLen);
+  const failure = goalState && goalState.status !== "complete"
+    ? responseText
+    : finalTurnError(session, startLen);
+  return { responseText, session, aborted, steered: softLimitReached, failure };
 }
 
 /**
