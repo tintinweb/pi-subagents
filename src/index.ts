@@ -632,6 +632,25 @@ export default function (pi: ExtensionAPI) {
     widget.onTurnStart();
   });
 
+  // Config tags surfaced to the invoking agent in the type list so it can
+  // route and budget without trial-and-error. Fields included only when set:
+  //   model + lock_model (done), max_turns, inherit_context
+  // Other frontmatter fields (thinking, isolated, skills, memory, prompt_mode,
+  // isolation, extensions) are operational tuning, not routing-relevant, and
+  // would just add token cost to the tool description every turn.
+  const buildConfigTags = (cfg: AgentConfig | undefined): string => {
+    if (!cfg) return "";
+    const tags: string[] = [];
+    if (cfg.model) {
+      tags.push(getModelLabelFromConfig(cfg.model));
+      if (cfg.lockModel) tags.push("locked");
+    }
+    // 0 means unlimited — don't advertise an unlimited cap.
+    if (cfg.maxTurns && cfg.maxTurns > 0) tags.push(`≤${cfg.maxTurns} turns`);
+    if (cfg.inheritContext) tags.push("ctx-inherit");
+    return tags.length > 0 ? ` (${tags.join(", ")})` : "";
+  };
+
   /** Build the full type list text dynamically from the unified registry. */
   const buildTypeListText = () => {
     // Filter to enabled agents only — disabled agents (enabled: false) must not
@@ -642,14 +661,12 @@ export default function (pi: ExtensionAPI) {
 
     const defaultDescs = defaultNames.map((name) => {
       const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)}${cfg.lockModel ? ", locked" : ""})` : "";
-      return `- ${name}: ${cfg?.description ?? name}${modelSuffix}`;
+      return `- ${name}: ${cfg?.description ?? name}${buildConfigTags(cfg)}`;
     });
 
     const customDescs = userNames.map((name) => {
       const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)}${cfg.lockModel ? ", locked" : ""})` : "";
-      return `- ${name}: ${cfg?.description ?? name}${modelSuffix}`;
+      return `- ${name}: ${cfg?.description ?? name}${buildConfigTags(cfg)}`;
     });
 
     return [
@@ -679,8 +696,7 @@ export default function (pi: ExtensionAPI) {
   const buildCompactTypeListText = () =>
     getAvailableTypes().map((name) => {
       const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)}${cfg.lockModel ? ", locked" : ""})` : "";
-      return `- ${name}: ${firstSentence(cfg?.description ?? name)}${modelSuffix}`;
+      return `- ${name}: ${firstSentence(cfg?.description ?? name)}${buildConfigTags(cfg)}`;
     }).join("\n");
 
   /** Build routing guidelines dynamically from all available agent descriptions. */
