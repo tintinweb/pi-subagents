@@ -1715,10 +1715,11 @@ Notes:
    * Spawn a background agent directly from the /agents menu, without routing
    * through the LLM-callable Agent tool. Mirrors the tool's background path:
    * activity tracker, output file, lifecycle events, completion nudge. The
-   * prompt is optional — empty spawns the agent idle on a cheap heartbeat so it
-   * is immediately steer/resume-able. An ack is injected into the orchestrator
-   * so it knows the worker exists and can incorporate it without an extra
-   * `Agent` tool call.
+   * prompt is optional — empty spawns the agent idle (session prepared but
+   * no prompt loop runs, no throwaway heartbeat turn). The worker stays
+   * persistent until tasked via `resume` (Agent tool `resume: id`). An ack is
+   * injected into the orchestrator so it knows the worker exists and can
+   * incorporate it without an extra `Agent` tool call.
    */
   async function spawnBackgroundFromMenu(
     ctx: ExtensionCommandContext,
@@ -1738,10 +1739,9 @@ Notes:
     if (input === undefined) return; // escape
     const prompt = input.trim();
     const idle = prompt.length === 0;
-    // Cheap heartbeat: one turn, no tools. Keeps the session alive for steer/resume.
-    const effectivePrompt = idle
-      ? "[idle spawn] Stand by for instructions. Do not take any action until you receive a task via a follow-up message or a steer. Acknowledge in one sentence."
-      : prompt;
+    // Idle: no prompt — the session is prepared but the loop doesn't run until
+    // the first task arrives via `resume`. No heartbeat turn, no premature
+    // completion nudge.
 
     const resolvedConfig = resolveAgentInvocationConfig(cfg, { run_in_background: true });
     let model = spawnCtx.model;
@@ -1780,14 +1780,19 @@ Notes:
     };
 
     try {
-      id = manager.spawn(pi, spawnCtx, name, effectivePrompt, {
+      id = manager.spawn(pi, spawnCtx, name, idle ? "" : prompt, {
         description: idle ? `${displayName} (idle)` : prompt.slice(0, 60),
         model,
         maxTurns: effectiveMaxTurns,
         isolated,
-        inheritContext,
+        inheritContext: idle ? false : inheritContext,
         thinkingLevel: thinking,
         isBackground: true,
+        // Idle agents don't run a turn, so don't occupy a concurrency slot
+        // while waiting — bypass the queue so the session is prepared
+        // immediately and `resume` can task it without waiting on a drain.
+        bypassQueue: idle,
+        idle,
         isolation,
         invocation: agentInvocation,
         ...bgCallbacks,
@@ -1800,7 +1805,7 @@ Notes:
     const record = manager.getRecord(id);
     if (record) {
       record.outputFile = createOutputFilePath(spawnCtx.cwd, id, spawnCtx.sessionManager.getSessionId());
-      writeInitialEntry(record.outputFile, id, effectivePrompt, spawnCtx.cwd);
+      writeInitialEntry(record.outputFile, id, idle ? "(idle — awaiting task)" : prompt, spawnCtx.cwd);
     }
     agentActivity.set(id, bgState);
     setGlobalActivity(id, bgState);
@@ -1816,7 +1821,7 @@ Notes:
     // Ack into the orchestrator so it can incorporate the worker without a
     // separate Agent tool call. One cheap turn.
     const ack = idle
-      ? `Background worker spawned idle: ${displayName} (id: ${id}). No task assigned yet. Send instructions via steer_subagent, or assign work in your next message.`
+      ? `Background worker spawned idle: ${displayName} (id: ${id}). No task assigned. Assign work by calling the Agent tool with resume: "${id}" and your task prompt. It stays persistent until tasked or stopped.`
       : `Background worker spawned: ${displayName} (id: ${id}). Task: ${prompt}. You will be notified on completion. Use get_subagent_result for full results or steer_subagent to send more instructions.`;
     pi.sendUserMessage(ack);
     ctx.ui.notify(`Spawned ${displayName} ${idle ? "(idle)" : "in background"}.`, "info");

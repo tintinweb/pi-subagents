@@ -50,6 +50,15 @@ interface SpawnOptions {
    * scheduler so a fired job can't be deferred past its trigger window.
    */
   bypassQueue?: boolean;
+  /**
+   * Spawn the agent idle: prepare the session (create + bind extensions) but
+   * don't start the prompt loop. The agent stays "running" and awaits its
+   * first task via `resume`. No throwaway heartbeat turn, no premature
+   * completion nudge. Used by the /agents menu spawn with an empty prompt.
+   */
+  idle?: boolean;
+  /** Idle-spawn gate promise; threaded through to runAgent so the loop awaits the first task. Set by `spawn` when `idle: true`. */
+  idleGate?: Promise<string>;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
   /** Resolved invocation snapshot captured for UI display. */
@@ -158,6 +167,16 @@ export class AgentManager {
     this.agents.set(id, record);
     registerRecord(record);
 
+    // Idle spawn: create the deferred gate before startAgent so resume/abort
+    // can resolve/reject it even before the session is fully prepared.
+    if (options.idle) {
+      const idleGate = new Promise<string>((resolve, reject) => {
+        record.idleResolve = resolve;
+        record.idleReject = reject;
+      });
+      options = { ...options, idleGate };
+    }
+
     // Parent signal already aborted before queuing or starting — settle immediately.
     if (options.signal?.aborted) {
       record.status = "stopped";
@@ -256,6 +275,7 @@ export class AgentManager {
       },
       customTools: options.customTools,
       softLimitSteer: options.softLimitSteer,
+      idleGate: options.idleGate,
       onSessionCreated: (session) => {
         record.session = session;
         // Flush any steers that arrived before the session was ready
@@ -383,6 +403,23 @@ export class AgentManager {
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
+
+    // Idle-spawned agent: feed the first real task through the gate. runAgent
+    // is blocked awaiting `idleGate`; resolving it starts the loop, and the
+    // existing `.then(settle)` handler resolves status/result/onComplete.
+    if (record.idleResolve) {
+      record.status = "running";
+      record.startedAt = Date.now();
+      record.completedAt = undefined;
+      record.result = undefined;
+      record.error = undefined;
+      const resolve = record.idleResolve;
+      record.idleResolve = undefined;
+      record.idleReject = undefined;
+      resolve(prompt);
+      await record.promise;
+      return record;
+    }
 
     record.status = "running";
     record.startedAt = Date.now();

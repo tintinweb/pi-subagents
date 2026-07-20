@@ -67,8 +67,9 @@ export function extensionCanonicalName(extPath: string): string {
 /**
  * Classify `extensions: string[]` frontmatter entries for the loader-level filter.
  *
- * An entry beginning with `npm:` or `git:` is a package SOURCE selector and matches
- * Pi's exact package source ID. An entry is otherwise a PATH iff it contains a path
+ * An entry beginning with a Pi package source scheme (`npm:`, `git:`, `github:`,
+ * `http:`, `https:`, or `ssh:`) is a package SOURCE selector and matches Pi's exact
+ * package source ID. An entry is otherwise a PATH iff it contains a path
  * separator or starts with `~`; otherwise it is a NAME. `"*"` sets the wildcard flag
  * (keep all default-discovered extensions).
  *
@@ -77,6 +78,10 @@ export function extensionCanonicalName(extPath: string): string {
  * selectors match all enabled resources from that source. Bare names stay in `names`
  * and continue to match extensions by canonical name.
  */
+function isPackageSourceSelector(entry: string): boolean {
+  return /^(?:npm|git|github|http|https|ssh):/.test(entry);
+}
+
 export function parseExtensionsSpec(
   entries: string[],
   cwd: string,
@@ -91,7 +96,7 @@ export function parseExtensionsSpec(
       wildcard = true;
       continue;
     }
-    if (entry.startsWith("npm:") || entry.startsWith("git:")) {
+    if (isPackageSourceSelector(entry)) {
       sources.add(entry);
       continue;
     }
@@ -265,6 +270,14 @@ export interface RunOptions {
    * When omitted, the default wrap-up message is used.
    */
   softLimitSteer?: string;
+  /**
+   * Idle-spawn gate: when set, runAgent prepares the session (creates it,
+   * binds extensions, fires `onSessionCreated`) but does NOT start the prompt
+   * loop. It awaits this promise for the first real task, then runs the loop
+   * with the resolved prompt. Lets a background agent be spawned persistent
+   * and idle (no throwaway heartbeat turn), then tasked later via resume.
+   */
+  idleGate?: Promise<string>;
   /**
    * True for background spawns (parent keeps a live turn to answer questions).
    * The pi-intercom `contact_supervisor` bridge is only wired for background

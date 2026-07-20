@@ -113,6 +113,10 @@ export interface AgentRecord {
   depth?: number;
   /** Spawning agent id; undefined for roots. */
   parentId?: string;
+  /** Resolves the idle-spawn gate with the first real task prompt. Set only while an idle-spawned agent awaits its first task. */
+  idleResolve?: (prompt: string) => void;
+  /** Rejects the idle-spawn gate on abort. Set alongside `idleResolve`. */
+  idleReject?: (err: Error) => void;
 }
 
 export interface AgentInvocation {
