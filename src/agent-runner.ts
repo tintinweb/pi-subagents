@@ -261,6 +261,8 @@ export interface RunOptions {
   pi: ExtensionAPI;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
+  /** Caller-supplied session name; takes precedence over the agent config/type. */
+  sessionName?: string;
   model?: Model<any>;
   maxTurns?: number;
   signal?: AbortSignal;
@@ -706,7 +708,10 @@ export async function runAgent(
 
   const { session } = await createAgentSession(sessionOpts);
 
-  const baseSessionName = agentConfig?.name ?? type;
+  const suppliedSessionName = typeof options.sessionName === "string" && options.sessionName.trim()
+    ? options.sessionName.trim()
+    : undefined;
+  const baseSessionName = suppliedSessionName ?? agentConfig?.name ?? type;
   session.setSessionName(
     options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
   );

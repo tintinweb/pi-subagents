@@ -56,6 +56,8 @@ interface SpawnArgs {
 
 interface SpawnOptions {
   description: string;
+  /** Caller-supplied session name; falls back to the agent config/type when omitted. */
+  sessionName?: string;
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
@@ -247,6 +249,7 @@ export class AgentManager {
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      sessionName: options.sessionName,
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,

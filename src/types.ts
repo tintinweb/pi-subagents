@@ -182,6 +182,8 @@ export interface ScheduledSubagent {
   intervalMs?: number;
 
   // spawn params (subset of Agent tool params; no inherit_context, no resume)
+  /** Optional caller-supplied session name. */
+  sessionName?: string;
   subagent_type: SubagentType;
   prompt: string;
   model?: string;

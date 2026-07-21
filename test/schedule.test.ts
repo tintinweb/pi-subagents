@@ -294,6 +294,21 @@ describe("SubagentScheduler — fire path", () => {
     expect(optsArg.isBackground).toBe(true);
   });
 
+  it("preserves a caller-supplied session name when a scheduled job fires", () => {
+    const job = scheduler.addJob({
+      name: "named-job",
+      description: "x",
+      sessionName: "GH-123 scheduled review",
+      schedule: "1s",
+      subagent_type: "general-purpose",
+      prompt: "x",
+    });
+
+    expect(scheduler.list().find(j => j.id === job.id)?.sessionName).toBe("GH-123 scheduled review");
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn.mock.calls[0][4].sessionName).toBe("GH-123 scheduled review");
+  });
+
   it("disabled jobs do not fire", () => {
     const job = scheduler.addJob({
       name: "off", description: "x", schedule: "1s",

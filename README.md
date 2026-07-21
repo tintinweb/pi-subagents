@@ -53,11 +53,12 @@ Agent({
   subagent_type: "Explore",
   prompt: "Find all files that handle authentication",
   description: "Find auth files",
+  name: "Authentication search",
   run_in_background: true,
 })
 ```
 
-Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
+Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion. Optional `name` labels the subagent session for easier identification; the normal short agent-ID suffix is still appended automatically (for example, `Authentication search#a1b2c3d4`).
 
 ### Scheduling
 
@@ -68,6 +69,7 @@ Agent({
   subagent_type: "Explore",
   prompt: "Look at recent commits and summarize what changed since last week",
   description: "Weekly commit review",
+  name: "Weekly repository review",
   schedule: "0 0 9 * * 1",   // 9am every Monday (6-field cron)
 })
 ```
@@ -278,6 +280,7 @@ Launch a sub-agent.
 |-----------|------|----------|-------------|
 | `prompt` | string | yes | The task for the agent |
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
+| `name` | string | no | Human-readable session name; the short agent-ID suffix is added automatically |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
