@@ -47,6 +47,12 @@ export interface AgentConfig {
   outputTranscript?: boolean;
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;
+  /** Opt in to child-safe nested subagent tools. Defaults to false. */
+  allowSubagents?: boolean;
+  /** Optional nested-agent allowlist. Omitted = any enabled agent; [] = none. */
+  allowedSubagents?: string[];
+  /** Optional nesting-depth cap that can only tighten the inherited limit. */
+  maxSubagentDepth?: number;
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
@@ -128,6 +134,12 @@ export interface AgentRecord {
   isBackground?: boolean;
   /** Resolved spawn params, captured for UI display. Fixed at spawn time. */
   invocation?: AgentInvocation;
+  /** Nesting depth: top-level subagent = 1. */
+  depth?: number;
+  /** Parent agent ID for ownership-scoped nested controls. */
+  parentAgentId?: string;
+  /** Effective inherited nesting cap for this branch. */
+  maxSubagentDepth?: number;
 }
 
 export interface AgentInvocation {
