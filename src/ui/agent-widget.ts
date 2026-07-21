@@ -299,7 +299,10 @@ export function buildTreeRows(
   const queuedRecords = records.filter(r => r.status === "queued").sort((a, b) => a.startedAt - b.startedAt);
   const queuePos = new Map<string, { index: number; total: number }>();
   const total = queuedRecords.length;
-  queuedRecords.forEach((r, i) => queuePos.set(r.id, { index: i + 1, total }));
+  for (let i = 0; i < queuedRecords.length; i++) {
+    const r = queuedRecords[i];
+    queuePos.set(r.id, { index: i + 1, total });
+  }
 
   const children = new Map<string | undefined, AgentRecord[]>();
   for (const record of records) {

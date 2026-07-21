@@ -17,6 +17,7 @@ import { Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { differsFromDefault, diffFromDefault } from "./agent-diff.js";
 import { AgentManager } from "./agent-manager.js";
+import { registerAgentModeCommands } from "./agent-mode.js";
 import { getAgentConversation, getDefaultExtensions, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, setDefaultExtensions, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getDefaultAgentNames, getUserAgentNames, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
 import { registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -2391,6 +2392,8 @@ ${systemPrompt}
     description: "Manage agents",
     handler: async (_args, ctx) => { await showAgentsMenu(ctx); },
   });
+
+  registerAgentModeCommands(pi);
 
 
 }

@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/agent-mode <agent-name>` and `/agent-mode-off` commands** — switch the current session to a brand-new session configured as the selected agent (system prompt, model, thinking level, tool allowlist). Prompts for confirmation because the current conversation is NOT carried over.
 - **Package source selectors in `extensions: [...]`.** Exact Pi source IDs prefixed with `npm:` or `git:`, such as `npm:pi-sessions`, `npm:@aliou/pi-neuralwatt`, and `git:github.com/anh-chu/pi-rewind-lite`, load every extension resource from that installed package.
 - **Parallel chain stages** — `chain: [{ parallel: [...] }]` now runs a static member set concurrently, merges labeled outputs into downstream `{previous}`, supports per-stage `continue_on_error`, and warns when writable members are not `isolation: "worktree"` isolated.
 - **`defaultExtensions` global setting.** Sets the default `extensions:` for subagents whose frontmatter omits the field, using the same shape and loader-level semantics as the per-agent field (`true` = all, `false` = none, `string[]` = allowlist of names/paths). An explicit per-agent `extensions:` always wins. Lets you globally trim which extensions subagents load (token + bind cost) without editing every agent file. Toggle via `/agents → Settings → Default extensions` or `subagents.json`. Omitting the setting preserves the legacy behavior (agents that omit `extensions:` load all extensions).
