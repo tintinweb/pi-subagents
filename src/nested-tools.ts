@@ -6,6 +6,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { abortable } from "./abortable.js";
 import {
   getAgentConfig,
   getAvailableTypes,
@@ -222,17 +223,20 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       agent_id: Type.String(),
       wait: Type.Optional(Type.Boolean()),
     }),
-    execute: async (_toolCallId, params) => {
+    execute: async (_toolCallId, params, signal) => {
       const record = context.manager.getRecord(params.agent_id);
       if (!ownsRecord(record, context.parentAgentId)) {
         return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
-      // Queued records do not receive a promise until the manager starts them.
+      // Wait for completion if requested. Cancellation (e.g. the parent's tool
+      // call is aborted) stops only this wait; the nested child keeps running and
+      // stays unconsumed. Queued records have no promise until the manager starts
+      // them, so poll — abortably — until they leave the queue, then await.
       if (params.wait && (record.status === "queued" || record.status === "running")) {
         while (record.status === "queued") {
-          await new Promise(resolve => setTimeout(resolve, 250));
+          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
         }
-        if (record.promise) await record.promise;
+        if (record.promise) await abortable(record.promise, signal);
       }
       return textResult(formatRecord(record), record.status === "error");
     },

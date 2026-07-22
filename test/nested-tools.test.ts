@@ -220,6 +220,34 @@ describe("child-safe nested Agent tools", () => {
     expect(result.content[0].text).toBe("queued done");
   });
 
+  it("aborts a nested result wait without aborting the owned child", async () => {
+    const [, getResult] = tools();
+    let settleChild: (() => void) | undefined;
+    const record = {
+      id: "running-child",
+      status: "running",
+      parentAgentId: "parent-1",
+      promise: new Promise<void>(resolve => { settleChild = resolve; }),
+    };
+    records.set(record.id, record);
+
+    const controller = new AbortController();
+    const outcome = getResult
+      .execute("call-abort", { agent_id: record.id, wait: true }, controller.signal, undefined, ctx())
+      .then(() => "resolved", (e: unknown) => (e instanceof Error ? e.name : String(e)));
+
+    controller.abort();
+    const settled = await Promise.race([
+      outcome,
+      new Promise(r => setTimeout(() => r("timed-out"), 100)),
+    ]);
+
+    expect(settled).toBe("AbortError");
+    // The wait was cancelled but the child was never aborted or consumed.
+    expect(record.status).toBe("running");
+    settleChild?.();
+  });
+
   it("propagates a target agent's tighter depth cap", async () => {
     writeAgent("tight", "max_subagent_depth: 1\n");
     registerAgents(loadCustomAgents(cwd));
