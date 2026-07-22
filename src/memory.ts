@@ -2,14 +2,19 @@
  * memory.ts — Persistent agent memory: per-agent memory directories that persist across sessions.
  *
  * Memory scopes:
- *   - "user"    → ~/.pi/agent-memory/{agent-name}/
+ *   - "user"    → getAgentDir()/agent-memory/{agent-name}/ (default ~/.pi/agent/agent-memory/, honors $PI_CODING_AGENT_DIR)
  *   - "project" → .pi/agent-memory/{agent-name}/
  *   - "local"   → .pi/agent-memory-local/{agent-name}/
+ *
+ * The user scope previously hardcoded ~/.pi/agent-memory/. That legacy location
+ * is still honored (read + write) when it exists and the new location doesn't,
+ * so existing memories aren't orphaned.
  */
 
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, } from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { MemoryScope } from "./types.js";
 
 /** Maximum lines to read from MEMORY.md */
@@ -58,8 +63,17 @@ export function resolveMemoryDir(agentName: string, scope: MemoryScope, cwd: str
     throw new Error(`Unsafe agent name for memory directory: "${agentName}"`);
   }
   switch (scope) {
-    case "user":
-      return join(homedir(), ".pi", "agent-memory", agentName);
+    case "user": {
+      const current = join(getAgentDir(), "agent-memory", agentName);
+      // Legacy location from when this path was hardcoded. Keep using it if it
+      // already holds this agent's memory and the new location hasn't been
+      // created yet — otherwise existing memories would be silently orphaned.
+      const legacy = join(homedir(), ".pi", "agent-memory", agentName);
+      if (!existsSync(current) && existsSync(legacy) && !isSymlink(legacy)) {
+        return legacy;
+      }
+      return current;
+    }
     case "project":
       return join(cwd, ".pi", "agent-memory", agentName);
     case "local":

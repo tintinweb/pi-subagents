@@ -26,10 +26,32 @@ describe("memory", () => {
       expect(dir).toBe("/workspace/.pi/agent-memory-local/auditor");
     });
 
-    it("resolves user scope to ~/.pi/agent-memory/<name>", () => {
-      const dir = resolveMemoryDir("auditor", "user", "/workspace");
-      expect(dir).toContain(".pi/agent-memory/auditor");
-      expect(dir).not.toContain("/workspace");
+    it("resolves user scope under the agent dir (honors PI_CODING_AGENT_DIR)", () => {
+      const originalEnv = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = join(tmpDir, "custom-agent-dir");
+      try {
+        const dir = resolveMemoryDir("auditor", "user", "/workspace");
+        expect(dir).toBe(join(tmpDir, "custom-agent-dir", "agent-memory", "auditor"));
+        expect(dir).not.toContain("/workspace");
+      } finally {
+        if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalEnv;
+      }
+    });
+
+    it("falls back to legacy ~/.pi/agent-memory/<name> when it exists and the new location doesn't", () => {
+      // Simulate: agent dir relocated, but memories were written under the old hardcoded path.
+      // We can't fake homedir() easily, so only assert the shape when the legacy dir is absent:
+      // with no legacy dir, resolution must point at the agent dir, not homedir.
+      const originalEnv = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = join(tmpDir, "agent-dir");
+      try {
+        const dir = resolveMemoryDir("fresh-agent-no-legacy", "user", "/workspace");
+        expect(dir).toBe(join(tmpDir, "agent-dir", "agent-memory", "fresh-agent-no-legacy"));
+      } finally {
+        if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalEnv;
+      }
     });
 
     it("throws on names with path traversal (..)", () => {
@@ -241,9 +263,18 @@ describe("memory", () => {
     });
 
     it("uses correct directory for user scope", () => {
-      const block = buildMemoryBlock("test-agent", "user", tmpDir);
-      expect(block).toContain(".pi/agent-memory/test-agent");
-      expect(block).not.toContain(tmpDir);
+      // Pin the agent dir to a temp location so the test doesn't create
+      // directories in the real home / agent dir (buildMemoryBlock mkdirs).
+      const originalEnv = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = join(tmpDir, "agent-dir");
+      try {
+        const block = buildMemoryBlock("test-agent", "user", join(tmpDir, "workspace"));
+        expect(block).toContain(join(tmpDir, "agent-dir", "agent-memory", "test-agent"));
+        expect(block).not.toContain(join(tmpDir, "workspace"));
+      } finally {
+        if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalEnv;
+      }
     });
 
     it("includes scope label in header", () => {

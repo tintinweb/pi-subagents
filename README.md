@@ -542,7 +542,9 @@ memory: project   # project | local | user
 |-------|----------|----------|
 | `project` | `.pi/agent-memory/<name>/` | Shared across the team (committed) |
 | `local` | `.pi/agent-memory-local/<name>/` | Machine-specific (gitignored) |
-| `user` | `~/.pi/agent-memory/<name>/` | Global personal memory |
+| `user` | `<agentDir>/agent-memory/<name>/` (default `~/.pi/agent/agent-memory/`, honors `PI_CODING_AGENT_DIR`) | Global personal memory |
+
+The `user` scope previously hardcoded `~/.pi/agent-memory/`. If that legacy directory exists for an agent and the new location doesn't, it keeps being used — existing memories aren't orphaned.
 
 Memory uses a `MEMORY.md` index file and individual memory files with frontmatter. Agents with write tools get full read-write access. **Read-only agents** (no `write`/`edit` tools) automatically get read-only memory — they can consume memories written by other agents but cannot modify them. This prevents unintended tool escalation.
 
