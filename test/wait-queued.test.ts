@@ -1,5 +1,5 @@
 /**
- * wait-queued.test.ts — get_subagent_result(wait: true) on a QUEUED agent.
+ * wait-queued.test.ts — get_subagent_result(wait: true) lifecycle behavior.
  *
  * Queued records have no promise yet (it's created when the queue starts
  * them), so the old `status === "running" && record.promise` condition
@@ -120,6 +120,109 @@ describe("get_subagent_result wait:true on a queued agent", () => {
     expect(textOf(result)).toContain("THE-RESULT-PAYLOAD");
     expect(textOf(result)).not.toContain("still running");
 
+    await new Promise((r) => setTimeout(r, 350));
+    expect(JSON.stringify(pi.sendMessage.mock.calls)).not.toContain(queuedId);
+
     await lifecycle.get("session_shutdown")?.();
   }, 20_000);
+
+  it("aborts a running result wait without aborting or consuming the child", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    let resolveRun: (() => void) | undefined;
+    let childSignal: AbortSignal | undefined;
+    vi.mocked(runAgent).mockImplementation(
+      (_ctx, _type, _prompt, options) =>
+        new Promise((resolve) => {
+          childSignal = options.signal;
+          resolveRun = () => resolve({
+            responseText: "THE-RESULT-PAYLOAD",
+            session: { dispose: vi.fn() } as any,
+            aborted: false,
+            steered: false,
+          });
+        }),
+    );
+
+    const { id } = await spawnBackground(tools);
+    const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, "removeEventListener");
+    const waitOutcome = tools
+      .get("get_subagent_result")
+      .execute("tc-wait-abort", { agent_id: id, wait: true }, controller.signal, undefined, ctx())
+      .then(
+        () => "resolved",
+        (error: unknown) => error instanceof Error ? error.name : String(error),
+      );
+
+    controller.abort();
+    const outcome = await Promise.race([
+      waitOutcome,
+      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+    ]);
+    const childWasAborted = childSignal?.aborted;
+
+    resolveRun?.();
+    await flush();
+    await waitOutcome;
+    await new Promise((r) => setTimeout(r, 350));
+
+    const completedResult = await tools
+      .get("get_subagent_result")
+      .execute("tc-result", { agent_id: id }, undefined, undefined, ctx());
+
+    await lifecycle.get("session_shutdown")?.();
+
+    expect(outcome).toBe("AbortError");
+    expect(childWasAborted).toBe(false);
+    expect(removeListener).toHaveBeenCalledTimes(1);
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    expect(textOf(completedResult)).toContain("THE-RESULT-PAYLOAD");
+  });
+
+  it("aborts a queued result wait before the agent starts", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const resolvers = deferredRuns();
+    let queuedId: string | undefined;
+    for (let i = 0; i < 10 && !queuedId; i++) {
+      const { id, queued } = await spawnBackground(tools);
+      if (queued) queuedId = id;
+    }
+    expect(queuedId, "expected to hit the concurrency limit within 10 spawns").toBeDefined();
+
+    const controller = new AbortController();
+    const waitOutcome = tools
+      .get("get_subagent_result")
+      .execute("tc-queued-abort", { agent_id: queuedId, wait: true }, controller.signal, undefined, ctx())
+      .then(
+        () => "resolved",
+        (error: unknown) => error instanceof Error ? error.name : String(error),
+      );
+
+    controller.abort();
+    const outcome = await Promise.race([
+      waitOutcome,
+      new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 100)),
+    ]);
+
+    let completedResult: any;
+    for (let i = 0; i < 40 && !completedResult; i++) {
+      while (resolvers.length > 0) resolvers.shift()!();
+      await flush();
+      const result = await tools
+        .get("get_subagent_result")
+        .execute("tc-queued-result", { agent_id: queuedId }, undefined, undefined, ctx());
+      if (textOf(result).includes("THE-RESULT-PAYLOAD")) completedResult = result;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+
+    await waitOutcome;
+    await lifecycle.get("session_shutdown")?.();
+
+    expect(outcome).toBe("AbortError");
+    expect(textOf(completedResult)).toContain("THE-RESULT-PAYLOAD");
+  });
 });

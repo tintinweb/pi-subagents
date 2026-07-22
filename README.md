@@ -299,6 +299,8 @@ Check status and retrieve results from a background agent.
 | `wait` | boolean | no | Wait for completion |
 | `verbose` | boolean | no | Include full conversation log |
 
+Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
+
 ### `steer_subagent`
 
 Send a steering message to a running agent. The message interrupts after the current tool execution.
