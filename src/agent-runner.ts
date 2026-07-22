@@ -197,6 +197,97 @@ export function parseExtSelectors(entries: string[]): {
   return { extNames, narrowing };
 }
 
+/**
+ * Keep a subagent's tool scope correct as extensions register tools over time.
+ *
+ * Extensions may call `registerTool` long after load — pi-mcp from `session_start`,
+ * context-mode from `before_agent_start` — so scope has to be re-derived rather than
+ * snapshotted. `registerTool` writes into the very `extension.tools` maps this reads,
+ * so `inScope()` sees late arrivals on the next call.
+ *
+ * Two enforcement points, because neither covers the whole picture:
+ *
+ *   - `turn_end` re-narrows the ACTIVE set. pi emits `turn_end` immediately before
+ *     `prepareNextTurn` re-snapshots `agent.state.tools`, and session listeners run
+ *     synchronously, so the narrow lands in time for turns 2..N.
+ *   - `beforeToolCall` blocks out-of-scope calls. Turn 1 cannot be narrowed at all:
+ *     `before_agent_start` fires INSIDE `prompt()` and may widen the tool set, but
+ *     `createContextSnapshot()` freezes that turn's tools immediately after — there
+ *     is no hook in between. A call-time check is the only correct guard there.
+ *
+ * Both are installed on the session and deliberately NOT unsubscribed: they must
+ * outlive the `runAgent` call so resumed/steered turns stay scoped. pi's `dispose()`
+ * clears `_eventListeners`, so they die with the session rather than leaking.
+ *
+ * Only meaningful when extensions are loaded — under `noExtensions`/`isolated` the
+ * static `allowedToolNames` allowlist already gates the registry itself.
+ */
+export function installExtensionToolScope(
+  session: AgentSession,
+  ctx: {
+    loader: DefaultResourceLoader;
+    toolNames: string[];
+    disallowedSet: Set<string> | undefined;
+    extNames: Set<string>;
+    narrowing: Map<string, Set<string>>;
+  },
+): void {
+  const { loader, toolNames, disallowedSet, extNames, narrowing } = ctx;
+
+  // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
+  // selector is present, extension tools become an explicit allowlist — a loaded
+  // extension not named by a selector contributes nothing (its handlers still ran),
+  // and `ext:foo/bar` narrows `foo` to just `bar`.
+  const inScope = (): Set<string> => {
+    const keep = new Set(toolNames.filter((t) => !disallowedSet?.has(t)));
+    const optInActive = extNames.size > 0;
+    for (const extension of loader.getExtensions().extensions) {
+      const canons = extensionCanonicalNames(extension.path);
+      if (optInActive && !canons.some((c) => extNames.has(c))) continue;
+      // First alias that carries a narrowing set — a user won't narrow one
+      // extension under two different names, so first-match is correct.
+      const narrowed = canons.map((c) => narrowing.get(c)).find(Boolean);
+      for (const name of extension.tools.keys()) {
+        if (narrowed && !narrowed.has(name)) continue;
+        if (disallowedSet?.has(name)) continue;
+        keep.add(name);
+      }
+    }
+    for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
+    return keep;
+  };
+
+  const renarrow = () => {
+    const allowed = inScope();
+    const next = session.getAllTools().map((t) => t.name).filter((n) => allowed.has(n));
+    const current = session.getActiveToolNames();
+    // setActiveToolsByName unconditionally rebuilds the system prompt, so skip
+    // the no-op that steady-state turns would otherwise pay for every turn.
+    if (next.length !== current.length || next.some((n, i) => n !== current[i])) {
+      session.setActiveToolsByName(next);
+    }
+  };
+
+  // Activate what registered during session_start (eager MCP servers); pi would
+  // otherwise leave only its four default built-ins active at turn 1.
+  renarrow();
+
+  session.subscribe((event: AgentSessionEvent) => {
+    if (event.type === "turn_end") renarrow();
+  });
+
+  const priorBeforeToolCall = session.agent.beforeToolCall;
+  session.agent.beforeToolCall = async (context, signal) => {
+    if (!inScope().has(context.toolCall.name)) {
+      return {
+        block: true,
+        reason: `Tool "${context.toolCall.name}" is not available to this subagent.`,
+      };
+    }
+    return priorBeforeToolCall?.(context, signal);
+  };
+}
+
 /** Default max turns. undefined = unlimited (no turn limit). */
 let defaultMaxTurns: number | undefined;
 
@@ -637,43 +728,52 @@ export async function runAgent(
     ? new Set(agentConfig.disallowedTools)
     : undefined;
 
-  // Enumerate extension-registered tool names from the loaded resource loader.
-  // Extensions populate `extension.tools` during `loader.reload()` and the set
-  // is stable afterwards — `bindExtensions` does not register new tools.
+  // ─── Tool scoping ───────────────────────────────────────────────────────
   //
-  // Opt-in flip: when any `ext:` selector is present, extension tools become an
-  // explicit allowlist — a loaded extension not named by a selector contributes
-  // no tools (its handlers still ran), and `ext:foo/bar` narrows `foo` to `bar`.
-  const extensionToolNames: string[] = [];
-  if (!noExtensions) {
-    const optInActive = extNames.size > 0;
-    for (const extension of loader.getExtensions().extensions) {
-      const canons = extensionCanonicalNames(extension.path);
-      if (optInActive && !canons.some((c) => extNames.has(c))) continue;
-      // First alias that carries a narrowing set — a user won't narrow one
-      // extension under two different names, so first-match is correct.
-      const narrowed = canons.map((c) => narrowing.get(c)).find(Boolean);
-      for (const toolName of extension.tools.keys()) {
-        if (narrowed && !narrowed.has(toolName)) continue;
-        extensionToolNames.push(toolName);
-      }
-    }
-  }
-
-  // Build the master tool allowlist applied at session construction.
-  // pi-mono's `allowedToolNames` gates BOTH registration and the initial active
-  // set, so listing the exact final set here means the session is correctly
-  // scoped from the first instant — no post-construction narrowing required.
+  // Some extensions register their tools ASYNCHRONOUSLY, long after the
+  // `loader.reload()` above: pi-mcp calls registerTool from `session_start`
+  // (once its MCP servers connect), context-mode from `before_agent_start`.
+  // That is deliberate on their part — eagerly spawning an MCP bridge during
+  // extension discovery orphans child processes on pi's non-agent code paths
+  // (--help, config, trust probing).
+  //
+  // So the tool set cannot be snapshotted here. pi's `allowedToolNames` gates
+  // tool *registration* (`_refreshToolRegistry`'s `isAllowedTool`), not merely
+  // the active set, and is frozen at construction — a name absent from the
+  // snapshot is dropped forever, even once the tool actually registers (#125).
+  //
+  // Whenever extensions are in play we therefore:
+  //   - leave `allowedToolNames` unset, so pi's live gate admits tools whenever
+  //     they register;
+  //   - express the name-stable, permanent part of the scope (our own
+  //     orchestration tools, built-ins the agent didn't ask for, and
+  //     `disallowedTools`) as `excludeTools`, which pi re-applies on every
+  //     registry refresh;
+  //   - enforce `ext:` narrowing on the ACTIVE set via the live `inScope()`
+  //     predicate installed after bind — the active set is what the LLM sees,
+  //     so a registry tool that is never activated is invisible and uncallable.
+  //
+  // `noExtensions`/`isolated` keeps the historical static allowlist: nothing
+  // async can appear there, and a hard registry gate is the correct boundary.
   const builtinToolNameSet = new Set(toolNames);
-  const allowedTools = [...toolNames, ...extensionToolNames].filter((t) => {
-    if (EXCLUDED_TOOL_NAMES.includes(t)) return false;
-    if (disallowedSet?.has(t)) return false;
-    if (builtinToolNameSet.has(t)) return true;
-    // Reached only for extension tools. The extension set was already filtered
-    // at the loader (extensionsOverride / noExtensions) and at enumeration
-    // (`ext:` opt-in flip), so any extension tool in `extensionToolNames` is allowed.
-    return !noExtensions;
-  });
+
+  let sessionTools: string[] | undefined;
+  let sessionExcludeTools: string[] | undefined;
+  if (noExtensions) {
+    sessionTools = toolNames.filter(
+      (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
+    );
+  } else {
+    const denyTools = new Set<string>(EXCLUDED_TOOL_NAMES);
+    // Keep only the built-ins the agent asked for — deny the rest.
+    for (const name of BUILTIN_TOOL_NAMES) {
+      if (!builtinToolNameSet.has(name)) denyTools.add(name);
+    }
+    if (disallowedSet) {
+      for (const name of disallowedSet) denyTools.add(name);
+    }
+    sessionExcludeTools = [...denyTools];
+  }
 
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
@@ -697,9 +797,12 @@ export async function runAgent(
     modelRegistry: ctx.modelRegistry,
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
-    tools: allowedTools,
+    tools: sessionTools,
     resourceLoader: loader,
   };
+  if (sessionExcludeTools) {
+    sessionOpts.excludeTools = sessionExcludeTools;
+  }
   if (thinkingLevel) {
     sessionOpts.thinkingLevel = thinkingLevel;
   }
@@ -723,6 +826,22 @@ export async function runAgent(
       });
     },
   });
+
+  // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
+  // the ACTIVE set still needs managing: pi activates only its four default
+  // built-ins at turn 1, and `ext:` narrowing has no registry-level expression
+  // (we can't deny the name of a tool that hasn't registered yet). Both are
+  // handled below by re-deriving scope from the loader's live extension maps —
+  // `registerTool` writes into those same maps, so late arrivals are judged too.
+  if (!noExtensions) {
+    installExtensionToolScope(session, {
+      loader,
+      toolNames,
+      disallowedSet,
+      extNames,
+      narrowing,
+    });
+  }
 
   options.onSessionCreated?.(session);
 
