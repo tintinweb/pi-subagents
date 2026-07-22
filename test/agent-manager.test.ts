@@ -647,6 +647,24 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
   });
 });
 
+describe("AgentManager — session name passthrough", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("passes SpawnOptions.sessionName to runAgent", async () => {
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      sessionName: "CH-005 verify",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(vi.mocked(runAgent).mock.lastCall![3].sessionName).toBe("CH-005 verify");
+  });
+});
+
 describe("AgentManager — abort() state machine", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());

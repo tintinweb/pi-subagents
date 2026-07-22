@@ -35,6 +35,7 @@ export type ScheduleChangeEvent =
 export interface NewJobInput {
   name: string;
   description: string;
+  sessionName?: string;
   schedule: string;
   subagent_type: SubagentType;
   prompt: string;
@@ -96,6 +97,7 @@ export class SubagentScheduler {
       id: nanoid(10),
       name: input.name,
       description: input.description,
+      sessionName: input.sessionName,
       schedule: detected.normalized,
       scheduleType: detected.type,
       intervalMs: detected.intervalMs,
@@ -240,6 +242,7 @@ export class SubagentScheduler {
     try {
       agentId = manager.spawn(pi, ctx, job.subagent_type, job.prompt, {
         description: job.description,
+        sessionName: job.sessionName,
         isBackground: true,
         bypassQueue: true,
         model: resolvedModel,

@@ -306,6 +306,32 @@ describe("agent-runner final output capture", () => {
 
     expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
   });
+
+  it("trims and prefers a caller-supplied session name while preserving the short agentId suffix", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "a1b2c3d4e5f6",
+      sessionName: "  CH-005 plan  ",
+    });
+
+    expect(session.setSessionName).toHaveBeenCalledWith("CH-005 plan#a1b2c3d4");
+  });
+
+  it("falls back to the configured name when a caller supplies only whitespace", async () => {
+    const { session } = createSession("NAMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      agentId: "a1b2c3d4e5f6",
+      sessionName: "   ",
+    });
+
+    expect(session.setSessionName).toHaveBeenCalledWith("Explore#a1b2c3d4");
+  });
 });
 
 // #144 — a failed FINAL assistant turn (stopReason "error") must surface as
