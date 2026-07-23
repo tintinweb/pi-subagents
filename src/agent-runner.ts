@@ -18,10 +18,12 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { createNestedSubagentTools, DEFAULT_MAX_SUBAGENT_DEPTH, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -230,9 +232,11 @@ export function installExtensionToolScope(
     disallowedSet: Set<string> | undefined;
     extNames: Set<string>;
     narrowing: Map<string, Set<string>>;
+    /** Opt-in nested-delegation tool names to keep active despite the EXCLUDED strip. */
+    nestedToolNames: Set<string>;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing } = ctx;
+  const { loader, toolNames, disallowedSet, extNames, narrowing, nestedToolNames } = ctx;
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -254,6 +258,12 @@ export function installExtensionToolScope(
       }
     }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
+    // Opt-in nested delegation tools share EXCLUDED_TOOL_NAMES' names but are
+    // legitimately active for this agent — re-admit them so the renarrow keeps
+    // them in the active set and beforeToolCall doesn't block them.
+    for (const name of nestedToolNames) {
+      if (!disallowedSet?.has(name)) keep.add(name);
+    }
     return keep;
   };
 
@@ -392,6 +402,13 @@ export interface RunOptions {
    * pre-compaction context size estimate. Aborted compactions don't fire.
    */
   onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+  /** Runtime bridge for opt-in child-safe nested delegation. */
+  nestedRuntime?: {
+    manager: NestedAgentManager;
+    parentAgentId: string;
+    depth: number;
+    maxSubagentDepth?: number;
+  };
 }
 
 export interface RunResult {
@@ -645,7 +662,7 @@ export async function runAgent(
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });
-  await loader.reload();
+  await runInChildSessionContext(() => loader.reload());
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -728,6 +745,28 @@ export async function runAgent(
     ? new Set(agentConfig.disallowedTools)
     : undefined;
 
+  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
+  // set `allow_subagents` and a nestedRuntime was provided — and never when
+  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
+  // scoping below re-admits them explicitly (registry deny + active-set narrow).
+  const inheritedMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? DEFAULT_MAX_SUBAGENT_DEPTH;
+  const effectiveMaxDepth = Math.min(
+    inheritedMaxDepth,
+    agentConfig?.maxSubagentDepth ?? inheritedMaxDepth,
+  );
+  const nestedTools = agentConfig?.allowSubagents && options.nestedRuntime && !options.isolated
+    ? createNestedSubagentTools({
+        manager: options.nestedRuntime.manager,
+        pi: options.pi,
+        parentAgentId: options.nestedRuntime.parentAgentId,
+        depth: options.nestedRuntime.depth,
+        maxSubagentDepth: effectiveMaxDepth,
+        allowedSubagents: agentConfig.allowedSubagents,
+        configCwd,
+      })
+    : [];
+  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
+
   // ─── Tool scoping ───────────────────────────────────────────────────────
   //
   // Some extensions register their tools ASYNCHRONOUSLY, long after the
@@ -760,16 +799,26 @@ export async function runAgent(
   let sessionTools: string[] | undefined;
   let sessionExcludeTools: string[] | undefined;
   if (noExtensions) {
-    sessionTools = toolNames.filter(
-      (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
-    );
+    // Strict allowlist: built-ins the agent asked for, plus any opt-in nested
+    // tools (whose names would otherwise be dropped as EXCLUDED_TOOL_NAMES).
+    sessionTools = [
+      ...toolNames.filter(
+        (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
+      ),
+      ...[...nestedToolNames].filter((t) => !disallowedSet?.has(t)),
+    ];
   } else {
-    const denyTools = new Set<string>(EXCLUDED_TOOL_NAMES);
+    // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
+    // those are injected as customTools and must survive the registry gate.
+    const denyTools = new Set<string>(
+      EXCLUDED_TOOL_NAMES.filter((t) => !nestedToolNames.has(t)),
+    );
     // Keep only the built-ins the agent asked for — deny the rest.
     for (const name of BUILTIN_TOOL_NAMES) {
       if (!builtinToolNameSet.has(name)) denyTools.add(name);
     }
     if (disallowedSet) {
+      // disallowed_tools wins even over an opt-in nested tool of the same name.
       for (const name of disallowedSet) denyTools.add(name);
     }
     sessionExcludeTools = [...denyTools];
@@ -798,6 +847,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime }),
     model,
     tools: sessionTools,
+    customTools: nestedTools,
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {
@@ -807,7 +857,7 @@ export async function runAgent(
     sessionOpts.thinkingLevel = thinkingLevel;
   }
 
-  const { session } = await createAgentSession(sessionOpts);
+  const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -840,6 +890,7 @@ export async function runAgent(
       disallowedSet,
       extNames,
       narrowing,
+      nestedToolNames,
     });
   }
 

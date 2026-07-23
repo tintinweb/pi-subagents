@@ -138,6 +138,16 @@ describe("FleetList navigation", () => {
     expect(h.render()).toEqual([]);
   });
 
+  it("hides nested child records from the coordinator fleet", () => {
+    const h = harness([
+      makeRecord({ id: "top", description: "top-level" }),
+      makeRecord({ id: "nested", description: "nested-child", parentAgentId: "top" }),
+    ]);
+    const output = h.render().join("\n");
+    expect(output).toContain("top-level");
+    expect(output).not.toContain("nested-child");
+  });
+
   it("activates on ↓ at an empty prompt, consuming the key", () => {
     const h = harness([makeRecord()]);
     const res = h.press(DOWN);

@@ -222,6 +222,9 @@ All fields are optional — sensible defaults for everything.
 | `persist_session` | `false` | Persist this subagent as a normal pi session instead of keeping the session in memory only. The subagent's `.output` transcript is still written either way unless `output_transcript: false` |
 | `output_transcript` | `true` (or `subagents.json` `outputTranscript`) | Write this subagent's `.output` transcript; when set, overrides the `subagents.json` `outputTranscript` default. Set `false` to write no transcript file or path. Governs only the transcript — independent of `persist_session`, `isolation: worktree`, and `memory:` |
 | `session_dir` | pi default | Optional session directory when `persist_session: true`; omitted uses pi's normal session location, and relative paths resolve from the agent cwd |
+| `allow_subagents` | `false` | Opt in to scoped nested `Agent`, `get_subagent_result`, and `steer_subagent` tools |
+| `allowed_subagents` | unrestricted | Optional comma-separated restriction used only when `allow_subagents: true`; omitted allows any enabled agent, while `none` or an empty value allows none |
+| `max_subagent_depth` | `2` | Optional nonnegative per-agent cap that can only tighten the inherited limit; main is depth 0 and its first subagent is depth 1 |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | `false` | Run in background by default |
@@ -231,6 +234,23 @@ All fields are optional — sensible defaults for everything.
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
 
 **Forgiving `model:` resolution.** A `model:` pin is matched against pi's model registry tolerantly, so cosmetic id variations don't silently drop the agent back to the parent's model: `.` and `-` are treated as equivalent in version numbers (`claude-haiku-4.5` ≡ `claude-haiku-4-5`), a trailing `-YYYYMMDD` date stamp is optional (`anthropic/claude-haiku-4-5-20251001` matches an undated registry id and vice-versa), and a `provider/modelId` whose named provider doesn't carry that model retries the bare id against every provider. Precedence is **exact → fuzzy under the named provider → same model under any provider → unavailable**, so an exact match always wins and dated snapshots aren't conflated. If nothing resolves, the pin can't run and the agent inherits the parent model — `/agents → Agent types` flags this case as `(unavailable, fallback: inherit)` and shows the resolved target `(→ provider/id)` when resolution lands on a different provider or version than configured. (This is distinct from [Model Scope](#model-scope) enforcement, which matches the `enabledModels` allowlist by *exact* entry.)
+
+### Nested subagents
+
+Nested delegation is default-off. Set `allow_subagents: true` only on a non-isolated custom agent that owns a real fan-out responsibility:
+
+```yaml
+---
+tools: read, grep, find
+extensions: false
+allow_subagents: true
+allowed_subagents: support-file-finder, support-callsite-tracer
+---
+```
+
+`allowed_subagents` is runtime-enforced. Omitted means any enabled agent; `none` means no agent. Unknown, disabled, and out-of-list types are rejected rather than falling back. Result, resume, and steering operations are ownership-scoped, so a parent can control only its own children. Nested records remain internal to that parent and do not appear in top-level tools, lifecycle events, transcripts, or agent UI.
+
+The default hard cap is depth 2: main session (0) → subagent (1) → nested child (2). `max_subagent_depth` can tighten, never relax, the inherited cap. At the cap, delegation returns an error. A child must independently opt in with `allow_subagents: true` to delegate again; isolated agents never receive nested tools.
 
 ### Tool & extension scoping
 

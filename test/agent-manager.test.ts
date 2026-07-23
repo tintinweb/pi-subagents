@@ -161,6 +161,38 @@ describe("AgentManager — spawnAndWait onSpawned + foreground output file wirin
     expect(spawnedId).toBe(id);
   });
 
+  it("restores the shared onSpawned callback before awaiting the foreground run", async () => {
+    manager = new AgentManager();
+    let finishFirst: ((value: any) => void) | undefined;
+    vi.mocked(runAgent)
+      .mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }))
+      .mockResolvedValueOnce({
+        responseText: "second",
+        session: mockSession(),
+        aborted: false,
+        steered: false,
+      });
+    const firstCallback = vi.fn();
+
+    const first = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "first", {
+      description: "first",
+    }, firstCallback);
+    const secondId = manager.spawn(mockPi, mockCtx, "general-purpose", "second", {
+      description: "second",
+      isBackground: true,
+    });
+
+    expect(firstCallback).toHaveBeenCalledTimes(1);
+    await manager.getRecord(secondId)!.promise;
+    finishFirst?.({
+      responseText: "first",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    await first;
+  });
+
   it("onComplete fires on the error path with resultConsumed=true", async () => {
     // The .then path is covered by the lifecycle-symmetry test above; this guards
     // the .catch path which lacks try/catch around onComplete (a known asymmetry).
@@ -176,6 +208,62 @@ describe("AgentManager — spawnAndWait onSpawned + foreground output file wirin
     expect(completedRecord!.status).toBe("error");
     expect(completedRecord!.resultConsumed).toBe(true);
     expect(record).toBe(completedRecord);
+  });
+});
+
+describe("AgentManager — nested runtime propagation", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("stores nesting metadata and passes the owning manager/runtime to runAgent", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "scout", "nested", {
+      description: "nested",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: "parent-1",
+      maxSubagentDepth: 3,
+      configCwd: "/trusted/config",
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)).toEqual(expect.objectContaining({
+      depth: 2,
+      parentAgentId: "parent-1",
+      maxSubagentDepth: 3,
+    }));
+    expect(runAgent).toHaveBeenLastCalledWith(
+      mockCtx,
+      "scout",
+      "nested",
+      expect.objectContaining({
+        configCwd: "/trusted/config",
+        nestedRuntime: {
+          manager,
+          parentAgentId: id,
+          depth: 2,
+          maxSubagentDepth: 3,
+        },
+      }),
+    );
+  });
+
+  it("defaults top-level subagents to depth one", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "scout", "top", {
+      description: "top",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)?.depth).toBe(1);
+    expect(vi.mocked(runAgent).mock.lastCall?.[3].nestedRuntime).toEqual(expect.objectContaining({
+      parentAgentId: id,
+      depth: 1,
+    }));
   });
 });
 

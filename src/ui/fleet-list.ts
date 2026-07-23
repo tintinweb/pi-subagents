@@ -188,7 +188,7 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => a.session && (
+      .filter(a => !a.parentAgentId && a.session && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)

@@ -15,9 +15,11 @@ import { join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { abortable } from "./abortable.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, isDefaultsDisabled, registerAgents, resolveType, setDefaultsDisabled } from "./agent-types.js";
+import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabled-models.js";
@@ -56,39 +58,6 @@ import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsag
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
-}
-
-/** Await a promise until it settles or the caller cancels, without aborting the underlying work. */
-function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-  if (!signal) return promise;
-  if (signal.aborted) return Promise.reject(signal.reason);
-
-  return new Promise<T>((resolve, reject) => {
-    let settled = false;
-    const cleanup = () => signal.removeEventListener("abort", onAbort);
-    const onAbort = () => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(signal.reason);
-    };
-
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        resolve(value);
-      },
-      (error: unknown) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      },
-    );
-  });
 }
 
 export function renderRunningAgentStatus(
@@ -264,6 +233,11 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
 }
 
 export default function (pi: ExtensionAPI) {
+  // Child AgentSessions load normal extensions. Re-entering this extension there
+  // would create another manager and leak handlers. Nested orchestration is
+  // injected as scoped custom tools by the existing manager instead.
+  if (inChildSessionContext()) return;
+
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
     "subagent-notification",
@@ -434,6 +408,10 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: route through group join or send individual nudge
   const manager = new AgentManager((record) => {
+    // Nested children report only through their owning parent's scoped tools.
+    // Keep them out of top-level lifecycle, transcript, notification, and UI channels.
+    if (record.parentAgentId) return;
+
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
@@ -474,6 +452,7 @@ export default function (pi: ExtensionAPI) {
     // 'delivered' → group callback already fired
     widget.update();
   }, undefined, (record) => {
+    if (record.parentAgentId) return;
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", {
       id: record.id,
@@ -481,6 +460,7 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
     });
   }, (record, info) => {
+    if (record.parentAgentId) return;
     // Emit compacted event when agent's session compacts (preserves count on record).
     pi.events.emit("subagents:compacted", {
       id: record.id,
@@ -502,12 +482,24 @@ export default function (pi: ExtensionAPI) {
   // session's entry. The first activation (the root session) wins; child
   // activations leave it alone.
   const MANAGER_KEY = Symbol.for("pi-subagents:manager");
+  // Process-external callers may supply arbitrary options. Nested ownership and
+  // config-root metadata are internal capabilities issued only by scoped tools.
+  const spawnTopLevel = (piRef: any, ctxRef: any, type: string, prompt: string, options: any) => {
+    const safeOptions = { ...(options ?? {}) };
+    delete safeOptions.parentAgentId;
+    delete safeOptions.depth;
+    delete safeOptions.maxSubagentDepth;
+    delete safeOptions.configCwd;
+    return manager.spawn(piRef, ctxRef, type, prompt, safeOptions);
+  };
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
     hasRunning: () => manager.hasRunning(),
-    spawn: (piRef: any, ctx: any, type: string, prompt: string, options: any) =>
-      manager.spawn(piRef, ctx, type, prompt, options),
-    getRecord: (id: string) => manager.getRecord(id),
+    spawn: spawnTopLevel,
+    getRecord: (id: string) => {
+      const record = manager.getRecord(id);
+      return record?.parentAgentId ? undefined : record;
+    },
   };
   const ownsManagerRegistry = (globalThis as any)[MANAGER_KEY] === undefined;
   if (ownsManagerRegistry) {
@@ -559,7 +551,13 @@ export default function (pi: ExtensionAPI) {
         events: pi.events,
         pi,
         getCtx: () => currentCtx,
-        manager,
+        manager: {
+          spawn: spawnTopLevel,
+          abort: (id) => {
+            const record = manager.getRecord(id);
+            return !record?.parentAgentId && manager.abort(id);
+          },
+        },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
       // Emitting after all factories have run (rather than at factory time)
@@ -1212,7 +1210,7 @@ Terse command-style prompts produce shallow, generic work.
       // Resume existing agent
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
-        if (!existing) {
+        if (!existing || existing.parentAgentId) {
           return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
         }
         if (!existing.session) {
@@ -1461,7 +1459,7 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      if (!record || record.parentAgentId) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
@@ -1540,7 +1538,7 @@ Terse command-style prompts produce shallow, generic work.
     }),
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
-      if (!record) {
+      if (!record || record.parentAgentId) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
       if (record.status !== "running") {
@@ -1617,7 +1615,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter(a => !a.parentAgentId);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -1738,7 +1736,7 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents();
+    const agents = manager.listAgents().filter(a => !a.parentAgentId);
     if (agents.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
@@ -1878,6 +1876,11 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.model) fmFields.push(`model: ${cfg.model}`);
     if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
     if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
+    if (cfg.allowSubagents) fmFields.push("allow_subagents: true");
+    if (cfg.allowedSubagents !== undefined) {
+      fmFields.push(`allowed_subagents: ${cfg.allowedSubagents.length > 0 ? cfg.allowedSubagents.join(", ") : "none"}`);
+    }
+    if (cfg.maxSubagentDepth !== undefined) fmFields.push(`max_subagent_depth: ${cfg.maxSubagentDepth}`);
     fmFields.push(`prompt_mode: ${cfg.promptMode}`);
     if (cfg.extensions === false) fmFields.push("extensions: false");
     else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);

@@ -60,7 +60,10 @@ function ctx() {
 const textOf = (r: any): string => r.content[0].text;
 
 describe("status note reaches the parent through the real handlers", () => {
-  afterEach(() => vi.restoreAllMocks());
+  afterEach(() => {
+    delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
+    vi.restoreAllMocks();
+  });
 
   it("foreground turn-limit abort → the Agent result flags an incomplete outcome", async () => {
     vi.mocked(runAgent).mockResolvedValue({
@@ -82,6 +85,62 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(out).toContain("hit the turn limit");      // getStatusNote("aborted") is wired in
     expect(out).toContain("partial work so far");     // partial result still delivered
     expect(out).not.toContain("STOPPED BY THE USER"); // not mislabelled as a user stop
+  });
+
+  it("hides nested records from top-level tools, registry, transcripts, and lifecycle", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "nested result",
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+
+    // External registry/RPC callers cannot mint internal ownership metadata.
+    const topId = registry.spawn(pi, ctx(), "general-purpose", "top", {
+      description: "top-level owner",
+      isBackground: false,
+      parentAgentId: "forged-parent",
+      depth: 99,
+      maxSubagentDepth: 99,
+      configCwd: "/untrusted/config",
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(registry.getRecord(topId)).toEqual(expect.objectContaining({
+      parentAgentId: undefined,
+      depth: 1,
+    }));
+
+    // Internal scoped tools receive the raw owning manager through nestedRuntime.
+    const rawManager = vi.mocked(runAgent).mock.calls[0][3].nestedRuntime.manager;
+    pi.events.emit.mockClear();
+    pi.appendEntry.mockClear();
+    pi.sendMessage.mockClear();
+    const id = rawManager.spawn(pi, ctx(), "general-purpose", "nested", {
+      description: "nested child",
+      isBackground: true,
+      parentAgentId: topId,
+      depth: 2,
+      maxSubagentDepth: 2,
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    expect(registry.getRecord(id)).toBeUndefined();
+    for (const [name, params] of [
+      ["get_subagent_result", { agent_id: id }],
+      ["steer_subagent", { agent_id: id, message: "stop" }],
+      ["Agent", { resume: id, prompt: "continue", description: "resume", subagent_type: "general-purpose" }],
+    ] as const) {
+      const result = await tools.get(name).execute("tc-nested", params, undefined, undefined, ctx());
+      expect(textOf(result)).toContain("Agent not found");
+    }
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:started", expect.objectContaining({ id }));
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:completed", expect.objectContaining({ id }));
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:failed", expect.objectContaining({ id }));
+    expect(pi.appendEntry).not.toHaveBeenCalledWith("subagents:record", expect.objectContaining({ id }));
+    expect(pi.sendMessage).not.toHaveBeenCalled();
   });
 
   it("background user-stop → get_subagent_result flags STOPPED BY THE USER (not completed)", async () => {

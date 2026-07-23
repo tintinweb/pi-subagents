@@ -73,6 +73,9 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       persistSession: fm.persist_session != null ? fm.persist_session === true : undefined,
       outputTranscript: fm.output_transcript != null ? fm.output_transcript !== false : undefined,
       sessionDir: str(fm.session_dir),
+      allowSubagents: fm.allow_subagents === true,
+      allowedSubagents: parseOptionalAllowlist(fm.allowed_subagents),
+      maxSubagentDepth: nonNegativeInteger(fm.max_subagent_depth),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
@@ -99,6 +102,11 @@ function nonNegativeInt(val: unknown): number | undefined {
   return typeof val === "number" && val >= 0 ? val : undefined;
 }
 
+/** Extract a non-negative integer for discrete depth values. */
+function nonNegativeInteger(val: unknown): number | undefined {
+  return typeof val === "number" && Number.isInteger(val) && val >= 0 ? val : undefined;
+}
+
 /**
  * Parse a raw CSV field value into items, or undefined if absent/empty/"none".
  */
@@ -108,6 +116,19 @@ function parseCsvField(val: unknown): string[] | undefined {
   if (!s || s === "none") return undefined;
   const items = s.split(",").map(t => t.trim()).filter(Boolean);
   return items.length > 0 ? items : undefined;
+}
+
+/**
+ * Parse an optional restriction list while preserving the distinction between
+ * omitted (unrestricted when allow_subagents is true) and explicitly empty/none
+ * (no nested agent types allowed).
+ */
+function parseOptionalAllowlist(val: unknown): string[] | undefined {
+  if (val === undefined) return undefined;
+  if (val === null) return [];
+  const s = String(val).trim();
+  if (!s || s === "none") return [];
+  return s.split(",").map(t => t.trim()).filter(Boolean);
 }
 
 /**

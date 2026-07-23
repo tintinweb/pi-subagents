@@ -95,6 +95,14 @@ interface SpawnOptions {
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
+  /** Nesting depth: top-level subagent = 1. */
+  depth?: number;
+  /** Parent agent ID for ownership-scoped nested controls. */
+  parentAgentId?: string;
+  /** Effective inherited nesting cap for this branch. */
+  maxSubagentDepth?: number;
+  /** Config-discovery root inherited by nested launches when it differs from the working directory. */
+  configCwd?: string;
 }
 
 export class AgentManager {
@@ -174,6 +182,9 @@ export class AgentManager {
       // have no inline surface — stay visible instead of vanishing.
       isBackground: options.isBackground,
       invocation: options.invocation,
+      depth: options.depth ?? 1,
+      parentAgentId: options.parentAgentId,
+      maxSubagentDepth: options.maxSubagentDepth,
     };
     this.agents.set(id, record);
 
@@ -258,7 +269,7 @@ export class AgentManager {
       // stay undefined otherwise so plain worktree runs keep resolving config
       // (incl. relative extension paths and memory) inside the worktree copy.
       cwd: worktreeCwd ?? customCwd,
-      configCwd: customCwd !== undefined ? ctx.cwd : undefined,
+      configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
@@ -274,6 +285,12 @@ export class AgentManager {
         record.compactionCount++;
         this.onCompact?.(record, info);
         options.onCompaction?.(info);
+      },
+      nestedRuntime: {
+        manager: this,
+        parentAgentId: id,
+        depth: record.depth ?? 1,
+        maxSubagentDepth: record.maxSubagentDepth,
       },
       onSessionCreated: (session) => {
         record.session = session;
@@ -429,14 +446,18 @@ export class AgentManager {
     // Temporarily register the onSpawned hook so startAgent can call it.
     const prevOnSpawned = this.onSpawned;
     this.onSpawned = onSpawned;
+    let id: string;
     try {
-      const id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
-      const record = this.agents.get(id)!;
-      await record.promise;
-      return { id, record };
+      // spawn() invokes onSpawned synchronously before returning. Restore the
+      // shared hook immediately so unrelated concurrent spawns cannot inherit
+      // this foreground caller's callback while its run is awaited.
+      id = this.spawn(pi, ctx, type, prompt, { ...options, isBackground: false });
     } finally {
       this.onSpawned = prevOnSpawned;
     }
+    const record = this.agents.get(id)!;
+    await record.promise;
+    return { id, record };
   }
 
   /**
