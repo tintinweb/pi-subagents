@@ -131,7 +131,7 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
+  /** Effective model display name used by this run. */
   modelName?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;

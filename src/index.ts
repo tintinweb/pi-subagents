@@ -43,6 +43,7 @@ import {
   formatTurns,
   getDisplayName,
   getPromptModeLabel,
+  prepareModelNameForDisplay,
   SPINNER,
   type Theme,
   type UICtx,
@@ -987,10 +988,11 @@ Terse command-style prompts produce shallow, generic work.
         return new Text(text, 0, 0);
       }
 
-      // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
+      // Helper: build "model · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
       const stats = (d: AgentDetails) => {
         const parts: string[] = [];
-        if (d.modelName) parts.push(d.modelName);
+        const modelName = prepareModelNameForDisplay(d.modelName);
+        if (modelName) parts.push(modelName);
         if (d.tags) parts.push(...d.tags);
         if (d.turnCount != null && d.turnCount > 0) {
           parts.push(formatTurns(d.turnCount, d.maxTurns));
@@ -1139,10 +1141,8 @@ Terse command-style prompts produce shallow, generic work.
         writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
 
-      const parentModelId = ctx.model?.id;
-      const effectiveModelId = model?.id;
-      const modelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
+      const modelName = model
+        ? (model.name ?? model.id).replace(/^Claude\s+/i, "").toLowerCase()
         : undefined;
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {

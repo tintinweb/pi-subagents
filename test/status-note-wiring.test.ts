@@ -59,6 +59,54 @@ function ctx() {
 
 const textOf = (r: any): string => r.content[0].text;
 
+function modelCtx() {
+  const context = ctx();
+  context.model = {
+    provider: "openai-codex",
+    id: "gpt-5.6-sol",
+    name: "GPT-5.6 Sol",
+  };
+  return context;
+}
+
+describe("Agent tool model display", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("shows the effective inherited model with thinking in collapsed and expanded results", async () => {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: { dispose: vi.fn() } as never,
+      aborted: false,
+      steered: false,
+    });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const tool = tools.get("Agent");
+    const onUpdate = vi.fn();
+
+    await tool.execute(
+      "tc-model",
+      { prompt: "go", description: "d", subagent_type: "general-purpose", thinking: "max" },
+      undefined,
+      onUpdate,
+      modelCtx(),
+    );
+
+    const update = onUpdate.mock.calls[0]?.[0];
+    const collapsed = tool.renderResult(update, { expanded: false, isPartial: true }, {
+      fg: (_color: string, text: string) => text,
+    }).render(120).join("\n");
+    const expanded = tool.renderResult(update, { expanded: true, isPartial: true }, {
+      fg: (_color: string, text: string) => text,
+    }).render(120).join("\n");
+
+    expect(collapsed).toContain("gpt-5.6 sol");
+    expect(expanded).toContain("gpt-5.6 sol");
+    expect(collapsed).toContain("thinking:");
+    expect(expanded).toContain("thinking:");
+  });
+});
+
 describe("status note reaches the parent through the real handlers", () => {
   afterEach(() => vi.restoreAllMocks());
 
