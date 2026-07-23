@@ -814,7 +814,8 @@ Notes:
 - Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
-- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
+- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.
+- isolation: "off" runs without isolation — same as omitting the field.`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -844,7 +845,8 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
+- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.
+- Use isolation: "off" to opt out of isolation explicitly — same effect as omitting the field.${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -965,9 +967,14 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
       isolation: Type.Optional(
-        Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-        }),
+        Type.Union([
+          Type.Literal("worktree", {
+            description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+          }),
+          Type.Literal("off", {
+            description: 'Explicitly disable isolation. Same effect as omitting the field.',
+          }),
+        ]),
       ),
       ...scheduleParam,
     }),
@@ -2017,7 +2024,7 @@ run_in_background: <true to run in background by default. Default: false>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>
-isolation: <"worktree" to run in isolated git worktree. Omit for normal>
+isolation: <"worktree" to run in isolated git worktree, or "off" to skip isolation explicitly (same as omitting).>
 ---
 
 <system prompt body — instructions for the agent>

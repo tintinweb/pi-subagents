@@ -216,7 +216,7 @@ export class AgentManager {
       if (!wt) {
         throw new Error(
           'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
-          'Initialize git and commit at least once, or omit `isolation`.',
+          'Initialize git and commit at least once, or set `isolation: "off"` (or omit the field).',
         );
       }
       record.worktree = wt;

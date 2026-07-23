@@ -79,7 +79,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       runInBackground: fm.run_in_background != null ? fm.run_in_background === true : undefined,
       isolated: fm.isolated != null ? fm.isolated === true : undefined,
       memory: parseMemory(fm.memory),
-      isolation: fm.isolation === "worktree" ? "worktree" : undefined,
+      isolation: fm.isolation === "worktree" || fm.isolation === "off" ? fm.isolation : undefined,
       enabled: fm.enabled !== false,  // default true; explicitly false disables
       source,
     });
