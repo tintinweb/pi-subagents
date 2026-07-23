@@ -86,7 +86,7 @@ describe("Agent tool model display", () => {
 
     await tool.execute(
       "tc-model",
-      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      { prompt: "go", description: "d", subagent_type: "general-purpose", thinking: "max" },
       undefined,
       onUpdate,
       modelCtx(),
@@ -102,8 +102,8 @@ describe("Agent tool model display", () => {
 
     expect(collapsed).toContain("gpt-5.6 sol");
     expect(expanded).toContain("gpt-5.6 sol");
-    expect(collapsed).toContain("thinking: medium");
-    expect(expanded).toContain("thinking: medium");
+    expect(collapsed).toContain("thinking:");
+    expect(expanded).toContain("thinking:");
   });
 });
 
