@@ -10,6 +10,7 @@ import { DEFAULT_AGENTS } from "./default-agents.js";
 import type { AgentConfig } from "./types.js";
 import { readNicoAgentOverrides, applyNicoOverridesToMap } from "./nico-overrides.js";
 
+
 /**
  * All known built-in tool names, derived from pi's own tool factories rather
  * than hardcoded so the set tracks pi-mono if it adds/renames a built-in.
@@ -53,8 +54,15 @@ export function registerAgents(userAgents: Map<string, AgentConfig>): void {
   for (const [name, config] of userAgents) {
     agents.set(name, config);
   }
+}
 
-  // Apply npm:pi-subagents-style JSON overrides (highest priority)
+/**
+ * Apply npm:pi-subagents-style JSON overrides to the current agent registry.
+ * Reads from ~/.pi/agent/settings.json and .pi/settings.json and applies
+ * them as the highest-priority layer. Auto-registers agents that don't
+ * exist in the registry yet.
+ */
+export function applyNicoOverrides(): void {
   const { overrides, defaultModel } = readNicoAgentOverrides(process.cwd());
   applyNicoOverridesToMap(agents, overrides, defaultModel);
 }
