@@ -24,6 +24,28 @@ export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; toke
 /** Default max concurrent background agents. */
 const DEFAULT_MAX_CONCURRENT = 4;
 
+/** Shut down and dispose every child session, logging failures after all settle. */
+async function shutdownAgentSessions(sessions: AgentSession[]): Promise<void> {
+  const outcomes = await Promise.allSettled(
+    sessions.map(async (session) => {
+      try {
+        await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+      } finally {
+        session.dispose();
+      }
+    }),
+  );
+  const failures = outcomes
+    .filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected")
+    .map((outcome) => outcome.reason);
+  if (failures.length > 0) {
+    console.warn(
+      `[pi-subagents] Failed to shut down ${failures.length} child agent session(s):`,
+      failures,
+    );
+  }
+}
+
 /**
  * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
  * (parent cwd). Anything else must be an absolute path to an existing
@@ -124,7 +146,11 @@ export class AgentManager {
     this.onCompact = onCompact;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
-    this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
+    this.cleanupInterval = setInterval(() => {
+      void this.cleanup().catch((error) => {
+        console.warn("[pi-subagents] Failed to clean up completed agent sessions:", error);
+      });
+    }, 60_000);
     this.cleanupInterval.unref();
   }
 
@@ -535,20 +561,24 @@ export class AgentManager {
     return true;
   }
 
-  /** Dispose a record's session and remove it from the map. */
-  private removeRecord(id: string, record: AgentRecord): void {
-    record.session?.dispose?.();
+  /** Remove a record and transfer ownership of its session to the cleanup caller. */
+  private detachRecordSession(id: string, record: AgentRecord): AgentSession | undefined {
+    const session = record.session;
     record.session = undefined;
     this.agents.delete(id);
+    return session;
   }
 
-  private cleanup() {
+  private async cleanup(): Promise<void> {
     const cutoff = Date.now() - 10 * 60_000;
+    const sessions: AgentSession[] = [];
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
-      this.removeRecord(id, record);
+      const session = this.detachRecordSession(id, record);
+      if (session) sessions.push(session);
     }
+    await shutdownAgentSessions(sessions);
   }
 
   /**
@@ -556,13 +586,17 @@ export class AgentManager {
    * Called on session start/switch so tasks from a prior session don't persist.
    * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
    * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
+   * Resolves after every removed child session has completed lifecycle teardown.
    */
-  clearCompleted(skipUnconsumed = false): void {
+  async clearCompleted(skipUnconsumed = false): Promise<void> {
+    const sessions: AgentSession[] = [];
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
-      this.removeRecord(id, record);
+      const session = this.detachRecordSession(id, record);
+      if (session) sessions.push(session);
     }
+    await shutdownAgentSessions(sessions);
   }
 
   /** Whether any agents are still running or queued. */
@@ -612,20 +646,27 @@ export class AgentManager {
     }
   }
 
-  dispose() {
+  /** Tear down every retained child session, then release manager-owned resources. */
+  async dispose(): Promise<void> {
     clearInterval(this.cleanupInterval);
     // Clear queue
     this.queue = [];
+    const sessions: AgentSession[] = [];
     for (const record of this.agents.values()) {
-      record.session?.dispose();
+      if (record.session) sessions.push(record.session);
+      record.session = undefined;
     }
     this.agents.clear();
-    // Prune any orphaned git worktrees (crash recovery)
-    try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
-    // Also prune repos that caller-supplied cwds created worktrees in — a clean
-    // exit with in-flight agents would otherwise leave stale registrations there.
-    for (const repo of this.worktreeRepos) {
-      try { pruneWorktrees(repo); } catch { /* ignore */ }
+    try {
+      await shutdownAgentSessions(sessions);
+    } finally {
+      // Prune any orphaned git worktrees (crash recovery)
+      try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
+      // Also prune repos that caller-supplied cwds created worktrees in — a clean
+      // exit with in-flight agents would otherwise leave stale registrations there.
+      for (const repo of this.worktreeRepos) {
+        try { pruneWorktrees(repo); } catch { /* ignore */ }
+      }
     }
   }
 }

@@ -551,7 +551,7 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
-    manager.clearCompleted(true);
+    await manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
     if (!rpcHandle) {
@@ -569,8 +569,8 @@ export default function (pi: ExtensionAPI) {
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
-  pi.on("session_before_switch", () => {
-    manager.clearCompleted(true);
+  pi.on("session_before_switch", async () => {
+    await manager.clearCompleted(true);
     scheduler.stop();
   });
 
@@ -592,7 +592,7 @@ export default function (pi: ExtensionAPI) {
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
     fleet.dispose();
-    manager.dispose();
+    await manager.dispose();
   });
 
   // Live widget: show running agents above editor.
