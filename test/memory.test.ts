@@ -1,7 +1,18 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock homedir so the user-scope legacy fallback check (~/.pi/agent-memory)
+// resolves against a controlled temp home rather than the developer's real
+// ~/.pi state. The default return must be a valid string: pi-coding-agent
+// evaluates getAgentDir() at module load, so an undefined homedir throws at import.
+const mockHomedir = vi.hoisted(() => vi.fn(() => "/tmp"));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: mockHomedir };
+});
+
 import { buildMemoryBlock, buildReadOnlyMemoryBlock, ensureMemoryDir, isSymlink, isUnsafeName, readMemoryIndex, resolveMemoryDir, safeReadFile } from "../src/memory.js";
 
 describe("memory", () => {
@@ -9,6 +20,11 @@ describe("memory", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "pi-mem-test-"));
+    // Point homedir at a clean temp home with no legacy agent-memory dirs, so
+    // user-scope resolution deterministically returns the agent-dir location.
+    const fakeHome = join(tmpDir, "home");
+    mkdirSync(fakeHome, { recursive: true });
+    mockHomedir.mockReturnValue(fakeHome);
   });
 
   afterEach(() => {
@@ -33,21 +49,6 @@ describe("memory", () => {
         const dir = resolveMemoryDir("auditor", "user", "/workspace");
         expect(dir).toBe(join(tmpDir, "custom-agent-dir", "agent-memory", "auditor"));
         expect(dir).not.toContain("/workspace");
-      } finally {
-        if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
-        else process.env.PI_CODING_AGENT_DIR = originalEnv;
-      }
-    });
-
-    it("falls back to legacy ~/.pi/agent-memory/<name> when it exists and the new location doesn't", () => {
-      // Simulate: agent dir relocated, but memories were written under the old hardcoded path.
-      // We can't fake homedir() easily, so only assert the shape when the legacy dir is absent:
-      // with no legacy dir, resolution must point at the agent dir, not homedir.
-      const originalEnv = process.env.PI_CODING_AGENT_DIR;
-      process.env.PI_CODING_AGENT_DIR = join(tmpDir, "agent-dir");
-      try {
-        const dir = resolveMemoryDir("fresh-agent-no-legacy", "user", "/workspace");
-        expect(dir).toBe(join(tmpDir, "agent-dir", "agent-memory", "fresh-agent-no-legacy"));
       } finally {
         if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
         else process.env.PI_CODING_AGENT_DIR = originalEnv;

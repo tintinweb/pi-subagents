@@ -4,8 +4,10 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock homedir so the legacy ~/.pi/agent-memory fallback can be exercised
-// against a temp directory instead of the real home.
-const mockHomedir = vi.hoisted(() => vi.fn());
+// against a temp directory instead of the real home. The default return must
+// be a valid string: pi-coding-agent evaluates getAgentDir() at module load
+// (before beforeEach runs), so an undefined homedir would throw at import.
+const mockHomedir = vi.hoisted(() => vi.fn(() => "/tmp"));
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
   return { ...actual, homedir: mockHomedir };
