@@ -381,21 +381,47 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     const record = manager.getRecord(id)!;
 
     expect(record.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
+    expect(record.usageRecords).toEqual([]);
     expect(record.compactionCount).toBe(0);
 
     manager.abort(id);
   });
 
-  it("onAssistantUsage from runAgent accumulates into record.lifetimeUsage", async () => {
+  it("onAssistantUsage from runAgent accumulates totals and preserves records", async () => {
     manager = new AgentManager();
 
-    // Capture the options passed to runAgent so we can drive callbacks
+    const first = {
+      timestamp: 123,
+      provider: "openai-codex",
+      model: "gpt-5.4",
+      usage: {
+        input: 100,
+        output: 50,
+        cacheRead: 500,
+        cacheWrite: 10,
+        totalTokens: 660,
+        cost: { input: 0.1, output: 0.2, cacheRead: 0.03, cacheWrite: 0.04, total: 0.37 },
+      },
+    };
+    const second = {
+      timestamp: 456,
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      usage: {
+        input: 200,
+        output: 80,
+        cacheRead: 900,
+        cacheWrite: 20,
+        totalTokens: 1200,
+        cost: { input: 0.2, output: 0.3, cacheRead: 0.05, cacheWrite: 0.06, total: 0.61 },
+      },
+    };
+
     let captured: any;
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
       captured = opts;
-      // Two assistant messages with usage
-      opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 10 });
-      opts.onAssistantUsage?.({ input: 200, output: 80, cacheWrite: 20 });
+      opts.onAssistantUsage?.(first);
+      opts.onAssistantUsage?.(second);
       return { responseText: "done", session: mockSession(), aborted: false, steered: false };
     });
 
@@ -409,6 +435,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({
       input: 300, output: 130, cacheWrite: 30,
     });
+    expect(manager.getRecord(id)!.usageRecords).toEqual([first, second]);
   });
 
   it("onCompaction from runAgent increments record.compactionCount", async () => {
@@ -440,16 +467,27 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     expect(manager.getRecord(id)!.compactionCount).toBe(2);
   });
 
-  it("resume() also accumulates usage and increments compactions on the same record", async () => {
-    manager = new AgentManager();
+  it("resume() persists only new usage while keeping lifetime totals", async () => {
+    const completions: AgentRecord[] = [];
+    manager = new AgentManager((record) => completions.push(record));
 
-    // First, spawn with a session that resume can latch onto
+    const initialUsage = {
+      timestamp: 123,
+      provider: "openai-codex",
+      model: "gpt-5.4",
+      usage: {
+        input: 10,
+        output: 5,
+        cacheRead: 100,
+        cacheWrite: 1,
+        totalTokens: 116,
+        cost: { input: 0.01, output: 0.01, cacheRead: 0.01, cacheWrite: 0.01, total: 0.04 },
+      },
+    };
     const session = { ...mockSession() };
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "first",
-      session: session as any,
-      aborted: false,
-      steered: false,
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onAssistantUsage?.(initialUsage);
+      return { responseText: "first", session: session as any, aborted: false, steered: false };
     });
 
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
@@ -458,22 +496,38 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
     await manager.getRecord(id)!.promise;
 
-    // Pre-resume: lifetimeUsage from spawn was zero (mock didn't call onAssistantUsage)
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0 });
-    expect(manager.getRecord(id)!.compactionCount).toBe(0);
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 10, output: 5, cacheWrite: 1 });
+    expect(manager.getRecord(id)!.usageRecords).toEqual([initialUsage]);
+    expect(completions).toHaveLength(1);
+    completions.length = 0;
 
-    // Now resume — drive callbacks via the mocked resumeAgent
     const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    const resumedUsage = {
+      timestamp: 789,
+      provider: "openai-codex",
+      model: "gpt-5.4",
+      usage: {
+        input: 70,
+        output: 30,
+        cacheRead: 200,
+        cacheWrite: 5,
+        totalTokens: 305,
+        cost: { input: 0.07, output: 0.03, cacheRead: 0.01, cacheWrite: 0.01, total: 0.12 },
+      },
+    };
     vi.mocked(resumeMock).mockImplementation(async (_session, _prompt, opts: any) => {
-      opts.onAssistantUsage?.({ input: 70, output: 30, cacheWrite: 5 });
+      opts.onAssistantUsage?.(resumedUsage);
       opts.onCompaction?.({ reason: "overflow", tokensBefore: 999 });
       return { text: "second" };
     });
 
-    await manager.resume(id, "more");
+    const resumed = await manager.resume(id, "more");
 
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5 });
-    expect(manager.getRecord(id)!.compactionCount).toBe(1);
+    expect(resumed!.lifetimeUsage).toEqual({ input: 80, output: 35, cacheWrite: 6 });
+    expect(resumed!.usageRecords).toEqual([resumedUsage]);
+    expect(resumed!.compactionCount).toBe(1);
+    expect(resumed!.resultConsumed).toBe(true);
+    expect(completions).toEqual([resumed]);
   });
 });
 

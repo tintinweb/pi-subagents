@@ -117,6 +117,7 @@ import {
   runAgent,
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
+import type { AssistantUsageRecord } from "../src/usage.js";
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
 let lastSession: ReturnType<typeof createSession>["session"] | undefined;
@@ -477,20 +478,44 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
 // callback. The callback feeds the AgentRecord lifetime accumulator, which
 // is the source of truth for total tokens (survives compaction).
 describe("agent-runner usage callback wiring", () => {
-  function emitMessageEnd(listeners: Array<(e: any) => void>, usage: any) {
-    const event = { type: "message_end", message: { role: "assistant", usage } };
+  function emitMessageEnd(listeners: Array<(e: any) => void>, usage: any, timestamp = 123) {
+    const event = {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        provider: "openai-codex",
+        model: "gpt-5.4",
+        timestamp,
+        usage,
+      },
+    };
     for (const l of listeners) l(event);
   }
 
-  it("runAgent forwards full usage from message_end events", async () => {
+  it("runAgent forwards structured usage records from message_end events", async () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    const seen: Array<{ input: number; output: number; cacheWrite: number }> = [];
+    const firstUsage = {
+      input: 100,
+      output: 50,
+      cacheRead: 500,
+      cacheWrite: 10,
+      totalTokens: 660,
+      cost: { input: 0.1, output: 0.2, cacheRead: 0.03, cacheWrite: 0.04, total: 0.37 },
+    };
+    const secondUsage = {
+      input: 200,
+      output: 80,
+      cacheRead: 900,
+      cacheWrite: 20,
+      totalTokens: 1200,
+      cost: { input: 0.2, output: 0.3, cacheRead: 0.05, cacheWrite: 0.06, total: 0.61 },
+    };
+    const seen: AssistantUsageRecord[] = [];
     session.prompt = vi.fn(async () => {
-      // Two assistant messages over the run
-      emitMessageEnd(listeners, { input: 100, output: 50, cacheWrite: 10 });
-      emitMessageEnd(listeners, { input: 200, output: 80, cacheWrite: 20 });
+      emitMessageEnd(listeners, firstUsage, 123);
+      emitMessageEnd(listeners, secondUsage, 456);
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });
 
@@ -500,8 +525,8 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     expect(seen).toEqual([
-      { input: 100, output: 50, cacheWrite: 10 },
-      { input: 200, output: 80, cacheWrite: 20 },
+      { timestamp: 123, provider: "openai-codex", model: "gpt-5.4", usage: firstUsage },
+      { timestamp: 456, provider: "openai-codex", model: "gpt-5.4", usage: secondUsage },
     ]);
   });
 
@@ -509,9 +534,9 @@ describe("agent-runner usage callback wiring", () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    const seen: any[] = [];
+    const seen: AssistantUsageRecord[] = [];
     session.prompt = vi.fn(async () => {
-      emitMessageEnd(listeners, { input: 50 }); // output, cacheWrite missing
+      emitMessageEnd(listeners, { input: 50 });
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });
 
@@ -520,7 +545,19 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0 }]);
+    expect(seen).toEqual([{
+      timestamp: 123,
+      provider: "openai-codex",
+      model: "gpt-5.4",
+      usage: {
+        input: 50,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 50,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    }]);
   });
 
   it("runAgent skips the callback when message_end has no usage field", async () => {
@@ -540,7 +577,7 @@ describe("agent-runner usage callback wiring", () => {
 
   it("resumeAgent forwards usage on message_end the same way", async () => {
     const { session, listeners } = createSession("RESUMED");
-    const seen: any[] = [];
+    const seen: AssistantUsageRecord[] = [];
 
     session.prompt = vi.fn(async () => {
       emitMessageEnd(listeners, { input: 10, output: 20, cacheWrite: 5 });
@@ -551,7 +588,19 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5 }]);
+    expect(seen).toEqual([{
+      timestamp: 123,
+      provider: "openai-codex",
+      model: "gpt-5.4",
+      usage: {
+        input: 10,
+        output: 20,
+        cacheRead: 0,
+        cacheWrite: 5,
+        totalTokens: 35,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    }]);
   });
 
   it("forwards compaction_end events to onCompaction (only when not aborted)", async () => {

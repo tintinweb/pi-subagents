@@ -1,5 +1,54 @@
 /** usage.ts — Token usage: shapes, accumulator operators, session-stats readers. */
 
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai";
+
+/** A finalized assistant message's complete, attribution-ready usage metadata. */
+export interface AssistantUsageRecord {
+  timestamp: number;
+  provider: string;
+  model: string;
+  usage: Usage;
+}
+
+/**
+ * Copy and normalize a finalized assistant message's usage for persistence.
+ * The fallbacks keep custom providers with partial usage payloads observable.
+ */
+export function createAssistantUsageRecord(message: AssistantMessage): AssistantUsageRecord {
+  const source = message.usage as Partial<Usage> | undefined;
+  const input = typeof source?.input === "number" ? source.input : 0;
+  const output = typeof source?.output === "number" ? source.output : 0;
+  const cacheRead = typeof source?.cacheRead === "number" ? source.cacheRead : 0;
+  const cacheWrite = typeof source?.cacheWrite === "number" ? source.cacheWrite : 0;
+  const costSource = source?.cost as Partial<Usage["cost"]> | undefined;
+  const cost = {
+    input: typeof costSource?.input === "number" ? costSource.input : 0,
+    output: typeof costSource?.output === "number" ? costSource.output : 0,
+    cacheRead: typeof costSource?.cacheRead === "number" ? costSource.cacheRead : 0,
+    cacheWrite: typeof costSource?.cacheWrite === "number" ? costSource.cacheWrite : 0,
+    total: typeof costSource?.total === "number"
+      ? costSource.total
+      : (costSource?.input ?? 0) + (costSource?.output ?? 0) + (costSource?.cacheRead ?? 0) + (costSource?.cacheWrite ?? 0),
+  };
+
+  return {
+    timestamp: typeof message.timestamp === "number" ? message.timestamp : Date.now(),
+    provider: message.provider ?? "unknown",
+    model: message.model ?? "unknown",
+    usage: {
+      ...source,
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      totalTokens: typeof source?.totalTokens === "number"
+        ? source.totalTokens
+        : input + output + cacheRead + cacheWrite,
+      cost,
+    },
+  };
+}
+
 /**
  * Lifetime usage components, accumulated via `message_end` events. Survives
  * compaction (which replaces session.state.messages and would reset any
