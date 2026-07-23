@@ -1,7 +1,26 @@
 import { describe, expect, it } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
+import { type AgentActivity, AgentWidget, buildInvocationTags, fgPreservingNestedStyles, formatSessionTokens, prepareModelIdForDisplay } from "../src/ui/agent-widget.js";
+
+describe("prepareModelIdForDisplay", () => {
+  it("keeps model IDs on one printable terminal line", () => {
+    expect(prepareModelIdForDisplay("openai\u001b[2J\n/gpt-5.6-sol")).toBe("openai /gpt-5.6-sol");
+  });
+});
+
+describe("buildInvocationTags", () => {
+  it("keeps the effective model ID with its model-dependent thinking level", () => {
+    expect(buildInvocationTags({
+      modelId: "openai-codex/gpt-5.6-sol",
+      thinking: "max",
+      maxTurns: 60,
+    })).toEqual({
+      modelId: "openai-codex/gpt-5.6-sol",
+      tags: ["thinking: max", "max turns: 60"],
+    });
+  });
+});
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
