@@ -12,10 +12,11 @@ import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { prepareConversationDisplay } from "./prepare-conversation-display.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
-/** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
-const CHROME_LINES_BASE = 6;
+/** Fixed chrome: top border + header separator + footer separator + footer + bottom border. */
+const CHROME_LINES_FIXED = 5;
 const MIN_VIEWPORT = 3;
 /** Height ceiling shared by the overlay's `maxHeight` and the viewer's internal viewport cap. */
 export const VIEWPORT_HEIGHT_PCT = 70;
@@ -135,39 +136,19 @@ export class ConversationViewer implements Component {
     const hrBot = th.fg("border", `╰${"─".repeat(width - 2)}╯`);
     const hrMid = row(th.fg("dim", "─".repeat(innerW)));
 
+    const maxRows = this.maxRows();
+    const minimumChrome = CHROME_LINES_FIXED + 1 + (this.composer ? 1 : 0);
+    if (maxRows < minimumChrome) return [];
+    const headerLines = this.headerLines(maxRows);
+
     // Header
     lines.push(hrTop);
-    const name = getDisplayName(this.record.type);
-    const modeLabel = getPromptModeLabel(this.record.type);
-    const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
-    const statusIcon = this.record.status === "running"
-      ? th.fg("accent", "●")
-      : this.record.status === "completed"
-        ? th.fg("success", "✓")
-        : this.record.status === "error"
-          ? th.fg("error", "✗")
-          : th.fg("dim", "○");
-    const duration = formatDuration(this.record.startedAt, this.record.completedAt);
-
-    const headerParts: string[] = [duration];
-    const toolUses = this.activity?.toolUses ?? this.record.toolUses;
-    if (toolUses > 0) headerParts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
-    const tokens = getLifetimeTotal(this.activity?.lifetimeUsage);
-    if (tokens > 0) {
-      const percent = getSessionContextPercent(this.activity?.session);
-      headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
-    }
-
-    lines.push(row(
-      `${statusIcon} ${th.bold(name)}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
-    ));
-    const invocationLine = this.invocationLine();
-    if (invocationLine) lines.push(row(invocationLine));
+    for (const headerLine of headerLines) lines.push(row(headerLine));
     lines.push(hrMid);
 
     // Content area — rebuild every render (live data, no cache needed)
     const contentLines = this.buildContentLines(innerW);
-    const viewportHeight = this.viewportHeight();
+    const viewportHeight = this.viewportHeight(headerLines.length, maxRows);
     const maxScroll = Math.max(0, contentLines.length - viewportHeight);
 
     if (this.autoScroll) {
@@ -261,23 +242,73 @@ export class ConversationViewer implements Component {
 
   // ---- Private ----
 
-  private viewportHeight(): number {
-    // Cap mirrors the overlay's maxHeight — otherwise the viewer would render
-    // more lines than the overlay shows and clip the footer.
-    const maxRows = Math.floor((this.tui.terminal.rows * VIEWPORT_HEIGHT_PCT) / 100);
-    return Math.max(MIN_VIEWPORT, maxRows - this.chromeLines());
+  private maxRows(): number {
+    return Math.floor((this.tui.terminal.rows * VIEWPORT_HEIGHT_PCT) / 100);
   }
 
-  private chromeLines(): number {
-    // The composer adds one row above the footer hint while it's open.
-    return CHROME_LINES_BASE + (this.invocationLine() ? 1 : 0) + (this.composer ? 1 : 0);
+  private viewportHeight(headerRows = this.headerLines(this.maxRows()).length, maxRows = this.maxRows()): number {
+    return Math.max(0, maxRows - this.chromeLines(headerRows));
   }
 
-  private invocationLine(): string | undefined {
+  private chromeLines(headerRows: number): number {
+    return CHROME_LINES_FIXED + headerRows + (this.composer ? 1 : 0);
+  }
+
+  private headerLines(maxRows: number): string[] {
+    const th = this.theme;
+    const name = prepareConversationDisplay(getDisplayName(this.record.type));
+    const description = prepareConversationDisplay(this.record.description);
+    const modeLabel = getPromptModeLabel(this.record.type);
+    const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
+    const statusIcon = this.record.status === "running" ? th.fg("accent", "●")
+      : this.record.status === "completed" ? th.fg("success", "✓")
+        : this.record.status === "error" ? th.fg("error", "✗") : th.fg("dim", "○");
+    const parts: string[] = [formatDuration(this.record.startedAt, this.record.completedAt)];
+    const toolUses = this.activity?.toolUses ?? this.record.toolUses;
+    if (toolUses > 0) parts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
+    const tokens = getLifetimeTotal(this.activity?.lifetimeUsage);
+    if (tokens > 0) parts.push(formatSessionTokens(tokens, getSessionContextPercent(this.activity?.session), th, this.record.compactionCount));
+
+    const lines: string[] = [];
+    if (name.warning) lines.push(th.fg("muted", name.warning));
+    const inlineDescription = description.warning ? "" : description.lines[0] ?? "";
+    const primaryLine = `${statusIcon} ${th.bold(name.lines[0] ?? "")}${modeTag}  ${th.fg("muted", inlineDescription)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", parts.join(" · "))}`;
+    lines.push(primaryLine);
+    for (const line of name.lines.slice(1)) lines.push(`  ${th.bold(line)}`);
+    if (description.warning) {
+      lines.push(th.fg("muted", description.warning));
+      for (const line of description.lines) lines.push(`  ${th.fg("muted", line)}`);
+    } else {
+      for (const line of description.lines.slice(1)) lines.push(`  ${th.fg("muted", line)}`);
+    }
+
     const { modelName, tags } = buildInvocationTags(this.record.invocation);
-    const parts = modelName ? [modelName, ...tags] : tags;
-    if (parts.length === 0) return undefined;
-    return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
+    const invocationParts = [modelName, ...tags]
+      .filter((part): part is string => part !== undefined)
+      .map(part => prepareConversationDisplay(part));
+    const canRenderInline = invocationParts.every(part => !part.warning && part.lines.length === 1);
+    if (canRenderInline && invocationParts.length > 0) {
+      lines.push(th.fg("dim", `  ↳ ${invocationParts.map(part => part.text).join(" · ")}`));
+    } else {
+      let firstInvocationRow = true;
+      for (const part of invocationParts) {
+        if (part.warning) lines.push(th.fg("muted", part.warning));
+        for (const line of part.lines) {
+          lines.push(th.fg("dim", `  ${firstInvocationRow ? "↳" : " "} ${line}`));
+          firstInvocationRow = false;
+        }
+      }
+    }
+
+    const roomyMinimumViewport = maxRows >= CHROME_LINES_FIXED + (this.composer ? 1 : 0) + 1 + MIN_VIEWPORT
+      ? MIN_VIEWPORT
+      : 1;
+    const headerBudget = Math.max(1, maxRows - CHROME_LINES_FIXED - (this.composer ? 1 : 0) - roomyMinimumViewport);
+    if (lines.length <= headerBudget) return lines;
+
+    const supplemental = lines.filter((line) => line !== primaryLine);
+    if (headerBudget === 1) return [primaryLine];
+    return [primaryLine, ...supplemental.slice(0, headerBudget - 2), th.fg("dim", "…")];
   }
 
   private buildContentLines(width: number): string[] {
@@ -286,6 +317,16 @@ export class ConversationViewer implements Component {
     const th = this.theme;
     const messages = this.session.messages;
     const lines: string[] = [];
+    const appendPrepared = (rawText: string, options: { maxCodePoints?: number; frame?: (line: string) => string } = {}) => {
+      const prepared = prepareConversationDisplay(rawText, options.maxCodePoints);
+      if (prepared.warning) lines.push(th.fg("muted", prepared.warning));
+      for (const preparedLine of prepared.lines) {
+        for (const wrapped of wrapTextWithAnsi(preparedLine, width)) {
+          lines.push(truncateToWidth(options.frame ? options.frame(wrapped) : wrapped, width));
+        }
+      }
+      return prepared;
+    };
 
     if (messages.length === 0) {
       lines.push(th.fg("dim", "(waiting for first message...)"));
@@ -301,9 +342,7 @@ export class ConversationViewer implements Component {
         if (!text.trim()) continue;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.fg("accent", "[User]"));
-        for (const line of wrapTextWithAnsi(text.trim(), width)) {
-          lines.push(line);
-        }
+        appendPrepared(text.trim());
       } else if (msg.role === "assistant") {
         const textParts: string[] = [];
         const toolCalls: string[] = [];
@@ -315,35 +354,19 @@ export class ConversationViewer implements Component {
         }
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.bold("[Assistant]"));
-        if (textParts.length > 0) {
-          for (const line of wrapTextWithAnsi(textParts.join("\n").trim(), width)) {
-            lines.push(line);
-          }
-        }
-        for (const name of toolCalls) {
-          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
-        }
+        if (textParts.length > 0) appendPrepared(textParts.join("\n").trim());
+        for (const name of toolCalls) appendPrepared(String(name), { frame: (line) => th.fg("muted", `  [Tool: ${line}]`) });
       } else if (msg.role === "toolResult") {
-        const text = extractText(msg.content);
-        const truncated = text.length > 500 ? text.slice(0, 500) + "... (truncated)" : text;
-        if (!truncated.trim()) continue;
+        const rawText = extractText(msg.content);
+        if (!rawText.trim()) continue;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.fg("dim", "[Result]"));
-        for (const line of wrapTextWithAnsi(truncated.trim(), width)) {
-          lines.push(th.fg("dim", line));
-        }
+        appendPrepared(rawText.trim(), { maxCodePoints: 500, frame: (line) => th.fg("dim", line) });
       } else if ((msg as any).role === "bashExecution") {
         const bash = msg as any;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(truncateToWidth(th.fg("muted", `  $ ${bash.command}`), width));
-        if (bash.output?.trim()) {
-          const out = bash.output.length > 500
-            ? bash.output.slice(0, 500) + "... (truncated)"
-            : bash.output;
-          for (const line of wrapTextWithAnsi(out.trim(), width)) {
-            lines.push(th.fg("dim", line));
-          }
-        }
+        appendPrepared(String(bash.command), { frame: (line) => th.fg("muted", `  $ ${line}`) });
+        if (bash.output?.trim()) appendPrepared(String(bash.output).trim(), { maxCodePoints: 500, frame: (line) => th.fg("dim", line) });
       } else {
         continue;
       }
@@ -352,9 +375,10 @@ export class ConversationViewer implements Component {
 
     // Streaming indicator for running agents
     if (this.record.status === "running" && this.activity) {
-      const act = describeActivity(this.activity.activeTools, this.activity.responseText);
       lines.push("");
-      lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
+      appendPrepared(describeActivity(this.activity.activeTools, this.activity.responseText), {
+        frame: (line) => th.fg("accent", "▍ ") + th.fg("dim", line),
+      });
     }
 
     return lines.map(l => truncateToWidth(l, width));

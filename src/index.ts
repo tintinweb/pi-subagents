@@ -48,6 +48,7 @@ import {
   type UICtx,
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
+import { prepareConversationDisplay } from "./ui/prepare-conversation-display.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
@@ -88,6 +89,13 @@ function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
         reject(error);
       },
     );
+  });
+}
+
+export function prepareInvocationTagLines(rawTags: string[]): string[] {
+  return rawTags.flatMap((tag) => {
+    const prepared = prepareConversationDisplay(tag);
+    return [...(prepared.warning ? [prepared.warning] : []), ...prepared.lines];
   });
 }
 
@@ -1158,7 +1166,8 @@ Terse command-style prompts produce shallow, generic work.
       };
       // Tool-result render shows the mode label too; viewer's header already does.
       const modeLabel = getPromptModeLabel(subagentType);
-      const { tags: invocationTags } = buildInvocationTags(agentInvocation);
+      const { tags: rawInvocationTags } = buildInvocationTags(agentInvocation);
+      const invocationTags = prepareInvocationTagLines(rawInvocationTags);
       const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
       const detailBase = {
         displayName,

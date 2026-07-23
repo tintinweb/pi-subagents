@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { renderRunningAgentStatus } from "../src/index.js";
+import { prepareInvocationTagLines, renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
+import {
+  type AgentActivity,
+  AgentWidget,
+  buildInvocationTags,
+  describeActivity,
+  fgPreservingNestedStyles,
+  formatSessionTokens,
+} from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -39,6 +46,39 @@ describe("formatSessionTokens", () => {
     expect(fgPreservingNestedStyles(ansiTheme, "accent", tokenText)).toBe(
       "\u001b[35m1.2k token (\u001b[33m70%\u001b[39m\u001b[35m)\u001b[39m",
     );
+  });
+});
+
+describe("describeActivity", () => {
+  it("truncates response activity by Unicode code points without splitting an emoji", () => {
+    const activity = describeActivity(new Map(), `${"a".repeat(59)}😀z`);
+
+    expect(activity).toBe(`${"a".repeat(59)}😀…`);
+    expect(activity).not.toContain("[binary content]");
+  });
+});
+
+describe("buildInvocationTags", () => {
+  it("keeps invocation metadata raw until a display boundary", () => {
+    expect(buildInvocationTags({
+      modelName: "Model\u001b[H\nVariant",
+      thinking: "high\u001b[2J\nforged" as any,
+      isolated: true,
+    })).toEqual({
+      modelName: "Model\u001b[H\nVariant",
+      tags: ["thinking: high\u001b[2J\nforged", "isolated"],
+    });
+  });
+});
+
+describe("prepareInvocationTagLines", () => {
+  it("gates raw invocation tags at the custom tool-result display boundary", () => {
+    expect(prepareInvocationTagLines(["thinking: high\u001b[2J\nforged", "isolated"])).toEqual([
+      "[unsafe terminal content escaped]",
+      "thinking: high\\u{1B}[2J",
+      "forged",
+      "isolated",
+    ]);
   });
 });
 

@@ -28,6 +28,7 @@
   "dependencies": {
     "@sinclair/typebox": "^0.34.49",
     "croner": "^10.0.1",
+    "istextorbinary": "^9.5.0",
     "nanoid": "^5.0.0"
   },
   "scripts": {
