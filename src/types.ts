@@ -148,8 +148,8 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
-  modelName?: string;
+  /** Effective provider/model ID used by this run. */
+  modelId?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
   isolated?: boolean;
