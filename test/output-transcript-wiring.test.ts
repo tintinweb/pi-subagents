@@ -73,7 +73,12 @@ describe("output_transcript agent wiring", () => {
     process.chdir(cwd);
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
       await Promise.resolve();
-      const session = { messages: [], subscribe: vi.fn(() => vi.fn()), dispose: vi.fn() } as any;
+      const session = {
+        messages: [],
+        subscribe: vi.fn(() => vi.fn()),
+        extensionRunner: { emit: vi.fn().mockResolvedValue(undefined) },
+        dispose: vi.fn(),
+      } as any;
       options.onSessionCreated?.(session);
       return { responseText: "done", session, aborted: false, steered: false };
     });

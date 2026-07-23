@@ -19,7 +19,10 @@ import { runAgent } from "../src/agent-runner.js";
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
 
-const mockSession = () => ({ dispose: vi.fn() } as any);
+const mockSession = () => ({
+  extensionRunner: { emit: vi.fn().mockResolvedValue(undefined) },
+  dispose: vi.fn(),
+} as any);
 
 const resolvedRun = () =>
   vi.mocked(runAgent).mockResolvedValue({
@@ -32,9 +35,7 @@ const resolvedRun = () =>
 describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)", () => {
   let manager: AgentManager;
 
-  afterEach(() => {
-    manager?.dispose();
-  });
+  afterEach(() => manager?.dispose());
 
   it("reproduces bug: onComplete fires with resultConsumed=false when set after await", async () => {
     let seenConsumed: boolean | undefined;
@@ -182,9 +183,7 @@ describe("AgentManager — spawnAndWait onSpawned + foreground output file wirin
 describe("AgentManager — completion callbacks", () => {
   let manager: AgentManager;
 
-  afterEach(() => {
-    manager?.dispose();
-  });
+  afterEach(() => manager?.dispose());
 
   it("does not let onComplete errors turn a completed agent into a failed run", async () => {
     manager = new AgentManager(() => {
@@ -205,9 +204,7 @@ describe("AgentManager — completion callbacks", () => {
 describe("AgentManager — cleanup timer", () => {
   let manager: AgentManager;
 
-  afterEach(() => {
-    manager?.dispose();
-  });
+  afterEach(() => manager?.dispose());
 
   it("does not keep the process alive on its own", () => {
     manager = new AgentManager();
@@ -216,12 +213,104 @@ describe("AgentManager — cleanup timer", () => {
   });
 });
 
+describe("AgentManager — child session shutdown", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("awaits session_shutdown before disposing a child session", async () => {
+    const events: string[] = [];
+    let releaseShutdown!: () => void;
+    const shutdownGate = new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    });
+    const session = {
+      extensionRunner: {
+        emit: vi.fn(async () => {
+          events.push("shutdown:start");
+          await shutdownGate;
+          events.push("shutdown:end");
+        }),
+      },
+      dispose: vi.fn(() => events.push("dispose")),
+    };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: session as any,
+      aborted: false,
+      steered: false,
+    });
+    manager = new AgentManager();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    const disposing = manager.dispose();
+    await vi.waitFor(() => expect(session.extensionRunner.emit).toHaveBeenCalledOnce());
+    expect(session.dispose).not.toHaveBeenCalled();
+
+    releaseShutdown();
+    await disposing;
+
+    expect(events).toEqual(["shutdown:start", "shutdown:end", "dispose"]);
+  });
+
+  it("logs a runner emission failure after disposing every child session", async () => {
+    const shutdownError = new Error("bridge close failed");
+    const failedSession = {
+      extensionRunner: { emit: vi.fn().mockRejectedValue(shutdownError) },
+      dispose: vi.fn(),
+    };
+    const healthySession = mockSession();
+    vi.mocked(runAgent)
+      .mockResolvedValueOnce({
+        responseText: "failed runner",
+        session: failedSession as any,
+        aborted: false,
+        steered: false,
+      })
+      .mockResolvedValueOnce({
+        responseText: "healthy runner",
+        session: healthySession,
+        aborted: false,
+        steered: false,
+      });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    manager = new AgentManager();
+
+    const failedId = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "failed runner",
+      isBackground: true,
+    });
+    const healthyId = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "healthy runner",
+      isBackground: true,
+    });
+    await Promise.all([
+      manager.getRecord(failedId)!.promise,
+      manager.getRecord(healthyId)!.promise,
+    ]);
+
+    await manager.dispose();
+
+    expect(failedSession.dispose).toHaveBeenCalledOnce();
+    expect(healthySession.extensionRunner.emit).toHaveBeenCalledOnce();
+    expect(healthySession.dispose).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      "[pi-subagents] Failed to shut down 1 child agent session(s):",
+      [shutdownError],
+    );
+    warn.mockRestore();
+  });
+});
+
 describe("AgentManager — Bug 3 clearCompleted", () => {
   let manager: AgentManager;
 
-  afterEach(() => {
-    manager?.dispose();
-  });
+  afterEach(() => manager?.dispose());
 
   it("clearCompleted removes completed records", async () => {
     manager = new AgentManager();
@@ -234,7 +323,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     await manager.getRecord(id)!.promise;
 
     expect(manager.listAgents()).toHaveLength(1);
-    manager.clearCompleted();
+    await manager.clearCompleted();
     expect(manager.listAgents()).toHaveLength(0);
   });
 
@@ -260,7 +349,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     expect(manager.getRecord(id1)!.status).toBe("running");
     expect(manager.getRecord(id2)!.status).toBe("queued");
 
-    manager.clearCompleted();
+    await manager.clearCompleted();
 
     // Both should still be present
     expect(manager.getRecord(id1)).toBeDefined();
@@ -271,10 +360,17 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager.abort(id2);
   });
 
-  it("clearCompleted calls dispose on sessions of removed records", async () => {
+  it("clearCompleted shuts down extensions before disposing removed sessions", async () => {
     manager = new AgentManager();
-    const disposeSpy = vi.fn();
-    const sess = { dispose: disposeSpy };
+    const events: string[] = [];
+    const sess = {
+      extensionRunner: {
+        emit: vi.fn(async () => {
+          events.push("shutdown");
+        }),
+      },
+      dispose: vi.fn(() => events.push("dispose")),
+    };
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
       session: sess as any,
@@ -288,9 +384,13 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     });
     await manager.getRecord(id)!.promise;
 
-    manager.clearCompleted();
+    await manager.clearCompleted();
 
-    expect(disposeSpy).toHaveBeenCalledOnce();
+    expect(sess.extensionRunner.emit).toHaveBeenCalledWith({
+      type: "session_shutdown",
+      reason: "quit",
+    });
+    expect(events).toEqual(["shutdown", "dispose"]);
   });
 
   it("clearCompleted removes error and stopped records", async () => {
@@ -304,7 +404,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     await manager.getRecord(id)!.promise;
     expect(manager.getRecord(id)!.status).toBe("error");
 
-    manager.clearCompleted();
+    await manager.clearCompleted();
     expect(manager.getRecord(id)).toBeUndefined();
   });
 
@@ -320,7 +420,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     expect(manager.getRecord(id)!.status).toBe("completed");
     expect(manager.getRecord(id)!.resultConsumed).toBeFalsy();
 
-    manager.clearCompleted(true);
+    await manager.clearCompleted(true);
     expect(manager.getRecord(id)).toBeDefined();
   });
 
@@ -336,7 +436,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     await record.promise;
     record.resultConsumed = true;
 
-    manager.clearCompleted(true);
+    await manager.clearCompleted(true);
     expect(manager.getRecord(id)).toBeUndefined();
   });
 
@@ -355,7 +455,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     // Error records with unread results are also preserved — the LLM should
     // be able to read the error message via get_subagent_result before the
     // record is evicted.
-    manager.clearCompleted(true);
+    await manager.clearCompleted(true);
     expect(manager.getRecord(id)).toBeDefined();
   });
 });
@@ -365,9 +465,7 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
 describe("AgentManager — lifetime usage + compaction count are eagerly initialized", () => {
   let manager: AgentManager;
 
-  afterEach(() => {
-    manager?.dispose();
-  });
+  afterEach(() => manager?.dispose());
 
   it("spawn initializes lifetimeUsage to zeros and compactionCount to 0", () => {
     manager = new AgentManager();
@@ -483,9 +581,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
 describe("AgentManager — isolation: worktree fails loud, no silent fallback", () => {
   let manager: AgentManager;
 
-  afterEach(() => {
-    manager?.dispose();
-  });
+  afterEach(() => manager?.dispose());
 
   it("spawn() throws when createWorktree returns undefined; no orphan record left behind", async () => {
     const { createWorktree } = await import("../src/worktree.js");
@@ -760,7 +856,7 @@ describe("AgentManager — steer()", () => {
     });
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
     // Simulate the session becoming ready.
-    captured?.({ steer, dispose: vi.fn() });
+    captured?.({ ...mockSession(), steer });
 
     expect(manager.steer(id, "go left")).toBe(true);
     expect(steer).toHaveBeenCalledWith("go left");
