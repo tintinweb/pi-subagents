@@ -138,6 +138,17 @@ describe("FleetList navigation", () => {
     expect(h.render()).toEqual([]);
   });
 
+  it("keeps the roster hidden until selection is active", () => {
+    const h = harness([makeRecord()]);
+    expect(h.render()).toEqual([]);
+
+    h.press(DOWN);
+    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+
+    h.press(ESC);
+    expect(h.render()).toEqual([]);
+  });
+
   it("activates on ↓ at an empty prompt, consuming the key", () => {
     const h = harness([makeRecord()]);
     const res = h.press(DOWN);
@@ -155,6 +166,7 @@ describe("FleetList navigation", () => {
     const h = harness([makeRecord()]);
     h.setEditorText("hello");
     expect(h.press(DOWN)).toBeUndefined();
+    expect(h.render()).toEqual([]);
   });
 
   it("ignores key-release events so one tap moves exactly one row", () => {
@@ -190,22 +202,21 @@ describe("FleetList navigation", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN); // activate, index 0
     expect(h.press(UP)).toEqual({ consume: true });
-    // back to inactive hint
-    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    expect(h.render()).toEqual([]);
   });
 
   it("Esc deactivates", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN);
     expect(h.press(ESC)).toEqual({ consume: true });
-    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    expect(h.render()).toEqual([]);
   });
 
   it("passes non-nav keys through and cancels navigation", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN);
     expect(h.press(RIGHT)).toBeUndefined();
-    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    expect(h.render()).toEqual([]);
   });
 
   it("ignores all input while disabled and hides the widget", () => {
@@ -271,11 +282,11 @@ describe("FleetList vs other focused components (#123)", () => {
     focusInHarness(h, realEditor());
     expect(h.press(DOWN)).toEqual({ consume: true }); // activate at the prompt
     focusInHarness(h, { kind: "selector" });          // a dialog takes focus
+    expect(h.render()).toEqual([]);
     expect(h.press(DOWN)).toBeUndefined();
     expect(h.press(ENTER)).toBeUndefined();
     expect(h.press(ESC)).toBeUndefined();
-    // and the list dropped back to its inactive hint
-    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    expect(h.render()).toEqual([]);
   });
 
   it("still activates when the prompt editor has focus", () => {
@@ -294,9 +305,10 @@ describe("FleetList vs other focused components (#123)", () => {
 describe("FleetList rendering", () => {
   it("renders main + agent rows with markers, type, description and right-aligned stats", () => {
     const h = harness([makeRecord({ description: "Sleep then report 1" })]);
+    h.press(DOWN);
     const lines = h.render(120);
     // hint + blank + main + one agent
-    expect(lines[0]).toContain("← for agents");
+    expect(lines[0]).toContain("enter view");
     expect(lines.find(l => l.includes("main"))).toContain("●"); // main selected by default
     const agentLine = lines.find(l => l.includes("Sleep then report 1"))!;
     expect(agentLine).toContain("○");
@@ -310,7 +322,9 @@ describe("FleetList rendering", () => {
       makeRecord({ id: "new", description: "newest", startedAt: 2000 }),
       makeRecord({ id: "old", description: "oldest", startedAt: 1000 }),
     ];
-    const lines = harness(agents).render();
+    const h = harness(agents);
+    h.press(DOWN);
+    const lines = h.render();
     const oldIdx = lines.findIndex(l => l.includes("oldest"));
     const newIdx = lines.findIndex(l => l.includes("newest"));
     expect(oldIdx).toBeGreaterThanOrEqual(0);
@@ -322,7 +336,9 @@ describe("FleetList rendering", () => {
       makeRecord({ id: "live", description: "running one" }),
       makeRecord({ id: "pending", description: "queued one", status: "queued", session: undefined }),
     ];
-    const lines = harness(agents).render();
+    const h = harness(agents);
+    h.press(DOWN);
+    const lines = h.render();
     expect(lines.some(l => l.includes("running one"))).toBe(true);
     expect(lines.some(l => l.includes("queued one"))).toBe(false);
   });
@@ -331,6 +347,7 @@ describe("FleetList rendering", () => {
     const agents = Array.from({ length: 8 }, (_, i) =>
       makeRecord({ id: `a${i}`, description: `report ${i}` }));
     const h = harness(agents);
+    h.press(DOWN);
     const lines = h.render(120);
     // 8 agents, cap 5 visible → "↓ 3 more"
     expect(lines.some(l => l.includes("↓ 3 more"))).toBe(true);
@@ -366,7 +383,7 @@ describe("FleetList overlay lifecycle", () => {
     h.press(DOWN); // active, index 0 (main)
     h.press(ENTER);
     expect(h.overlayOpened()).toBe(false); // never opened an overlay
-    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
+    expect(h.render()).toEqual([]);
   });
 
   it("keeps the cursor on the viewed agent after closing, even if the list reordered", async () => {
@@ -405,7 +422,7 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.manager.steer).toHaveBeenCalledWith("live", "go left");
   });
 
-  it("does NOT auto-close when the viewed agent finishes (final output stays readable)", () => {
+  it("does NOT auto-close when the viewed agent finishes (final output stays readable)", async () => {
     const agents = [makeRecord({ id: "live", description: "the one" })];
     const h = harness(agents);
     h.press(DOWN); // active (main)
@@ -415,14 +432,22 @@ describe("FleetList overlay lifecycle", () => {
     // The agent finishes, well past the linger window...
     agents[0] = makeRecord({ id: "live", description: "the one", status: "completed", completedAt: Date.now() - 60_000 });
     h.fleet.onAgentFinished("live");
-    expect(h.overlayClosed()).toBe(false);                          // viewer stays open
-    expect(h.render().some(l => l.includes("the one"))).toBe(true); // and stays listed while viewed
+    expect(h.overlayClosed()).toBe(false); // viewer stays open
+    expect(h.render()).toEqual([]);        // roster stays hidden while it cannot be selected
+
+    await h.closeOverlay();
+    expect(h.render()).toEqual([]);
   });
 
   it("lingers a finished agent in the list, then drops it after the window", () => {
     const recent = makeRecord({ id: "r", description: "recent done", status: "completed", completedAt: Date.now() });
-    expect(harness([recent]).render().some(l => l.includes("recent done"))).toBe(true);
+    const recentHarness = harness([recent]);
+    recentHarness.press(DOWN);
+    expect(recentHarness.render().some(l => l.includes("recent done"))).toBe(true);
+
     const old = makeRecord({ id: "o", description: "old done", status: "completed", completedAt: Date.now() - 60_000 });
-    expect(harness([old]).render().some(l => l.includes("old done"))).toBe(false);
+    const oldHarness = harness([old]);
+    oldHarness.press(DOWN);
+    expect(oldHarness.render().some(l => l.includes("old done"))).toBe(false);
   });
 });
