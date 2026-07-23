@@ -75,19 +75,78 @@ function deferredRuns() {
   return resolvers;
 }
 
-async function spawnBackground(tools: Map<string, any>): Promise<{ id: string; queued: boolean }> {
+async function spawnBackground(
+  tools: Map<string, any>,
+  executionCtx = ctx(),
+  description = "queued-wait test agent",
+): Promise<{ id: string; queued: boolean }> {
   const r = await tools.get("Agent").execute(
     "tc-spawn",
-    { prompt: "go", description: "queued-wait test agent", subagent_type: "general-purpose", run_in_background: true },
+    { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true },
     undefined,
     undefined,
-    ctx(),
+    executionCtx,
   );
   const id = /Agent ID: (\S+)/.exec(textOf(r))![1];
   return { id, queued: textOf(r).includes("queued in background") };
 }
 
 describe("get_subagent_result wait:true on a queued agent", () => {
+  it("starts visible activity elapsed time when a queued agent begins running", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const resolvers = deferredRuns();
+
+    try {
+      let widgetFactory: any;
+      const ui = {
+        setStatus: vi.fn(),
+        setWidget: vi.fn((_key: string, content: any) => {
+          if (content) widgetFactory = content;
+        }),
+        notify: vi.fn(),
+        onTerminalInput: vi.fn(() => vi.fn()),
+      };
+      await lifecycle.get("tool_execution_start")?.({}, { ...ctx(), hasUI: true, ui });
+      expect(ui.onTerminalInput).toHaveBeenCalledOnce();
+
+      const executionCtx = { ...ctx(), hasUI: true, ui };
+      let queuedId: string | undefined;
+      let queuedDescription: string | undefined;
+      for (let i = 0; i < 10 && !queuedId; i++) {
+        const description = `queued-elapsed-${i}`;
+        const { id, queued } = await spawnBackground(tools, executionCtx, description);
+        if (queued) {
+          queuedId = id;
+          queuedDescription = description;
+        }
+      }
+      expect(queuedId, "expected to hit the concurrency limit within 10 spawns").toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      resolvers.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(widgetFactory, JSON.stringify({
+        status: ui.setStatus.mock.calls,
+        widget: ui.setWidget.mock.calls.map((call: any[]) => [call[0], typeof call[1]]),
+      })).toBeTypeOf("function");
+      const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+      const lines = widgetFactory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render();
+      const queuedAgentHeader = lines.findIndex((line: string) => line.includes(queuedDescription));
+      expect(queuedAgentHeader).toBeGreaterThanOrEqual(0);
+      expect(lines[queuedAgentHeader + 1]).toContain("thinking… · 0.0s");
+    } finally {
+      while (resolvers.length > 0) resolvers.shift()!();
+      await vi.advanceTimersByTimeAsync(0);
+      await lifecycle.get("session_shutdown")?.();
+      vi.useRealTimers();
+    }
+  });
+
   it("waits through queue start and returns the result (no 'still running')", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);

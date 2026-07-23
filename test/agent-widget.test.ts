@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
@@ -57,6 +57,10 @@ describe("renderRunningAgentStatus", () => {
 describe("AgentWidget", () => {
   const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   function makeActivity(): AgentActivity {
     return {
       activeTools: new Map(),
@@ -64,6 +68,8 @@ describe("AgentWidget", () => {
       responseText: "",
       turnCount: 1,
       lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      currentActivityText: "thinking…",
+      currentActivityStartedAt: Date.now(),
     };
   }
 
@@ -99,6 +105,36 @@ describe("AgentWidget", () => {
       .render()
       .join("\n");
   }
+
+  it("shows elapsed time on the current visible activity line and resets when it changes", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const activity = makeActivity();
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    const widget = new AgentWidget(
+      manager as any,
+      new Map([["background", activity]]),
+      () => "background",
+    );
+    let factory: any;
+    widget.setUICtx({
+      setStatus: () => {},
+      setWidget: (_key, content) => { factory = content; },
+    });
+    widget.update();
+
+    vi.setSystemTime(23_500);
+    let lines = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render().join("\n");
+    expect(lines).toContain("⎿  thinking… · 13.5s");
+
+    activity.activeTools.set("tool-1", "bash");
+    lines = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render().join("\n");
+    expect(lines).toContain("⎿  running command… · 0.0s");
+
+    vi.setSystemTime(26_000);
+    lines = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render().join("\n");
+    expect(lines).toContain("⎿  running command… · 2.5s");
+  });
 
   // "all" (and the no-policy constructor default) shows every agent.
   it("shows foreground agents in 'all' mode (and by default)", () => {
