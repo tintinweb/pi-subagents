@@ -83,7 +83,7 @@ describe("ConversationViewer", () => {
       mockSession([]),
       mockRecord({
         invocation: {
-          modelId: "openai-codex/gpt-5.6-sol",
+          modelName: "gpt-5.6 sol",
           thinking: "max",
           maxTurns: 60,
         },
@@ -94,7 +94,7 @@ describe("ConversationViewer", () => {
     );
 
     const rendered = viewer.render(120).map(line => stripVTControlCharacters(line)).join("\n");
-    expect(rendered).toContain("openai-codex/gpt-5.6-sol · thinking: max · max turns: 60");
+    expect(rendered).toContain("gpt-5.6 sol · thinking: max · max turns: 60");
   });
 
   describe("render width safety", () => {

@@ -148,8 +148,8 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Effective provider/model ID used by this run. */
-  modelId?: string;
+  /** Effective model display name used by this run. */
+  modelName?: string;
   thinking?: ThinkingLevel;
   maxTurns?: number;
   isolated?: boolean;
