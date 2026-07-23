@@ -77,8 +77,8 @@ export interface AgentDetails {
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
-  /** Effective provider/model ID used by this run. */
-  modelId?: string;
+  /** Effective model display name used by this run. */
+  modelName?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
   tags?: string[];
   /** Current turn count. */
@@ -161,16 +161,16 @@ export function getPromptModeLabel(type: SubagentType): string | undefined {
   return config.promptMode === "append" ? "twin" : undefined;
 }
 
-/** Make a model ID safe for single-line terminal display. */
-export function prepareModelIdForDisplay(modelId: string | undefined): string | undefined {
-  if (!modelId) return undefined;
-  return stripVTControlCharacters(modelId).replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
+/** Make a model name safe for single-line terminal display. */
+export function prepareModelNameForDisplay(modelName: string | undefined): string | undefined {
+  if (!modelName) return undefined;
+  return stripVTControlCharacters(modelName).replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim();
 }
 
 /** Mode label is not included — callers add it where they want it. */
 export function buildInvocationTags(
   invocation: AgentInvocation | undefined,
-): { modelId?: string; tags: string[] } {
+): { modelName?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
   if (invocation.thinking) tags.push(`thinking: ${invocation.thinking}`);
@@ -179,7 +179,7 @@ export function buildInvocationTags(
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground) tags.push("background");
   if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
-  return { modelId: prepareModelIdForDisplay(invocation.modelId), tags };
+  return { modelName: prepareModelNameForDisplay(invocation.modelName), tags };
 }
 
 /** Truncate text to a single line, max `len` chars. */

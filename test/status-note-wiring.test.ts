@@ -72,7 +72,7 @@ function modelCtx() {
 describe("Agent tool model display", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("shows the effective inherited model ID in collapsed and expanded results", async () => {
+  it("shows the effective inherited model with thinking in collapsed and expanded results", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
       session: { dispose: vi.fn() } as never,
@@ -100,8 +100,10 @@ describe("Agent tool model display", () => {
       fg: (_color: string, text: string) => text,
     }).render(120).join("\n");
 
-    expect(collapsed).toContain("openai-codex/gpt-5.6-sol");
-    expect(expanded).toContain("openai-codex/gpt-5.6-sol");
+    expect(collapsed).toContain("gpt-5.6 sol");
+    expect(expanded).toContain("gpt-5.6 sol");
+    expect(collapsed).toContain("thinking: medium");
+    expect(expanded).toContain("thinking: medium");
   });
 });
 

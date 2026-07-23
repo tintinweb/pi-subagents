@@ -43,7 +43,7 @@ import {
   formatTurns,
   getDisplayName,
   getPromptModeLabel,
-  prepareModelIdForDisplay,
+  prepareModelNameForDisplay,
   SPINNER,
   type Theme,
   type UICtx,
@@ -222,7 +222,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
 
 /** Build AgentDetails from a base + record-specific fields. */
 function buildDetails(
-  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelId" | "tags">,
+  base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
   record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage: LifetimeUsage },
   activity?: AgentActivity,
   overrides?: Partial<AgentDetails>,
@@ -988,11 +988,11 @@ Terse command-style prompts produce shallow, generic work.
         return new Text(text, 0, 0);
       }
 
-      // Helper: build "provider/model · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
+      // Helper: build "model · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
       const stats = (d: AgentDetails) => {
         const parts: string[] = [];
-        const modelId = prepareModelIdForDisplay(d.modelId);
-        if (modelId) parts.push(modelId);
+        const modelName = prepareModelNameForDisplay(d.modelName);
+        if (modelName) parts.push(modelName);
         if (d.tags) parts.push(...d.tags);
         if (d.turnCount != null && d.turnCount > 0) {
           parts.push(formatTurns(d.turnCount, d.maxTurns));
@@ -1141,10 +1141,12 @@ Terse command-style prompts produce shallow, generic work.
         writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
 
-      const modelId = model ? `${model.provider}/${model.id}` : undefined;
+      const modelName = model
+        ? (model.name ?? model.id).replace(/^Claude\s+/i, "").toLowerCase()
+        : undefined;
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
-        modelId,
+        modelName,
         thinking,
         // Explicit value only — the default fallback would just add noise.
         // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
@@ -1162,7 +1164,7 @@ Terse command-style prompts produce shallow, generic work.
         displayName,
         description: params.description,
         subagentType,
-        modelId,
+        modelName,
         tags: agentTags.length > 0 ? agentTags : undefined,
       };
 
