@@ -4,6 +4,7 @@
  * a string. Drives the registered `Agent` / `get_subagent_result` tools and
  * inspects the text delivered back, for a turn-limit abort and a user stop.
  */
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -58,6 +59,48 @@ function ctx() {
 }
 
 const textOf = (r: any): string => r.content[0].text;
+
+describe("get_subagent_result rendering", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("collapses completed reports and expands the unchanged full payload", async () => {
+    initTheme("dark");
+    const payload = "first report line\nsecond report line\nthird report line";
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: payload,
+      session: { dispose: vi.fn() } as any,
+      aborted: false,
+      steered: false,
+    });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const spawn = await tools.get("Agent").execute(
+      "tc-result-render",
+      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: true },
+      undefined, undefined, ctx(),
+    );
+    const id = textOf(spawn).match(/Agent ID: (\S+)/)?.[1];
+    expect(id, "background spawn should surface an agent id").toBeTruthy();
+
+    const result = await tools.get("get_subagent_result").execute(
+      "tc-result-read", { agent_id: id, wait: true }, undefined, undefined, ctx(),
+    );
+    expect(textOf(result)).toContain("Status: completed");
+    expect(textOf(result)).toContain(payload);
+
+    const renderer = tools.get("get_subagent_result").renderResult;
+    const theme = { fg: (_color: string, text: string) => text };
+    const collapsed = renderer(result, { expanded: false, isPartial: false }, theme).render(120).join("\n");
+    const expanded = renderer(result, { expanded: true, isPartial: false }, theme).render(120).join("\n");
+
+    expect(collapsed).not.toContain("second report line");
+    expect(collapsed).toContain("to expand");
+    for (const line of textOf(result).split("\n")) {
+      expect(expanded).toContain(line);
+    }
+  });
+});
 
 describe("status note reaches the parent through the real handlers", () => {
   afterEach(() => vi.restoreAllMocks());

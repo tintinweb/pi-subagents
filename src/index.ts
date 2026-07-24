@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { AgentManager } from "./agent-manager.js";
@@ -1459,6 +1459,20 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
+    renderResult(result, { expanded, isPartial }, theme) {
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      const details = result.details as { status?: AgentRecord["status"] } | undefined;
+      if (expanded || isPartial || details?.status !== "completed") {
+        return new Text(text, 0, 0);
+      }
+      return new Text(
+        theme.fg("dim", "  ⎿  Result available (") +
+          keyHint("app.tools.expand", "to expand") +
+          theme.fg("dim", ")"),
+        0,
+        0,
+      );
+    },
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
       if (!record) {
@@ -1494,6 +1508,10 @@ Terse command-style prompts produce shallow, generic work.
         `Agent: ${record.id}\n` +
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
+      const details = buildDetails(
+        { displayName, description: record.description, subagentType: record.type },
+        record,
+      );
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
@@ -1517,7 +1535,7 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      return textResult(output);
+      return textResult(output, details);
     },
   }));
 
