@@ -54,6 +54,16 @@ import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
+const collapseResultByStatus: Record<AgentRecord["status"], boolean> = {
+  queued: false,
+  running: false,
+  completed: true,
+  steered: true,
+  aborted: true,
+  stopped: true,
+  error: false,
+};
+
 // ---- Shared helpers ----
 
 /** Tool execute return value for a text response. */
@@ -1455,7 +1465,8 @@ Terse command-style prompts produce shallow, generic work.
     renderResult(result, { expanded, isPartial }, theme) {
       const text = result.content[0]?.type === "text" ? result.content[0].text : "";
       const details = result.details as { status?: AgentRecord["status"] } | undefined;
-      if (expanded || isPartial || details?.status !== "completed") {
+      const status = details?.status;
+      if (expanded || isPartial || status === undefined || !collapseResultByStatus[status]) {
         return new Text(text, 0, 0);
       }
       return new Text(

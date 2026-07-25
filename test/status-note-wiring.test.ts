@@ -6,6 +6,7 @@
  */
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentRecord } from "../src/types.js";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -99,6 +100,70 @@ describe("get_subagent_result rendering", () => {
     for (const line of textOf(result).split("\n")) {
       expect(expanded).toContain(line);
     }
+  });
+
+  const rendererCases: Record<AgentRecord["status"], { collapses: boolean }> = {
+    queued: { collapses: false },
+    running: { collapses: false },
+    completed: { collapses: true },
+    steered: { collapses: true },
+    aborted: { collapses: true },
+    stopped: { collapses: true },
+    error: { collapses: false },
+  };
+  it.each(Object.entries(rendererCases))("renders %s status according to its classification", (status, { collapses }) => {
+    initTheme("dark");
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const renderer = tools.get("get_subagent_result").renderResult;
+    const payload = "first report line\nsecond report line\nthird report line";
+    const theme = { fg: (_color: string, text: string) => text };
+    const rendered = renderer(
+      { content: [{ type: "text", text: payload }], details: { status } },
+      { expanded: false, isPartial: false },
+      theme,
+    ).render(120).join("\n");
+
+    for (const line of payload.split("\n")) {
+      if (collapses) {
+        expect(rendered).not.toContain(line);
+      } else {
+        expect(rendered).toContain(line);
+      }
+    }
+    if (collapses) {
+      expect(rendered).toContain("to expand");
+    } else {
+      expect(rendered).not.toContain("to expand");
+    }
+  });
+
+  const visibleOverrides: Array<{
+    name: string;
+    details: { status: AgentRecord["status"] } | undefined;
+    options?: { expanded?: boolean; isPartial?: boolean };
+  }> = [
+    { name: "missing details", details: undefined },
+    { name: "partial render", details: { status: "completed" }, options: { isPartial: true } },
+    { name: "expanded render", details: { status: "completed" }, options: { expanded: true } },
+  ];
+  it.each(visibleOverrides)("keeps every payload line visible for $name", ({ details, options }) => {
+    initTheme("dark");
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const renderer = tools.get("get_subagent_result").renderResult;
+    const payload = "first report line\nsecond report line\nthird report line";
+    const theme = { fg: (_color: string, text: string) => text };
+    const rendered = renderer(
+      { content: [{ type: "text", text: payload }], details },
+      { expanded: false, isPartial: false, ...options },
+      theme,
+    ).render(120).join("\n");
+
+    for (const line of payload.split("\n")) {
+      expect(rendered).toContain(line);
+    }
+    expect(rendered).not.toContain("to expand");
   });
 });
 
