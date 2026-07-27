@@ -46,6 +46,7 @@ export type FleetUICtx = {
 type MainEntry = { kind: "main" };
 type AgentEntry = { kind: "agent"; record: AgentRecord };
 type FleetEntry = MainEntry | AgentEntry;
+type FleetTUI = { focusedComponent?: unknown; requestRender(force?: boolean): void };
 
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
@@ -76,8 +77,9 @@ function rightAlign(left: string, right: string, width: number): string {
 
 export class FleetList {
   private ui: FleetUICtx | undefined;
-  private tui: any | undefined;
+  private tui: FleetTUI | undefined;
   private inputUnsub: (() => void) | undefined;
+  private pendingOpen: ReturnType<typeof setImmediate> | undefined;
   private widgetRegistered = false;
   private timer: ReturnType<typeof setInterval> | undefined;
 
@@ -89,6 +91,7 @@ export class FleetList {
   /** Set while a conversation overlay is open; calling it closes the overlay. */
   private viewerClose: (() => void) | undefined;
   private viewingAgentId: string | undefined;
+  private restoreActiveAfterViewer = false;
 
   constructor(
     private manager: AgentManager,
@@ -100,13 +103,17 @@ export class FleetList {
   setEnabled(enabled: boolean): void {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
-    if (!enabled) this.active = false;
+    if (!enabled) {
+      this.active = false;
+      this.cancelPendingOpen();
+    }
     this.update();
   }
 
   /** Capture the UI context and (re)register the global input handler. */
   setUICtx(ui: FleetUICtx): void {
     if (ui === this.ui) return;
+    this.cancelPendingOpen();
     this.inputUnsub?.();
     this.ui = ui;
     this.widgetRegistered = false;
@@ -128,6 +135,7 @@ export class FleetList {
   }
 
   dispose(): void {
+    this.cancelPendingOpen();
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.inputUnsub?.();
     this.inputUnsub = undefined;
@@ -293,30 +301,48 @@ export class FleetList {
     }
     const session = record.session;
     const activity = this.agentActivity.get(record.id);
+    const ui = this.ui;
+    this.cancelPendingOpen();
+    this.restoreActiveAfterViewer = this.active;
     this.viewingAgentId = record.id;
+    this.deactivate();
+    this.tui?.requestRender(true);
 
-    void this.ui.custom<undefined>(
-      (tui, theme, keybindings, done) => {
-        this.viewerClose = () => done(undefined);
-        return new ConversationViewer(
-          tui,
-          session,
-          record,
-          activity,
-          theme,
-          done,
-          () => {
-            if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
-          },
-          keybindings,
-          (message: string) => this.manager.steer(record.id, message),
-        );
-      },
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      },
-    ).then(() => this.clearViewer(), () => this.clearViewer());
+    this.pendingOpen = setImmediate(() => {
+      this.pendingOpen = undefined;
+      if (this.ui !== ui || this.viewerClose || this.viewingAgentId !== record.id) return;
+
+      void ui.custom<undefined>(
+        (tui, theme, keybindings, done) => {
+          this.viewerClose = () => done(undefined);
+          return new ConversationViewer(
+            tui,
+            session,
+            record,
+            activity,
+            theme,
+            done,
+            () => {
+              if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
+            },
+            keybindings,
+            (message: string) => this.manager.steer(record.id, message),
+          );
+        },
+        {
+          overlay: true,
+          overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
+        },
+      ).then(() => this.clearViewer(), () => this.clearViewer());
+    });
+  }
+
+  private cancelPendingOpen(): void {
+    if (!this.pendingOpen) return;
+    clearImmediate(this.pendingOpen);
+    this.pendingOpen = undefined;
+    this.viewingAgentId = undefined;
+    this.restoreActiveAfterViewer = false;
   }
 
   /** Reset overlay state and return to the list (on close, auto-close, or error). */
@@ -331,6 +357,8 @@ export class FleetList {
     }
     this.viewerClose = undefined;
     this.viewingAgentId = undefined;
+    this.active = this.restoreActiveAfterViewer;
+    this.restoreActiveAfterViewer = false;
     this.update();
   }
 

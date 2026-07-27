@@ -57,6 +57,10 @@ interface Harness {
   setEditorText: (t: string) => void;
   /** Whether an overlay has been opened. */
   overlayOpened: () => boolean;
+  /** Lifecycle transitions recorded by the fake TUI/UI. */
+  transitions: () => string[];
+  /** Whether the replacement UI's custom overlay was opened. */
+  replaceUICtx: () => () => boolean;
   /** Whether the most recently opened overlay's `done` was invoked (closed). */
   overlayClosed: () => boolean;
   /** Simulate the viewer closing itself (Esc → done); flushes the close microtask. */
@@ -73,7 +77,11 @@ function harness(agents: AgentRecord[]): Harness {
   let closed = false;
   let overlayDone: ((r: undefined) => void) | undefined;
   let overlayComponent: { handleInput(data: string): void } | undefined;
-  const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+  const lifecycle: string[] = [];
+  const fakeTui = {
+    requestRender: (force?: boolean) => lifecycle.push(`request-render:${force === true}`),
+    terminal: { columns: 120, rows: 40 },
+  };
 
   const ui: FleetUICtx = {
     setWidget: (_key, content) => { widgetFactory = content as any; },
@@ -81,6 +89,7 @@ function harness(agents: AgentRecord[]): Harness {
     getEditorText: () => editorText,
     notify: () => {},
     custom: ((factory: any) => {
+      lifecycle.push("overlay-open");
       opened = true;
       return new Promise<undefined>((resolve) => {
         const done = (r: undefined) => { closed = true; overlayDone = undefined; resolve(r); };
@@ -106,6 +115,20 @@ function harness(agents: AgentRecord[]): Harness {
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
     setEditorText: (t) => { editorText = t; },
     overlayOpened: () => opened,
+    transitions: () => lifecycle,
+    replaceUICtx: () => {
+      let replacementOpened = false;
+      const replacementUi: FleetUICtx = {
+        ...ui,
+        onTerminalInput: () => () => {},
+        custom: (() => {
+          replacementOpened = true;
+          return new Promise<undefined>(() => {});
+        }) as FleetUICtx["custom"],
+      };
+      fleet.setUICtx(replacementUi);
+      return () => replacementOpened;
+    },
     overlayClosed: () => closed,
     closeOverlay: async () => { overlayDone?.(undefined); await Promise.resolve(); },
     widgetTui: fakeTui,
@@ -396,6 +419,56 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render()).toEqual([]);
   });
 
+  it("renders the base UI before opening the selected viewer", async () => {
+    const h = harness([makeRecord({ id: "live" })]);
+    h.press(DOWN); // activate (main)
+    h.render(); // hand FleetList the TUI so force-render requests are observable
+    h.press(DOWN); // select the agent
+    h.transitions().length = 0;
+
+    h.press(ENTER);
+    expect(h.overlayOpened()).toBe(false); // opening must be deferred
+
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(h.transitions().indexOf("request-render:true")).toBeGreaterThanOrEqual(0);
+    expect(h.transitions().indexOf("request-render:true")).toBeLessThan(h.transitions().indexOf("overlay-open"));
+    expect(h.overlayOpened()).toBe(true);
+  });
+
+  it("cancels a pending viewer on dispose", async () => {
+    const h = harness([makeRecord({ id: "live" })]);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // select the agent
+    h.press(ENTER);
+    h.fleet.dispose();
+
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(h.overlayOpened()).toBe(false);
+  });
+
+  it("cancels a pending viewer when FleetView is disabled", async () => {
+    const h = harness([makeRecord({ id: "live" })]);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // select the agent
+    h.press(ENTER);
+    h.fleet.setEnabled(false);
+
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(h.overlayOpened()).toBe(false);
+  });
+
+  it("cancels a pending viewer when the UI context is replaced", async () => {
+    const h = harness([makeRecord({ id: "live" })]);
+    h.press(DOWN); // activate (main)
+    h.press(DOWN); // select the agent
+    h.press(ENTER);
+    const replacementOpened = h.replaceUICtx();
+
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(h.overlayOpened()).toBe(false);
+    expect(replacementOpened()).toBe(false);
+  });
+
   it("keeps the cursor on the viewed agent after closing, even if the list reordered", async () => {
     const fakeSession = { subscribe: () => () => {}, messages: [] };
     const agents = [
@@ -407,7 +480,8 @@ describe("FleetList overlay lifecycle", () => {
     h.press(DOWN); // activate (main, idx 0)
     h.press(DOWN); // a1 (idx 1)
     h.press(DOWN); // a2 (idx 2)
-    h.press(ENTER); // open a2
+    h.press(ENTER); // schedule a2
+    await new Promise<void>(resolve => setImmediate(resolve));
     // a1 finishes and drops out while viewing → a2 shifts from idx 2 to idx 1.
     agents.splice(0, 1);
     await h.closeOverlay();
@@ -416,12 +490,13 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().find(l => l.includes("three"))).toContain("○");
   });
 
-  it("wires the viewer's steer composer to manager.steer with the agent id", () => {
+  it("wires the viewer's steer composer to manager.steer with the agent id", async () => {
     const agents = [makeRecord({ id: "live", description: "the one" })];
     const h = harness(agents);
     h.press(DOWN);  // activate (main)
     h.press(DOWN);  // → the agent
-    h.press(ENTER); // open the conversation viewer
+    h.press(ENTER); // schedule the conversation viewer
+    await new Promise<void>(resolve => setImmediate(resolve));
 
     const viewer = h.overlayComponent();
     expect(viewer).toBeDefined();
@@ -437,7 +512,8 @@ describe("FleetList overlay lifecycle", () => {
     const h = harness(agents);
     h.press(DOWN); // active (main)
     h.press(DOWN); // → the agent
-    h.press(ENTER); // opens overlay
+    h.press(ENTER); // schedules overlay
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(h.overlayOpened()).toBe(true);
     // The agent finishes, well past the linger window...
     agents[0] = makeRecord({ id: "live", description: "the one", status: "completed", completedAt: Date.now() - 60_000 });
