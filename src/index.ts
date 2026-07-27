@@ -1247,23 +1247,19 @@ Terse command-style prompts produce shallow, generic work.
           }
         };
 
-        try {
-          id = manager.spawn(pi, ctx, subagentType, params.prompt, {
-            description: params.description,
-            model,
-            maxTurns: effectiveMaxTurns,
-            isolated,
-            inheritContext,
-            thinkingLevel: thinking,
-            isBackground: true,
-            isolation,
-            invocation: agentInvocation,
-            rootSessionId: ctx.sessionManager.getSessionId(),
-            ...bgCallbacks,
-          });
-        } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
-        }
+        id = manager.spawn(pi, ctx, subagentType, params.prompt, {
+          description: params.description,
+          model,
+          maxTurns: effectiveMaxTurns,
+          isolated,
+          inheritContext,
+          thinkingLevel: thinking,
+          isBackground: true,
+          isolation,
+          invocation: agentInvocation,
+          rootSessionId: ctx.sessionManager.getSessionId(),
+          ...bgCallbacks,
+        });
 
         // Set output file + join mode synchronously after spawn, before the
         // event loop yields — onSessionCreated is async so this is safe.
@@ -1396,7 +1392,7 @@ Terse command-style prompts produce shallow, generic work.
         record = fgResult.record;
       } catch (err) {
         clearInterval(spinnerInterval);
-        return textResult(err instanceof Error ? err.message : String(err));
+        throw err;
       }
 
       clearInterval(spinnerInterval);
