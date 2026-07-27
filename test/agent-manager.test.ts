@@ -580,6 +580,28 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
   });
 
+  it("worktree isolation resolves explicit session files against the original base cwd", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockReturnValueOnce({
+      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir",
+    });
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+      sessionFile: ".agents/sessions/KEY.dev.jsonl",
+    });
+    await manager.getRecord(id)!.promise;
+
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.cwd).toBe("/wt/copy");
+    expect(opts.sessionFile).toBe(".agents/sessions/KEY.dev.jsonl");
+    expect(opts.sessionFileCwd).toBe("/tmp");
+  });
+
   it("plain worktree (no cwd) keeps the historical root working dir even when workPath differs", async () => {
     // Parent session sitting in a repo subdirectory: workPath would point at
     // the copied subdir. Without SpawnOptions.cwd the agent must stay at the
