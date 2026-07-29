@@ -24,6 +24,7 @@ import { isModelInScope, readEnabledModels, resolveEnabledModels } from "./enabl
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { DEFAULT_HOLD_MS, NudgeQueue } from "./nudge-queue.js";
 import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -326,28 +327,23 @@ export default function (pi: ExtensionAPI) {
   const agentActivity = new Map<string, AgentActivity>();
 
   // ---- Cancellable pending notifications ----
-  // Holds notifications briefly so get_subagent_result can cancel them
-  // before they reach pi.sendMessage (fire-and-forget).
-  const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
-  const NUDGE_HOLD_MS = 200;
+  // Holds notifications briefly so get_subagent_result can cancel them before
+  // they reach pi.sendMessage (fire-and-forget), and parks any that come due
+  // mid-run until the parent settles — see nudge-queue.ts for why emitting
+  // during a run is worse than holding.
+  const NUDGE_HOLD_MS = DEFAULT_HOLD_MS;
   // A queued result wait must observe completion before its held notification
   // can fire, so successful waits can still suppress that redundant nudge.
   const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
 
+  const nudges = new NudgeQueue(() => currentCtx?.isIdle() === false, NUDGE_HOLD_MS);
+
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
-    cancelNudge(key);
-    pendingNudges.set(key, setTimeout(() => {
-      pendingNudges.delete(key);
-      try { send(); } catch { /* ignore stale completion side-effect errors */ }
-    }, delay));
+    nudges.schedule(key, send, delay);
   }
 
   function cancelNudge(key: string) {
-    const timer = pendingNudges.get(key);
-    if (timer != null) {
-      clearTimeout(timer);
-      pendingNudges.delete(key);
-    }
+    nudges.cancel(key);
   }
 
   // ---- Individual nudge helper (async join mode) ----
@@ -569,6 +565,16 @@ export default function (pi: ExtensionAPI) {
     if (isSchedulingEnabled() && !scheduler.isActive()) startScheduler(ctx);
   });
 
+  // Deliver notifications parked while the parent was running. `agent_settled`
+  // rather than `agent_end` or `turn_end`: those fire with a retry, compaction,
+  // or another tool-calling turn still ahead, and a notification emitted then is
+  // parked by pi's follow-up queue exactly as before — unsuppressable and
+  // delivered after the final answer. `agent_settled` is the first point where
+  // pi will not continue on its own.
+  pi.on("agent_settled", () => {
+    nudges.flush();
+  });
+
   pi.on("session_before_switch", () => {
     manager.clearCompleted(true);
     scheduler.stop();
@@ -589,8 +595,7 @@ export default function (pi: ExtensionAPI) {
     }
     scheduler.stop();
     manager.abortAll();
-    for (const timer of pendingNudges.values()) clearTimeout(timer);
-    pendingNudges.clear();
+    nudges.dispose();
     fleet.dispose();
     manager.dispose();
   });
@@ -836,6 +841,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
 - Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting work as done.
 - Use run_in_background for work you don't need immediately. You will be notified when it completes — do NOT poll or sleep waiting for it. Continue with other work or respond to the user instead.
+- "Do not poll" forbids sleeping and status-checking loops, not waiting. When the user's request is only satisfied once the agents' output is integrated — reviewing their diffs, opening PRs, writing the summary they asked for — join them with get_subagent_result(wait: true) rather than ending your turn on a "work is running" status report.
 - Foreground vs background: use foreground (default) when you need the agent's results before you can proceed. Use background when you have genuinely independent work to do in parallel.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
