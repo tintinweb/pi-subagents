@@ -74,6 +74,34 @@ export interface AgentConfig {
 
 export type JoinMode = 'async' | 'group' | 'smart';
 
+export type AgentOutcomeCategory =
+  | "completed"
+  | "execution"
+  | "provider"
+  | "max_turns"
+  | "user_stop"
+  | "caller_stop"
+  | "startup";
+export type AgentOutcomeRecovery =
+  | "none"
+  | "wait_for_agent"
+  | "resume_same_agent"
+  | "start_fresh_after_correction";
+export type AgentOutcomeFreshSpawn = "not_needed" | "forbidden" | "allowed_after_correction";
+
+/** Stable accepted-agent terminal/current outcome attached additively to records and result details. */
+export interface AgentOutcome {
+  agentId: string;
+  status: AgentRecord["status"];
+  phase: "startup" | "run" | "resume";
+  category: AgentOutcomeCategory;
+  retryable: boolean;
+  recovery: AgentOutcomeRecovery;
+  freshSpawn: AgentOutcomeFreshSpawn;
+  message?: string;
+  hasOutput: boolean;
+}
+
 /**
  * Display mode for the persistent above-editor agent widget.
  * - `all`: show every agent (foreground + background).
@@ -90,6 +118,10 @@ export interface AgentRecord {
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
   result?: string;
   error?: string;
+  /** Stable accepted-agent outcome metadata. */
+  outcome?: AgentOutcome;
+  /** Origin of a stopped lifecycle, when known. */
+  stopOrigin?: "user" | "caller";
   toolUses: number;
   startedAt: number;
   completedAt?: number;
@@ -170,7 +202,9 @@ export interface NotificationDetails {
   durationMs: number;
   outputFile?: string;
   error?: string;
-  resultPreview: string;
+  /** Preview of actual agent output; absent when the record has no result. */
+  resultPreview?: string;
+  outcome?: AgentOutcome;
   /** Additional agents in a group notification. */
   others?: NotificationDetails[];
 }

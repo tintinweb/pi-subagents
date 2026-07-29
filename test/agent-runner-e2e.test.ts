@@ -23,11 +23,14 @@
  * provider registers in a different `pi-ai` module instance than the one
  * pi-coding-agent streams through, which is brittle and orthogonal to gating.)
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import type { AgentSession, ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AgentManager } from "../src/agent-manager.js";
 import { extensionCanonicalName, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import type { AgentConfig } from "../src/types.js";
@@ -45,8 +48,8 @@ const EXT_TOOL = "e2e_probe";
 const BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 /** Minimal `pi` stub — `detectEnv` only needs `exec` (returns non-git). */
-function makePi() {
-  return { exec: async () => ({ code: 1, stdout: "", stderr: "" }) } as any;
+function makePi(): ExtensionAPI {
+  return { exec: async () => ({ code: 1, stdout: "", stderr: "" }) } as unknown as ExtensionAPI;
 }
 
 describe("agent-runner end-to-end (real pi-mono session + real extension)", () => {
@@ -89,7 +92,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       ]),
     );
     const model = faux.getModel();
-    const modelRegistry: any = {
+    const modelRegistry = {
       find: () => model,
       getAll: () => [model],
       getAvailable: () => [model],
@@ -98,8 +101,8 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       getApiKeyAndHeaders: async () => ({ apiKey: "faux", headers: {} }),
       registerProvider: () => {},
       unregisterProvider: () => {},
-    };
-    const ctx: any = { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry };
+    } as unknown as ModelRegistry;
+    const ctx = { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry } as unknown as ExtensionContext;
 
     let active: string[] = [];
     try {
@@ -116,6 +119,91 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     }
     return active;
   }
+
+  it("real Pi session aborts before a pre-aborted caller can prompt or execute a tool", async () => {
+    const marker = join(cwd, "tool-executed");
+    registerAgents(
+      new Map([["e2e", {
+        name: "e2e",
+        description: "e2e",
+        builtinToolNames: BUILTINS,
+        extensions: [FIXTURE],
+        skills: false,
+        systemPrompt: "You are e2e.",
+        promptMode: "replace",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      } as AgentConfig]]),
+    );
+    const model = faux.getModel();
+    const modelRegistry = {
+      find: () => model, getAll: () => [model], getAvailable: () => [model],
+      hasConfiguredAuth: () => true, isUsingOAuth: () => false,
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "faux", headers: {} }),
+      registerProvider: () => {}, unregisterProvider: () => {},
+    } as unknown as ModelRegistry;
+    // If the runner wrongly starts a model turn, this response invokes the real
+    // extension tool and writes `marker`. A pre-aborted signal must prevent both.
+    faux.setResponses([() => fauxAssistantMessage(fauxToolCall(EXT_TOOL, { marker }))]);
+    const controller = new AbortController();
+    controller.abort();
+    let created: AgentSession | undefined;
+
+    const result = await runAgent(
+      { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry } as unknown as ExtensionContext,
+      "e2e",
+      "execute the probe",
+      { pi: makePi(), model, signal: controller.signal, onSessionCreated: (session) => { created = session; } },
+    );
+
+    expect(created).toBe(result.session); // a real Pi session remains manager-owned
+    expect(created.messages).toHaveLength(0); // no user prompt or assistant/tool messages
+    expect(existsSync(marker)).toBe(false); // the real extension tool never ran
+    expect(result.responseText).toBe("");
+  });
+
+  it("real manager preserves caller_stop without recovery for a pre-aborted child", async () => {
+    const marker = join(cwd, "manager-tool-executed");
+    registerAgents(
+      new Map([["e2e", {
+        name: "e2e", description: "e2e", builtinToolNames: BUILTINS,
+        extensions: [FIXTURE], skills: false, systemPrompt: "You are e2e.",
+        promptMode: "replace", inheritContext: false, runInBackground: false, isolated: false,
+      } as AgentConfig]]),
+    );
+    const model = faux.getModel();
+    const modelRegistry = {
+      find: () => model, getAll: () => [model], getAvailable: () => [model],
+      hasConfiguredAuth: () => true, isUsingOAuth: () => false,
+      getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "faux", headers: {} }),
+      registerProvider: () => {}, unregisterProvider: () => {},
+    } as unknown as ModelRegistry;
+    faux.setResponses([() => fauxAssistantMessage(fauxToolCall(EXT_TOOL, { marker }))]);
+    const parent = new AbortController();
+    parent.abort();
+    const manager = new AgentManager();
+    try {
+      const id = manager.spawn(
+        makePi(),
+        { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry } as unknown as ExtensionContext,
+        "e2e",
+        "execute the probe",
+        { description: "pre-aborted", isBackground: false, signal: parent.signal },
+      );
+      const record = manager.getRecord(id)!;
+      await record.promise;
+
+      expect(record.session).toBeDefined();
+      expect(record.status).toBe("stopped");
+      expect(record.outcome).toEqual(expect.objectContaining({
+        category: "caller_stop", recovery: "none", freshSpawn: "forbidden", hasOutput: false,
+      }));
+      expect(existsSync(marker)).toBe(false);
+    } finally {
+      manager.dispose();
+    }
+  });
 
   it("real pi-mono admits an extension-registered tool when it's in the allowlist (#47)", async () => {
     const active = await activeToolsFor({ extensions: [FIXTURE] });

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -133,6 +133,34 @@ describe("output_transcript agent wiring", () => {
     expect(writeInitialEntry).not.toHaveBeenCalled();
     expect(streamToOutputFile).not.toHaveBeenCalled();
     await lifecycle.get("session_shutdown")?.({}, makeCtx(cwd));
+  });
+
+  it("removes a foreground transcript when async startup rejects before session acceptance", async () => {
+    vi.mocked(createOutputFilePath).mockReturnValueOnce(join(cwd, "pre-acceptance.output"));
+    vi.mocked(writeInitialEntry).mockImplementationOnce((path) => writeFileSync(path, "initial\n"));
+    vi.mocked(runAgent).mockRejectedValueOnce(new Error("async startup rejected"));
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    await expect(tools.get("Agent").execute(
+      "tool-call",
+      { prompt: "ordinary work", description: "Do ordinary work", subagent_type: "general-purpose" },
+      undefined,
+      undefined,
+      makeCtx(cwd),
+    )).rejects.toThrow("async startup rejected");
+
+    expect(createOutputFilePath).toHaveBeenCalledOnce();
+    expect(writeInitialEntry).toHaveBeenCalledOnce();
+    expect(existsSync(join(cwd, "pre-acceptance.output"))).toBe(false);
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:completed", expect.anything());
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:failed", expect.anything());
+    expect(pi.appendEntry).not.toHaveBeenCalledWith("subagents:record", expect.anything());
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+    const manager = (globalThis as unknown as Record<symbol, { hasRunning(): boolean } | undefined>)[
+      Symbol.for("pi-subagents:manager")
+    ];
+    expect(manager?.hasRunning()).toBe(false);
   });
 
   it("keeps transcript creation as the default", async () => {
