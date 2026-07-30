@@ -2,9 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerAgents } from "../src/agent-types.js";
+import { getAvailableTypes, registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
+import { encodeCwd } from "../src/output-file.js";
 
 let cwd: string;
 let manager: NestedAgentManager;
@@ -18,15 +20,29 @@ function writeAgent(name: string, extra = "") {
   writeFileSync(join(dir, `${name}.md`), `---\ndescription: ${name}\ntools: read\n${extra}---\n${name}\n`);
 }
 
+const MODELS = [
+  { id: "allowed", name: "Allowed", provider: "anthropic" },
+  { id: "blocked", name: "Blocked", provider: "anthropic" },
+];
+
 function ctx(executionCwd = cwd) {
   return {
     cwd: executionCwd,
     model: undefined,
-    modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
+    modelRegistry: {
+      find: (provider: string, id: string) => ({ provider, id }),
+      getAvailable: () => MODELS,
+      getAll: () => MODELS,
+    },
   } as any;
 }
 
-function tools(allowedSubagents?: string[], depth = 1, maxSubagentDepth = 2) {
+function tools(
+  allowedSubagents: "all" | string[] = "all",
+  depth = 1,
+  maxSubagentDepth = 2,
+  configCwd = cwd,
+) {
   return createNestedSubagentTools({
     manager,
     pi: {} as any,
@@ -34,7 +50,7 @@ function tools(allowedSubagents?: string[], depth = 1, maxSubagentDepth = 2) {
     depth,
     maxSubagentDepth,
     allowedSubagents,
-    configCwd: cwd,
+    configCwd,
   });
 }
 
@@ -67,11 +83,14 @@ beforeEach(() => {
   } as any;
 });
 
-afterEach(() => rmSync(cwd, { recursive: true, force: true }));
+afterEach(() => {
+  setScopeModelsEnabled(false);
+  rmSync(cwd, { recursive: true, force: true });
+});
 
 describe("child-safe nested Agent tools", () => {
   it("allows any enabled agent when allowed_subagents is omitted", async () => {
-    const [agent] = tools(undefined);
+    const [agent] = tools();
     const result = await execute(agent, {
       subagent_type: "reviewer",
       description: "review evidence",
@@ -87,6 +106,7 @@ describe("child-safe nested Agent tools", () => {
         maxSubagentDepth: 2,
         configCwd: cwd,
       }),
+      expect.any(Function), // onSpawned — attaches the child's transcript
     );
   });
 
@@ -97,7 +117,7 @@ describe("child-safe nested Agent tools", () => {
     writeFileSync(join(workAgentDir, "intruder.md"), "---\ndescription: intruder\n---\nintruder\n");
 
     try {
-      const [agent] = tools(undefined);
+      const [agent] = tools();
       const result = await execute(agent, {
         subagent_type: "intruder",
         description: "untrusted agent",
@@ -112,7 +132,7 @@ describe("child-safe nested Agent tools", () => {
     }
   });
 
-  it("enforces a narrow allowlist and treats an empty list as allow none", async () => {
+  it("enforces a narrow allowlist", async () => {
     const [limited] = tools(["scout"]);
     const denied = await execute(limited, {
       subagent_type: "reviewer",
@@ -123,18 +143,86 @@ describe("child-safe nested Agent tools", () => {
     expect(denied.content[0].text).toContain("not allowed");
     expect(spawnAndWait).not.toHaveBeenCalled();
 
-    const [empty] = tools([]);
-    const none = await execute(empty, {
+    const allowed = await execute(limited, {
       subagent_type: "scout",
       description: "find files",
       prompt: "Find them",
     });
-    expect(none.isError).toBe(true);
-    expect(none.content[0].text).toContain("Allowed: none");
+    expect(allowed.isError).toBe(false);
+    expect(spawnAndWait).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves nested types without touching the process-global registry", async () => {
+    // A worktree-isolated parent hands its own config root down. Resolving from
+    // it must not swap the registry the main session and every other agent read.
+    const otherCwd = mkdtempSync(join(tmpdir(), "nested-tools-config-"));
+    const otherAgentDir = join(otherCwd, ".pi", "agents");
+    mkdirSync(otherAgentDir, { recursive: true });
+    writeFileSync(join(otherAgentDir, "branch-only.md"), "---\ndescription: branch-only\n---\nbranch-only\n");
+    const before = getAvailableTypes();
+
+    try {
+      const [agent] = tools("all", 1, 2, otherCwd);
+      const result = await execute(agent, {
+        subagent_type: "branch-only",
+        description: "branch agent",
+        prompt: "Do work",
+      });
+
+      // Resolved from the inherited root...
+      expect(result.isError).toBe(false);
+      // ...without leaking it into the shared registry.
+      expect(getAvailableTypes()).toEqual(before);
+      expect(getAvailableTypes()).not.toContain("branch-only");
+    } finally {
+      rmSync(otherCwd, { recursive: true, force: true });
+    }
+  });
+
+  it("applies the scopeModels allowlist to a caller-supplied model", async () => {
+    writeFileSync(
+      join(cwd, ".pi", "settings.json"),
+      JSON.stringify({ enabledModels: ["anthropic/allowed"] }),
+    );
+    setScopeModelsEnabled(true);
+    const [agent] = tools();
+
+    const blocked = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/blocked",
+    });
+    expect(blocked.isError).toBe(true);
+    expect(blocked.content[0].text).toContain("Model not in scope");
+    expect(spawnAndWait).not.toHaveBeenCalled();
+
+    const inScope = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      model: "anthropic/allowed",
+    });
+    expect(inScope.isError).toBe(false);
+  });
+
+  it("queues a steer for an owned child whose session is not ready yet", async () => {
+    const [, , steer] = tools();
+    const record: Record<string, unknown> = {
+      id: "child-1",
+      status: "running",
+      parentAgentId: "parent-1",
+    };
+    records.set("child-1", record);
+
+    const result = await execute(steer, { agent_id: "child-1", message: "focus on tests" });
+
+    expect(result.isError).toBe(false);
+    expect(record.pendingSteers).toEqual(["focus on tests"]);
   });
 
   it("blocks delegation at the inherited depth cap", async () => {
-    const [agent] = tools(undefined, 2, 2);
+    const [agent] = tools("all", 2, 2);
     const result = await execute(agent, {
       subagent_type: "scout",
       description: "find files",
@@ -149,7 +237,7 @@ describe("child-safe nested Agent tools", () => {
   it("rejects unknown or disabled nested agent types instead of falling back", async () => {
     writeAgent("disabled", "enabled: false\n");
     registerAgents(loadCustomAgents(cwd));
-    const [agent] = tools(undefined);
+    const [agent] = tools();
 
     for (const subagentType of ["missing", "disabled"]) {
       const result = await execute(agent, {
@@ -251,7 +339,7 @@ describe("child-safe nested Agent tools", () => {
   it("propagates a target agent's tighter depth cap", async () => {
     writeAgent("tight", "max_subagent_depth: 1\n");
     registerAgents(loadCustomAgents(cwd));
-    const [agent] = tools(undefined, 1, 3);
+    const [agent] = tools("all", 1, 3);
     const result = await execute(agent, {
       subagent_type: "tight",
       description: "tight child",
@@ -262,6 +350,133 @@ describe("child-safe nested Agent tools", () => {
     expect(spawnAndWait).toHaveBeenCalledWith(
       expect.anything(), expect.anything(), "tight", "Do work",
       expect.objectContaining({ depth: 2, maxSubagentDepth: 1 }),
+      expect.any(Function),
     );
+  });
+
+  it("flags a truncated child run instead of passing partial output off as complete", async () => {
+    spawnAndWait.mockImplementation(async () => ({
+      id: "child-1",
+      record: { id: "child-1", status: "steered", result: "half an answer", parentAgentId: "parent-1" },
+    }));
+    const [agent] = tools();
+    const result = await execute(agent, {
+      subagent_type: "scout",
+      description: "truncated",
+      prompt: "Do work",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toContain("output may be partial");
+    // The warning leads, so it can't read as part of the child's own answer.
+    expect(result.content[0].text.indexOf("half an answer")).toBeGreaterThan(0);
+  });
+
+  it("keeps a failed child's partial output alongside the error", async () => {
+    spawnAndWait.mockImplementation(async () => ({
+      id: "child-1",
+      record: {
+        id: "child-1", status: "error", error: "provider exploded",
+        result: "got this far", parentAgentId: "parent-1",
+      },
+    }));
+    const [agent] = tools();
+    const result = await execute(agent, {
+      subagent_type: "scout",
+      description: "failing",
+      prompt: "Do work",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("provider exploded");
+    expect(result.content[0].text).toContain("got this far");
+  });
+
+  it("attributes a nested child's token spend to the owning parent", async () => {
+    const parent = { id: "parent-1", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 } };
+    records.set("parent-1", parent);
+    spawn.mockImplementation((_pi, _ctx, _type, _prompt, options) => {
+      options.onAssistantUsage?.({ input: 100, output: 20, cacheWrite: 5 });
+      return "child-1";
+    });
+
+    const [agent] = tools();
+    await execute(agent, {
+      subagent_type: "scout",
+      description: "spender",
+      prompt: "Do work",
+      run_in_background: true,
+    });
+
+    expect(parent.lifetimeUsage).toEqual({ input: 100, output: 20, cacheWrite: 5 });
+  });
+
+  it("attributes spend up the whole ancestor chain, not just one level", async () => {
+    // A spawn callback fires only for that child's own turns, so a deeper
+    // descendant would otherwise never reach the one record anyone can see.
+    const top = { id: "top", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 } };
+    const middle = {
+      id: "parent-1", status: "running", parentAgentId: "top",
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    };
+    records.set("top", top);
+    records.set("parent-1", middle);
+    spawn.mockImplementation((_pi, _ctx, _type, _prompt, options) => {
+      options.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1 });
+      return "child-1";
+    });
+
+    const [agent] = tools();
+    await execute(agent, {
+      subagent_type: "scout",
+      description: "deep spender",
+      prompt: "Do work",
+      run_in_background: true,
+    });
+
+    expect(middle.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
+    expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
+  });
+
+  it("files a nested transcript under the root session, honoring output_transcript", async () => {
+    records.set("parent-1", { id: "parent-1", status: "running", rootSessionId: "root-session" });
+    spawnAndWait.mockImplementation(async (_pi, _ctx, type, _prompt, options, onSpawned) => {
+      const record = { id: "child-1", type, status: "completed", result: "done", parentAgentId: options.parentAgentId };
+      records.set("child-1", record);
+      onSpawned?.("child-1");
+      return { id: "child-1", record };
+    });
+
+    // Real path construction (not mocked here), so clean up what it writes.
+    const transcriptRoot = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encodeCwd(cwd));
+    try {
+      const [agent] = tools();
+      await execute(agent, { subagent_type: "scout", description: "traced", prompt: "Do work" });
+      expect(records.get("child-1").outputFile).toContain(join("root-session", "tasks", "child-1.output"));
+
+      // The child's own frontmatter still wins.
+      writeAgent("quiet", "output_transcript: false\n");
+      registerAgents(loadCustomAgents(cwd));
+      records.delete("child-1");
+      await execute(agent, { subagent_type: "quiet", description: "untraced", prompt: "Do work" });
+      expect(records.get("child-1").outputFile).toBeUndefined();
+    } finally {
+      rmSync(transcriptRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("forwards the execution context to the manager unmodified", async () => {
+    // Each AgentSession builds its own ExtensionRunner, so the ctx handed to
+    // execute is the CHILD's — capturing one at tool-build time instead would
+    // silently misroute the grandchild's cwd, conversation, and model.
+    const [agent] = tools();
+    const executionCtx = ctx();
+    await agent.execute("call-1", {
+      subagent_type: "scout",
+      description: "ctx check",
+      prompt: "Do work",
+    } as any, undefined, undefined, executionCtx);
+
+    expect(spawnAndWait.mock.calls[0][1]).toBe(executionCtx);
   });
 });

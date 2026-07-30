@@ -47,10 +47,11 @@ export interface AgentConfig {
   outputTranscript?: boolean;
   /** Optional session directory used when persistSession is true. Omitted = pi's normal session location. */
   sessionDir?: string;
-  /** Opt in to child-safe nested subagent tools. Defaults to false. */
-  allowSubagents?: boolean;
-  /** Optional nested-agent allowlist. Omitted = any enabled agent; [] = none. */
-  allowedSubagents?: string[];
+  /**
+   * Nested delegation, off by default: undefined = no nested tools;
+   * "all" = any enabled agent; string[] = only those agent types.
+   */
+  allowedSubagents?: "all" | string[];
   /** Optional nesting-depth cap that can only tighten the inherited limit. */
   maxSubagentDepth?: number;
   systemPrompt: string;
@@ -140,6 +141,12 @@ export interface AgentRecord {
   parentAgentId?: string;
   /** Effective inherited nesting cap for this branch. */
   maxSubagentDepth?: number;
+  /**
+   * Session id of the root (main) session this branch descends from. Nested
+   * spawns inherit it so their transcripts file under the same session
+   * directory as their ancestors' instead of the child session's own id.
+   */
+  rootSessionId?: string;
 }
 
 export interface AgentInvocation {

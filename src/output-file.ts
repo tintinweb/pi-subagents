@@ -11,6 +11,20 @@ import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 /**
+ * Project/global default for writing a subagent's `.output` transcript; a custom
+ * agent's `output_transcript` overrides it per agent.
+ *
+ * State lives here rather than in an index.ts closure because both spawn paths
+ * need it — the top-level Agent tool and the nested delegation tools. Same
+ * reason `scopeModels` lives in model-scope.ts: a setting only one path can read
+ * is a setting the other path silently ignores.
+ */
+let outputTranscriptDefault = true;
+
+export function getOutputTranscriptDefault(): boolean { return outputTranscriptDefault; }
+export function setOutputTranscriptDefault(b: boolean): void { outputTranscriptDefault = b; }
+
+/**
  * Encode a cwd path as a filesystem-safe directory name. Handles:
  *   - POSIX:   "/home/user/project"        → "home-user-project"
  *   - Windows: "C:\Users\foo\project"      → "Users-foo-project"

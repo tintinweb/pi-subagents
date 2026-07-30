@@ -108,7 +108,7 @@ vi.mock("../src/skill-loader.js", () => ({
 }));
 
 vi.mock("../src/nested-tools.js", () => ({
-  DEFAULT_MAX_SUBAGENT_DEPTH: 2,
+  getMaxSubagentDepth: vi.fn(() => 2),
   createNestedSubagentTools: vi.fn(() => [
     { name: "Agent" },
     { name: "get_subagent_result" },
@@ -914,7 +914,7 @@ describe("agent-runner master tool allowlist", () => {
   it("injects scoped nested tools for an opted-in non-isolated agent", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(
-      makeAgentConfig({ extensions: false, allowSubagents: true, allowedSubagents: ["scout"] }),
+      makeAgentConfig({ extensions: false, allowedSubagents: ["scout"] }),
     );
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     const { session } = createSession("OK");
@@ -946,7 +946,7 @@ describe("agent-runner master tool allowlist", () => {
     // installExtensionToolScope renarrow that strips EXCLUDED_TOOL_NAMES.
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(
-      makeAgentConfig({ extensions: true, allowSubagents: true }),
+      makeAgentConfig({ extensions: true, allowedSubagents: "all" }),
     );
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     withExtensions({ "/ext/ok.ts": ["ok_ext"] });
@@ -969,7 +969,7 @@ describe("agent-runner master tool allowlist", () => {
   });
 
   it("still strips the orchestration tools under extensions when nesting is OFF", async () => {
-    // Guards the negative: without allow_subagents the EXCLUDED names stay denied
+    // Guards the negative: without allowed_subagents the EXCLUDED names stay denied
     // and inactive even though an extension registers tools with those very names.
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
@@ -990,7 +990,7 @@ describe("agent-runner master tool allowlist", () => {
   it("suppresses nested tools in isolated mode even when opted in", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(
-      makeAgentConfig({ extensions: false, allowSubagents: true }),
+      makeAgentConfig({ extensions: false, allowedSubagents: "all" }),
     );
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     const { session } = createSession("OK");
@@ -1017,22 +1017,42 @@ describe("agent-runner master tool allowlist", () => {
     createAgentSession.mockResolvedValue({ session });
 
     vi.mocked(getAgentConfig).mockReturnValueOnce(
-      makeAgentConfig({ extensions: false, allowSubagents: true, maxSubagentDepth: 1 }),
+      makeAgentConfig({ extensions: false, allowedSubagents: "all", maxSubagentDepth: 2 }),
     );
     await runAgent(ctx, "Explore", "go", {
       pi,
       nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 3 },
     });
-    expect(createNestedSubagentTools).toHaveBeenLastCalledWith(expect.objectContaining({ maxSubagentDepth: 1 }));
+    expect(createNestedSubagentTools).toHaveBeenLastCalledWith(expect.objectContaining({ maxSubagentDepth: 2 }));
 
     vi.mocked(getAgentConfig).mockReturnValueOnce(
-      makeAgentConfig({ extensions: false, allowSubagents: true, maxSubagentDepth: 5 }),
+      makeAgentConfig({ extensions: false, allowedSubagents: "all", maxSubagentDepth: 5 }),
     );
     await runAgent(ctx, "Explore", "go", {
       pi,
       nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 2 },
     });
     expect(createNestedSubagentTools).toHaveBeenLastCalledWith(expect.objectContaining({ maxSubagentDepth: 2 }));
+  });
+
+  it("injects no nested tools once the effective cap is reached", async () => {
+    // At the cap the agent can never spawn — and so can never own a child to
+    // fetch from or steer. Three always-erroring tools would just cost context.
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, allowedSubagents: "all" }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 1 },
+    });
+
+    expect(createNestedSubagentTools).not.toHaveBeenCalled();
+    expect(lastToolsPassed()).not.toContain("Agent");
   });
 
   it("extensions: false with disallowedTools — denylist applies to built-ins", async () => {

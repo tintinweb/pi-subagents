@@ -34,34 +34,70 @@ export function isDefaultsDisabled(): boolean { return disableDefaults; }
 export function setDefaultsDisabled(b: boolean): void { disableDefaults = b; }
 
 /**
+ * Build a registry map: DEFAULT_AGENTS first (unless disabled via settings),
+ * then user agents overlaid on top (same name overrides the default).
+ * Pure — callers that must not disturb the process-wide registry (nested
+ * delegation resolving agents from its own config root) build their own map.
+ */
+export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
+  const registry = new Map<string, AgentConfig>();
+  if (!disableDefaults) {
+    for (const [name, config] of DEFAULT_AGENTS) registry.set(name, config);
+  }
+  for (const [name, config] of userAgents) registry.set(name, config);
+  return registry;
+}
+
+/**
  * Register agents into the unified registry.
  * Starts with DEFAULT_AGENTS, then overlays user agents (overrides defaults with same name).
  * Disabled agents (enabled === false) are kept in the registry but excluded from spawning.
  */
 export function registerAgents(userAgents: Map<string, AgentConfig>): void {
   agents.clear();
-
-  // Start with defaults (unless disabled via settings)
-  if (!disableDefaults) {
-    for (const [name, config] of DEFAULT_AGENTS) {
-      agents.set(name, config);
-    }
-  }
-
-  // Overlay user agents (overrides defaults with same name)
-  for (const [name, config] of userAgents) {
+  for (const [name, config] of buildAgentRegistry(userAgents)) {
     agents.set(name, config);
   }
 }
 
-/** Case-insensitive key resolution. */
-function resolveKey(name: string): string | undefined {
-  if (agents.has(name)) return name;
+/** Case-insensitive key resolution within a registry. */
+function resolveKeyIn(registry: Map<string, AgentConfig>, name: string): string | undefined {
+  if (registry.has(name)) return name;
   const lower = name.toLowerCase();
-  for (const key of agents.keys()) {
+  for (const key of registry.keys()) {
     if (key.toLowerCase() === lower) return key;
   }
   return undefined;
+}
+
+/** Case-insensitive key resolution. */
+function resolveKey(name: string): string | undefined {
+  return resolveKeyIn(agents, name);
+}
+
+/** Resolve a type name case-insensitively in a registry. Returns the canonical key or undefined. */
+export function resolveTypeIn(registry: Map<string, AgentConfig>, name: string): string | undefined {
+  return resolveKeyIn(registry, name);
+}
+
+/** Get the agent config for a type (case-insensitive) from a registry. */
+export function getAgentConfigIn(registry: Map<string, AgentConfig>, name: string): AgentConfig | undefined {
+  const key = resolveKeyIn(registry, name);
+  return key ? registry.get(key) : undefined;
+}
+
+/** Check if a type is valid and enabled (case-insensitive) in a registry. */
+export function isValidTypeIn(registry: Map<string, AgentConfig>, type: string): boolean {
+  const key = resolveKeyIn(registry, type);
+  if (!key) return false;
+  return registry.get(key)?.enabled !== false;
+}
+
+/** Get all enabled type names in a registry (for spawning and tool descriptions). */
+export function getAvailableTypesIn(registry: Map<string, AgentConfig>): string[] {
+  return [...registry.entries()]
+    .filter(([_, config]) => config.enabled !== false)
+    .map(([name]) => name);
 }
 
 /** Resolve a type name case-insensitively. Returns the canonical key or undefined. */
@@ -71,15 +107,12 @@ export function resolveType(name: string): string | undefined {
 
 /** Get the agent config for a type (case-insensitive). */
 export function getAgentConfig(name: string): AgentConfig | undefined {
-  const key = resolveKey(name);
-  return key ? agents.get(key) : undefined;
+  return getAgentConfigIn(agents, name);
 }
 
 /** Get all enabled type names (for spawning and tool descriptions). */
 export function getAvailableTypes(): string[] {
-  return [...agents.entries()]
-    .filter(([_, config]) => config.enabled !== false)
-    .map(([name]) => name);
+  return getAvailableTypesIn(agents);
 }
 
 /** Get all type names including disabled (for UI listing). */
@@ -103,9 +136,7 @@ export function getUserAgentNames(): string[] {
 
 /** Check if a type is valid and enabled (case-insensitive). */
 export function isValidType(type: string): boolean {
-  const key = resolveKey(type);
-  if (!key) return false;
-  return agents.get(key)?.enabled !== false;
+  return isValidTypeIn(agents, type);
 }
 
 /** Tool names required for memory management. */

@@ -8,15 +8,21 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
-vi.mock("../src/output-file.js", () => ({
-  createOutputFilePath: vi.fn(() => "/tmp/fake-subagent.output"),
-  writeInitialEntry: vi.fn(),
-  streamToOutputFile: vi.fn(() => vi.fn()),
-}));
+// Only the filesystem side is faked; the transcript default is real module
+// state (both spawn paths read it there), so it must be reset between tests.
+vi.mock("../src/output-file.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/output-file.js")>("../src/output-file.js");
+  return {
+    ...actual,
+    createOutputFilePath: vi.fn(() => "/tmp/fake-subagent.output"),
+    writeInitialEntry: vi.fn(),
+    streamToOutputFile: vi.fn(() => vi.fn()),
+  };
+});
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { createOutputFilePath, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
+import { createOutputFilePath, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -87,6 +93,7 @@ describe("output_transcript agent wiring", () => {
     else process.env.HOME = previousHome;
     rmSync(cwd, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
+    setOutputTranscriptDefault(true);
     vi.clearAllMocks();
   });
 

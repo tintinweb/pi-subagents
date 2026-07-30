@@ -109,7 +109,6 @@ max_turns: 30
 persist_session: true
 output_transcript: false
 session_dir: .seams/pi-sessions/seam-plan-reviewer
-allow_subagents: true
 allowed_subagents: scout, reviewer
 max_subagent_depth: 2
 prompt_mode: replace
@@ -133,7 +132,6 @@ You are a security auditor.`);
     expect(agent.persistSession).toBe(true);
     expect(agent.outputTranscript).toBe(false);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
-    expect(agent.allowSubagents).toBe(true);
     expect(agent.allowedSubagents).toEqual(["scout", "reviewer"]);
     expect(agent.maxSubagentDepth).toBe(2);
     expect(agent.promptMode).toBe("replace");
@@ -163,7 +161,6 @@ Just a prompt.`);
     expect(agent.persistSession).toBeUndefined();
     expect(agent.outputTranscript).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
-    expect(agent.allowSubagents).toBe(false);
     expect(agent.allowedSubagents).toBeUndefined();
     expect(agent.maxSubagentDepth).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
@@ -185,32 +182,58 @@ Just a prompt.`);
     expect(agent.systemPrompt).toBe("Just a system prompt, no frontmatter.");
   });
 
-  it("distinguishes unrestricted, empty, and omitted nested allowlists", () => {
+  it("parses allowed_subagents: off by default, `all` wildcard, csv restriction", () => {
+    writeAgent("omitted", `---
+---
+Off.`);
     writeAgent("unrestricted", `---
-allow_subagents: true
+allowed_subagents: all
 ---
 Unrestricted.`);
-    writeAgent("empty", `---
-allow_subagents: true
+    writeAgent("wildcard", `---
+allowed_subagents: "*"
+---
+Unrestricted.`);
+    writeAgent("mixed-case", `---
+allowed_subagents: scout, ALL
+---
+Unrestricted.`);
+    writeAgent("none", `---
 allowed_subagents: none
 ---
-Empty.`);
-    writeAgent("explicit-empty", `---
-allow_subagents: true
+Off.`);
+    writeAgent("blank", `---
 allowed_subagents:
 ---
-Empty.`);
-    writeAgent("default-off", `---
-allowed_subagents: scout
+Off.`);
+    writeAgent("restricted", `---
+allowed_subagents: scout, reviewer
+---
+Restricted.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("omitted")!.allowedSubagents).toBeUndefined();
+    expect(result.get("unrestricted")!.allowedSubagents).toBe("all");
+    expect(result.get("wildcard")!.allowedSubagents).toBe("all");
+    expect(result.get("mixed-case")!.allowedSubagents).toBe("all");
+    expect(result.get("none")!.allowedSubagents).toBeUndefined();
+    expect(result.get("blank")!.allowedSubagents).toBeUndefined();
+    expect(result.get("restricted")!.allowedSubagents).toEqual(["scout", "reviewer"]);
+  });
+
+  it("accepts booleans like extensions:/skills: do, instead of a type named \"true\"", () => {
+    writeAgent("bool-on", `---
+allowed_subagents: true
+---
+On.`);
+    writeAgent("bool-off", `---
+allowed_subagents: false
 ---
 Off.`);
 
     const result = loadCustomAgents(tmpDir);
-    expect(result.get("unrestricted")!.allowedSubagents).toBeUndefined();
-    expect(result.get("empty")!.allowedSubagents).toEqual([]);
-    expect(result.get("explicit-empty")!.allowedSubagents).toEqual([]);
-    expect(result.get("default-off")!.allowSubagents).toBe(false);
-    expect(result.get("default-off")!.allowedSubagents).toEqual(["scout"]);
+    expect(result.get("bool-on")!.allowedSubagents).toBe("all");
+    expect(result.get("bool-off")!.allowedSubagents).toBeUndefined();
   });
 
   it("ignores invalid or negative max_subagent_depth values", () => {

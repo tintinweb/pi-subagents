@@ -211,6 +211,17 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({});
     });
 
+    it("keeps maxSubagentDepth 0 (nesting off) but drops negative, fractional, and over-ceiling values", () => {
+      writeProject({ maxSubagentDepth: 0 });
+      expect(loadSettings(projectDir)).toEqual({ maxSubagentDepth: 0 });
+      writeProject({ maxSubagentDepth: -1 });
+      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ maxSubagentDepth: 1.5 });
+      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ maxSubagentDepth: 17 });
+      expect(loadSettings(projectDir)).toEqual({});
+    });
+
     it("drops invalid defaultJoinMode values", () => {
       writeProject({ defaultJoinMode: "invalid" });
       expect(loadSettings(projectDir)).toEqual({});
@@ -377,6 +388,7 @@ describe("settings persistence", () => {
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setMaxSubagentDepth: vi.fn(),
       };
     });
 
@@ -393,9 +405,10 @@ describe("settings persistence", () => {
     });
 
     it("applies only the fields that are present", () => {
-      applySettings({ maxConcurrent: 4, graceTurns: 3 }, appliers);
+      applySettings({ maxConcurrent: 4, graceTurns: 3, maxSubagentDepth: 1 }, appliers);
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(4);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(3);
+      expect(appliers.setMaxSubagentDepth).toHaveBeenCalledWith(1);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
@@ -525,6 +538,7 @@ describe("settings persistence", () => {
         setFleetView: vi.fn(),
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
+        setMaxSubagentDepth: vi.fn(),
       };
     });
 

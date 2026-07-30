@@ -23,7 +23,7 @@ import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
-import { createNestedSubagentTools, DEFAULT_MAX_SUBAGENT_DEPTH, type NestedAgentManager } from "./nested-tools.js";
+import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -746,20 +746,27 @@ export async function runAgent(
     : undefined;
 
   // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
-  // set `allow_subagents` and a nestedRuntime was provided — and never when
+  // set `allowed_subagents` and a nestedRuntime was provided — and never when
   // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
   // scoping below re-admits them explicitly (registry deny + active-set narrow).
-  const inheritedMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? DEFAULT_MAX_SUBAGENT_DEPTH;
+  const inheritedMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
   const effectiveMaxDepth = Math.min(
     inheritedMaxDepth,
     agentConfig?.maxSubagentDepth ?? inheritedMaxDepth,
   );
-  const nestedTools = agentConfig?.allowSubagents && options.nestedRuntime && !options.isolated
+  // At (or past) the cap this agent can never spawn, so it can never own a child
+  // to fetch from or steer either — inject nothing rather than three tools whose
+  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
+  // "nesting off" instead of "nesting always fails".
+  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
+    ? options.nestedRuntime
+    : undefined;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
     ? createNestedSubagentTools({
-        manager: options.nestedRuntime.manager,
+        manager: nestedRuntime.manager,
         pi: options.pi,
-        parentAgentId: options.nestedRuntime.parentAgentId,
-        depth: options.nestedRuntime.depth,
+        parentAgentId: nestedRuntime.parentAgentId,
+        depth: nestedRuntime.depth,
         maxSubagentDepth: effectiveMaxDepth,
         allowedSubagents: agentConfig.allowedSubagents,
         configCwd,

@@ -94,6 +94,14 @@ export interface SubagentsSettings {
    * (`isolation: worktree`), or memory files.
    */
   outputTranscript?: boolean;
+  /**
+   * Hard ceiling on nested subagent delegation, counted from the main session:
+   * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
+   * disables nesting project-wide. A custom agent's `max_subagent_depth` can
+   * only tighten this further, never raise it. Read when a subagent session is
+   * built, so a change applies to agents started after it.
+   */
+  maxSubagentDepth?: number;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -111,6 +119,7 @@ export interface SettingsAppliers {
   setFleetView: (b: boolean) => void;
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
+  setMaxSubagentDepth: (n: number) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -126,6 +135,7 @@ const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "bac
 const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
+const SUBAGENT_DEPTH_CEILING = 16;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
@@ -152,6 +162,13 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.graceTurns as number) <= GRACE_TURNS_CEILING
   ) {
     out.graceTurns = r.graceTurns as number;
+  }
+  if (
+    Number.isInteger(r.maxSubagentDepth) &&
+    (r.maxSubagentDepth as number) >= 0 &&
+    (r.maxSubagentDepth as number) <= SUBAGENT_DEPTH_CEILING
+  ) {
+    out.maxSubagentDepth = r.maxSubagentDepth as number;
   }
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode as JoinMode;
@@ -230,6 +247,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.maxConcurrent === "number") appliers.setMaxConcurrent(s.maxConcurrent);
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
+  if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);

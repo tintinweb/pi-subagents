@@ -3,7 +3,8 @@
  *
  * Background agents are subject to a configurable concurrency limit (default: 4).
  * Excess agents are queued and auto-started as running agents complete.
- * Foreground agents bypass the queue (they block the parent anyway).
+ * Foreground agents bypass the queue (they block the parent anyway), and so do
+ * nested children — see `occupiesPoolSlot`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -44,6 +45,19 @@ function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | 
   if (!isDirectory) {
     throw new Error(`SpawnOptions.cwd is not a directory: "${cwd}"`);
   }
+}
+
+/**
+ * Whether a record occupies one of the `maxConcurrent` background slots.
+ * Nested children don't: their parent already holds a slot, so counting (and
+ * therefore queueing) them would deadlock a parent that waits on its own child.
+ *
+ * Note this bounds nothing horizontally — the depth cap limits how DEEP nesting
+ * goes, not how WIDE. A parent's only limit on concurrent children is that each
+ * spawn costs it a turn, which is unbounded when max turns is unlimited.
+ */
+function occupiesPoolSlot(record: Pick<AgentRecord, "isBackground" | "parentAgentId">): boolean {
+  return !!record.isBackground && record.parentAgentId === undefined;
 }
 
 interface SpawnArgs {
@@ -103,6 +117,8 @@ interface SpawnOptions {
   maxSubagentDepth?: number;
   /** Config-discovery root inherited by nested launches when it differs from the working directory. */
   configCwd?: string;
+  /** Root session id, inherited by nested launches so transcripts stay grouped. */
+  rootSessionId?: string;
 }
 
 export class AgentManager {
@@ -185,12 +201,13 @@ export class AgentManager {
       depth: options.depth ?? 1,
       parentAgentId: options.parentAgentId,
       maxSubagentDepth: options.maxSubagentDepth,
+      rootSessionId: options.rootSessionId,
     };
     this.agents.set(id, record);
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (options.isBackground && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
+    if (occupiesPoolSlot(record) && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
       this.queue.push({ id, args });
       return id;
@@ -243,7 +260,7 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (options.isBackground) this.runningBackground++;
+    if (occupiesPoolSlot(record)) this.runningBackground++;
     this.onStart?.(record);
 
     // Wire parent abort signal to stop the subagent when the parent is interrupted
@@ -344,13 +361,15 @@ export class AgentManager {
           }
         }
 
+        this.abortOwnedChildren(id);
+
         // Fire onComplete for foreground agents too — lifecycle symmetry.
         // Mark resultConsumed so the callback skips notifications (result returned inline).
         if (!options.isBackground) {
           record.resultConsumed = true;
           try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
         } else {
-          this.runningBackground--;
+          if (occupiesPoolSlot(record)) this.runningBackground--;
           try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
           this.drainQueue();
         }
@@ -380,13 +399,15 @@ export class AgentManager {
           } catch { /* ignore cleanup errors */ }
         }
 
+        this.abortOwnedChildren(id);
+
         // Fire onComplete for foreground agents too — lifecycle symmetry.
         // Mark resultConsumed so the callback skips notifications (result returned inline).
         if (!options.isBackground) {
           record.resultConsumed = true;
           this.onComplete?.(record);
         } else {
-          this.runningBackground--;
+          if (occupiesPoolSlot(record)) this.runningBackground--;
           this.onComplete?.(record);
           this.drainQueue();
         }
@@ -399,6 +420,18 @@ export class AgentManager {
     // Called synchronously — onSessionCreated fires asynchronously inside runAgent.
     // Used by spawnAndWait to let the caller set up output files before streaming starts.
     this.onSpawned?.(id);
+  }
+
+  /**
+   * Stop the nested children a settled parent owns. Nested records are hidden
+   * from the UI and only their owner can consume them, so a child outliving its
+   * parent would burn tokens unseen with no way to reach it. Grandchildren are
+   * covered transitively — each abort lands in that child's own settle path.
+   */
+  private abortOwnedChildren(parentId: string): void {
+    for (const [id, record] of this.agents) {
+      if (record.parentAgentId === parentId) this.abort(id);
+    }
   }
 
   /** Start queued agents up to the concurrency limit. */
@@ -502,6 +535,10 @@ export class AgentManager {
       record.error = err instanceof Error ? err.message : String(err);
       record.completedAt = Date.now();
     }
+
+    // Same contract as the spawn settle paths: children spawned during the
+    // resumed turn must not outlive it — nothing else can see or reach them.
+    this.abortOwnedChildren(id);
 
     return record;
   }
