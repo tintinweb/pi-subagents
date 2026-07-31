@@ -90,6 +90,7 @@ describe("settings persistence", () => {
       defaultJoinMode: "smart" as const,
       schedulingEnabled: false,
       toolDescriptionMode: "compact" as const,
+      worktreeTimeoutSeconds: "auto" as const,
     };
     saveSettings(settings, projectDir);
     expect(loadSettings(projectDir)).toEqual(settings);
@@ -220,6 +221,20 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({});
       writeProject({ maxSubagentDepth: 17 });
       expect(loadSettings(projectDir)).toEqual({});
+    });
+
+    it("accepts auto or bounded fixed worktree timeout values", () => {
+      writeProject({ worktreeTimeoutSeconds: "auto" });
+      expect(loadSettings(projectDir)).toEqual({ worktreeTimeoutSeconds: "auto" });
+      writeProject({ worktreeTimeoutSeconds: 300 });
+      expect(loadSettings(projectDir)).toEqual({ worktreeTimeoutSeconds: 300 });
+    });
+
+    it("drops invalid worktree timeout values", () => {
+      for (const value of [0, 29, 3601, 1.5, true, null, "300", "manual"]) {
+        writeProject({ worktreeTimeoutSeconds: value });
+        expect(loadSettings(projectDir)).toEqual({});
+      }
     });
 
     it("drops invalid defaultJoinMode values", () => {
@@ -389,6 +404,7 @@ describe("settings persistence", () => {
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
+        setWorktreeTimeout: vi.fn(),
       };
     });
 
@@ -405,10 +421,11 @@ describe("settings persistence", () => {
     });
 
     it("applies only the fields that are present", () => {
-      applySettings({ maxConcurrent: 4, graceTurns: 3, maxSubagentDepth: 1 }, appliers);
+      applySettings({ maxConcurrent: 4, graceTurns: 3, maxSubagentDepth: 1, worktreeTimeoutSeconds: 300 }, appliers);
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(4);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(3);
       expect(appliers.setMaxSubagentDepth).toHaveBeenCalledWith(1);
+      expect(appliers.setWorktreeTimeout).toHaveBeenCalledWith(300);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
@@ -428,6 +445,7 @@ describe("settings persistence", () => {
           toolDescriptionMode: "compact",
           fleetView: false,
           widgetMode: "off",
+          worktreeTimeoutSeconds: "auto",
         },
         appliers,
       );
@@ -441,6 +459,7 @@ describe("settings persistence", () => {
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
       expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
+      expect(appliers.setWorktreeTimeout).toHaveBeenCalledWith("auto");
     });
 
     it("applies widgetMode; skips it when absent", () => {
@@ -539,6 +558,7 @@ describe("settings persistence", () => {
         setWidgetMode: vi.fn(),
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
+        setWorktreeTimeout: vi.fn(),
       };
     });
 

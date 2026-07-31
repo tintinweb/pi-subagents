@@ -420,14 +420,16 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, worktree timeout, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, nested depth `2`, worktree timeout `auto`, join mode `smart`, defaults enabled).
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
+
+**Worktree timeout** (`worktreeTimeoutSeconds`, default `"auto"`): controls the maximum time allowed for Git to create and check out an isolated worktree. Auto mode uses a one-minute floor, adds five milliseconds per tracked file, and caps the result at thirty minutes; this gives large Windows repositories more time without making small repositories wait indefinitely. Enter a fixed value from `30` to `3600` seconds to override auto mode. Configure it from `/agents` → Settings → Worktree timeout, or edit `subagents.json` directly. A failed or timed-out checkout is cleaned up, including partially-created worktree registrations.
 
 **Disable defaults** (`disableDefaultAgents`, default `false`): when on, the three built-in agents (general-purpose, Explore, Plan) are not registered — only your project/global custom agents are advertised and spawnable. User-defined agents are unaffected, including ones that override a default by name. The Agent tool's type list updates on the next pi session (the tool schema is registered at startup).
 
@@ -580,11 +582,13 @@ The `disallowed_tools` field is respected when determining write capability — 
 
 ## Worktree Isolation
 
-Set `isolation: worktree` to run an agent in a temporary git worktree:
+Set `isolation: worktree` to run an agent in a temporary git worktree. The checkout timeout defaults to the auto strategy described in [Persistent Settings](#persistent-settings):
 
 ```
 Agent({ subagent_type: "refactor", prompt: "...", isolation: "worktree" })
 ```
+
+Use `worktreeTimeoutSeconds: 900` in `subagents.json` when a fixed fifteen-minute limit is preferred over auto mode.
 
 The agent gets a full, isolated copy of the repository. On completion:
 - **No changes:** worktree is cleaned up automatically
