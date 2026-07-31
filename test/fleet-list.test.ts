@@ -166,6 +166,8 @@ describe("FleetList navigation", () => {
       makeRecord({ id: "top", description: "top-level" }),
       makeRecord({ id: "nested", description: "nested-child", parentAgentId: "top" }),
     ]);
+    // Roster stays collapsed until selection is active (#169).
+    h.press(DOWN);
     const output = h.render().join("\n");
     expect(output).toContain("top-level");
     expect(output).not.toContain("nested-child");
