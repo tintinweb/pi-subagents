@@ -367,9 +367,24 @@ describe("child-safe nested Agent tools", () => {
     });
 
     expect(result.isError).toBe(false);
-    expect(result.content[0].text).toContain("output may be partial");
+    // Foreground: the whole output is inline and no id came back, so the note
+    // must not invite a get_subagent_result call the parent cannot make (#174).
+    expect(result.content[0].text).toContain("everything the agent produced is above");
+    expect(result.content[0].text).not.toContain("output is partial");
     // The warning leads, so it can't read as part of the child's own answer.
     expect(result.content[0].text.indexOf("half an answer")).toBeGreaterThan(0);
+  });
+
+  it("uses the fetchable wording when the parent polls a background child by id", async () => {
+    records.set("child-1", {
+      id: "child-1", status: "aborted", result: "partial work", parentAgentId: "parent-1",
+    });
+    const [, getResult] = tools();
+    const result = await execute(getResult, { agent_id: "child-1" });
+
+    // Here the parent does hold a valid id, so the background wording applies.
+    expect(result.content[0].text).toContain("output may be incomplete");
+    expect(result.content[0].text).not.toContain("everything the agent produced is above");
   });
 
   it("keeps a failed child's partial output alongside the error", async () => {
