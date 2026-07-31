@@ -171,7 +171,15 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
       isolated: Type.Optional(Type.Boolean()),
       inherit_context: Type.Optional(Type.Boolean()),
-      isolation: Type.Optional(Type.Literal("worktree")),
+      isolation: Type.Optional(
+        Type.Literal("worktree", {
+          description:
+            'Set to "worktree" to run the nested agent in a temporary git worktree (isolated copy of the repo). ' +
+            "Requires an existing Git repository with a valid HEAD/at least one commit. " +
+            "Omit for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable isolation. " +
+            "Changes are saved to a branch on completion.",
+        }),
+      ),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       if (params.resume) {

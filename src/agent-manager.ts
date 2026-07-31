@@ -16,7 +16,48 @@ import { buildAgentOutcome, sanitizeAgentCause } from "./agent-outcome.js";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
-import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, pruneWorktrees, tryCreateWorktree, type WorktreeCreateFailureReason } from "./worktree.js";
+
+/** Model-facing guidance when worktree isolation cannot start. */
+function worktreeIsolationError(reason: WorktreeCreateFailureReason): Error {
+  const retryWithoutIsolationOnce =
+    "Retry the Agent call once without `isolation`; do not repeat the same call unchanged. " +
+    "Do not initialize or commit a repository solely to enable worktree isolation.";
+  const fixThenRetryIsolation =
+    "Fix the worktree/Git problem, then retry the same Agent call with isolation: \"worktree\". " +
+    "Do not drop isolation or fall back silently.";
+
+  if (reason === "not_git_repo" || reason === "no_head") {
+    // Confirmed missing prerequisites — one safe corrective path is unisolated retry.
+    return new Error(
+      'Cannot run with isolation: "worktree" — requires an existing Git repository with a valid HEAD ' +
+        "(at least one commit). " +
+        retryWithoutIsolationOnce,
+    );
+  }
+
+  if (reason === "git_probe_failed") {
+    // Indeterminate Git probe (timeout, missing git, permissions, safe.directory,
+    // corrupt repo, malformed output) — never drop isolation.
+    return new Error(
+      'Cannot run with isolation: "worktree" — Git probe failed (worktree/Git infrastructure). ' +
+        fixThenRetryIsolation,
+    );
+  }
+
+  if (reason === "repo_path_resolution_failed") {
+    // Path/root resolution failed before `git worktree add` was attempted.
+    return new Error(
+      'Cannot run with isolation: "worktree" — failed to resolve the Git repository root/path for worktree creation. ' +
+        fixThenRetryIsolation,
+    );
+  }
+
+  // Genuine `git worktree add` infrastructure failure — preserve isolation.
+  return new Error(
+    'Cannot run with isolation: "worktree" — `git worktree add` failed. ' + fixThenRetryIsolation,
+  );
+}
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -241,13 +282,11 @@ export class AgentManager {
     // BEFORE state mutation so a throw doesn't leave the record half-running.
     let worktreeCwd: string | undefined;
     if (options.isolation === "worktree") {
-      const wt = createWorktree(baseCwd, id);
-      if (!wt) {
-        throw new Error(
-          'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
-          'Initialize git and commit at least once, or omit `isolation`.',
-        );
+      const created = tryCreateWorktree(baseCwd, id);
+      if (!created.ok) {
+        throw worktreeIsolationError(created.reason);
       }
+      const wt = created.worktree;
       record.worktree = wt;
       // workPath preserves subdirectory scoping for caller-supplied cwds: a
       // cwd deep in a monorepo maps to the same subdir inside the copy, not

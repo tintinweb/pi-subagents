@@ -513,4 +513,18 @@ describe("child-safe nested Agent tools", () => {
 
     expect(spawnAndWait.mock.calls[0][1]).toBe(executionCtx);
   });
+
+  it("nested Agent isolation schema documents worktree prerequisites without init-to-enable", () => {
+    // Public seam: inspect the real registered nested Agent parameters schema
+    // (same surface models see), not a duplicated description constant.
+    const [agent] = tools();
+    const schemaText = JSON.stringify(agent.parameters);
+    const lower = schemaText.toLowerCase();
+
+    expect(schemaText).toContain('"worktree"');
+    expect(lower).toMatch(/valid head|at least one commit/);
+    expect(lower).toMatch(/omit.*isolation|without isolation|non-git/);
+    expect(lower).toMatch(/never initialize|do not initialize|never init/);
+    expect(schemaText).not.toMatch(/Initialize git and commit at least once/);
+  });
 });

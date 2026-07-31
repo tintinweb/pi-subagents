@@ -10,12 +10,13 @@ vi.mock("../src/agent-runner.js", () => ({
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
+  tryCreateWorktree: vi.fn(),
   cleanupWorktree: vi.fn(() => ({ hasChanges: false })),
   pruneWorktrees: vi.fn(),
 }));
 
 import { type RunResult, resumeAgent, runAgent } from "../src/agent-runner.js";
-import { createWorktree } from "../src/worktree.js";
+import { tryCreateWorktree } from "../src/worktree.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -712,9 +713,11 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     manager?.dispose();
   });
 
-  it("spawn() throws when createWorktree returns undefined; no orphan record left behind", async () => {
-    const { createWorktree } = await import("../src/worktree.js");
-    vi.mocked(createWorktree).mockReturnValueOnce(undefined);
+  it("spawn() throws when worktree creation fails; no orphan record left behind", async () => {
+    vi.mocked(tryCreateWorktree).mockReturnValueOnce({
+      ok: false,
+      reason: "not_git_repo",
+    });
     vi.mocked(runAgent).mockClear();
 
     manager = new AgentManager();
@@ -727,6 +730,73 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(manager.listAgents()).toEqual([]);
     // runAgent never invoked — strict, no silent fallback
     expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("spawn() error for missing worktree tells the model to retry once without isolation, not init git", async () => {
+    vi.mocked(tryCreateWorktree).mockReturnValueOnce({
+      ok: false,
+      reason: "not_git_repo",
+    });
+    vi.mocked(runAgent).mockClear();
+
+    manager = new AgentManager();
+    let message = "";
+    try {
+      manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+        description: "test",
+        isolation: "worktree",
+      });
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toMatch(/isolation: "worktree"/);
+    expect(message.toLowerCase()).toMatch(/omit|without|retry/);
+    expect(message).not.toMatch(/Initialize git and commit at least once/);
+    expect(message.toLowerCase()).not.toMatch(/git init|initialize git/);
+    expect(manager.listAgents()).toEqual([]);
+    expect(runAgent).not.toHaveBeenCalled();
+  });
+
+  it("spawn() infrastructure isolation failures keep isolation and do not suggest unisolated retry", async () => {
+    for (const reason of ["git_probe_failed", "repo_path_resolution_failed", "worktree_add_failed"] as const) {
+      vi.mocked(tryCreateWorktree).mockReturnValueOnce({
+        ok: false,
+        reason,
+      });
+      vi.mocked(runAgent).mockClear();
+
+      manager = new AgentManager();
+      let message = "";
+      try {
+        manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+          description: "test",
+          isolation: "worktree",
+        });
+      } catch (err) {
+        message = err instanceof Error ? err.message : String(err);
+      }
+
+      expect(message).toMatch(/isolation: "worktree"/);
+      // Accurate class: path/probe failures are not `git worktree add`.
+      if (reason === "repo_path_resolution_failed") {
+        expect(message.toLowerCase()).toMatch(/resolve|repository root|path/);
+        expect(message).not.toMatch(/`git worktree add` failed/);
+      } else if (reason === "git_probe_failed") {
+        expect(message.toLowerCase()).toMatch(/git|probe|infrastructure|worktree\/git/);
+        expect(message).not.toMatch(/`git worktree add` failed/);
+      } else {
+        expect(message).toMatch(/`git worktree add` failed/);
+      }
+      // Strict: preserve isolation; fix infrastructure, then retry with isolation.
+      expect(message.toLowerCase()).toMatch(/fix|retry.*isolation|then retry/);
+      expect(message.toLowerCase()).toMatch(/do not drop isolation|do not fall back|preserve/);
+      expect(message.toLowerCase()).not.toMatch(/retry the agent call once without/);
+      expect(message.toLowerCase()).not.toMatch(/retry once without/);
+      expect(message).not.toMatch(/Initialize git and commit at least once/);
+      expect(manager.listAgents()).toEqual([]);
+      expect(runAgent).not.toHaveBeenCalled();
+      manager.dispose();
+    }
   });
 });
 
@@ -781,9 +851,12 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
   });
 
   it("cwd + isolation: worktree — worktree created FROM cwd, session runs at the copy's workPath, cleanup targets cwd's repo", async () => {
-    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
-    vi.mocked(createWorktree).mockReturnValueOnce({
-      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/packages/api",
+    const { cleanupWorktree } = await import("../src/worktree.js");
+    vi.mocked(tryCreateWorktree).mockReturnValueOnce({
+      ok: true,
+      worktree: {
+        path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/packages/api",
+      },
     });
     resolvedRun();
 
@@ -795,7 +868,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     });
     await manager.getRecord(id)!.promise;
 
-    expect(createWorktree).toHaveBeenCalledWith("/", id);
+    expect(tryCreateWorktree).toHaveBeenCalledWith("/", id);
     // Worktree wins for the working dir — at workPath, so subdirectory scoping
     // survives isolation. Config still anchored to the parent.
     expect(runAgent).toHaveBeenCalledWith(
@@ -809,9 +882,11 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     // Parent session sitting in a repo subdirectory: workPath would point at
     // the copied subdir. Without SpawnOptions.cwd the agent must stay at the
     // copy's root — moving it would also move .pi config discovery.
-    const { createWorktree } = await import("../src/worktree.js");
-    vi.mocked(createWorktree).mockReturnValueOnce({
-      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir",
+    vi.mocked(tryCreateWorktree).mockReturnValueOnce({
+      ok: true,
+      worktree: {
+        path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir",
+      },
     });
     vi.mocked(runAgent).mockClear();
     resolvedRun();
@@ -1334,7 +1409,10 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
     });
     expect(manager.getRecord(queued)?.status).toBe("queued");
 
-    vi.mocked(createWorktree).mockReturnValueOnce(undefined);
+    vi.mocked(tryCreateWorktree).mockReturnValueOnce({
+      ok: false,
+      reason: "not_git_repo",
+    });
     finishBlocker?.({ responseText: "done", session: mockSession(), aborted: false, steered: false });
     await manager.getRecord(blocker)?.promise;
 

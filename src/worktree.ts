@@ -6,7 +6,7 @@
  * If changes exist, a branch is created and returned in the result.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,29 +37,159 @@ export interface WorktreeCleanupResult {
   path?: string;
 }
 
+/** Why worktree isolation could not be established. */
+export type WorktreeCreateFailureReason =
+  | "not_git_repo"
+  | "no_head"
+  | "git_probe_failed"
+  | "repo_path_resolution_failed"
+  | "worktree_add_failed";
+
+export type WorktreeCreateResult =
+  | { ok: true; worktree: WorktreeInfo }
+  | { ok: false; reason: WorktreeCreateFailureReason };
+
+const GIT_PROBE_TIMEOUT_MS = 5000;
+
+/** Outcome of a conclusive `git rev-parse` classification probe. */
+type GitProbeResult<
+  TSuccess extends string = string,
+  TNegative extends WorktreeCreateFailureReason = WorktreeCreateFailureReason,
+> =
+  | { kind: "success"; value: TSuccess }
+  | { kind: "negative"; reason: TNegative }
+  | { kind: "infrastructure" };
+
+function runGitProbe(cwd: string, args: string[], timeoutMs = GIT_PROBE_TIMEOUT_MS) {
+  return spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    // Capture streams without unbounded throws; classification uses status/output only.
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: timeoutMs,
+  });
+}
+
+function probeStdout(result: ReturnType<typeof runGitProbe>): string {
+  return (result.stdout ?? "").trim();
+}
+
+function probeStderr(result: ReturnType<typeof runGitProbe>): string {
+  return (result.stderr ?? "").trim();
+}
+
 /**
- * Create a temporary git worktree for an agent.
- * Returns the worktree path, or undefined if not in a git repo.
+ * Conclusive inside-work-tree probe.
+ * - success true → Git work tree
+ * - success false / conclusive "not a git repository" → not_git_repo
+ * - spawn/timeout/permission/safe.directory/corrupt/malformed → infrastructure
  */
-export function createWorktree(cwd: string, agentId: string): WorktreeInfo | undefined {
-  // Verify we're in a git repo with at least one commit (HEAD must exist)
-  let baseSha: string;
+function probeInsideWorkTree(cwd: string): GitProbeResult<"true", "not_git_repo"> {
+  const result = runGitProbe(cwd, ["rev-parse", "--is-inside-work-tree"]);
+  if (result.error || result.signal) return { kind: "infrastructure" };
+
+  const status = result.status;
+  const out = probeStdout(result);
+  const err = probeStderr(result).toLowerCase();
+
+  if (status === 0) {
+    if (out === "true") return { kind: "success", value: "true" };
+    // Bare repos and other non-work-trees report false without being "no repo".
+    // Isolation still cannot run; treat as confirmed non-work-tree prerequisite.
+    if (out === "false") return { kind: "negative", reason: "not_git_repo" };
+    return { kind: "infrastructure" };
+  }
+
+  // Git uses 128 for many fatal repository/config failures. Only classic
+  // repository-discovery misses are safe unisolated-retry prerequisites;
+  // safe.directory, corrupt gitdir, permissions, etc. keep isolation.
+  if (
+    status === 128 &&
+    /not a git repository \(or any of the parent directories\)|not a git repository \(or any parent up to mount point/i.test(
+      err,
+    )
+  ) {
+    return { kind: "negative", reason: "not_git_repo" };
+  }
+
+  return { kind: "infrastructure" };
+}
+
+/** Full object name as produced by `git rev-parse HEAD` on a valid commit. */
+const FULL_OBJECT_NAME = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i; // SHA-1 (40) or SHA-256 (64)
+
+/**
+ * Conclusive HEAD probe (requires a prior confirmed work tree).
+ * - success + full object name → base SHA
+ * - conclusive missing/unborn revision → no_head
+ * - spawn/timeout/permission/corrupt/malformed → infrastructure
+ */
+function probeHead(cwd: string): GitProbeResult<string, "no_head"> {
+  const result = runGitProbe(cwd, ["rev-parse", "HEAD"]);
+  if (result.error || result.signal) return { kind: "infrastructure" };
+
+  const status = result.status;
+  const out = probeStdout(result);
+  const err = probeStderr(result).toLowerCase();
+
+  if (status === 0) {
+    if (FULL_OBJECT_NAME.test(out)) return { kind: "success", value: out };
+    return { kind: "infrastructure" };
+  }
+
+  // Unborn branch / deleted HEAD / unknown revision — expected prerequisite miss.
+  if (
+    status === 128 &&
+    (/unknown revision|bad revision|needed a single revision|ambiguous argument ['"]?head['"]?/i.test(err) ||
+      /unknown revision or path not in the working tree/i.test(err))
+  ) {
+    return { kind: "negative", reason: "no_head" };
+  }
+
+  return { kind: "infrastructure" };
+}
+
+/**
+ * Create a temporary git worktree for an agent, with a structured failure reason.
+ * Distinguishes confirmed non-Git / missing-HEAD prerequisites from Git probe
+ * infrastructure failures and a genuine `git worktree add` failure.
+ * Never silently falls back.
+ */
+export function tryCreateWorktree(cwd: string, agentId: string): WorktreeCreateResult {
+  const inside = probeInsideWorkTree(cwd);
+  if (inside.kind === "infrastructure") {
+    return { ok: false, reason: "git_probe_failed" };
+  }
+  if (inside.kind === "negative") {
+    return { ok: false, reason: inside.reason };
+  }
+
+  const head = probeHead(cwd);
+  if (head.kind === "infrastructure") {
+    return { ok: false, reason: "git_probe_failed" };
+  }
+  if (head.kind === "negative") {
+    return { ok: false, reason: head.reason };
+  }
+  const baseSha = head.value;
+
+  // Where cwd sits inside the repo ("" at the root): the agent must work at
+  // the same subdirectory inside the copy, or a monorepo-package cwd would
+  // silently widen to the whole repo. realpath both sides — git emits
+  // resolved paths while cwd may arrive through a symlink (macOS /tmp).
   let subdir: string;
   try {
-    execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd, stdio: "pipe", timeout: 5000 });
-    baseSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd, stdio: "pipe", timeout: 5000 })
-      .toString()
-      .trim();
-    // Where cwd sits inside the repo ("" at the root): the agent must work at
-    // the same subdirectory inside the copy, or a monorepo-package cwd would
-    // silently widen to the whole repo. realpath both sides — git emits
-    // resolved paths while cwd may arrive through a symlink (macOS /tmp).
-    const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], { cwd, stdio: "pipe", timeout: 5000 })
+    const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      stdio: "pipe",
+      timeout: 5000,
+    })
       .toString()
       .trim();
     subdir = relative(realpathSync(topLevel), realpathSync(cwd));
   } catch {
-    return undefined;
+    // Top-level/path resolution failed after HEAD succeeded — worktree add was not attempted.
+    return { ok: false, reason: "repo_path_resolution_failed" };
   }
 
   const branch = `pi-agent-${agentId}`;
@@ -73,11 +203,27 @@ export function createWorktree(cwd: string, agentId: string): WorktreeInfo | und
       stdio: "pipe",
       timeout: 30000,
     });
-    return { path: worktreePath, branch, baseSha, workPath: subdir ? join(worktreePath, subdir) : worktreePath };
+    return {
+      ok: true,
+      worktree: {
+        path: worktreePath,
+        branch,
+        baseSha,
+        workPath: subdir ? join(worktreePath, subdir) : worktreePath,
+      },
+    };
   } catch {
-    // If worktree creation fails, return undefined (agent runs in normal cwd)
-    return undefined;
+    return { ok: false, reason: "worktree_add_failed" };
   }
+}
+
+/**
+ * Create a temporary git worktree for an agent.
+ * Returns the worktree info, or undefined when isolation cannot be established.
+ */
+export function createWorktree(cwd: string, agentId: string): WorktreeInfo | undefined {
+  const result = tryCreateWorktree(cwd, agentId);
+  return result.ok ? result.worktree : undefined;
 }
 
 /**

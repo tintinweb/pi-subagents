@@ -26,7 +26,7 @@ If the target is already known, use a direct tool — `read` for a known path, `
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.{{scheduleGuideline}}
+- Use isolation: "worktree" only in an existing Git repository with a valid HEAD/at least one commit (safe parallel file modifications). Omit isolation for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable worktree isolation. The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.{{scheduleGuideline}}
 
 ## Writing the prompt
 

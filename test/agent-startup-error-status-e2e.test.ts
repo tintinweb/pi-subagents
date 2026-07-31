@@ -12,8 +12,7 @@ import { agentCall, type PrintModeRun, routeBySession, runPrintMode } from "./he
 
 vi.setConfig({ testTimeout: 30_000 });
 
-const STARTUP_ERROR =
-  'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed.';
+const STARTUP_ERROR_FRAGMENT = 'Cannot run with isolation: "worktree"';
 
 type AgentToolResult = {
   isError?: boolean;
@@ -58,6 +57,13 @@ describe("issue #179 — Agent startup failures preserve tool error status", () 
 
     const result = latestAgentToolResult(run.parentSession);
     expect(result.isError).toBe(true);
-    expect(result.content.map((block) => block.text ?? "").join("")).toContain(STARTUP_ERROR);
+    const text = result.content.map((block) => block.text ?? "").join("");
+    expect(text).toContain(STARTUP_ERROR_FRAGMENT);
+    // Non-Git cwd: one safe corrective path — retry once without isolation.
+    // Do not suggest initializing/committing solely to enable worktree isolation.
+    expect(text.toLowerCase()).toMatch(/retry the agent call once without/);
+    expect(text.toLowerCase()).toMatch(/without [`']?isolation[`']?/);
+    expect(text).not.toMatch(/Initialize git and commit at least once/);
+    expect(text.toLowerCase()).not.toMatch(/initialize git|git init|commit at least once/);
   });
 });
