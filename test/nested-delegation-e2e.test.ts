@@ -15,13 +15,14 @@
  * deterministically, and a live model choosing not to delegate would look like
  * a passing test.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+import { encodeCwd } from "../src/output-file.js";
 import {
   agentCall,
   type FauxReply,
@@ -40,6 +41,29 @@ function firstUserText(context: Context): string {
   const content = first?.content;
   if (typeof content === "string") return content;
   return ((content ?? []) as Array<{ text?: string }>).map((b) => b.text ?? "").join("");
+}
+
+/** Tool results in a session context, newest last, with their tool names. */
+function toolResultTexts(context: Context): Array<{ name: string; text: string }> {
+  const out: Array<{ name: string; text: string }> = [];
+  for (const m of context.messages) {
+    if (m.role !== "toolResult") continue;
+    const name = (m as { toolName?: string }).toolName ?? "";
+    const text = ((m.content ?? []) as Array<{ text?: string }>).map((b) => b.text ?? "").join("");
+    out.push({ name, text });
+  }
+  return out;
+}
+
+/** Every `.output` transcript beneath a root, at any session/tasks depth. */
+function findOutputFiles(root: string): string[] {
+  let entries: string[];
+  try { entries = readdirSync(root); } catch { return []; }
+  return entries.flatMap((e) => {
+    const full = join(root, e);
+    if (statSync(full).isDirectory()) return findOutputFiles(full);
+    return full.endsWith(".output") ? [full] : [];
+  });
 }
 
 function writeAgents(cwd: string): void {
@@ -148,5 +172,86 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
 
     // Two hops home: worker → orchestrator → parent.
     expect(run.responseText).toContain(WORKER_MARKER);
+  });
+
+  it("backgrounds a nested child, polls it by id, and streams its transcript", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "nested-e2e-bg-"));
+    tmpDirs.push(cwd);
+    writeAgents(cwd);
+    const transcriptRoot = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`, encodeCwd(cwd));
+    rmSync(transcriptRoot, { recursive: true, force: true });
+
+    const respond = (context: Context): FauxReply => {
+      const text = firstUserText(context);
+
+      if (text.includes("Do the leaf work")) return WORKER_MARKER;
+
+      if (text.includes("Delegate this downward")) {
+        const results = toolResultTexts(context);
+        const spawned = results.find((r) => r.name === "Agent")?.text ?? "";
+        const polled = results.find((r) => r.name === "get_subagent_result")?.text;
+        // Third turn: the poll came back — echo it so a lost result fails loudly.
+        if (polled !== undefined) return `orchestrator polled: ${polled}`;
+        // Second turn: the spawn returned an id; fetch by exactly that id, which
+        // also exercises the manager's ownership check from inside a child.
+        if (spawned) {
+          const id = /Agent ID:\s*(\S+)/.exec(spawned)?.[1];
+          expect(id).toBeTruthy();
+          return fauxToolCall("get_subagent_result", { agent_id: id, wait: true });
+        }
+        return agentCall({
+          subagent_type: "worker",
+          description: "leaf work",
+          prompt: "Do the leaf work.",
+          run_in_background: true,
+        });
+      }
+
+      if (toolResultTexts(context).some((r) => r.name === "Agent")) return "parent done";
+      return agentCall({
+        subagent_type: "orchestrator",
+        description: "delegate",
+        prompt: "Delegate this downward.",
+      });
+    };
+
+    try {
+      run = await runPrintMode({
+        prompt: "Delegate the work.",
+        cwd,
+        respond,
+        beforeRun: () => { registerAgents(loadCustomAgents(cwd)); },
+      });
+
+      // The background child ran and its output came back through the id the
+      // spawn handed out — so it was never queued behind its waiting parent.
+      const orchestratorResult = run.parentSession.messages
+        .filter((m) => m.role === "toolResult")
+        .flatMap((m) => (m.content as Array<{ text?: string }>).map((b) => b.text ?? ""))
+        .join("\n");
+      expect(orchestratorResult).toContain("orchestrator polled");
+      expect(orchestratorResult).toContain(WORKER_MARKER);
+
+      // Only the REAL manager wires onSessionCreated → streamToOutputFile for a
+      // nested spawn, and only real rootSessionId propagation puts the file under
+      // this root. Identify the WORKER's own transcript by the prompt in its
+      // initial entry — matching the marker alone would also match the
+      // orchestrator's transcript, which merely echoes it, and would pass even
+      // with nested transcripts switched off entirely.
+      // Match on the FIRST line — writeInitialEntry seeds each transcript with the
+      // prompt that agent was given. Searching the whole file would also match the
+      // orchestrator's, which records the same string inside its Agent tool-call
+      // arguments, and would pass with nested transcripts switched off entirely.
+      const transcripts = findOutputFiles(transcriptRoot).map((f) => readFileSync(f, "utf-8"));
+      const workerTranscript = transcripts.find((t) => {
+        const first = JSON.parse(t.split("\n")[0]) as { message?: { content?: unknown } };
+        return first.message?.content === "Do the leaf work.";
+      });
+      expect(workerTranscript).toBeDefined();
+      // ...and it streamed the child's own turn, not just the seeded prompt.
+      expect(workerTranscript).toContain(WORKER_MARKER);
+    } finally {
+      rmSync(transcriptRoot, { recursive: true, force: true });
+    }
   });
 });
