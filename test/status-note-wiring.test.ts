@@ -82,9 +82,62 @@ describe("status note reaches the parent through the real handlers", () => {
     );
 
     const out = textOf(res);
-    expect(out).toContain("hit the turn limit");      // getStatusNote("aborted") is wired in
+    // Exact lead clause, not just "turn limit": a steered/aborted mix-up would
+    // otherwise slip through, and they are different outcomes.
+    expect(out).toContain("aborted at the turn limit");
     expect(out).toContain("partial work so far");     // partial result still delivered
     expect(out).not.toContain("STOPPED BY THE USER"); // not mislabelled as a user stop
+
+    // The two answers a foreground parent needs: is this all of it, and is the
+    // task done. The first is what #174 turned on — the parent has no agent id,
+    // so it must not read "partial" as "go fetch the rest".
+    expect(out).toContain("everything the agent produced is above");
+    expect(out).toContain("the task is unfinished");
+    // State only, never an instruction to act (see getForegroundOutcomeNote):
+    // advising a fresh run to save one wasted tool call is a bet nothing here
+    // can measure. And naming the tool we steer away from only raises its salience.
+    expect(out).not.toContain("re-spawn");
+    expect(out).not.toContain("get_subagent_result");
+  });
+
+  it("foreground user-stop → tells the parent NOT to restart it unasked", async () => {
+    // Pi delivers a user ESC as an abort on the tool's signal; the manager wires
+    // that to abort(id) (#44), landing the record on "stopped" — deliberately
+    // distinct from a turn-limit "aborted", because the correct next action is
+    // the opposite one.
+    let finish: (v: any) => void = () => {};
+    vi.mocked(runAgent).mockReturnValue(new Promise((r) => { finish = r; }) as any);
+
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+
+    const parent = new AbortController();
+    const call = tools.get("Agent").execute(
+      "tc-stop",
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      parent.signal, undefined, ctx(),
+    );
+
+    // The manager only wires addEventListener("abort", …) and never checks
+    // signal.aborted upfront (agent-manager.ts:240-243), so aborting before the
+    // listener is attached would silently land on "completed" instead. Flush
+    // first rather than relying on spawn() happening in execute()'s synchronous
+    // prefix, which any future await in that path would quietly break.
+    await new Promise((r) => setImmediate(r));
+    parent.abort(); // the user hits ESC
+    finish({ responseText: "partial work so far", session: { dispose: vi.fn() }, aborted: false, steered: false });
+
+    const out = textOf(await call);
+    expect(out).toContain("STOPPED BY THE USER");
+    expect(out).toContain("everything the agent produced is above");
+    // Same claim, same confidence, same words as the aborted case — only the
+    // lead clause distinguishes them.
+    expect(out).toContain("the task is unfinished");
+    // State only, here most of all. Advice to re-spawn would re-run work a human
+    // deliberately killed; advice to ask first presumes someone is there to ask,
+    // which is false under `pi -p`, scheduled jobs, and background-driven runs.
+    expect(out).not.toContain("re-spawn");
+    expect(out).not.toContain("ask before");
   });
 
   it("hides nested records from top-level tools, registry, transcripts, and lifecycle", async () => {
@@ -169,5 +222,11 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(out).toContain("STOPPED BY THE USER");
     expect(out).toContain("the task was NOT finished");
     expect(out).not.toContain("Done"); // not surfaced as a normal completion
+
+    // The background/retrieval path keeps getStatusNote, NOT the foreground
+    // note. Its caller holds a 500-char preview and a real agent id, so
+    // "everything the agent produced is above" would be a lie here. Folding the
+    // two functions back together is exactly the regression this guards.
+    expect(out).not.toContain("everything the agent produced is above");
   });
 });

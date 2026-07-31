@@ -1,7 +1,18 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// Mock homedir so the user-scope legacy fallback check (~/.pi/agent-memory)
+// resolves against a controlled temp home rather than the developer's real
+// ~/.pi state. The default return must be a valid string: pi-coding-agent
+// evaluates getAgentDir() at module load, so an undefined homedir throws at import.
+const mockHomedir = vi.hoisted(() => vi.fn(() => "/tmp"));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, homedir: mockHomedir };
+});
+
 import { buildMemoryBlock, buildReadOnlyMemoryBlock, ensureMemoryDir, isSymlink, isUnsafeName, readMemoryIndex, resolveMemoryDir, safeReadFile } from "../src/memory.js";
 
 describe("memory", () => {
@@ -9,6 +20,11 @@ describe("memory", () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), "pi-mem-test-"));
+    // Point homedir at a clean temp home with no legacy agent-memory dirs, so
+    // user-scope resolution deterministically returns the agent-dir location.
+    const fakeHome = join(tmpDir, "home");
+    mkdirSync(fakeHome, { recursive: true });
+    mockHomedir.mockReturnValue(fakeHome);
   });
 
   afterEach(() => {
@@ -26,10 +42,17 @@ describe("memory", () => {
       expect(dir).toBe("/workspace/.pi/agent-memory-local/auditor");
     });
 
-    it("resolves user scope to ~/.pi/agent-memory/<name>", () => {
-      const dir = resolveMemoryDir("auditor", "user", "/workspace");
-      expect(dir).toContain(".pi/agent-memory/auditor");
-      expect(dir).not.toContain("/workspace");
+    it("resolves user scope under the agent dir (honors PI_CODING_AGENT_DIR)", () => {
+      const originalEnv = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = join(tmpDir, "custom-agent-dir");
+      try {
+        const dir = resolveMemoryDir("auditor", "user", "/workspace");
+        expect(dir).toBe(join(tmpDir, "custom-agent-dir", "agent-memory", "auditor"));
+        expect(dir).not.toContain("/workspace");
+      } finally {
+        if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalEnv;
+      }
     });
 
     it("throws on names with path traversal (..)", () => {
@@ -241,9 +264,18 @@ describe("memory", () => {
     });
 
     it("uses correct directory for user scope", () => {
-      const block = buildMemoryBlock("test-agent", "user", tmpDir);
-      expect(block).toContain(".pi/agent-memory/test-agent");
-      expect(block).not.toContain(tmpDir);
+      // Pin the agent dir to a temp location so the test doesn't create
+      // directories in the real home / agent dir (buildMemoryBlock mkdirs).
+      const originalEnv = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = join(tmpDir, "agent-dir");
+      try {
+        const block = buildMemoryBlock("test-agent", "user", join(tmpDir, "workspace"));
+        expect(block).toContain(join(tmpDir, "agent-dir", "agent-memory", "test-agent"));
+        expect(block).not.toContain(join(tmpDir, "workspace"));
+      } finally {
+        if (originalEnv == null) delete process.env.PI_CODING_AGENT_DIR;
+        else process.env.PI_CODING_AGENT_DIR = originalEnv;
+      }
     });
 
     it("includes scope label in header", () => {

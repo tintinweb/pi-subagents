@@ -25,7 +25,7 @@ import {
   streamToOutputFile,
   writeInitialEntry,
 } from "./output-file.js";
-import { getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type {
   AgentConfig,
   AgentInvocation,
@@ -110,7 +110,20 @@ function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): rec
   return record?.parentAgentId === parentAgentId;
 }
 
-function formatRecord(record: AgentRecord): string {
+/**
+ * How the caller received this record, which decides the outcome wording.
+ *
+ *   - "inline": a foreground spawn or a resume. The full output is in this very
+ *     result and no agent id was handed back, so the note must say there is
+ *     nothing left to fetch — otherwise the parent invents an id, calls
+ *     `get_subagent_result`, and hits "not owned by this parent" (#174, the same
+ *     trap the top-level foreground path fell into).
+ *   - "fetched": `get_subagent_result` on a background child. The parent holds a
+ *     valid id and can poll again, so the background wording applies.
+ */
+type ResultPosition = "inline" | "fetched";
+
+function formatRecord(record: AgentRecord, position: ResultPosition): string {
   if (record.status === "error") {
     return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
   }
@@ -121,7 +134,9 @@ function formatRecord(record: AgentRecord): string {
   // this in its result headline; a nested result has no headline, so the note
   // leads — appended, it would look like part of the child's own output.
   const text = record.result?.trim() || record.error?.trim() || "No output.";
-  const note = getStatusNote(record.status);
+  const note = position === "inline"
+    ? getForegroundOutcomeNote(record.status)
+    : getStatusNote(record.status);
   return note ? `Nested agent${note}.\n\n${text}` : text;
 }
 
@@ -167,7 +182,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         const resumed = await context.manager.resume(params.resume, params.prompt, signal);
         return resumed
-          ? textResult(formatRecord(resumed), resumed.status === "error")
+          ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
 
@@ -323,7 +338,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           { ...options, signal },
           attachTranscript,
         );
-        return textResult(formatRecord(record), record.status === "error");
+        return textResult(formatRecord(record, "inline"), record.status === "error");
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
       }
@@ -353,7 +368,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         if (record.promise) await abortable(record.promise, signal);
       }
-      return textResult(formatRecord(record), record.status === "error");
+      return textResult(formatRecord(record, "fetched"), record.status === "error");
     },
   });
 
