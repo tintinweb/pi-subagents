@@ -38,9 +38,8 @@ import { addUsage } from "./usage.js";
 /**
  * Hard ceiling on nesting for every branch: main session = 0, its subagents = 1,
  * their children = 2. `0`/`1` disables nesting entirely. Set from
- * `subagents.json` (`maxSubagentDepth`); a custom agent's `max_subagent_depth`
- * can only tighten it further. Read when a subagent session is built, so a
- * change applies to sessions started after it.
+ * `subagents.json` (`maxSubagentDepth`). Read when a subagent session is built,
+ * so a change applies to sessions started after it.
  */
 let maxSubagentDepth = 2;
 
@@ -237,10 +236,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // off the owning parent rather than this child session's own id.
       const rootSessionId = context.manager.getRecord(context.parentAgentId)?.rootSessionId;
       const childDepth = context.depth + 1;
-      const childMaxDepth = Math.min(
-        context.maxSubagentDepth,
-        config?.maxSubagentDepth ?? context.maxSubagentDepth,
-      );
       const options: NestedSpawnOptions = {
         description: params.description,
         model,
@@ -276,7 +271,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         },
         depth: childDepth,
         parentAgentId: context.parentAgentId,
-        maxSubagentDepth: childMaxDepth,
+        maxSubagentDepth: context.maxSubagentDepth,
         configCwd: context.configCwd,
         rootSessionId,
       };

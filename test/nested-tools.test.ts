@@ -336,20 +336,18 @@ describe("child-safe nested Agent tools", () => {
     settleChild?.();
   });
 
-  it("propagates a target agent's tighter depth cap", async () => {
-    writeAgent("tight", "max_subagent_depth: 1\n");
-    registerAgents(loadCustomAgents(cwd));
+  it("hands the branch cap down to the child it spawns", async () => {
     const [agent] = tools("all", 1, 3);
     const result = await execute(agent, {
-      subagent_type: "tight",
-      description: "tight child",
+      subagent_type: "scout",
+      description: "child",
       prompt: "Do work",
     });
 
     expect(result.isError).toBe(false);
     expect(spawnAndWait).toHaveBeenCalledWith(
-      expect.anything(), expect.anything(), "tight", "Do work",
-      expect.objectContaining({ depth: 2, maxSubagentDepth: 1 }),
+      expect.anything(), expect.anything(), "scout", "Do work",
+      expect.objectContaining({ depth: 2, maxSubagentDepth: 3 }),
       expect.any(Function),
     );
   });

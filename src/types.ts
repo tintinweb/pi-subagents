@@ -52,8 +52,6 @@ export interface AgentConfig {
    * "all" = any enabled agent; string[] = only those agent types.
    */
   allowedSubagents?: "all" | string[];
-  /** Optional nesting-depth cap that can only tighten the inherited limit. */
-  maxSubagentDepth?: number;
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */

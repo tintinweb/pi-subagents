@@ -1006,33 +1006,20 @@ describe("agent-runner master tool allowlist", () => {
     expect(lastToolsPassed()).not.toContain("Agent");
   });
 
-  it("lets an agent cap tighten but not relax its inherited depth", async () => {
-    vi.mocked(getConfig)
-      .mockReturnValueOnce(makeConfig({ extensions: false }))
-      .mockReturnValueOnce(makeConfig({ extensions: false }));
-    vi.mocked(getToolNamesForType)
-      .mockReturnValueOnce(BUILTINS_7)
-      .mockReturnValueOnce(BUILTINS_7);
+  it("passes the inherited depth cap through to the nested tools", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
     vi.mocked(getAgentConfig).mockReturnValueOnce(
-      makeAgentConfig({ extensions: false, allowedSubagents: "all", maxSubagentDepth: 2 }),
+      makeAgentConfig({ extensions: false, allowedSubagents: "all" }),
     );
     await runAgent(ctx, "Explore", "go", {
       pi,
       nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 3 },
     });
-    expect(createNestedSubagentTools).toHaveBeenLastCalledWith(expect.objectContaining({ maxSubagentDepth: 2 }));
-
-    vi.mocked(getAgentConfig).mockReturnValueOnce(
-      makeAgentConfig({ extensions: false, allowedSubagents: "all", maxSubagentDepth: 5 }),
-    );
-    await runAgent(ctx, "Explore", "go", {
-      pi,
-      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 2 },
-    });
-    expect(createNestedSubagentTools).toHaveBeenLastCalledWith(expect.objectContaining({ maxSubagentDepth: 2 }));
+    expect(createNestedSubagentTools).toHaveBeenLastCalledWith(expect.objectContaining({ maxSubagentDepth: 3 }));
   });
 
   it("injects no nested tools once the effective cap is reached", async () => {

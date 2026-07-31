@@ -97,9 +97,8 @@ export interface SubagentsSettings {
   /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
-   * disables nesting project-wide. A custom agent's `max_subagent_depth` can
-   * only tighten this further, never raise it. Read when a subagent session is
-   * built, so a change applies to agents started after it.
+   * disables nesting project-wide. Read when a subagent session is built, so a
+   * change applies to agents started after it.
    */
   maxSubagentDepth?: number;
 }

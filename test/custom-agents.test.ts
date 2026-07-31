@@ -110,7 +110,6 @@ persist_session: true
 output_transcript: false
 session_dir: .seams/pi-sessions/seam-plan-reviewer
 allowed_subagents: scout, reviewer
-max_subagent_depth: 2
 prompt_mode: replace
 inherit_context: true
 run_in_background: true
@@ -133,7 +132,6 @@ You are a security auditor.`);
     expect(agent.outputTranscript).toBe(false);
     expect(agent.sessionDir).toBe(".seams/pi-sessions/seam-plan-reviewer");
     expect(agent.allowedSubagents).toEqual(["scout", "reviewer"]);
-    expect(agent.maxSubagentDepth).toBe(2);
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBe(true);
     expect(agent.runInBackground).toBe(true);
@@ -162,7 +160,6 @@ Just a prompt.`);
     expect(agent.outputTranscript).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
     expect(agent.allowedSubagents).toBeUndefined();
-    expect(agent.maxSubagentDepth).toBeUndefined();
     expect(agent.promptMode).toBe("replace");
     expect(agent.inheritContext).toBeUndefined();
     expect(agent.runInBackground).toBeUndefined();
@@ -234,21 +231,6 @@ Off.`);
     const result = loadCustomAgents(tmpDir);
     expect(result.get("bool-on")!.allowedSubagents).toBe("all");
     expect(result.get("bool-off")!.allowedSubagents).toBeUndefined();
-  });
-
-  it("ignores invalid or negative max_subagent_depth values", () => {
-    writeAgent("negative", `---
-max_subagent_depth: -1
----
-Negative.`);
-    writeAgent("fractional", `---
-max_subagent_depth: 1.5
----
-Fractional.`);
-
-    const result = loadCustomAgents(tmpDir);
-    expect(result.get("negative")!.maxSubagentDepth).toBeUndefined();
-    expect(result.get("fractional")!.maxSubagentDepth).toBeUndefined();
   });
 
   it("handles tools: none → empty array", () => {

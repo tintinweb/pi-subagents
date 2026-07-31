@@ -74,7 +74,6 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       outputTranscript: fm.output_transcript != null ? fm.output_transcript !== false : undefined,
       sessionDir: str(fm.session_dir),
       allowedSubagents: parseAllowedSubagents(fm.allowed_subagents),
-      maxSubagentDepth: nonNegativeInteger(fm.max_subagent_depth),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
@@ -99,11 +98,6 @@ function str(val: unknown): string | undefined {
 /** Extract a non-negative integer or undefined. 0 means unlimited for max_turns. */
 function nonNegativeInt(val: unknown): number | undefined {
   return typeof val === "number" && val >= 0 ? val : undefined;
-}
-
-/** Extract a non-negative integer for discrete depth values. */
-function nonNegativeInteger(val: unknown): number | undefined {
-  return typeof val === "number" && Number.isInteger(val) && val >= 0 ? val : undefined;
 }
 
 /**

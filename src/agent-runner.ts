@@ -749,11 +749,7 @@ export async function runAgent(
   // set `allowed_subagents` and a nestedRuntime was provided — and never when
   // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
   // scoping below re-admits them explicitly (registry deny + active-set narrow).
-  const inheritedMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  const effectiveMaxDepth = Math.min(
-    inheritedMaxDepth,
-    agentConfig?.maxSubagentDepth ?? inheritedMaxDepth,
-  );
+  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
   // At (or past) the cap this agent can never spawn, so it can never own a child
   // to fetch from or steer either — inject nothing rather than three tools whose
   // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean

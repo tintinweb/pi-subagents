@@ -1848,7 +1848,6 @@ Terse command-style prompts produce shallow, generic work.
     if (cfg.allowedSubagents !== undefined) {
       fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
     }
-    if (cfg.maxSubagentDepth !== undefined) fmFields.push(`max_subagent_depth: ${cfg.maxSubagentDepth}`);
     fmFields.push(`prompt_mode: ${cfg.promptMode}`);
     if (cfg.extensions === false) fmFields.push("extensions: false");
     else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
