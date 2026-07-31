@@ -30,7 +30,15 @@ import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import {
+  applyAndEmitLoaded,
+  isValidWorktreeTimeoutSetting,
+  MAX_WORKTREE_TIMEOUT_SECONDS,
+  MIN_WORKTREE_TIMEOUT_SECONDS,
+  type SubagentsSettings,
+  saveAndEmitChanged,
+  type ToolDescriptionMode,
+} from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
@@ -53,6 +61,7 @@ import {
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { getWorktreeTimeoutSetting, setWorktreeTimeoutSetting } from "./worktree.js";
 
 // ---- Shared helpers ----
 
@@ -753,6 +762,7 @@ export default function (pi: ExtensionAPI) {
       setWidgetMode: setWidgetMode,
       setOutputTranscript: setOutputTranscriptDefault,
       setMaxSubagentDepth: setMaxSubagentDepth,
+      setWorktreeTimeout: setWorktreeTimeoutSetting,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -2121,10 +2131,12 @@ ${systemPrompt}
       widgetMode: getWidgetMode(),
       outputTranscript: getOutputTranscriptDefault(),
       maxSubagentDepth: getMaxSubagentDepth(),
+      worktreeTimeoutSeconds: getWorktreeTimeoutSetting(),
     };
   }
 
   const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth"]);
+  const INPUT_IDS = new Set([...NUMERIC_IDS, "worktreeTimeoutSeconds"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
@@ -2132,6 +2144,7 @@ ${systemPrompt}
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
+      const wts = getWorktreeTimeoutSetting();
 
       return [
         {
@@ -2161,6 +2174,13 @@ ${systemPrompt}
           description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
           currentValue: String(msd),
           values: [String(msd)],
+        },
+        {
+          id: "worktreeTimeoutSeconds",
+          label: "Worktree timeout",
+          description: `Git checkout timeout in seconds; auto scales with tracked files (${MIN_WORKTREE_TIMEOUT_SECONDS}-${MAX_WORKTREE_TIMEOUT_SECONDS}s fixed range)`,
+          currentValue: String(wts),
+          values: [String(wts)],
         },
         {
           id: "joinMode",
@@ -2254,6 +2274,18 @@ ${systemPrompt}
               : `Nested depth set to ${n}. Applies to agents started from now on.`,
           );
         }
+      } else if (id === "worktreeTimeoutSeconds") {
+        const normalized = value.trim().toLowerCase();
+        const parsed: unknown = normalized === "auto" ? "auto" : Number(normalized);
+        if (isValidWorktreeTimeoutSetting(parsed)) {
+          setWorktreeTimeoutSetting(parsed);
+          notifyApplied(
+            ctx,
+            parsed === "auto"
+              ? "Worktree timeout set to auto"
+              : `Worktree timeout set to ${parsed} seconds`,
+          );
+        }
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
         notifyApplied(ctx, `Default join mode set to ${value}`);
@@ -2328,8 +2360,8 @@ ${systemPrompt}
             currentIndex = Math.min(items.length - 1, currentIndex + 1);
           }
 
-          // Enter on numeric field → close and prompt for typed input
-          if (matchesKey(data, Key.enter) && NUMERIC_IDS.has(items[currentIndex].id)) {
+          // Enter on editable field → close and prompt for typed input
+          if (matchesKey(data, Key.enter) && INPUT_IDS.has(items[currentIndex].id)) {
             done(items[currentIndex].id);
             return;
           }
@@ -2338,15 +2370,17 @@ ${systemPrompt}
       };
     });
 
-    // If a numeric field ID was returned, prompt for typed input
-    if (result && NUMERIC_IDS.has(result)) {
+    // If an editable field ID was returned, prompt for typed input
+    if (result && INPUT_IDS.has(result)) {
       const current = result === "maxConcurrent"
         ? String(manager.getMaxConcurrent())
         : result === "defaultMaxTurns"
           ? String(getDefaultMaxTurns() ?? 0)
           : result === "maxSubagentDepth"
             ? String(getMaxSubagentDepth())
-            : String(getGraceTurns());
+            : result === "worktreeTimeoutSeconds"
+              ? String(getWorktreeTimeoutSetting())
+              : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
         ? "Max concurrency (1+)"
@@ -2354,16 +2388,31 @@ ${systemPrompt}
           ? "Default max turns (0 = unlimited)"
           : result === "maxSubagentDepth"
             ? "Nested depth (0/1 = nesting off)"
-            : "Grace turns (1+)";
+            : result === "worktreeTimeoutSeconds"
+              ? `Worktree timeout (auto or ${MIN_WORKTREE_TIMEOUT_SECONDS}-${MAX_WORKTREE_TIMEOUT_SECONDS} seconds)`
+              : "Grace turns (1+)";
 
-      // Loop until user enters a valid integer or cancels (Esc / null).
-      // Silently trims whitespace; rejects non-numeric input by re-prompting.
+      // Loop until the user enters a valid value or cancels (Esc / null).
+      // Worktree timeout accepts the auto strategy or a bounded integer.
       let input: string | undefined = await ctx.ui.input(label, current);
       while (input != null) {
         const trimmed = input.trim();
-        const n = Number(trimmed);
-        if (trimmed !== "" && Number.isInteger(n)) {
-          applyValue(result, String(n));
+        let parsed: string | undefined;
+        if (result === "worktreeTimeoutSeconds") {
+          const normalized = trimmed.toLowerCase();
+          if (normalized === "auto") {
+            parsed = "auto";
+          } else {
+            const n = Number(normalized);
+            if (isValidWorktreeTimeoutSetting(n)) parsed = String(n);
+          }
+        } else {
+          const n = Number(trimmed);
+          if (trimmed !== "" && Number.isInteger(n)) parsed = String(n);
+        }
+
+        if (parsed !== undefined) {
+          applyValue(result, parsed);
           await showSettings(ctx);
           return;
         }

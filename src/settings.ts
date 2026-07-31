@@ -7,6 +7,21 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { JoinMode, WidgetMode } from "./types.js";
 
+export type WorktreeTimeoutSetting = "auto" | number;
+
+export const MIN_WORKTREE_TIMEOUT_SECONDS = 30;
+export const MAX_WORKTREE_TIMEOUT_SECONDS = 3_600;
+export const DEFAULT_WORKTREE_TIMEOUT_SETTING: WorktreeTimeoutSetting = "auto";
+
+export function isValidWorktreeTimeoutSetting(value: unknown): value is WorktreeTimeoutSetting {
+  return value === "auto" || (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= MIN_WORKTREE_TIMEOUT_SECONDS &&
+    value <= MAX_WORKTREE_TIMEOUT_SECONDS
+  );
+}
+
 export interface SubagentsSettings {
   maxConcurrent?: number;
   /**
@@ -101,6 +116,8 @@ export interface SubagentsSettings {
    * change applies to agents started after it.
    */
   maxSubagentDepth?: number;
+  /** Worktree checkout timeout in seconds, or "auto" to scale with tracked files. */
+  worktreeTimeoutSeconds?: WorktreeTimeoutSetting;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -119,6 +136,7 @@ export interface SettingsAppliers {
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
+  setWorktreeTimeout: (setting: WorktreeTimeoutSetting) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -168,6 +186,9 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.maxSubagentDepth as number) <= SUBAGENT_DEPTH_CEILING
   ) {
     out.maxSubagentDepth = r.maxSubagentDepth as number;
+  }
+  if (isValidWorktreeTimeoutSetting(r.worktreeTimeoutSeconds)) {
+    out.worktreeTimeoutSeconds = r.worktreeTimeoutSeconds;
   }
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode as JoinMode;
@@ -247,6 +268,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
+  if (s.worktreeTimeoutSeconds !== undefined) appliers.setWorktreeTimeout(s.worktreeTimeoutSeconds);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);

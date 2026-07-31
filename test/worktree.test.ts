@@ -3,7 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanupWorktree, createWorktree, pruneWorktrees } from "../src/worktree.js";
+import {
+  calculateAutoWorktreeTimeoutMs,
+  cleanupWorktree,
+  createWorktree,
+  pruneWorktrees,
+  resolveWorktreeTimeoutMs,
+  setWorktreeTimeoutSetting,
+} from "../src/worktree.js";
 
 /**
  * Helper: create a temporary git repo with an initial commit.
@@ -27,9 +34,26 @@ describe("worktree", () => {
   });
 
   afterEach(() => {
+    setWorktreeTimeoutSetting("auto");
     // Clean up any lingering worktrees first, then remove repo
     try { pruneWorktrees(repoDir); } catch { /* ignore */ }
     rmSync(repoDir, { recursive: true, force: true });
+  });
+
+  describe("timeout resolution", () => {
+    it("uses a one-minute floor and a thirty-minute cap for auto mode", () => {
+      expect(calculateAutoWorktreeTimeoutMs(0)).toBe(60_000);
+      expect(calculateAutoWorktreeTimeoutMs(1_000_000)).toBe(30 * 60_000);
+    });
+
+    it("scales auto mode by tracked file count", () => {
+      expect(calculateAutoWorktreeTimeoutMs(1_000)).toBe(65_000);
+      expect(resolveWorktreeTimeoutMs(repoDir, "auto")).toBe(60_005);
+    });
+
+    it("converts fixed timeout seconds to milliseconds", () => {
+      expect(resolveWorktreeTimeoutMs(repoDir, 300)).toBe(300_000);
+    });
   });
 
   describe("createWorktree", () => {
