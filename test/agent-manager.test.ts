@@ -582,8 +582,8 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
       captured = opts;
       // Two assistant messages with usage
-      opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 10 });
-      opts.onAssistantUsage?.({ input: 200, output: 80, cacheWrite: 20 });
+      opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 10, cost: 0.012 });
+      opts.onAssistantUsage?.({ input: 200, output: 80, cacheWrite: 20, cost: 0.006 });
       return { responseText: "done", session: mockSession(), aborted: false, steered: false };
     });
 
@@ -594,9 +594,11 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     await manager.getRecord(id)!.promise;
 
     expect(captured).toBeDefined();
-    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({
-      input: 300, output: 130, cacheWrite: 30,
-    });
+    const usage = manager.getRecord(id)!.lifetimeUsage;
+    expect(usage.input).toBe(300);
+    expect(usage.output).toBe(130);
+    expect(usage.cacheWrite).toBe(30);
+    expect(usage.cost).toBeCloseTo(0.018);
   });
 
   it("onCompaction from runAgent increments record.compactionCount", async () => {

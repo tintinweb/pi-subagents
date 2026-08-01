@@ -284,6 +284,22 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir).scopeModels).toBeUndefined();
     });
 
+    it("accepts showCost boolean (true and false)", () => {
+      writeProject({ showCost: true });
+      expect(loadSettings(projectDir)).toEqual({ showCost: true });
+      writeProject({ showCost: false });
+      expect(loadSettings(projectDir)).toEqual({ showCost: false });
+    });
+
+    it("drops non-boolean showCost", () => {
+      writeProject({ showCost: "yes" });
+      expect(loadSettings(projectDir).showCost).toBeUndefined();
+      writeProject({ showCost: 1 });
+      expect(loadSettings(projectDir).showCost).toBeUndefined();
+      writeProject({ showCost: null });
+      expect(loadSettings(projectDir).showCost).toBeUndefined();
+    });
+
     it("accepts disableDefaultAgents boolean (true and false)", () => {
       writeProject({ disableDefaultAgents: true });
       expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });
@@ -420,6 +436,7 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setShowCost: vi.fn(),
       };
     });
 
@@ -466,6 +483,7 @@ describe("settings persistence", () => {
           toolDescriptionMode: "compact",
           fleetView: false,
           widgetMode: "off",
+          showCost: true,
         },
         appliers,
       );
@@ -479,6 +497,7 @@ describe("settings persistence", () => {
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
       expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
+      expect(appliers.setShowCost).toHaveBeenCalledWith(true);
     });
 
     it("applies widgetMode; skips it when absent", () => {
@@ -578,6 +597,7 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setShowCost: vi.fn(),
       };
     });
 

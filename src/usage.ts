@@ -5,9 +5,10 @@
  * compaction (which replaces session.state.messages and would reset any
  * stats-derived sum). cacheRead is excluded because each turn's cacheRead is
  * the cumulative cached prefix re-read on that one call — summing across
- * turns counts the prefix N times. See issue #38.
+ * turns counts the prefix N times. See issue #38. Reported model cost is
+ * accumulated separately when the provider supplies it.
  */
-export type LifetimeUsage = { input: number; output: number; cacheWrite: number };
+export type LifetimeUsage = { input: number; output: number; cacheWrite: number; cost?: number };
 
 /** Sum of lifetime usage components, or 0 if undefined. */
 export function getLifetimeTotal(u?: LifetimeUsage): number {
@@ -19,6 +20,12 @@ export function addUsage(into: LifetimeUsage, delta: LifetimeUsage): void {
   into.input += delta.input;
   into.output += delta.output;
   into.cacheWrite += delta.cacheWrite;
+  if (delta.cost !== undefined) into.cost = (into.cost ?? 0) + delta.cost;
+}
+
+/** Format a reported model cost for compact UI display, or "" when unavailable. */
+export function formatCost(cost?: number): string {
+  return cost !== undefined && Number.isFinite(cost) ? `~$${cost.toFixed(3)}` : "";
 }
 
 /** Minimal shape we read from upstream `getSessionStats()`. */

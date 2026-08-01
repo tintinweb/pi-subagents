@@ -115,7 +115,8 @@ export interface AgentRecord {
   /**
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately
-   * excluded — see issue #38). Initialized to zeros at spawn.
+   * excluded — see issue #38). Reported model cost is accumulated separately
+   * when available. Initialized to zeros at spawn.
    */
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
@@ -171,6 +172,8 @@ export interface NotificationDetails {
   outputFile?: string;
   error?: string;
   resultPreview: string;
+  /** Reported model cost, when available. */
+  cost?: number;
   /** Additional agents in a group notification. */
   others?: NotificationDetails[];
 }

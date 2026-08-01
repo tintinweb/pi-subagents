@@ -9,7 +9,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
-import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
+import { formatCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
 
@@ -84,6 +84,8 @@ export interface AgentDetails {
   turnCount?: number;
   /** Effective max turns (undefined = unlimited). */
   maxTurns?: number;
+  /** Reported model cost, when available. */
+  cost?: number;
   agentId?: string;
   error?: string;
 }
@@ -237,6 +239,7 @@ export class AgentWidget {
      * extension supplies one defaulting to `"background"`.
      */
     private mode: () => WidgetMode = () => "all",
+    private showCost: () => boolean = () => false,
   ) {}
 
   /**
@@ -384,7 +387,8 @@ export class AgentWidget {
 
       const bg = this.agentActivity.get(a.id);
       const toolUses = bg?.toolUses ?? a.toolUses;
-      const tokens = getLifetimeTotal(bg?.lifetimeUsage);
+      const usage = bg?.lifetimeUsage ?? a.lifetimeUsage;
+      const tokens = getLifetimeTotal(usage);
       const contextPercent = getSessionContextPercent(bg?.session);
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
 
@@ -392,6 +396,7 @@ export class AgentWidget {
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);
+      if (this.showCost() && usage.cost !== undefined) parts.push(formatCost(usage.cost));
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 

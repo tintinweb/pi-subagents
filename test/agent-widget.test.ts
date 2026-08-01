@@ -57,13 +57,13 @@ describe("renderRunningAgentStatus", () => {
 describe("AgentWidget", () => {
   const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
-  function makeActivity(): AgentActivity {
+  function makeActivity(cost?: number): AgentActivity {
     return {
       activeTools: new Map(),
       toolUses: 0,
       responseText: "",
       turnCount: 1,
-      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost },
     };
   }
 
@@ -83,11 +83,12 @@ describe("AgentWidget", () => {
   }
 
   /** Render the widget for a manager and return the produced lines ("" if nothing rendered). */
-  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode): string {
+  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode, showCost?: () => boolean, cost?: number): string {
     const widget = new AgentWidget(
       manager as any,
-      new Map([[activityId, makeActivity()]]),
+      new Map([[activityId, makeActivity(cost)]]),
       mode,
+      showCost,
     );
     let factory: any;
     widget.setUICtx({
@@ -139,6 +140,12 @@ describe("AgentWidget", () => {
   });
 
   // "off" hides the widget entirely — even a background agent renders nothing.
+  it("shows cost only when cost display is enabled", () => {
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    expect(renderLines(manager, "background", () => "background", () => false, 0.018)).not.toContain("~$0.018");
+    expect(renderLines(manager, "background", () => "background", () => true, 0.018)).toContain("~$0.018");
+  });
+
   it("renders nothing in 'off' mode", () => {
     const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
     expect(renderLines(manager, "background", () => "off")).toBe("");

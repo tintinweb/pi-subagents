@@ -117,6 +117,8 @@ export interface SubagentsSettings {
    * meaning one thing here and another in the resolver.
    */
   fallbackSubagent?: string;
+  /** Whether to show reported model costs in subagent UI and results. Defaults to false. */
+  showCost?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -136,6 +138,7 @@ export interface SettingsAppliers {
   setOutputTranscript: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
   setFallbackSubagent: (v: string | undefined) => void;
+  setShowCost: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -220,6 +223,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   } else if (typeof r.fallbackSubagent === "string" && r.fallbackSubagent.trim()) {
     out.fallbackSubagent = r.fallbackSubagent.trim();
   }
+  if (typeof r.showCost === "boolean") {
+    out.showCost = r.showCost;
+  }
   return out;
 }
 
@@ -283,6 +289,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
+  if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
 }
 
 /**
