@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderRunningAgentStatus } from "../src/index.js";
+import { formatGroupSummary, renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
 
@@ -51,6 +51,27 @@ describe("renderRunningAgentStatus", () => {
       "⠋ thinking: xhigh · 4 tool uses",
       "  ⎿  thinking…",
     ]);
+  });
+});
+
+describe("formatGroupSummary", () => {
+  const summary = {
+    count: 3,
+    partial: false,
+    totalTokens: 42_200,
+    totalCost: 0.042,
+  };
+
+  it("shows aggregate token usage without cost when cost display is disabled", () => {
+    expect(formatGroupSummary(summary, false)).toBe("3 agents completed · 42.2k token");
+  });
+
+  it("includes aggregate cost only when cost display is enabled", () => {
+    expect(formatGroupSummary(summary, true)).toBe("3 agents completed · 42.2k token · ~$0.042");
+  });
+
+  it("marks partial groups", () => {
+    expect(formatGroupSummary({ ...summary, partial: true }, false)).toBe("3 agents completed (partial) · 42.2k token");
   });
 });
 

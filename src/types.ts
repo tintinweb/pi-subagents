@@ -159,6 +159,15 @@ export interface AgentInvocation {
   isolation?: IsolationMode;
 }
 
+/** Aggregate stats attached to a grouped notification. */
+export interface GroupSummary {
+  count: number;
+  partial: boolean;
+  totalTokens: number;
+  /** Sum of reported model costs, when available for every member. */
+  totalCost?: number;
+}
+
 /** Details attached to custom notification messages for visual rendering. */
 export interface NotificationDetails {
   id: string;
@@ -174,6 +183,8 @@ export interface NotificationDetails {
   resultPreview: string;
   /** Reported model cost, when available. */
   cost?: number;
+  /** Aggregate stats for a grouped notification. */
+  groupSummary?: GroupSummary;
   /** Additional agents in a group notification. */
   others?: NotificationDetails[];
 }

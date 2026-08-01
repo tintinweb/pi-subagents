@@ -119,6 +119,8 @@ export interface SubagentsSettings {
   fallbackSubagent?: string;
   /** Whether to show reported model costs in subagent UI and results. Defaults to false. */
   showCost?: boolean;
+  /** Whether to show aggregate stats for grouped background-agent notifications. Defaults to false. */
+  showGroupSummary?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -139,6 +141,7 @@ export interface SettingsAppliers {
   setMaxSubagentDepth: (n: number) => void;
   setFallbackSubagent: (v: string | undefined) => void;
   setShowCost: (b: boolean) => void;
+  setShowGroupSummary: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -226,6 +229,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.showCost === "boolean") {
     out.showCost = r.showCost;
   }
+  if (typeof r.showGroupSummary === "boolean") {
+    out.showGroupSummary = r.showGroupSummary;
+  }
   return out;
 }
 
@@ -290,6 +296,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
+  if (typeof s.showGroupSummary === "boolean") appliers.setShowGroupSummary(s.showGroupSummary);
 }
 
 /**

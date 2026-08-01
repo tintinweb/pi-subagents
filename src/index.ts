@@ -32,7 +32,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type GroupSummary, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -82,6 +82,18 @@ function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
 /** Format an agent's reported model cost, or "" when unavailable. */
 function formatLifetimeCost(o: { lifetimeUsage: LifetimeUsage }): string {
   return formatCost(o.lifetimeUsage.cost);
+}
+
+/** Format aggregate stats for a grouped notification. */
+export function formatGroupSummary(summary: GroupSummary, includeCost: boolean): string {
+  const countLabel = `${summary.count} agent${summary.count === 1 ? "" : "s"} completed${summary.partial ? " (partial)" : ""}`;
+  const parts = [countLabel];
+  if (summary.totalTokens > 0) parts.push(formatTokens(summary.totalTokens));
+  if (includeCost) {
+    const cost = formatCost(summary.totalCost);
+    if (cost) parts.push(cost);
+  }
+  return parts.join(" · ");
 }
 
 /**
@@ -238,6 +250,8 @@ export default function (pi: ExtensionAPI) {
 
   let costDisplayEnabled = false;
   function isCostDisplayEnabled(): boolean { return costDisplayEnabled; }
+  let groupSummaryEnabled = false;
+  function isGroupSummaryEnabled(): boolean { return groupSummaryEnabled; }
 
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
@@ -285,7 +299,12 @@ export default function (pi: ExtensionAPI) {
       }
 
       const all = [d, ...(d.others ?? [])];
-      return new Text(all.map(renderOne).join("\n"), 0, 0);
+      const summary = isGroupSummaryEnabled() && d.groupSummary
+        ? formatGroupSummary(d.groupSummary, isCostDisplayEnabled())
+        : "";
+      const rendered = all.map(renderOne);
+      if (summary) rendered.unshift(theme.fg("dim", summary));
+      return new Text(rendered.join("\n"), 0, 0);
     }
   );
 
@@ -366,7 +385,16 @@ export default function (pi: ExtensionAPI) {
           : `${unconsumed.length} agent(s) finished`;
 
         const [first, ...rest] = unconsumed;
+        const costs = unconsumed
+          .map((record) => record.lifetimeUsage.cost)
+          .filter((cost): cost is number => cost !== undefined && Number.isFinite(cost));
         const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
+        details.groupSummary = {
+          count: unconsumed.length,
+          partial,
+          totalTokens: unconsumed.reduce((total, record) => total + getLifetimeTotal(record.lifetimeUsage), 0),
+          totalCost: costs.length === unconsumed.length ? costs.reduce((total, cost) => total + cost, 0) : undefined,
+        };
         if (rest.length > 0) {
           details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
         }
@@ -616,6 +644,7 @@ export default function (pi: ExtensionAPI) {
   const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isCostDisplayEnabled);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
   function setCostDisplayEnabled(b: boolean): void { costDisplayEnabled = b; widget.update(); }
+  function setGroupSummaryEnabled(b: boolean): void { groupSummaryEnabled = b; }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
   const fleet = new FleetList(manager, agentActivity);
@@ -775,6 +804,7 @@ export default function (pi: ExtensionAPI) {
       setMaxSubagentDepth: setMaxSubagentDepth,
       setFallbackSubagent: setFallbackSubagent,
       setShowCost: setCostDisplayEnabled,
+      setShowGroupSummary: setGroupSummaryEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -2180,6 +2210,7 @@ ${systemPrompt}
       // goes away. undefined is dropped by JSON.stringify.
       fallbackSubagent: getFallbackSubagent(),
       showCost: isCostDisplayEnabled(),
+      showGroupSummary: isGroupSummaryEnabled(),
     };
   }
 
@@ -2278,6 +2309,13 @@ ${systemPrompt}
           values: ["on", "off"],
         },
         {
+          id: "showGroupSummary",
+          label: "Group summary",
+          description: "Show aggregate stats for grouped background-agent notifications",
+          currentValue: isGroupSummaryEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "fleetView",
           label: "Fleet view",
           description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
@@ -2373,6 +2411,10 @@ ${systemPrompt}
         const enabled = value === "on";
         setCostDisplayEnabled(enabled);
         notifyApplied(ctx, `Cost display ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "showGroupSummary") {
+        const enabled = value === "on";
+        setGroupSummaryEnabled(enabled);
+        notifyApplied(ctx, `Group summary ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
         notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);
