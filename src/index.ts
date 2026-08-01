@@ -647,7 +647,7 @@ export default function (pi: ExtensionAPI) {
   function setGroupSummaryEnabled(b: boolean): void { groupSummaryEnabled = b; }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  const fleet = new FleetList(manager, agentActivity);
+  const fleet = new FleetList(manager, agentActivity, isCostDisplayEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
