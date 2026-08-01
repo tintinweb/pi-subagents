@@ -73,7 +73,10 @@ describe("print mode background notifications", () => {
   it("ignores stale-context errors from delayed completion nudges", async () => {
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "done",
-      session: { dispose: vi.fn() } as any,
+      session: {
+        extensionRunner: { emit: vi.fn().mockResolvedValue(undefined) },
+        dispose: vi.fn(),
+      } as any,
       aborted: false,
       steered: false,
     });

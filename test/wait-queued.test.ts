@@ -65,7 +65,10 @@ function deferredRuns() {
         resolvers.push(() =>
           resolve({
             responseText: "THE-RESULT-PAYLOAD",
-            session: { dispose: vi.fn() } as any,
+            session: {
+              extensionRunner: { emit: vi.fn().mockResolvedValue(undefined) },
+              dispose: vi.fn(),
+            } as any,
             aborted: false,
             steered: false,
           }),
@@ -138,7 +141,10 @@ describe("get_subagent_result wait:true on a queued agent", () => {
           childSignal = options.signal;
           resolveRun = () => resolve({
             responseText: "THE-RESULT-PAYLOAD",
-            session: { dispose: vi.fn() } as any,
+            session: {
+              extensionRunner: { emit: vi.fn().mockResolvedValue(undefined) },
+              dispose: vi.fn(),
+            } as any,
             aborted: false,
             steered: false,
           });
