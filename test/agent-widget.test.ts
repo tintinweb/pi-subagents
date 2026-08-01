@@ -88,15 +88,21 @@ describe("AgentWidget", () => {
     };
   }
 
-  function makeRecord(id: string, opts: { isBackground?: boolean; parentAgentId?: string } = {}) {
+  function makeRecord(id: string, opts: {
+    isBackground?: boolean;
+    parentAgentId?: string;
+    status?: "running" | "steered";
+    lifetimeUsage?: { input: number; output: number; cacheWrite: number; cost?: number };
+  } = {}) {
     return {
       id,
       type: "general-purpose",
       description: `${id} description`,
-      status: "running",
+      status: opts.status ?? "running",
       toolUses: 0,
       startedAt: Date.now(),
-      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      completedAt: opts.status === "steered" ? Date.now() : undefined,
+      lifetimeUsage: opts.lifetimeUsage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
       isBackground: opts.isBackground,
       parentAgentId: opts.parentAgentId,
@@ -165,6 +171,24 @@ describe("AgentWidget", () => {
     const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
     expect(renderLines(manager, "background", () => "background", () => false, 0.018)).not.toContain("~$0.018");
     expect(renderLines(manager, "background", () => "background", () => true, 0.018)).toContain("~$0.018");
+  });
+
+  it("keeps lifetime tokens and cost on a finished turn-limited agent", () => {
+    const manager = {
+      listAgents: () => [makeRecord("limited", {
+        isBackground: true,
+        status: "steered",
+        lifetimeUsage: { input: 1_000, output: 200, cacheWrite: 0, cost: 0.018 },
+      })],
+    };
+    const lines = renderLines(manager, "limited", () => "background", () => true);
+    const hiddenCostLines = renderLines(manager, "limited", () => "background", () => false);
+
+    expect(lines).toContain("1.2k token");
+    expect(lines).toContain("~$0.018");
+    expect(lines).toContain("turn limit");
+    expect(hiddenCostLines).toContain("1.2k token");
+    expect(hiddenCostLines).not.toContain("~$0.018");
   });
 
   it("renders nothing in 'off' mode", () => {
