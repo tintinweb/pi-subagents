@@ -140,6 +140,8 @@ describe("toolDescriptionMode", () => {
     for (const surface of [fullDesc, compactDesc, schemaText]) {
       expect(surface.toLowerCase()).toMatch(/valid head|at least one commit/);
       expect(surface.toLowerCase()).toMatch(/omit.*isolation|without isolation|non-git/);
+      expect(surface.toLowerCase()).toMatch(/parent session cwd/);
+      expect(surface.toLowerCase()).toMatch(/path.*prompt.*cannot|cannot.*path.*prompt/);
       expect(surface.toLowerCase()).toMatch(/never initialize|do not initialize|never init/);
       expect(surface).not.toMatch(/Initialize git and commit at least once/);
     }

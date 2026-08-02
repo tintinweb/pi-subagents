@@ -577,6 +577,8 @@ describe("child-safe nested Agent tools", () => {
     expect(schemaText).toContain('"worktree"');
     expect(lower).toMatch(/valid head|at least one commit/);
     expect(lower).toMatch(/omit.*isolation|without isolation|non-git/);
+    expect(lower).toContain("parent session cwd");
+    expect(lower).toMatch(/path.*prompt.*cannot|cannot.*path.*prompt/);
     expect(lower).toMatch(/never initialize|do not initialize|never init/);
     expect(schemaText).not.toMatch(/Initialize git and commit at least once/);
   });

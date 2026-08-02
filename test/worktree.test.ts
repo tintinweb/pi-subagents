@@ -49,6 +49,26 @@ describe("worktree", () => {
       try { execFileSync("git", ["worktree", "remove", "--force", wt!.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
 
+    it("creates a linked worktree from a bare repository with a valid HEAD", () => {
+      const bare = mkdtempSync(join(tmpdir(), "pi-wt-bare-"));
+      const source = initGitRepo();
+      try {
+        execFileSync("git", ["clone", "--bare", source, bare], { stdio: "pipe" });
+        const result = tryCreateWorktree(bare, "bare-repo");
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(existsSync(join(result.worktree.path, "README.md"))).toBe(true);
+          execFileSync("git", ["worktree", "remove", "--force", result.worktree.path], {
+            cwd: bare,
+            stdio: "pipe",
+          });
+        }
+      } finally {
+        rmSync(source, { recursive: true, force: true });
+        rmSync(bare, { recursive: true, force: true });
+      }
+    });
+
     it("returns undefined for non-git directory", () => {
       const nonGit = mkdtempSync(join(tmpdir(), "pi-wt-nongit-"));
       try {
@@ -69,6 +89,36 @@ describe("worktree", () => {
         rmSync(emptyRepo, { recursive: true, force: true });
       }
     });
+
+    it.each(["zh_CN.UTF-8", "C"])(
+      "classifies non-git and no-HEAD prerequisites independently of Git locale (%s)",
+      (locale) => {
+        const previousLcAll = process.env.LC_ALL;
+        const previousLang = process.env.LANG;
+        process.env.LC_ALL = locale;
+        process.env.LANG = locale;
+        const nonGit = mkdtempSync(join(tmpdir(), "pi-wt-locale-nongit-"));
+        const emptyRepo = mkdtempSync(join(tmpdir(), "pi-wt-locale-empty-"));
+        try {
+          execFileSync("git", ["init"], { cwd: emptyRepo, stdio: "pipe" });
+          expect(tryCreateWorktree(nonGit, "locale-nongit")).toEqual({
+            ok: false,
+            reason: "not_git_repo",
+          });
+          expect(tryCreateWorktree(emptyRepo, "locale-no-head")).toEqual({
+            ok: false,
+            reason: "no_head",
+          });
+        } finally {
+          if (previousLcAll === undefined) delete process.env.LC_ALL;
+          else process.env.LC_ALL = previousLcAll;
+          if (previousLang === undefined) delete process.env.LANG;
+          else process.env.LANG = previousLang;
+          rmSync(nonGit, { recursive: true, force: true });
+          rmSync(emptyRepo, { recursive: true, force: true });
+        }
+      },
+    );
 
     it("distinguishes non-git / no-HEAD prerequisites from worktree-add failure", () => {
       // Structured creation separates prerequisite failures from a genuine
@@ -131,6 +181,33 @@ exec /usr/bin/git "$@"
       }
     });
 
+    it("keeps an invalid .git marker fail-closed", () => {
+      const corrupt = mkdtempSync(join(tmpdir(), "pi-wt-corrupt-marker-"));
+      mkdirSync(join(corrupt, ".git"));
+      try {
+        expect(tryCreateWorktree(corrupt, "corrupt-marker")).toEqual({
+          ok: false,
+          reason: "git_probe_failed",
+        });
+      } finally {
+        rmSync(corrupt, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps a corrupt current branch ref fail-closed", () => {
+      const corrupt = mkdtempSync(join(tmpdir(), "pi-wt-corrupt-ref-"));
+      try {
+        execFileSync("git", ["init"], { cwd: corrupt, stdio: "pipe" });
+        writeFileSync(join(corrupt, ".git", "refs", "heads", "master"), "invalid-object-name\n");
+        expect(tryCreateWorktree(corrupt, "corrupt-ref")).toEqual({
+          ok: false,
+          reason: "git_probe_failed",
+        });
+      } finally {
+        rmSync(corrupt, { recursive: true, force: true });
+      }
+    });
+
     it("classifies infrastructure failure during initial inside-work-tree probe (not not_git_repo)", () => {
       // Timeout / permission / safe.directory / corrupt probe must not look like
       // a confirmed non-Git cwd — dropping isolation would be the wrong guidance.
@@ -175,7 +252,7 @@ if [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then
   echo true
   exit 0
 fi
-if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
+if [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ]; then
   echo "error: could not lock config file" >&2
   exit 1
 fi

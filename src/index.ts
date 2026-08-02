@@ -837,7 +837,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
-- isolation: "worktree" requires an existing Git repository with a valid HEAD/at least one commit; omit for read-only work or a non-Git cwd; never initialize or commit solely to enable it. Changes land on a branch.`;
+- isolation: "worktree" uses the parent session cwd; a repository path mentioned only in the prompt cannot select another worktree base. It requires an existing Git repository with a valid HEAD/at least one commit; omit for read-only work or a non-Git cwd; never initialize or commit solely to enable it. Changes land on a branch.`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -867,7 +867,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" only in an existing Git repository with a valid HEAD/at least one commit (safe parallel file modifications). Omit isolation for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable worktree isolation. The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
+- Use isolation: "worktree" only in an existing Git repository with a valid HEAD/at least one commit (safe parallel file modifications). Isolation uses the parent session cwd; a repository path mentioned only in the prompt cannot select another worktree base. Omit isolation for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable worktree isolation. The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -991,6 +991,7 @@ Terse command-style prompts produce shallow, generic work.
         Type.Literal("worktree", {
           description:
             'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). ' +
+            "Uses the parent session cwd; a repository path mentioned only in the prompt cannot select another worktree base. " +
             "Requires an existing Git repository with a valid HEAD/at least one commit. " +
             "Omit for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable isolation. " +
             "Changes are saved to a branch on completion.",

@@ -27,7 +27,7 @@ export function sanitizeAgentCause(cause: unknown): string {
       "$1[REDACTED]",
     )
     .replace(
-      new RegExp(`\\b(${SECRET_NAME})\\s*[:=]\\s*(?:"[^"]*"|'[^']*'|[^\\s,;&]+)`, "giu"),
+      new RegExp(`(["']?${SECRET_NAME}["']?)\\s*[:=]\\s*(?:"[^"]*"|'[^']*'|[^\\s,;&]+)`, "giu"),
       "$1=[REDACTED]",
     );
 

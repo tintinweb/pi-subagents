@@ -62,6 +62,17 @@ describe("sanitizeAgentCause", () => {
     expect(sanitized).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/u);
   });
 
+  it("redacts sensitive values in quoted JSON-style properties", () => {
+    const sanitized = sanitizeAgentCause(
+      'provider payload: {"apiKey":"key-json","password": "pass-json", "refresh_token" : "refresh-json"}',
+    );
+
+    expect(sanitized).toContain('"apiKey"=[REDACTED]');
+    expect(sanitized).toContain('"password"=[REDACTED]');
+    expect(sanitized).toContain('"refresh_token"=[REDACTED]');
+    expect(sanitized).not.toMatch(/key-json|pass-json|refresh-json/);
+  });
+
   it("redacts prefixed sensitive identifier suffixes without redacting neighboring keys", () => {
     const sanitized = sanitizeAgentCause(
       "OPENAI_API_KEY=key-123 ANTHROPIC_AUTH_TOKEN: token-456 DB_PASSWORD = secret-789 " +

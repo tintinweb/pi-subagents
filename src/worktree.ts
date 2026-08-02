@@ -8,9 +8,9 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 export interface WorktreeInfo {
   /** Absolute path to the worktree directory (the copied repo's root). */
@@ -56,7 +56,7 @@ type GitProbeResult<
   TSuccess extends string = string,
   TNegative extends WorktreeCreateFailureReason = WorktreeCreateFailureReason,
 > =
-  | { kind: "success"; value: TSuccess }
+  | { kind: "success"; value: TSuccess; bare?: boolean }
   | { kind: "negative"; reason: TNegative }
   | { kind: "infrastructure" };
 
@@ -64,7 +64,9 @@ function runGitProbe(cwd: string, args: string[], timeoutMs = GIT_PROBE_TIMEOUT_
   return spawnSync("git", args, {
     cwd,
     encoding: "utf8",
-    // Capture streams without unbounded throws; classification uses status/output only.
+    env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    // Capture streams without unbounded throws; force Git's stable C messages
+    // where stderr is needed to distinguish prerequisites from infrastructure.
     stdio: ["ignore", "pipe", "pipe"],
     timeout: timeoutMs,
   });
@@ -74,8 +76,22 @@ function probeStdout(result: ReturnType<typeof runGitProbe>): string {
   return (result.stdout ?? "").trim();
 }
 
-function probeStderr(result: ReturnType<typeof runGitProbe>): string {
-  return (result.stderr ?? "").trim();
+type GitMarkerState = "present" | "absent" | "infrastructure";
+
+function gitMarkerState(cwd: string): GitMarkerState {
+  let current = resolve(cwd);
+  while (true) {
+    try {
+      lstatSync(join(current, ".git"));
+      return "present";
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined;
+      if (code !== "ENOENT" && code !== "ENOTDIR") return "infrastructure";
+    }
+    const parent = dirname(current);
+    if (parent === current) return "absent";
+    current = parent;
+  }
 }
 
 /**
@@ -90,24 +106,22 @@ function probeInsideWorkTree(cwd: string): GitProbeResult<"true", "not_git_repo"
 
   const status = result.status;
   const out = probeStdout(result);
-  const err = probeStderr(result).toLowerCase();
 
   if (status === 0) {
     if (out === "true") return { kind: "success", value: "true" };
-    // Bare repos and other non-work-trees report false without being "no repo".
-    // Isolation still cannot run; treat as confirmed non-work-tree prerequisite.
-    if (out === "false") return { kind: "negative", reason: "not_git_repo" };
+    // Bare repositories report false but can still create a linked worktree.
+    if (out === "false") return { kind: "success", value: "true", bare: true };
     return { kind: "infrastructure" };
   }
 
-  // Git uses 128 for many fatal repository/config failures. Only classic
-  // repository-discovery misses are safe unisolated-retry prerequisites;
-  // safe.directory, corrupt gitdir, permissions, etc. keep isolation.
+  // Only absence of a .git marker throughout the cwd's ancestor chain proves
+  // a repository prerequisite miss. Corrupt, broken, or unreadable markers stay
+  // fail-closed instead of being mistaken for a safe unisolated retry.
   if (
     status === 128 &&
-    /not a git repository \(or any of the parent directories\)|not a git repository \(or any parent up to mount point/i.test(
-      err,
-    )
+    !process.env.GIT_DIR &&
+    !process.env.GIT_WORK_TREE &&
+    gitMarkerState(cwd) === "absent"
   ) {
     return { kind: "negative", reason: "not_git_repo" };
   }
@@ -125,25 +139,32 @@ const FULL_OBJECT_NAME = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i; // SHA-1 (40) or SH
  * - spawn/timeout/permission/corrupt/malformed → infrastructure
  */
 function probeHead(cwd: string): GitProbeResult<string, "no_head"> {
-  const result = runGitProbe(cwd, ["rev-parse", "HEAD"]);
+  const result = runGitProbe(cwd, ["rev-parse", "--verify", "HEAD^{commit}"]);
   if (result.error || result.signal) return { kind: "infrastructure" };
 
   const status = result.status;
   const out = probeStdout(result);
-  const err = probeStderr(result).toLowerCase();
 
   if (status === 0) {
     if (FULL_OBJECT_NAME.test(out)) return { kind: "success", value: out };
     return { kind: "infrastructure" };
   }
 
-  // Unborn branch / deleted HEAD / unknown revision — expected prerequisite miss.
-  if (
-    status === 128 &&
-    (/unknown revision|bad revision|needed a single revision|ambiguous argument ['"]?head['"]?/i.test(err) ||
-      /unknown revision or path not in the working tree/i.test(err))
-  ) {
-    return { kind: "negative", reason: "no_head" };
+  // A genuine unborn branch has a valid symbolic HEAD whose branch ref does
+  // not exist. Existing malformed, dangling, or non-commit refs remain
+  // infrastructure failures rather than prerequisite misses.
+  if (status === 128) {
+    const symbolic = runGitProbe(cwd, ["symbolic-ref", "-q", "HEAD"]);
+    const ref = probeStdout(symbolic);
+    if (!symbolic.error && !symbolic.signal && symbolic.status === 0 && ref.startsWith("refs/heads/")) {
+      const format = runGitProbe(cwd, ["check-ref-format", ref]);
+      if (!format.error && !format.signal && format.status === 0) {
+        const exists = runGitProbe(cwd, ["show-ref", "--verify", "--quiet", ref]);
+        if (!exists.error && !exists.signal && exists.status === 1) {
+          return { kind: "negative", reason: "no_head" };
+        }
+      }
+    }
   }
 
   return { kind: "infrastructure" };
@@ -177,19 +198,21 @@ export function tryCreateWorktree(cwd: string, agentId: string): WorktreeCreateR
   // the same subdirectory inside the copy, or a monorepo-package cwd would
   // silently widen to the whole repo. realpath both sides — git emits
   // resolved paths while cwd may arrive through a symlink (macOS /tmp).
-  let subdir: string;
-  try {
-    const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd,
-      stdio: "pipe",
-      timeout: 5000,
-    })
-      .toString()
-      .trim();
-    subdir = relative(realpathSync(topLevel), realpathSync(cwd));
-  } catch {
-    // Top-level/path resolution failed after HEAD succeeded — worktree add was not attempted.
-    return { ok: false, reason: "repo_path_resolution_failed" };
+  let subdir = "";
+  if (!inside.bare) {
+    try {
+      const topLevel = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd,
+        stdio: "pipe",
+        timeout: 5000,
+      })
+        .toString()
+        .trim();
+      subdir = relative(realpathSync(topLevel), realpathSync(cwd));
+    } catch {
+      // Top-level/path resolution failed after HEAD succeeded — worktree add was not attempted.
+      return { ok: false, reason: "repo_path_resolution_failed" };
+    }
   }
 
   const branch = `pi-agent-${agentId}`;

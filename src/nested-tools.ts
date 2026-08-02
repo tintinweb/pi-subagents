@@ -182,6 +182,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         Type.Literal("worktree", {
           description:
             'Set to "worktree" to run the nested agent in a temporary git worktree (isolated copy of the repo). ' +
+            "Uses the parent session cwd; a repository path mentioned only in the prompt cannot select another worktree base. " +
             "Requires an existing Git repository with a valid HEAD/at least one commit. " +
             "Omit for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable isolation. " +
             "Changes are saved to a branch on completion.",
