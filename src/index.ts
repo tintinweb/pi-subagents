@@ -12,11 +12,16 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
 import { AgentManager } from "./agent-manager.js";
+import {
+  formatAgentOutcome,
+  outcomeForRecord,
+  sanitizeAgentCause,
+} from "./agent-outcome.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -31,7 +36,7 @@ import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDe
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
-import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { getForegroundOutcomeNote, getStatusNote } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
@@ -59,6 +64,23 @@ import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsag
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
+}
+
+/** Invocation rejection: throwing is what Pi serializes as isError=true. */
+function rejectInvocation(cause: unknown): never {
+  throw new Error(sanitizeAgentCause(cause));
+}
+
+function formatAcceptedRecord(record: AgentRecord): string {
+  const outcome = outcomeForRecord(record);
+  const sections = [formatAgentOutcome(outcome)];
+  const output = record.result?.trim();
+  if (output) {
+    sections.push(record.status === "error"
+      ? `Partial output before the failure:\n${output}`
+      : `Agent output:\n${output}`);
+  }
+  return sections.join("\n\n");
 }
 
 export function renderRunningAgentStatus(
@@ -152,7 +174,7 @@ function escapeXml(s: string): string {
 }
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
-function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
+export function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
@@ -160,11 +182,17 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
   const ctxXml = contextPercent !== null ? `<context_percent>${Math.round(contextPercent)}</context_percent>` : "";
   const compactXml = record.compactionCount ? `<compactions>${record.compactionCount}</compactions>` : "";
 
-  const resultPreview = record.result
-    ? record.result.length > resultMaxLen
-      ? record.result.slice(0, resultMaxLen) + "\n...(truncated, use get_subagent_result for full output)"
-      : record.result
-    : "No output.";
+  const output = record.result?.trim();
+  const rawOutput = output || record.error || "No output.";
+  const resultPreview = rawOutput.length > resultMaxLen
+    ? rawOutput.slice(0, resultMaxLen) + "\n...(truncated, use get_subagent_result for full output)"
+    : rawOutput;
+  const modelText = record.outcome
+    ? [
+      formatAgentOutcome(record.outcome),
+      output && `${record.status === "error" ? "Partial output before the failure" : "Partial output"}:\n${resultPreview}`,
+    ].filter(Boolean).join("\n\n")
+    : resultPreview;
 
   return [
     `<task-notification>`,
@@ -173,7 +201,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
     `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
-    `<result>${escapeXml(resultPreview)}</result>`,
+    `<result>${escapeXml(modelText)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join('\n');
@@ -182,7 +210,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
 /** Build AgentDetails from a base + record-specific fields. */
 function buildDetails(
   base: Pick<AgentDetails, "displayName" | "description" | "subagentType" | "modelName" | "tags">,
-  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; id?: string; session?: any; lifetimeUsage: LifetimeUsage },
+  record: { toolUses: number; startedAt: number; completedAt?: number; status: string; error?: string; outcome?: AgentRecord["outcome"]; id?: string; session?: AgentSession; lifetimeUsage: LifetimeUsage },
   activity?: AgentActivity,
   overrides?: Partial<AgentDetails>,
 ): AgentDetails {
@@ -196,6 +224,7 @@ function buildDetails(
     status: record.status as AgentDetails["status"],
     agentId: record.id,
     error: record.error,
+    outcome: record.outcome,
     ...overrides,
   };
 }
@@ -215,11 +244,12 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
     outputFile: record.outputFile,
     error: record.error,
+    outcome: record.outcome,
     resultPreview: record.result
       ? record.result.length > resultMaxLen
         ? record.result.slice(0, resultMaxLen) + "…"
         : record.result
-      : "No output.",
+      : undefined,
   };
 }
 
@@ -256,13 +286,15 @@ export default function (pi: ExtensionAPI) {
           line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
         }
 
-        // Line 3: result preview (collapsed) or full (expanded)
-        if (expanded) {
-          const lines = d.resultPreview.split("\n").slice(0, 30);
-          for (const l of lines) line += "\n" + theme.fg("dim", `  ${l}`);
-        } else {
-          const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
-          line += "\n  " + theme.fg("dim", `⎿  ${preview}`);
+        // Line 3: actual result preview (collapsed) or full (expanded)
+        if (d.resultPreview !== undefined) {
+          if (expanded) {
+            const lines = d.resultPreview.split("\n").slice(0, 30);
+            for (const l of lines) line += "\n" + theme.fg("dim", `  ${l}`);
+          } else {
+            const preview = d.resultPreview.split("\n")[0]?.slice(0, 80) ?? "";
+            line += "\n  " + theme.fg("dim", `⎿  ${preview}`);
+          }
         }
 
         // Line 4: output file link (if present)
@@ -390,6 +422,7 @@ export default function (pi: ExtensionAPI) {
       description: record.description,
       result: record.result,
       error: record.error,
+      outcome: record.outcome,
       status: record.status,
       toolUses: record.toolUses,
       durationMs,
@@ -404,9 +437,9 @@ export default function (pi: ExtensionAPI) {
     if (record.parentAgentId) return;
 
     // Emit lifecycle event based on terminal status
-    const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
+    const isIncomplete = record.status === "error" || record.status === "stopped" || record.status === "aborted";
     const eventData = buildEventData(record);
-    if (isError) {
+    if (isIncomplete) {
       pi.events.emit("subagents:failed", eventData);
     } else {
       pi.events.emit("subagents:completed", eventData);
@@ -416,6 +449,7 @@ export default function (pi: ExtensionAPI) {
     pi.appendEntry("subagents:record", {
       id: record.id, type: record.type, description: record.description,
       status: record.status, result: record.result, error: record.error,
+      outcome: record.outcome,
       startedAt: record.startedAt, completedAt: record.completedAt,
     });
 
@@ -803,7 +837,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
-- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
+- isolation: "worktree" uses the parent session cwd; a repository path mentioned only in the prompt cannot select another worktree base. It requires an existing Git repository with a valid HEAD/at least one commit; omit for read-only work or a non-Git cwd; never initialize or commit solely to enable it. Changes land on a branch.`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -833,7 +867,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.
-- Use isolation: "worktree" to run the agent in an isolated git worktree (safe parallel file modifications). The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
+- Use isolation: "worktree" only in an existing Git repository with a valid HEAD/at least one commit (safe parallel file modifications). Isolation uses the parent session cwd; a repository path mentioned only in the prompt cannot select another worktree base. Omit isolation for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable worktree isolation. The worktree is automatically cleaned up if the agent makes no changes; otherwise the path and branch are returned in the result.${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -955,7 +989,12 @@ Terse command-style prompts produce shallow, generic work.
       ),
       isolation: Type.Optional(
         Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+          description:
+            'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). ' +
+            "Uses the parent session cwd; a repository path mentioned only in the prompt cannot select another worktree base. " +
+            "Requires an existing Git repository with a valid HEAD/at least one commit. " +
+            "Omit for read-only work or a non-Git cwd. Never initialize or commit a repository solely to enable isolation. " +
+            "Changes are saved to a branch on completion.",
         }),
       ),
       ...scheduleParam,
@@ -1069,7 +1108,7 @@ Terse command-style prompts produce shallow, generic work.
       // but the parameter is required by the schema — so gating it here would
       // make a live agent unresumable the moment its type is deleted, disabled,
       // or gains a case-clashing sibling. Only a real spawn is gated.
-      if (!dispatch.ok && !params.resume) return textResult(dispatch.message);
+      if (!dispatch.ok && !params.resume) rejectInvocation(dispatch.message);
       const subagentType = dispatch.ok ? dispatch.type : rawType;
       // What the caller actually asked for, named once: `fellBackFrom` is "" for
       // a blank request, so reading it inline invites the `??`-vs-`||` slip that
@@ -1096,7 +1135,7 @@ Terse command-style prompts produce shallow, generic work.
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
-          if (resolvedConfig.modelFromParams) return textResult(resolved);
+          if (resolvedConfig.modelFromParams) rejectInvocation(resolved);
           // config-specified: silent fallback to parent
         } else {
           model = resolved;
@@ -1114,7 +1153,7 @@ Terse command-style prompts produce shallow, generic work.
         agentLabel: customConfig?.displayName ?? subagentType,
         modelInput: resolvedConfig.modelInput,
       });
-      if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
+      if (scopeVerdict.kind === "error") rejectInvocation(scopeVerdict.message);
       if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
 
       const thinking = resolvedConfig.thinking;
@@ -1166,19 +1205,19 @@ Terse command-style prompts produce shallow, generic work.
       // ---- Schedule: register a job, don't spawn now ----
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
-          return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
+          rejectInvocation("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
         }
         if (params.resume) {
-          return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
+          rejectInvocation("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
         }
         if (params.inherit_context) {
-          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
+          rejectInvocation("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
         }
         if (params.run_in_background === false) {
-          return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
+          rejectInvocation("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
         }
         if (!scheduler.isActive()) {
-          return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
+          rejectInvocation("Scheduler is not active in this session yet. Try again after the session has fully started.");
         }
         try {
           const job = scheduler.addJob({
@@ -1202,7 +1241,7 @@ Terse command-style prompts produce shallow, generic work.
             `Manage via /agents → Scheduled jobs.`,
           );
         } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
+          rejectInvocation(err);
         }
       }
 
@@ -1210,24 +1249,16 @@ Terse command-style prompts produce shallow, generic work.
       if (params.resume) {
         const existing = manager.getRecord(params.resume);
         if (!existing || existing.parentAgentId) {
-          return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+          rejectInvocation(`Agent not found: "${params.resume}". It may have been cleaned up.`);
         }
         if (!existing.session) {
-          return textResult(`Agent "${params.resume}" has no active session to resume.`);
+          rejectInvocation(`Agent "${params.resume}" has no active session to resume.`);
         }
         const record = await manager.resume(params.resume, params.prompt, signal);
         if (!record) {
-          return textResult(`Failed to resume agent "${params.resume}".`);
+          rejectInvocation(`Failed to resume agent "${params.resume}".`);
         }
-        // A failed resume surfaces the error, plus any partial output THIS
-        // resume produced (never the previous turn's answer, #144).
-        if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
-        }
-        return textResult(
-          record.result?.trim() || "No output.",
-          buildDetails(detailBase, record),
-        );
+        return textResult(formatAcceptedRecord(record), buildDetails(detailBase, record));
       }
 
       // Background execution
@@ -1247,23 +1278,19 @@ Terse command-style prompts produce shallow, generic work.
           }
         };
 
-        try {
-          id = manager.spawn(pi, ctx, subagentType, params.prompt, {
-            description: params.description,
-            model,
-            maxTurns: effectiveMaxTurns,
-            isolated,
-            inheritContext,
-            thinkingLevel: thinking,
-            isBackground: true,
-            isolation,
-            invocation: agentInvocation,
-            rootSessionId: ctx.sessionManager.getSessionId(),
-            ...bgCallbacks,
-          });
-        } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
-        }
+        id = manager.spawn(pi, ctx, subagentType, params.prompt, {
+          description: params.description,
+          model,
+          maxTurns: effectiveMaxTurns,
+          isolated,
+          inheritContext,
+          thinkingLevel: thinking,
+          isBackground: true,
+          isolation,
+          invocation: agentInvocation,
+          rootSessionId: ctx.sessionManager.getSessionId(),
+          ...bgCallbacks,
+        });
 
         // Set output file + join mode synchronously after spawn, before the
         // event loop yields — onSessionCreated is async so this is safe.
@@ -1396,7 +1423,7 @@ Terse command-style prompts produce shallow, generic work.
         record = fgResult.record;
       } catch (err) {
         clearInterval(spinnerInterval);
-        return textResult(err instanceof Error ? err.message : String(err));
+        throw err;
       }
 
       clearInterval(spinnerInterval);
@@ -1413,9 +1440,10 @@ Terse command-style prompts produce shallow, generic work.
 
       const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
 
-      if (record.status === "error") {
-        // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+      const incomplete = record.status === "error" || record.status === "steered" ||
+        record.status === "aborted" || record.status === "stopped";
+      if (incomplete) {
+        return textResult(`${fallbackNote}${formatAcceptedRecord(record)}`, details);
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
@@ -1455,7 +1483,7 @@ Terse command-style prompts produce shallow, generic work.
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
       if (!record || record.parentAgentId) {
-        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+        rejectInvocation(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
       // Wait for completion if requested. Cancellation stops only this tool
@@ -1488,12 +1516,12 @@ Terse command-style prompts produce shallow, generic work.
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
-        output += "Agent is still running. Use wait: true or check back later.";
-      } else if (record.status === "error") {
-        output += `Error: ${record.error}${partialOutputSuffix(record)}`;
-      } else {
+      if (record.status === "running" || record.status === "queued") {
+        output += formatAgentOutcome(outcomeForRecord(record));
+      } else if (record.status === "completed") {
         output += record.result?.trim() || "No output.";
+      } else {
+        output += formatAcceptedRecord(record);
       }
 
       // Mark result as consumed — suppresses the completion notification
@@ -1534,10 +1562,10 @@ Terse command-style prompts produce shallow, generic work.
     execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
       if (!record || record.parentAgentId) {
-        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+        rejectInvocation(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
       if (record.status !== "running") {
-        return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
+        rejectInvocation(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
       }
       if (!record.session) {
         // Session not ready yet — queue the steer for delivery once initialized
@@ -1562,7 +1590,7 @@ Terse command-style prompts produce shallow, generic work.
           `Current state: ${stateParts.join(" · ")}`,
         );
       } catch (err) {
-        return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
+        rejectInvocation(`Failed to steer agent: ${sanitizeAgentCause(err)}`);
       }
     },
   }));

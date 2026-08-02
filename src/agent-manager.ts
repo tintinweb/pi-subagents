@@ -8,14 +8,56 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
+import { statSync, unlinkSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { buildAgentOutcome, sanitizeAgentCause } from "./agent-outcome.js";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
-import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, pruneWorktrees, tryCreateWorktree, type WorktreeCreateFailureReason } from "./worktree.js";
+
+/** Model-facing guidance when worktree isolation cannot start. */
+function worktreeIsolationError(reason: WorktreeCreateFailureReason): Error {
+  const retryWithoutIsolationOnce =
+    "Retry the Agent call once without `isolation`; do not repeat the same call unchanged. " +
+    "Do not initialize or commit a repository solely to enable worktree isolation.";
+  const fixThenRetryIsolation =
+    "Fix the worktree/Git problem, then retry the same Agent call with isolation: \"worktree\". " +
+    "Do not drop isolation or fall back silently.";
+
+  if (reason === "not_git_repo" || reason === "no_head") {
+    // Confirmed missing prerequisites — one safe corrective path is unisolated retry.
+    return new Error(
+      'Cannot run with isolation: "worktree" — requires an existing Git repository with a valid HEAD ' +
+        "(at least one commit). " +
+        retryWithoutIsolationOnce,
+    );
+  }
+
+  if (reason === "git_probe_failed") {
+    // Indeterminate Git probe (timeout, missing git, permissions, safe.directory,
+    // corrupt repo, malformed output) — never drop isolation.
+    return new Error(
+      'Cannot run with isolation: "worktree" — Git probe failed (worktree/Git infrastructure). ' +
+        fixThenRetryIsolation,
+    );
+  }
+
+  if (reason === "repo_path_resolution_failed") {
+    // Path/root resolution failed before `git worktree add` was attempted.
+    return new Error(
+      'Cannot run with isolation: "worktree" — failed to resolve the Git repository root/path for worktree creation. ' +
+        fixThenRetryIsolation,
+    );
+  }
+
+  // Genuine `git worktree add` infrastructure failure — preserve isolation.
+  return new Error(
+    'Cannot run with isolation: "worktree" — `git worktree add` failed. ' + fixThenRetryIsolation,
+  );
+}
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -240,13 +282,11 @@ export class AgentManager {
     // BEFORE state mutation so a throw doesn't leave the record half-running.
     let worktreeCwd: string | undefined;
     if (options.isolation === "worktree") {
-      const wt = createWorktree(baseCwd, id);
-      if (!wt) {
-        throw new Error(
-          'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
-          'Initialize git and commit at least once, or omit `isolation`.',
-        );
+      const created = tryCreateWorktree(baseCwd, id);
+      if (!created.ok) {
+        throw worktreeIsolationError(created.reason);
       }
+      const wt = created.worktree;
       record.worktree = wt;
       // workPath preserves subdirectory scoping for caller-supplied cwds: a
       // cwd deep in a monorepo maps to the same subdir inside the copy, not
@@ -261,16 +301,23 @@ export class AgentManager {
     record.status = "running";
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
-    this.onStart?.(record);
 
-    // Wire parent abort signal to stop the subagent when the parent is interrupted
+    // Wire parent cancellation before invoking the runner. addEventListener()
+    // does not replay an abort that already happened, so check synchronously and
+    // pass the resulting already-aborted child signal into runAgent.
     let detachParentSignal: (() => void) | undefined;
     if (options.signal) {
-      const onParentAbort = () => this.abort(id);
-      options.signal.addEventListener("abort", onParentAbort, { once: true });
-      detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
+      const onParentAbort = () => this.stop(id, "caller");
+      if (options.signal.aborted) {
+        onParentAbort();
+      } else {
+        options.signal.addEventListener("abort", onParentAbort, { once: true });
+        detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
+      }
     }
     const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
+
+    if (options.isBackground) this.onStart?.(record);
 
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -311,6 +358,7 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
+        if (!options.isBackground) this.onStart?.(record);
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
@@ -331,7 +379,7 @@ export class AgentManager {
             record.status = "aborted";
           } else if (failure) {
             record.status = "error";
-            record.error = failure;
+            record.error = sanitizeAgentCause(failure);
           } else {
             record.status = steered ? "steered" : "completed";
           }
@@ -339,6 +387,7 @@ export class AgentManager {
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
+        record.outcome = buildAgentOutcome(record, "run");
 
         detach();
 
@@ -376,12 +425,17 @@ export class AgentManager {
         return responseText;
       })
       .catch((err) => {
-        // Don't overwrite status if externally stopped via abort()
+        const preSessionFailure = !record.session && record.status !== "stopped";
         if (record.status !== "stopped") {
           record.status = "error";
+          record.error = sanitizeAgentCause(err);
         }
-        record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
+        record.outcome = buildAgentOutcome(
+          record,
+          preSessionFailure ? "startup" : "run",
+          record.status === "stopped" ? undefined : preSessionFailure ? "startup" : "provider",
+        );
 
         detach();
 
@@ -401,14 +455,19 @@ export class AgentManager {
 
         this.abortOwnedChildren(id);
 
+        // Foreground pre-session rejection is still pre-acceptance. Suppress all
+        // completion side effects; spawnAndWait removes the record and transcript
+        // before surfacing the tool error. Background callers already received an ID.
+        if (!options.isBackground && preSessionFailure) return "";
+
         // Fire onComplete for foreground agents too — lifecycle symmetry.
         // Mark resultConsumed so the callback skips notifications (result returned inline).
         if (!options.isBackground) {
           record.resultConsumed = true;
-          this.onComplete?.(record);
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
         } else {
           if (occupiesPoolSlot(record)) this.runningBackground--;
-          this.onComplete?.(record);
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
           this.drainQueue();
         }
         return "";
@@ -446,8 +505,9 @@ export class AgentManager {
         // Late failure (e.g. strict worktree-isolation) — surface on the record
         // so the user/agent can see it via /agents, then keep draining.
         record.status = "error";
-        record.error = err instanceof Error ? err.message : String(err);
+        record.error = sanitizeAgentCause(err);
         record.completedAt = Date.now();
+        record.outcome = buildAgentOutcome(record, "startup", "startup");
         this.onComplete?.(record);
       }
     }
@@ -490,6 +550,18 @@ export class AgentManager {
     }
     const record = this.agents.get(id)!;
     await record.promise;
+    // A foreground invocation is accepted only once the child session exists.
+    // Async setup rejection before that boundary is still a tool invocation
+    // failure: retain no record or ID for the caller to recover.
+    if (record.status === "error" && !record.session) {
+      const cause = record.error ?? "Agent startup failed.";
+      if (record.outputFile) {
+        try { unlinkSync(record.outputFile); } catch { /* absent/unwritable transcript */ }
+        record.outputFile = undefined;
+      }
+      this.removeRecord(id, record);
+      throw new Error(cause);
+    }
     return { id, record };
   }
 
@@ -509,9 +581,10 @@ export class AgentManager {
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
+    record.outcome = undefined;
 
     try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
+      const { text, failure, aborted } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
         },
@@ -525,15 +598,24 @@ export class AgentManager {
         signal,
       });
       // Same contract as the spawn path (#144): a failed final turn is an
-      // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
+      // error, not a completion — but the resumed text stays available. A
+      // caller-cancelled continuation is not a provider failure and offers no
+      // recovery instruction.
+      record.status = aborted ? "stopped" : failure ? "error" : "completed";
+      if (failure) record.error = sanitizeAgentCause(failure);
+      if (aborted) record.stopOrigin = "caller";
       record.result = text;
       record.completedAt = Date.now();
+      record.outcome = buildAgentOutcome(
+        record,
+        "resume",
+        aborted ? "caller_stop" : failure ? "provider" : "completed",
+      );
     } catch (err) {
       record.status = "error";
-      record.error = err instanceof Error ? err.message : String(err);
+      record.error = sanitizeAgentCause(err);
       record.completedAt = Date.now();
+      record.outcome = buildAgentOutcome(record, "resume", "provider");
     }
 
     // Same contract as the spawn settle paths: children spawned during the
@@ -575,21 +657,25 @@ export class AgentManager {
   }
 
   abort(id: string): boolean {
+    return this.stop(id, "user");
+  }
+
+  private stop(id: string, origin: "user" | "caller"): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
 
-    // Remove from queue if queued
     if (record.status === "queued") {
       this.queue = this.queue.filter(q => q.id !== id);
-      record.status = "stopped";
-      record.completedAt = Date.now();
-      return true;
+    } else if (record.status === "running") {
+      record.abortController?.abort();
+    } else {
+      return false;
     }
 
-    if (record.status !== "running") return false;
-    record.abortController?.abort();
     record.status = "stopped";
+    record.stopOrigin = origin;
     record.completedAt = Date.now();
+    record.outcome = buildAgentOutcome(record, "run", origin === "caller" ? "caller_stop" : "user_stop");
     return true;
   }
 
@@ -604,6 +690,7 @@ export class AgentManager {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
+      if (record.isBackground === false && record.session) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -638,7 +725,9 @@ export class AgentManager {
       const record = this.agents.get(queued.id);
       if (record) {
         record.status = "stopped";
+        record.stopOrigin = "caller";
         record.completedAt = Date.now();
+        record.outcome = buildAgentOutcome(record, "run", "caller_stop");
         count++;
       }
     }
@@ -648,7 +737,9 @@ export class AgentManager {
       if (record.status === "running") {
         record.abortController?.abort();
         record.status = "stopped";
+        record.stopOrigin = "caller";
         record.completedAt = Date.now();
+        record.outcome = buildAgentOutcome(record, "run", "caller_stop");
         count++;
       }
     }

@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cleanupWorktree, createWorktree, pruneWorktrees } from "../src/worktree.js";
+import { cleanupWorktree, createWorktree, pruneWorktrees, tryCreateWorktree } from "../src/worktree.js";
 
 /**
  * Helper: create a temporary git repo with an initial commit.
@@ -49,6 +49,26 @@ describe("worktree", () => {
       try { execFileSync("git", ["worktree", "remove", "--force", wt!.path], { cwd: repoDir, stdio: "pipe" }); } catch { /* ignore */ }
     });
 
+    it("creates a linked worktree from a bare repository with a valid HEAD", () => {
+      const bare = mkdtempSync(join(tmpdir(), "pi-wt-bare-"));
+      const source = initGitRepo();
+      try {
+        execFileSync("git", ["clone", "--bare", source, bare], { stdio: "pipe" });
+        const result = tryCreateWorktree(bare, "bare-repo");
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(existsSync(join(result.worktree.path, "README.md"))).toBe(true);
+          execFileSync("git", ["worktree", "remove", "--force", result.worktree.path], {
+            cwd: bare,
+            stdio: "pipe",
+          });
+        }
+      } finally {
+        rmSync(source, { recursive: true, force: true });
+        rmSync(bare, { recursive: true, force: true });
+      }
+    });
+
     it("returns undefined for non-git directory", () => {
       const nonGit = mkdtempSync(join(tmpdir(), "pi-wt-nongit-"));
       try {
@@ -67,6 +87,192 @@ describe("worktree", () => {
         expect(wt).toBeUndefined();
       } finally {
         rmSync(emptyRepo, { recursive: true, force: true });
+      }
+    });
+
+    it.each(["zh_CN.UTF-8", "C"])(
+      "classifies non-git and no-HEAD prerequisites independently of Git locale (%s)",
+      (locale) => {
+        const previousLcAll = process.env.LC_ALL;
+        const previousLang = process.env.LANG;
+        process.env.LC_ALL = locale;
+        process.env.LANG = locale;
+        const nonGit = mkdtempSync(join(tmpdir(), "pi-wt-locale-nongit-"));
+        const emptyRepo = mkdtempSync(join(tmpdir(), "pi-wt-locale-empty-"));
+        try {
+          execFileSync("git", ["init"], { cwd: emptyRepo, stdio: "pipe" });
+          expect(tryCreateWorktree(nonGit, "locale-nongit")).toEqual({
+            ok: false,
+            reason: "not_git_repo",
+          });
+          expect(tryCreateWorktree(emptyRepo, "locale-no-head")).toEqual({
+            ok: false,
+            reason: "no_head",
+          });
+        } finally {
+          if (previousLcAll === undefined) delete process.env.LC_ALL;
+          else process.env.LC_ALL = previousLcAll;
+          if (previousLang === undefined) delete process.env.LANG;
+          else process.env.LANG = previousLang;
+          rmSync(nonGit, { recursive: true, force: true });
+          rmSync(emptyRepo, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it("distinguishes non-git / no-HEAD prerequisites from worktree-add failure", () => {
+      // Structured creation separates prerequisite failures from a genuine
+      // `git worktree add` failure for Agent spawn messaging. createWorktree
+      // remains a thin success-or-undefined wrapper for other callers.
+      const nonGit = mkdtempSync(join(tmpdir(), "pi-wt-nongit-reason-"));
+      const emptyRepo = mkdtempSync(join(tmpdir(), "pi-wt-empty-reason-"));
+      try {
+        execFileSync("git", ["init"], { cwd: emptyRepo, stdio: "pipe" });
+
+        const nonGitResult = tryCreateWorktree(nonGit, "reason-nongit");
+        expect(nonGitResult.ok).toBe(false);
+        if (!nonGitResult.ok) expect(nonGitResult.reason).toBe("not_git_repo");
+
+        const noHeadResult = tryCreateWorktree(emptyRepo, "reason-nohead");
+        expect(noHeadResult.ok).toBe(false);
+        if (!noHeadResult.ok) expect(noHeadResult.reason).toBe("no_head");
+      } finally {
+        rmSync(nonGit, { recursive: true, force: true });
+        rmSync(emptyRepo, { recursive: true, force: true });
+      }
+    });
+
+    it("labels repo-root resolution failure separately from git worktree add", () => {
+      // Path/root resolution happens before `git worktree add` and must not be
+      // reported as an add failure. Use a PATH-shadowing git shim so only
+      // --show-toplevel fails after inside-work-tree + HEAD succeed.
+      const bin = mkdtempSync(join(tmpdir(), "pi-wt-git-shim-"));
+      const shim = join(bin, "git");
+      writeFileSync(
+        shim,
+        `#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then
+  echo true
+  exit 0
+fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then
+  echo abc123def4567890abc123def4567890abc123de
+  exit 0
+fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "--show-toplevel" ]; then
+  echo "simulated toplevel failure" >&2
+  exit 128
+fi
+exec /usr/bin/git "$@"
+`,
+      );
+      chmodSync(shim, 0o755);
+      const prevPath = process.env.PATH;
+      process.env.PATH = `${bin}:${prevPath ?? ""}`;
+      try {
+        const result = tryCreateWorktree(repoDir, "path-resolve");
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.reason).toBe("repo_path_resolution_failed");
+        }
+      } finally {
+        process.env.PATH = prevPath;
+        rmSync(bin, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps an invalid .git marker fail-closed", () => {
+      const corrupt = mkdtempSync(join(tmpdir(), "pi-wt-corrupt-marker-"));
+      mkdirSync(join(corrupt, ".git"));
+      try {
+        expect(tryCreateWorktree(corrupt, "corrupt-marker")).toEqual({
+          ok: false,
+          reason: "git_probe_failed",
+        });
+      } finally {
+        rmSync(corrupt, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps a corrupt current branch ref fail-closed", () => {
+      const corrupt = mkdtempSync(join(tmpdir(), "pi-wt-corrupt-ref-"));
+      try {
+        execFileSync("git", ["init"], { cwd: corrupt, stdio: "pipe" });
+        writeFileSync(join(corrupt, ".git", "refs", "heads", "master"), "invalid-object-name\n");
+        expect(tryCreateWorktree(corrupt, "corrupt-ref")).toEqual({
+          ok: false,
+          reason: "git_probe_failed",
+        });
+      } finally {
+        rmSync(corrupt, { recursive: true, force: true });
+      }
+    });
+
+    it("classifies infrastructure failure during initial inside-work-tree probe (not not_git_repo)", () => {
+      // Timeout / permission / safe.directory / corrupt probe must not look like
+      // a confirmed non-Git cwd — dropping isolation would be the wrong guidance.
+      const bin = mkdtempSync(join(tmpdir(), "pi-wt-git-infra-inside-"));
+      const shim = join(bin, "git");
+      writeFileSync(
+        shim,
+        `#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then
+  echo "fatal: detected dubious ownership in repository" >&2
+  exit 128
+fi
+exec /usr/bin/git "$@"
+`,
+      );
+      chmodSync(shim, 0o755);
+      const prevPath = process.env.PATH;
+      process.env.PATH = `${bin}:${prevPath ?? ""}`;
+      try {
+        const result = tryCreateWorktree(repoDir, "infra-inside");
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.reason).toBe("git_probe_failed");
+          expect(result.reason).not.toBe("not_git_repo");
+          expect(result.reason).not.toBe("no_head");
+        }
+      } finally {
+        process.env.PATH = prevPath;
+        rmSync(bin, { recursive: true, force: true });
+      }
+    });
+
+    it("classifies infrastructure failure during HEAD probe (not no_head)", () => {
+      // After a conclusive inside-work-tree=true, a non-no-HEAD probe failure
+      // (timeout/permission/corrupt) must keep isolation guidance.
+      const bin = mkdtempSync(join(tmpdir(), "pi-wt-git-infra-head-"));
+      const shim = join(bin, "git");
+      writeFileSync(
+        shim,
+        `#!/bin/sh
+if [ "$1" = "rev-parse" ] && [ "$2" = "--is-inside-work-tree" ]; then
+  echo true
+  exit 0
+fi
+if [ "$1" = "rev-parse" ] && [ "$2" = "--verify" ]; then
+  echo "error: could not lock config file" >&2
+  exit 1
+fi
+exec /usr/bin/git "$@"
+`,
+      );
+      chmodSync(shim, 0o755);
+      const prevPath = process.env.PATH;
+      process.env.PATH = `${bin}:${prevPath ?? ""}`;
+      try {
+        const result = tryCreateWorktree(repoDir, "infra-head");
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+          expect(result.reason).toBe("git_probe_failed");
+          expect(result.reason).not.toBe("no_head");
+          expect(result.reason).not.toBe("not_git_repo");
+        }
+      } finally {
+        process.env.PATH = prevPath;
+        rmSync(bin, { recursive: true, force: true });
       }
     });
 
