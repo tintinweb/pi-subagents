@@ -91,7 +91,7 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(out).toContain("partial work so far");
   });
 
-  it("foreground user-stop → tells the parent NOT to restart it unasked", async () => {
+  it("foreground user-stop → tells the parent to resume the accepted same agent", async () => {
     // Pi delivers a user ESC as an abort on the tool's signal; the manager wires
     // that to abort(id) (#44), landing the record on "stopped" — deliberately
     // distinct from a turn-limit "aborted", because the correct next action is
@@ -116,13 +116,12 @@ describe("status note reaches the parent through the real handlers", () => {
     const out = textOf(await call);
     expect(out).toContain("status: stopped");
     expect(out).toContain("category: caller_stop");
-    expect(out).toContain("recovery: none");
+    expect(out).toContain("recovery: resume_same_agent");
     expect(out).toContain("fresh_spawn: forbidden");
-    expect(out).not.toContain("resume_same_agent");
     expect(out).toContain("partial work so far");
   });
 
-  it("foreground pre-aborted caller signal stays a caller stop without recovery", async () => {
+  it("foreground pre-aborted caller signal keeps same-agent recovery once its session exists", async () => {
     let childWasAbortedAtInvocation: boolean | undefined;
     vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
       childWasAbortedAtInvocation = options.signal?.aborted;
@@ -150,9 +149,8 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(childWasAbortedAtInvocation).toBe(true);
     expect(out).toContain("status: stopped");
     expect(out).toContain("category: caller_stop");
-    expect(out).toContain("recovery: none");
+    expect(out).toContain("recovery: resume_same_agent");
     expect(out).toContain("fresh_spawn: forbidden");
-    expect(out).not.toContain("resume_same_agent");
   });
 
   it("hides nested records from top-level tools, registry, transcripts, and lifecycle", async () => {

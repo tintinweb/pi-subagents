@@ -387,9 +387,7 @@ export class AgentManager {
         record.result = responseText;
         record.session = session;
         record.completedAt ??= Date.now();
-        record.outcome = record.status === "stopped" && record.outcome
-          ? { ...record.outcome, hasOutput: Boolean(record.result?.trim()) }
-          : buildAgentOutcome(record, "run");
+        record.outcome = buildAgentOutcome(record, "run");
 
         detach();
 

@@ -285,6 +285,30 @@ describe("child-safe nested Agent tools", () => {
     expect(manager.resume).not.toHaveBeenCalled();
   });
 
+  it("keeps a failed accepted nested resume on the success channel with same-agent recovery", async () => {
+    const record = {
+      id: "child-1", status: "error", error: "provider exploded",
+      result: "got this far", parentAgentId: "parent-1", session: {} as any,
+    };
+    records.set(record.id, record);
+    manager.resume.mockResolvedValue(record);
+    const [agent] = tools();
+    const result = await execute(agent, {
+      subagent_type: "scout",
+      description: "resume child",
+      prompt: "Continue",
+      resume: record.id,
+    });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toContain("Agent outcome:");
+    expect(result.content[0].text).toContain("recovery: resume_same_agent");
+    expect(result.content[0].text).toContain("agent_id: child-1");
+    expect(result.details).toEqual(expect.objectContaining({
+      outcome: expect.objectContaining({ agentId: "child-1", recovery: "resume_same_agent" }),
+    }));
+  });
+
   it("waits for a queued owned child to start and settle", async () => {
     const [, getResult] = tools();
     const record = {
@@ -305,7 +329,9 @@ describe("child-safe nested Agent tools", () => {
 
     const result = await execute(getResult, { agent_id: record.id, wait: true });
 
-    expect(result.content[0].text).toBe("queued done");
+    expect(result.content[0].text).toContain("Agent outcome:");
+    expect(result.content[0].text).toContain("status: completed");
+    expect(result.content[0].text).toContain("queued done");
   });
 
   it("aborts a nested result wait without aborting the owned child", async () => {
@@ -406,12 +432,12 @@ describe("child-safe nested Agent tools", () => {
     expect(result.content[0].text).not.toContain("everything the agent produced is above");
   });
 
-  it("keeps a failed child's partial output alongside the error", async () => {
+  it("keeps a failed accepted child's lifecycle and partial output on the success channel", async () => {
     spawnAndWait.mockImplementation(async () => ({
       id: "child-1",
       record: {
         id: "child-1", status: "error", error: "provider exploded",
-        result: "got this far", parentAgentId: "parent-1",
+        result: "got this far", parentAgentId: "parent-1", session: {} as any,
       },
     }));
     const [agent] = tools();
@@ -421,9 +447,36 @@ describe("child-safe nested Agent tools", () => {
       prompt: "Do work",
     });
 
-    expect(result.isError).toBe(true);
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toContain("Agent outcome:");
+    expect(result.content[0].text).toContain("recovery: resume_same_agent");
+    expect(result.content[0].text).toContain("agent_id: child-1");
     expect(result.content[0].text).toContain("provider exploded");
     expect(result.content[0].text).toContain("got this far");
+    expect(result.details).toEqual(expect.objectContaining({
+      outcome: expect.objectContaining({
+        agentId: "child-1",
+        category: "provider",
+        recovery: "resume_same_agent",
+      }),
+    }));
+  });
+
+  it("keeps a fetched failed accepted child on the success channel with same-agent recovery", async () => {
+    records.set("child-1", {
+      id: "child-1", status: "error", error: "provider exploded",
+      result: "got this far", parentAgentId: "parent-1", session: {} as any,
+    });
+    const [, getResult] = tools();
+    const result = await execute(getResult, { agent_id: "child-1" });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toContain("Agent outcome:");
+    expect(result.content[0].text).toContain("recovery: resume_same_agent");
+    expect(result.content[0].text).toContain("agent_id: child-1");
+    expect(result.details).toEqual(expect.objectContaining({
+      outcome: expect.objectContaining({ agentId: "child-1", recovery: "resume_same_agent" }),
+    }));
   });
 
   it("attributes a nested child's token spend to the owning parent", async () => {

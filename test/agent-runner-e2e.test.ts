@@ -197,7 +197,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       expect(record.session).toBeDefined();
       expect(record.status).toBe("stopped");
       expect(record.outcome).toEqual(expect.objectContaining({
-        category: "caller_stop", recovery: "none", freshSpawn: "forbidden", hasOutput: false,
+        category: "caller_stop", recovery: "resume_same_agent", freshSpawn: "forbidden", hasOutput: false,
       }));
       expect(existsSync(marker)).toBe(false);
     } finally {

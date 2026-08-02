@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -33,10 +36,13 @@ const FATAL =
 
 describe("Agent lifecycle contract through the real Pi boundary", () => {
   let run: PrintModeRun | undefined;
+  let projectDir: string | undefined;
 
   afterEach(async () => {
     await run?.dispose();
     run = undefined;
+    if (projectDir) rmSync(projectDir, { recursive: true, force: true });
+    projectDir = undefined;
   });
 
   it("marks invocation rejection as isError=true and creates no record", async () => {
@@ -56,6 +62,59 @@ describe("Agent lifecycle contract through the real Pi boundary", () => {
     const [result] = agentResults(run.parentSession);
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("Model not found");
+    expect(run.subagents).toHaveLength(0);
+  });
+
+  it("marks fail-closed fallback rejection as isError=true and creates no record", async () => {
+    projectDir = mkdtempSync(join(tmpdir(), "subagents-lifecycle-fallback-"));
+    mkdirSync(join(projectDir, ".pi"), { recursive: true });
+    writeFileSync(join(projectDir, ".pi", "subagents.json"), JSON.stringify({ fallbackSubagent: false }));
+    run = await runPrintMode({
+      cwd: projectDir,
+      prompt: "Delegate.",
+      respond: routeBySession({
+        parentInitial: agentCall({
+          description: "unknown agent",
+          prompt: "Do work.",
+          subagent_type: "definitely-missing",
+        }),
+        parentFinal: "parent done",
+        subagent: "unused",
+      }),
+    });
+
+    const [result] = agentResults(run.parentSession);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Unknown or disabled agent type: "definitely-missing"');
+    expect(run.subagents).toHaveLength(0);
+  });
+
+  it("marks top-level model-scope rejection as isError=true and creates no record", async () => {
+    projectDir = mkdtempSync(join(tmpdir(), "subagents-lifecycle-scope-"));
+    mkdirSync(join(projectDir, ".pi"), { recursive: true });
+    writeFileSync(join(projectDir, ".pi", "subagents.json"), JSON.stringify({ scopeModels: true }));
+    writeFileSync(
+      join(projectDir, ".pi", "settings.json"),
+      JSON.stringify({ enabledModels: ["faux/faux-other"] }),
+      { mode: 0o600 },
+    );
+    run = await runPrintMode({
+      cwd: projectDir,
+      prompt: "Delegate.",
+      respond: routeBySession({
+        parentInitial: agentCall({
+          description: "out-of-scope model",
+          prompt: "Do work.",
+          model: "faux/faux-1",
+        }),
+        parentFinal: "parent done",
+        subagent: "unused",
+      }),
+    });
+
+    const [result] = agentResults(run.parentSession);
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Model not in scope: "faux/faux-1"');
     expect(run.subagents).toHaveLength(0);
   });
 

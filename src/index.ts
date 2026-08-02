@@ -1107,7 +1107,7 @@ Terse command-style prompts produce shallow, generic work.
       // but the parameter is required by the schema — so gating it here would
       // make a live agent unresumable the moment its type is deleted, disabled,
       // or gains a case-clashing sibling. Only a real spawn is gated.
-      if (!dispatch.ok && !params.resume) return textResult(dispatch.message);
+      if (!dispatch.ok && !params.resume) rejectInvocation(dispatch.message);
       const subagentType = dispatch.ok ? dispatch.type : rawType;
       // What the caller actually asked for, named once: `fellBackFrom` is "" for
       // a blank request, so reading it inline invites the `??`-vs-`||` slip that
@@ -1152,7 +1152,7 @@ Terse command-style prompts produce shallow, generic work.
         agentLabel: customConfig?.displayName ?? subagentType,
         modelInput: resolvedConfig.modelInput,
       });
-      if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
+      if (scopeVerdict.kind === "error") rejectInvocation(scopeVerdict.message);
       if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
 
       const thinking = resolvedConfig.thinking;

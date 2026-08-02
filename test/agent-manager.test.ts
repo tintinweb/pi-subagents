@@ -1148,7 +1148,7 @@ describe("AgentManager — parent abort signal forwarding (#44)", () => {
     expect(record.status).toBe("stopped");
     expect(record.outcome).toEqual(expect.objectContaining({
       category: "caller_stop",
-      recovery: "none",
+      recovery: "resume_same_agent",
       freshSpawn: "forbidden",
     }));
   });
@@ -1388,7 +1388,7 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
       agentId: id,
       status: "stopped",
       category: "user_stop",
-      recovery: "none",
+      recovery: "resume_same_agent",
       freshSpawn: "forbidden",
     }));
   });

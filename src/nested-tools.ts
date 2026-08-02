@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
+import { formatAgentOutcome, outcomeForRecord } from "./agent-outcome.js";
 import {
   buildAgentRegistry,
   getAgentConfigIn,
@@ -101,8 +102,12 @@ export interface NestedToolContext {
   configCwd: string;
 }
 
-function textResult(text: string, isError = false) {
-  return { content: [{ type: "text" as const, text }], isError, details: {} };
+function textResult(text: string, isError = false, record?: AgentRecord) {
+  return {
+    content: [{ type: "text" as const, text }],
+    isError,
+    details: record ? { outcome: outcomeForRecord(record) } : {},
+  };
 }
 
 function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): record is AgentRecord {
@@ -123,11 +128,12 @@ function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): rec
 type ResultPosition = "inline" | "fetched";
 
 function formatRecord(record: AgentRecord, position: ResultPosition): string {
-  if (record.status === "error") {
-    return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
-  }
   if (record.status === "queued" || record.status === "running") {
     return `Agent ${record.id} is ${record.status}.`;
+  }
+  const outcome = formatAgentOutcome(outcomeForRecord(record));
+  if (record.status === "error") {
+    return `${outcome}${partialOutputSuffix(record) || "\n\nPartial output before the failure:\nNo output."}`;
   }
   // A truncated run must not read as a finished one. The top-level path carries
   // this in its result headline; a nested result has no headline, so the note
@@ -136,7 +142,8 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   const note = position === "inline"
     ? getForegroundOutcomeNote(record.status)
     : getStatusNote(record.status);
-  return note ? `Nested agent${note}.\n\n${text}` : text;
+  const result = note ? `Nested agent${note}.\n\n${text}` : text;
+  return `${outcome}\n\n${result}`;
 }
 
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
@@ -189,7 +196,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         const resumed = await context.manager.resume(params.resume, params.prompt, signal);
         return resumed
-          ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
+          ? textResult(formatRecord(resumed, "inline"), false, resumed)
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
 
@@ -348,7 +355,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           { ...options, signal },
           attachTranscript,
         );
-        return textResult(formatRecord(record, "inline"), record.status === "error");
+        return textResult(formatRecord(record, "inline"), false, record);
       } catch (err) {
         return textResult(err instanceof Error ? err.message : String(err), true);
       }
@@ -378,7 +385,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         if (record.promise) await abortable(record.promise, signal);
       }
-      return textResult(formatRecord(record, "fetched"), record.status === "error");
+      return textResult(formatRecord(record, "fetched"), false, record);
     },
   });
 
