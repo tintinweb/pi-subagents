@@ -11,7 +11,7 @@ import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
-import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
+import { type AgentActivity, activityDurationMs, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatActivityWithElapsed, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
@@ -354,7 +354,7 @@ export class ConversationViewer implements Component {
     if (this.record.status === "running" && this.activity) {
       const act = describeActivity(this.activity.activeTools, this.activity.responseText);
       lines.push("");
-      lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
+      lines.push(truncateToWidth(th.fg("accent", "▍ ") + fgPreservingNestedStyles(th, "dim", formatActivityWithElapsed(act, activityDurationMs(this.activity, act))), width));
     }
 
     return lines.map(l => truncateToWidth(l, width));
