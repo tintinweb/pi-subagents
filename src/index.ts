@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
@@ -53,6 +53,16 @@ import {
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+
+const collapseResultByStatus: Record<AgentRecord["status"], boolean> = {
+  queued: false,
+  running: false,
+  completed: true,
+  steered: true,
+  aborted: true,
+  stopped: true,
+  error: false,
+};
 
 // ---- Shared helpers ----
 
@@ -1452,6 +1462,21 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
+    renderResult(result, { expanded, isPartial }, theme) {
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      const details = result.details as { status?: AgentRecord["status"] } | undefined;
+      const status = details?.status;
+      if (expanded || isPartial || status === undefined || !collapseResultByStatus[status]) {
+        return new Text(text, 0, 0);
+      }
+      return new Text(
+        theme.fg("dim", "  ⎿  Result available (") +
+          keyHint("app.tools.expand", "to expand") +
+          theme.fg("dim", ")"),
+        0,
+        0,
+      );
+    },
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = manager.getRecord(params.agent_id);
       if (!record || record.parentAgentId) {
@@ -1487,6 +1512,10 @@ Terse command-style prompts produce shallow, generic work.
         `Agent: ${record.id}\n` +
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
+      const details = buildDetails(
+        { displayName, description: record.description, subagentType: record.type },
+        record,
+      );
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
@@ -1510,7 +1539,7 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      return textResult(output);
+      return textResult(output, details);
     },
   }));
 
