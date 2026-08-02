@@ -20,7 +20,7 @@ import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
-import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
+import { type RpcHandle, registerRpcHandlers, type SpawnCapable } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
@@ -508,6 +508,35 @@ export default function (pi: ExtensionAPI) {
     (globalThis as any)[MANAGER_KEY] = registryEntry;
   }
 
+  // Cross-extension callers such as pi-tasks bypass the Agent tool, so they do
+  // not create its UI activity tracker. Wrap only that programmatic spawn path
+  // with the same callbacks before AgentManager starts the child session.
+  const rpcManager: SpawnCapable = {
+    spawn(piRef, ctxRef, type, prompt, options) {
+      const { state, callbacks } = createActivityTracker(options.maxTurns);
+      // Wrap spawnTopLevel (not raw manager.spawn) so RPC-spawned agents keep
+      // the #164 internal-option sanitization while gaining activity tracking.
+      const id = spawnTopLevel(
+        piRef,
+        ctxRef,
+        type,
+        prompt,
+        { ...options, ...callbacks },
+      );
+      agentActivity.set(id, state);
+      widget.ensureTimer();
+      widget.update();
+      fleet.ensureTimer();
+      fleet.update();
+      return id;
+    },
+    // Preserve the #164 guard: RPC must not abort nested (child) agents.
+    abort: (id) => {
+      const record = manager.getRecord(id);
+      return !record?.parentAgentId && manager.abort(id);
+    },
+  };
+
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
@@ -553,13 +582,7 @@ export default function (pi: ExtensionAPI) {
         events: pi.events,
         pi,
         getCtx: () => currentCtx,
-        manager: {
-          spawn: spawnTopLevel,
-          abort: (id) => {
-            const record = manager.getRecord(id);
-            return !record?.parentAgentId && manager.abort(id);
-          },
-        },
+        manager: rpcManager,
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
       // Emitting after all factories have run (rather than at factory time)
