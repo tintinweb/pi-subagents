@@ -913,6 +913,11 @@ Terse command-style prompts produce shallow, generic work.
       description: Type.String({
         description: "A short (3-5 word) description of the task (shown in UI).",
       }),
+      name: Type.Optional(
+        Type.String({
+          description: "Optional human-readable session name. The short agent ID suffix is added automatically.",
+        }),
+      ),
       subagent_type: Type.String({
         description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
       }),
@@ -1184,6 +1189,7 @@ Terse command-style prompts produce shallow, generic work.
           const job = scheduler.addJob({
             name: params.description as string,
             description: params.description as string,
+            sessionName: params.name as string | undefined,
             schedule: params.schedule as string,
             // The caller's own name, not the substitute — the scheduler re-resolves
             // at fire time, and the original is what a user edits.
@@ -1250,6 +1256,7 @@ Terse command-style prompts produce shallow, generic work.
         try {
           id = manager.spawn(pi, ctx, subagentType, params.prompt, {
             description: params.description,
+            sessionName: params.name,
             model,
             maxTurns: effectiveMaxTurns,
             isolated,
@@ -1377,6 +1384,7 @@ Terse command-style prompts produce shallow, generic work.
       try {
         const fgResult = await manager.spawnAndWait(pi, ctx, subagentType, params.prompt, {
           description: params.description,
+          sessionName: params.name,
           model,
           maxTurns: effectiveMaxTurns,
           isolated,

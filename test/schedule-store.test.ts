@@ -57,6 +57,14 @@ describe("ScheduleStore", () => {
     expect(fresh.list()).toEqual([job]);
   });
 
+  it("round-trips a caller-supplied session name", () => {
+    const file = join(tmp, "s.json");
+    const store = new ScheduleStore(file);
+    store.add(makeJob({ sessionName: "GH-123 scheduled review" }));
+
+    expect(new ScheduleStore(file).list()[0].sessionName).toBe("GH-123 scheduled review");
+  });
+
   it("update returns merged record and persists the patch", () => {
     const store = new ScheduleStore(join(tmp, "s.json"));
     const job = makeJob({ name: "before" });
