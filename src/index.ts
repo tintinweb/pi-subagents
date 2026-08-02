@@ -969,10 +969,19 @@ Terse command-style prompts produce shallow, generic work.
       return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
-    renderResult(result, { expanded, isPartial }, theme) {
+    renderResult(result, { expanded, isPartial }, theme, renderContext) {
       const details = result.details as AgentDetails | undefined;
-      if (!details) {
-        const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      const knownStatuses = new Set<AgentDetails["status"]>([
+        "running",
+        "background",
+        "completed",
+        "steered",
+        "stopped",
+        "error",
+        "aborted",
+      ]);
+      if (renderContext.isError || !details || !knownStatuses.has(details.status)) {
         return new Text(text, 0, 0);
       }
 
