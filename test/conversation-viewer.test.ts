@@ -1,5 +1,7 @@
+import { stripVTControlCharacters } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentRecord } from "../src/types.js";
+import { registerAgents } from "../src/agent-types.js";
+import type { AgentConfig, AgentRecord } from "../src/types.js";
 
 // ── Mock wrapTextWithAnsi ──────────────────────────────────────────────
 // We need to control what wrapTextWithAnsi returns to simulate the
@@ -76,6 +78,307 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer", () => {
+  describe("safe conversation rendering", () => {
+    function renderedText(messages: unknown[], activity?: any, record: Partial<AgentRecord> = {}): string[] {
+      const viewer = new ConversationViewer(
+        mockTui(), mockSession(messages), mockRecord(record), activity, ansiTheme(), vi.fn(),
+      );
+      const lines = viewer.render(80).map((line) => stripVTControlCharacters(line));
+      expect(lines.every((line) => !line.includes("\n"))).toBe(true);
+      expect(lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
+      return lines;
+    }
+
+    function expectWarningBeforeEscape(lines: string[], escaped: string): void {
+      const warningRow = lines.findIndex((line) => line.includes("[unsafe terminal content escaped]"));
+      const escapedRow = lines.findIndex((line) => line.includes(escaped));
+      expect(warningRow).toBeGreaterThanOrEqual(0);
+      expect(escapedRow).toBe(warningRow + 1);
+    }
+
+    it("classifies a sparse replacement character exactly as istextorbinary does", () => {
+      const lines = renderedText([{
+        role: "toolResult",
+        toolCallId: "tool-sparse-replacement",
+        toolName: "read",
+        content: [{ type: "text", text: "safe�after" }],
+        isError: false,
+        timestamp: Date.now(),
+      }]);
+
+      expect(lines.filter((line) => line.includes("[binary content]"))).toHaveLength(1);
+      expect(lines.join("\n")).not.toContain("\\u{FFFD}");
+    });
+
+    it("classifies binary content over the final limited display text", () => {
+      const payload = `\u009D${"�".repeat(60)}${"a".repeat(439)}${"b".repeat(5_000)}`;
+      const lines = renderedText([{
+        role: "toolResult",
+        toolCallId: "tool-limited-binary",
+        toolName: "read",
+        content: [{ type: "text", text: payload }],
+        isError: false,
+        timestamp: Date.now(),
+      }]);
+
+      expect(lines.filter((line) => line.includes("[binary content]"))).toHaveLength(1);
+      expect(lines.join("\n")).not.toContain("\\u{FFFD}");
+    });
+
+    it("replaces recording-like dense replacement text without exposing its contents", () => {
+      const payload = "RIFF�\u{9D}�\u{81}随机�\u{A4}�audio�\u{90}�tail";
+      const lines = renderedText([{
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "read",
+        content: [{ type: "text", text: payload }],
+        isError: false,
+        timestamp: Date.now(),
+      }]);
+      const contentRows = lines.filter((line) => line.includes("binary content") || line.includes("RIFF") || line.includes("audio"));
+
+      expect(contentRows).toHaveLength(1);
+      expect(contentRows[0]?.replace(/^│\s*|\s*│$/g, "").trim()).toBe("[binary content]");
+      expect(lines.join("\n")).not.toContain("RIFF");
+      expect(lines.join("\n")).not.toContain("audio");
+    });
+
+    it("keeps NUL-bearing content classified as binary", () => {
+      const lines = renderedText([{
+        role: "toolResult",
+        toolCallId: "tool-nul",
+        toolName: "read",
+        content: [{ type: "text", text: "safe\u0000after" }],
+        isError: false,
+        timestamp: Date.now(),
+      }]);
+
+      expect(lines.filter((line) => line.includes("[binary content]"))).toHaveLength(1);
+      expect(lines.join("\n")).not.toContain("safe");
+    });
+
+    it.each([
+      ["ESC", "safe\u001b[2Jafter", "safe\\u{1B}[2Jafter"],
+      ["C1", "safe\u0085after", "safe\\u{85}after"],
+      ["bidi", "safe\u202Eafter", "safe\\u{202E}after"],
+      ["private use", "safe\uE000after", "safe\\u{E000}after"],
+    ])("secondarily escapes %s text that istextorbinary classifies as text", (_kind, raw, escaped) => {
+      const lines = renderedText([{
+        role: "toolResult",
+        toolCallId: "tool-unsafe",
+        toolName: "read",
+        content: [{ type: "text", text: raw }],
+        isError: false,
+        timestamp: Date.now(),
+      }]);
+
+      expectWarningBeforeEscape(lines, escaped);
+      expect(lines.join("\n")).not.toContain(raw);
+      expect(lines.join("\n")).not.toContain("[binary content]");
+    });
+
+    it("passes ordinary text including tabs through without a warning", () => {
+      const wrappedTexts: string[] = [];
+      wrapOverride = (text) => {
+        wrappedTexts.push(text);
+        return [text];
+      };
+      const lines = renderedText([
+        { role: "user", content: "Hello,\t世界 👩‍💻" },
+        { role: "assistant", content: [{ type: "text", text: "Ordinary response" }] },
+      ]);
+
+      expect(wrappedTexts).toContain("Hello,\t世界 👩‍💻");
+      expect(wrappedTexts).toContain("Ordinary response");
+      expect(lines.join("\n")).not.toContain("[unsafe terminal content escaped]");
+    });
+
+    it("renders safe multiline tool names, bash commands, and activity as separate rows without warnings", () => {
+      const messageLines = renderedText([
+        { role: "assistant", content: [{ type: "toolCall", name: "tool\nname" }] },
+        { role: "bashExecution", command: "printf first\nprintf second", output: "" },
+      ]);
+      expect(messageLines.join("\n")).not.toContain("[unsafe terminal content escaped]");
+      expect(messageLines.some((line) => line.includes("[Tool: tool]"))).toBe(true);
+      expect(messageLines.some((line) => line.includes("[Tool: name]"))).toBe(true);
+      expect(messageLines.some((line) => line.includes("$ printf first"))).toBe(true);
+      expect(messageLines.some((line) => line.includes("$ printf second"))).toBe(true);
+
+      const activityLines = renderedText([{ role: "user", content: "prompt" }], {
+        activeTools: new Map([["call-1", "custom first\ncustom second"]]), toolUses: 1, responseText: "", turnCount: 0,
+        lifetimeUsage: {},
+      });
+      expect(activityLines.join("\n")).not.toContain("[unsafe terminal content escaped]");
+      expect(activityLines.some((line) => line.includes("custom first"))).toBe(true);
+      expect(activityLines.some((line) => line.includes("custom second"))).toBe(true);
+    });
+
+    it("warns before unsafe multiline tool names, bash commands, and activity and renders safe rows", () => {
+      const messageLines = renderedText([
+        { role: "assistant", content: [{ type: "toolCall", name: "tool\u001b[2J\nname" }] },
+        { role: "bashExecution", command: "printf '\u001b[2J'\nprintf safe", output: "" },
+      ]);
+      expectWarningBeforeEscape(messageLines, "[Tool: tool\\u{1B}[2J]");
+      expect(messageLines.some((line) => line.includes("[Tool: name]"))).toBe(true);
+      const warningRows = messageLines
+        .map((line, index) => line.includes("[unsafe terminal content escaped]") ? index : -1)
+        .filter((index) => index >= 0);
+      expect(warningRows).toHaveLength(2);
+      expect(messageLines[warningRows[1] + 1]).toContain("$ printf '\\u{1B}[2J'");
+      expect(messageLines.some((line) => line.includes("$ printf safe"))).toBe(true);
+
+      const activityLines = renderedText([{ role: "user", content: "prompt" }], {
+        activeTools: new Map(), toolUses: 0, responseText: "stream\u001b[2J\nsafe", turnCount: 0,
+        lifetimeUsage: {},
+      });
+      expectWarningBeforeEscape(activityLines, "stream\\u{1B}[2J");
+      expect(activityLines.some((line) => line.includes("safe"))).toBe(true);
+
+      expect(messageLines.join("\n") + activityLines.join("\n")).not.toMatch(/[\u001b\u0007]/);
+    });
+
+    it("renders unsafe multiline invocation tags as structural warning and escaped rows", () => {
+      const lines = renderedText([], undefined, {
+        invocation: {
+          thinking: "high\u001b[2J\nforged" as NonNullable<AgentRecord["invocation"]>["thinking"],
+        },
+      });
+      const warningRow = lines.findIndex((line) => line.includes("[unsafe terminal content escaped]"));
+
+      expect(warningRow).toBeGreaterThanOrEqual(0);
+      expect(lines[warningRow + 1]).toContain("thinking: high\\u{1B}[2J");
+      expect(lines[warningRow + 2]).toContain("forged");
+      expect(lines.join("\n")).not.toContain("\u001b[2J");
+      expect(lines.every((line) => !line.includes("\n"))).toBe(true);
+    });
+
+    it("gates external display name, description, and invocation model in header-adjacent rows", () => {
+      const config: AgentConfig = {
+        name: "unsafe-header",
+        displayName: "Display\u001b[2J\nName",
+        description: "Description\u001b[31m\nDetail",
+        extensions: false,
+        skills: false,
+        systemPrompt: "",
+        promptMode: "replace",
+      };
+      registerAgents(new Map([[config.name, config]]));
+      const lines = renderedText([], undefined, {
+        type: config.name,
+        description: config.description,
+        invocation: { modelName: "Model\u001b[H\nVariant" },
+      });
+      const rendered = lines.join("\n");
+
+      expect(lines.filter((line) => line.includes("[unsafe terminal content escaped]"))).toHaveLength(3);
+      expect(rendered).toContain("Display\\u{1B}[2J");
+      expect(rendered).toContain("Description\\u{1B}[31m");
+      expect(rendered).toContain("Model\\u{1B}[H");
+      expect(rendered).not.toContain("\u001b[2J");
+      expect(rendered).not.toContain("\u001b[31m");
+      expect(rendered).not.toContain("\u001b[H");
+    });
+
+    it.each([40, 12])("bounds multiline header chrome to the 70%% overlay height at %i rows", (rows) => {
+      const config: AgentConfig = {
+        name: `overflow-header-${rows}`,
+        displayName: ["Primary display", ...Array.from({ length: 12 }, (_, i) => `Name ${i}\u001b[2J`)].join("\n"),
+        description: Array.from({ length: 12 }, (_, i) => `Description ${i}\u001b[31m`).join("\n"),
+        extensions: false,
+        skills: false,
+        systemPrompt: "",
+        promptMode: "replace",
+      };
+      registerAgents(new Map([[config.name, config]]));
+      const tui = mockTui(rows, 80);
+      const viewer = new ConversationViewer(
+        tui,
+        mockSession([{ role: "user", content: "meaningful content" }]),
+        mockRecord({
+          type: config.name,
+          description: config.description,
+          invocation: {
+            modelName: Array.from({ length: 12 }, (_, i) => `Model ${i}\u001b[H`).join("\n"),
+          },
+        }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+      );
+
+      const rendered = viewer.render(80);
+      const plain = rendered.map((line) => stripVTControlCharacters(line));
+      expect(rendered.length).toBeLessThanOrEqual(Math.floor((rows * 70) / 100));
+      expect(plain[0]).toContain("╭");
+      expect(plain.at(-1)).toContain("╰");
+      expect(plain.at(-2)).toContain("Esc close");
+      expect(plain.join("\n")).toContain("Primary display");
+      expect(plain.join("\n")).toContain("meaningful content");
+      expect(plain.join("\n")).toContain("…");
+      expect(plain.every((line) => !line.includes("\n"))).toBe(true);
+      assertAllLinesFit(rendered, 80);
+    });
+
+    it("escapes unsafe active tool names before they reach the terminal", () => {
+      const lines = renderedText([{ role: "user", content: "prompt" }], {
+        activeTools: new Map([["call-1", "tool\u001b[2Jname"]]),
+        toolUses: 1, responseText: "", turnCount: 0, lifetimeUsage: {},
+      });
+
+      expectWarningBeforeEscape(lines, "tool\\u{1B}[2Jname…");
+      expect(lines.join("\n")).not.toContain("\u001b[2J");
+    });
+
+    it("applies the 500-code-point limit before the terminal safety gate", () => {
+      const preparedTexts: string[] = [];
+      wrapOverride = (text) => {
+        preparedTexts.push(text);
+        return [text];
+      };
+      const lines = renderedText([
+        { role: "toolResult", content: [{ type: "text", text: `${"a".repeat(500)}\0hidden` }] },
+        { role: "toolResult", content: [{ type: "text", text: `${"b".repeat(499)}\u001b[2J` }] },
+      ]);
+
+      expect(preparedTexts[0]).toBe(`${"a".repeat(500)}... (truncated)`);
+      expect(preparedTexts[0]).not.toContain("[binary content]");
+      expect(preparedTexts[0]).not.toContain("[unsafe terminal content escaped]");
+      expect(preparedTexts.some((text) => text.includes("\\u{1B}... (truncated)"))).toBe(true);
+      expect(lines.some((line) => line.includes("[unsafe terminal content escaped]"))).toBe(true);
+    });
+
+    it("truncates raw tool output by code point before escaping", () => {
+      const preparedTexts: string[] = [];
+      wrapOverride = (text) => {
+        preparedTexts.push(text);
+        return [text];
+      };
+      const astralAtBoundary = `${"a".repeat(499)}👩\u001b[2J`;
+      const unsafeAtBoundary = `${"b".repeat(499)}\u001b[2J`;
+      renderedText([
+        { role: "toolResult", content: [{ type: "text", text: astralAtBoundary }] },
+        { role: "toolResult", content: [{ type: "text", text: unsafeAtBoundary }] },
+      ]);
+      const prepared = preparedTexts.join("\n");
+
+      expect(prepared).toContain(`👩... (truncated)`);
+      expect(prepared).not.toContain("�");
+      expect(prepared).toContain("\\u{1B}... (truncated)");
+      expect(prepared).not.toMatch(/\\u\{1B(?:$|\.\.\.)/m);
+    });
+
+    it("escapes unsafe user and assistant text without exposing raw controls", () => {
+      const userRendered = renderedText([{ role: "user", content: "user\u001b[2J" }]).join("\n");
+      const assistantRendered = renderedText([{
+        role: "assistant", content: [{ type: "text", text: "assistant\u001b[2J" }],
+      }]).join("\n");
+
+      expect(userRendered).toContain("user\\u{1B}[2J");
+      expect(assistantRendered).toContain("assistant\\u{1B}[2J");
+      expect(userRendered + assistantRendered).not.toContain("\u001b[2J");
+    });
+  });
+
   describe("render width safety", () => {
     const widths = [40, 80, 120, 216];
 
@@ -476,6 +779,24 @@ describe("ConversationViewer", () => {
       );
       expect(viewer.render(W).join("\n")).not.toContain("Enter steer");
       expect(() => viewer.handleInput("\r")).not.toThrow();
+    });
+
+    it("keeps composer chrome within the small-terminal height cap", () => {
+      const rows = 10;
+      const cap = Math.floor(rows * 0.7);
+      const tui = mockTui(rows, W);
+      const viewer = new ConversationViewer(
+        tui, mockSession(), mockRecord({ status: "running" }),
+        undefined, ansiTheme(), vi.fn(), undefined, undefined, vi.fn(),
+      );
+      viewer.handleInput("\r");
+
+      const rendered = viewer.render(W).map((line) => stripVTControlCharacters(line));
+      expect(rendered.length).toBeLessThanOrEqual(cap);
+      if (rendered.length > 0) {
+        expect(rendered.some((line) => line.includes("Enter send · Esc cancel"))).toBe(true);
+        expect(rendered[rendered.length - 1]).toMatch(/^╰─+╯$/);
+      }
     });
 
     it("composer rows never exceed width", () => {
