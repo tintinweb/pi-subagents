@@ -115,12 +115,13 @@ describe("background completion steering scheduling", () => {
         return "completion was missing";
       },
       beforeRun: () => {
-        const control = (globalThis as Record<symbol, Record<string, unknown>>)[BLOCKING_TOOL_CONTROL];
+        const control = (globalThis as Record<symbol, Record<string, unknown>>)[BLOCKING_TOOL_CONTROL] ?? {};
         Object.assign(control, {
           entered: (signal: AbortSignal | undefined) => enteredBlockingTool?.(signal),
           release: releaseBlockingTool,
           completed: (signal: AbortSignal | undefined) => completedBlockingTool?.(signal),
         });
+        (globalThis as Record<symbol, Record<string, unknown>>)[BLOCKING_TOOL_CONTROL] = control;
       },
     });
 
