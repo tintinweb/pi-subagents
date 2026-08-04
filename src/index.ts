@@ -52,13 +52,15 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { addUsage, emptyUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type ReportableUsage, takeUnreportedUsage } from "./usage.js";
 
 // ---- Shared helpers ----
 
-/** Tool execute return value for a text response. */
-function textResult(msg: string, details?: AgentDetails) {
-  return { content: [{ type: "text" as const, text: msg }], details: details as any };
+/** Tool execute return value for a text response. `usage` (pi-ai Usage shape)
+ * rides the canonical ToolResultMessage.usage channel so pi core and
+ * statusline extensions count subagent spend in session cost. */
+function textResult(msg: string, details?: AgentDetails, usage?: ReportableUsage) {
+  return { content: [{ type: "text" as const, text: msg }], details: details as any, ...(usage ? { usage } : {}) };
 }
 
 export function renderRunningAgentStatus(
@@ -91,7 +93,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     maxTurns,
     responseText: "",
     session: undefined,
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    lifetimeUsage: emptyUsage(),
   };
 
   const callbacks = {
@@ -117,7 +119,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     onSessionCreated: (session: any) => {
       state.session = session;
     },
-    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number }) => {
+    onAssistantUsage: (usage: LifetimeUsage) => {
       addUsage(state.lifetimeUsage, usage);
       onStreamUpdate?.();
     },
@@ -1222,11 +1224,12 @@ Terse command-style prompts produce shallow, generic work.
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
+          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record), takeUnreportedUsage(record));
         }
         return textResult(
           record.result?.trim() || "No output.",
           buildDetails(detailBase, record),
+          takeUnreportedUsage(record),
         );
       }
 
@@ -1415,7 +1418,7 @@ Terse command-style prompts produce shallow, generic work.
 
       if (record.status === "error") {
         // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details, takeUnreportedUsage(record));
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
@@ -1425,6 +1428,7 @@ Terse command-style prompts produce shallow, generic work.
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
         (record.result?.trim() || "No output."),
         details,
+        takeUnreportedUsage(record),
       );
     },
   }));
@@ -1496,10 +1500,14 @@ Terse command-style prompts produce shallow, generic work.
         output += record.result?.trim() || "No output.";
       }
 
-      // Mark result as consumed — suppresses the completion notification
+      // Mark result as consumed — suppresses the completion notification.
+      // Also report the not-yet-reported usage slice on this tool result so
+      // the parent session's cost includes the background run's spend.
+      let reportedUsage: ReportableUsage | undefined;
       if (record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
         cancelNudge(params.agent_id);
+        reportedUsage = takeUnreportedUsage(record);
       }
 
       // Verbose: include full conversation
@@ -1510,7 +1518,7 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      return textResult(output);
+      return textResult(output, undefined, reportedUsage);
     },
   }));
 

@@ -118,6 +118,13 @@ export interface AgentRecord {
    * excluded — see issue #38). Initialized to zeros at spawn.
    */
   lifetimeUsage: LifetimeUsage;
+  /**
+   * Slice of lifetimeUsage already attached to a tool result via
+   * takeUnreportedUsage — prevents double-counting when both the spawn
+   * return and later get_subagent_result calls report usage. Undefined
+   * until the first report.
+   */
+  reportedUsage?: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /**
