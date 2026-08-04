@@ -148,9 +148,10 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Effective model display name used by this run. */
+  /** Canonical runtime model identifier (`provider/modelId`). */
   modelName?: string;
-  thinking?: ThinkingLevel;
+  /** Effective runtime thinking level after Pi applies defaults and model clamping. */
+  thinking?: string;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;

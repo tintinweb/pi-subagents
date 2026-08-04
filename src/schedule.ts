@@ -256,6 +256,14 @@ export class SubagentScheduler {
         isolated: job.isolated,
         thinkingLevel: job.thinking,
         isolation: job.isolation,
+        invocation: {
+          modelName: resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : undefined,
+          thinking: job.thinking,
+          maxTurns: job.max_turns,
+          isolated: job.isolated,
+          runInBackground: true,
+          isolation: job.isolation,
+        },
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);

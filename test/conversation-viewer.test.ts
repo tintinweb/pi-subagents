@@ -35,9 +35,11 @@ function mockTui(rows = 40, columns = 80) {
   } as any;
 }
 
-function mockSession(messages: any[] = []) {
+function mockSession(messages: any[] = [], runtime?: { provider: string; id: string; thinkingLevel: string }) {
   return {
     messages,
+    model: runtime ? { provider: runtime.provider, id: runtime.id } : undefined,
+    thinkingLevel: runtime?.thinkingLevel,
     subscribe: vi.fn(() => vi.fn()),
     dispose: vi.fn(),
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
@@ -77,13 +79,13 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer", () => {
-  it("shows the effective model ID with its model-dependent thinking level", () => {
+  it("shows the live runtime model ID with its model-dependent thinking level", () => {
     const viewer = new ConversationViewer(
       mockTui(30, 120),
-      mockSession([]),
+      mockSession([], { provider: "openai-codex", id: "gpt-5.6-sol", thinkingLevel: "xhigh" }),
       mockRecord({
         invocation: {
-          modelName: "gpt-5.6 sol",
+          modelName: "stale/primary",
           thinking: "max",
           maxTurns: 60,
         },
@@ -94,7 +96,8 @@ describe("ConversationViewer", () => {
     );
 
     const rendered = viewer.render(120).map(line => stripVTControlCharacters(line)).join("\n");
-    expect(rendered).toContain("gpt-5.6 sol · thinking: max · max turns: 60");
+    expect(rendered).toContain("openai-codex/gpt-5.6-sol · thinking: xhigh · max turns: 60");
+    expect(rendered).not.toContain("stale/primary");
   });
 
   describe("render width safety", () => {

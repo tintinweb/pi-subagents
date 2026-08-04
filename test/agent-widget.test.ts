@@ -96,6 +96,7 @@ describe("AgentWidget", () => {
       startedAt: Date.now(),
       lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
+      invocation: { modelName: "openai-codex/gpt-5.6-sol", thinking: "xhigh" },
       isBackground: opts.isBackground,
       parentAgentId: opts.parentAgentId,
     };
@@ -148,6 +149,21 @@ describe("AgentWidget", () => {
     const lines = renderLines(manager, "background", () => "background");
     expect(lines).toContain("Agents");
     expect(lines).toContain("background description");
+    expect(lines).toContain("openai-codex/gpt-5.6-sol · thinking: xhigh");
+  });
+
+  it("keeps the effective model and thinking in a finished row", () => {
+    const record = makeRecord("finished", { isBackground: true });
+    record.status = "completed";
+    record.completedAt = Date.now();
+    const manager = { listAgents: () => [record] };
+    const widget = new AgentWidget(manager as any, new Map([[record.id, makeActivity()]]), () => "background");
+    let factory: any;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_key, content) => { factory = content; } });
+    widget.markFinished(record.id);
+    widget.update();
+    const lines = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme).render().join("\n");
+    expect(lines).toContain("openai-codex/gpt-5.6-sol · thinking: xhigh");
   });
 
   // 'background' excludes only agents *known* to be foreground; one with no
@@ -155,6 +171,15 @@ describe("AgentWidget", () => {
   it("keeps agents with no isBackground flag in 'background' mode", () => {
     const manager = { listAgents: () => [makeRecord("unflagged", {})] };
     expect(renderLines(manager, "unflagged", () => "background")).toContain("unflagged description");
+  });
+
+  it("shows each queued agent with its effective model and thinking", () => {
+    const queued = makeRecord("queued", { isBackground: true });
+    queued.status = "queued";
+    const manager = { listAgents: () => [queued] };
+    const lines = renderLines(manager, "queued", () => "background");
+    expect(lines).toContain("queued description");
+    expect(lines).toContain("openai-codex/gpt-5.6-sol · thinking: xhigh");
   });
 
   // "off" hides the widget entirely — even a background agent renders nothing.
