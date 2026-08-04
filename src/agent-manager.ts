@@ -311,6 +311,11 @@ export class AgentManager {
       },
       onSessionCreated: (session) => {
         record.session = session;
+        record.invocation ??= {};
+        record.invocation.modelName = session.model
+          ? `${session.model.provider}/${session.model.id}`
+          : undefined;
+        record.invocation.thinking = session.thinkingLevel;
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {

@@ -46,6 +46,7 @@ import {
   formatTurns,
   getDisplayName,
   getPromptModeLabel,
+  prepareModelNameForDisplay,
   SPINNER,
   type Theme,
   type UICtx,
@@ -177,6 +178,16 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join('\n');
+}
+
+/** Read current runtime model/thinking, falling back to the pre-session invocation snapshot. */
+function getRuntimeInvocation(record: Pick<AgentRecord, "invocation" | "session"> | undefined): AgentInvocation | undefined {
+  if (!record?.session?.model) return record?.invocation;
+  return {
+    ...record.invocation,
+    modelName: `${record.session.model.provider}/${record.session.model.id}`,
+    thinking: record.session.thinkingLevel,
+  };
 }
 
 /** Build AgentDetails from a base + record-specific fields. */
@@ -976,10 +987,11 @@ Terse command-style prompts produce shallow, generic work.
         return new Text(text, 0, 0);
       }
 
-      // Helper: build "haiku · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
+      // Helper: build "model · thinking: high · ↻5≤30 · 3 tool uses · 33.8k tokens" stats string
       const stats = (d: AgentDetails) => {
         const parts: string[] = [];
-        if (d.modelName) parts.push(d.modelName);
+        const modelName = prepareModelNameForDisplay(d.modelName);
+        if (modelName) parts.push(modelName);
         if (d.tags) parts.push(...d.tags);
         if (d.turnCount != null && d.turnCount > 0) {
           parts.push(formatTurns(d.turnCount, d.maxTurns));
@@ -998,7 +1010,9 @@ Terse command-style prompts produce shallow, generic work.
 
       // ---- Background agent launched ----
       if (details.status === "background") {
-        return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})`), 0, 0);
+        const s = stats(details);
+        const line = (s ? `${s}\n` : "") + theme.fg("dim", `  ⎿  Running in background (ID: ${details.agentId})`);
+        return new Text(line, 0, 0);
       }
 
       // ---- Completed / Steered ----
@@ -1134,11 +1148,7 @@ Terse command-style prompts produce shallow, generic work.
         writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
 
-      const parentModelId = ctx.model?.id;
-      const effectiveModelId = model?.id;
-      const modelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
-        : undefined;
+      const modelName = model ? `${model.provider}/${model.id}` : undefined;
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
         modelName,
@@ -1219,14 +1229,22 @@ Terse command-style prompts produce shallow, generic work.
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
+        const resumedInvocation = buildInvocationTags(getRuntimeInvocation(record));
+        const resumedDetails = {
+          displayName: getDisplayName(record.type),
+          description: record.description,
+          subagentType: record.type,
+          modelName: resumedInvocation.modelName,
+          tags: resumedInvocation.tags.length > 0 ? resumedInvocation.tags : undefined,
+        };
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBase, record));
+          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(resumedDetails, record));
         }
         return textResult(
           record.result?.trim() || "No output.",
-          buildDetails(detailBase, record),
+          buildDetails(resumedDetails, record),
         );
       }
 
@@ -1301,6 +1319,12 @@ Terse command-style prompts produce shallow, generic work.
         });
 
         const isQueued = record?.status === "queued";
+        const runtimeInvocation = buildInvocationTags(getRuntimeInvocation(record));
+        const backgroundDetails = {
+          ...detailBase,
+          modelName: runtimeInvocation.modelName ?? detailBase.modelName,
+          tags: runtimeInvocation.tags.length > 0 ? runtimeInvocation.tags : detailBase.tags,
+        };
         return textResult(
           `${fallbackNote}Agent ${isQueued ? "queued" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
@@ -1311,7 +1335,7 @@ Terse command-style prompts produce shallow, generic work.
           `\nYou will be notified when this agent completes.\n` +
           `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.\n` +
           `Do not duplicate this agent's work.`,
-          { ...detailBase, toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
+          { ...backgroundDetails, toolUses: 0, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
         );
       }
 
@@ -1321,8 +1345,11 @@ Terse command-style prompts produce shallow, generic work.
       let fgId: string | undefined;
 
       const streamUpdate = () => {
+        const runtimeInvocation = buildInvocationTags(getRuntimeInvocation(fgId ? manager.getRecord(fgId) : undefined));
         const details: AgentDetails = {
           ...detailBase,
+          modelName: runtimeInvocation.modelName ?? detailBase.modelName,
+          tags: runtimeInvocation.tags.length > 0 ? runtimeInvocation.tags : detailBase.tags,
           toolUses: fgState.toolUses,
           tokens: formatLifetimeTokens(fgState),
           turnCount: fgState.turnCount,
@@ -1411,7 +1438,13 @@ Terse command-style prompts produce shallow, generic work.
       // Get final token count
       const tokenText = formatLifetimeTokens(fgState);
 
-      const details = buildDetails(detailBase, record, fgState, { tokens: tokenText });
+      const runtimeInvocation = buildInvocationTags(getRuntimeInvocation(record));
+      const runtimeDetails = {
+        ...detailBase,
+        modelName: runtimeInvocation.modelName ?? detailBase.modelName,
+        tags: runtimeInvocation.tags.length > 0 ? runtimeInvocation.tags : detailBase.tags,
+      };
+      const details = buildDetails(runtimeDetails, record, fgState, { tokens: tokenText });
 
       if (record.status === "error") {
         // Error headline + any partial output the run produced before failing.

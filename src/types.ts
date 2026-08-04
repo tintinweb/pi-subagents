@@ -148,9 +148,10 @@ export interface AgentRecord {
 }
 
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
+  /** Canonical runtime model identifier (`provider/modelId`). */
   modelName?: string;
-  thinking?: ThinkingLevel;
+  /** Effective runtime thinking level after Pi applies defaults and model clamping. */
+  thinking?: string;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;

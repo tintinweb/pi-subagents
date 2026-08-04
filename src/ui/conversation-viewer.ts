@@ -274,7 +274,14 @@ export class ConversationViewer implements Component {
   }
 
   private invocationLine(): string | undefined {
-    const { modelName, tags } = buildInvocationTags(this.record.invocation);
+    const runtimeInvocation = this.session.model
+      ? {
+          ...this.record.invocation,
+          modelName: `${this.session.model.provider}/${this.session.model.id}`,
+          thinking: this.session.thinkingLevel,
+        }
+      : this.record.invocation;
+    const { modelName, tags } = buildInvocationTags(runtimeInvocation);
     const parts = modelName ? [modelName, ...tags] : tags;
     if (parts.length === 0) return undefined;
     return this.theme.fg("dim", `  ↳ ${parts.join(" · ")}`);
