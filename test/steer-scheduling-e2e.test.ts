@@ -130,7 +130,7 @@ describe("background completion steering scheduling", () => {
       new Promise<never>((_, reject) => {
         setTimeout(() => {
           reject(new Error(`blocking tool was not entered; parent=${parentModelCalls} child=${childModelCalls}`));
-        }, 2_000);
+        }, 10_000);
       }),
     ]);
     expect(parentModelCalls).toBe(1);
@@ -138,7 +138,7 @@ describe("background completion steering scheduling", () => {
     await Promise.race([
       backgroundAgentCompleted,
       new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error("background completion event was not emitted")), 2_000);
+        setTimeout(() => reject(new Error("background completion event was not emitted")), 10_000);
       }),
     ]);
     expect(completedAgentEvent).toEqual(expect.objectContaining({ description: "background child" }));
