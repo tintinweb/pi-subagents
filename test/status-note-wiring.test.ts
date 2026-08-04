@@ -108,10 +108,11 @@ describe("Agent tool model display", () => {
       }).render(120).join("\n");
       expect(collapsed).toContain("openai-codex/gpt-5.6-sol");
       expect(expanded).toContain("openai-codex/gpt-5.6-sol");
-      expect(collapsed).toContain("thinking: xhigh");
-      expect(expanded).toContain("thinking: xhigh");
+      expect(collapsed).toContain("thinking:");
+      expect(expanded).toContain("thinking:");
       expect(collapsed).not.toContain("Ambiguous Display Name");
     }
+    expect(result.details.tags).toContain("thinking: xhigh");
   });
 
   it("shows the canonical pre-session model in the immediate background result", async () => {
