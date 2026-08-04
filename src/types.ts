@@ -18,7 +18,7 @@ export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as con
 export type MemoryScope = "user" | "project" | "local";
 
 /** Isolation mode for agent execution. */
-export type IsolationMode = "worktree";
+export type IsolationMode = "worktree" | "off";
 
 /** Unified agent configuration — used for both default and user-defined agents. */
 export interface AgentConfig {

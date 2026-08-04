@@ -803,7 +803,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls, run_in_background: true on each. You are notified when background agents finish — never poll or sleep.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one.
-- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch.`;
+- isolation: "worktree" runs the agent in an isolated git worktree; changes land on a branch. isolation: "off" explicitly disables isolation (same as omitting).`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -954,9 +954,14 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
       isolation: Type.Optional(
-        Type.Literal("worktree", {
-          description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
-        }),
+        Type.Union([
+          Type.Literal("worktree", {
+            description: 'Set to "worktree" to run the agent in a temporary git worktree (isolated copy of the repo). Changes are saved to a branch on completion.',
+          }),
+          Type.Literal("off", {
+            description: 'Explicitly disable isolation. Same effect as omitting the field.',
+          }),
+        ]),
       ),
       ...scheduleParam,
     }),

@@ -122,6 +122,7 @@ describe("toolDescriptionMode", () => {
       "resume",
       "steer_subagent",
       'isolation: "worktree"',
+      'isolation: "off"',
       ".pi/agents/",
       "self-contained",
     ]) {
