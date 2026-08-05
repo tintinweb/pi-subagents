@@ -427,10 +427,10 @@ describe("child-safe nested Agent tools", () => {
   });
 
   it("attributes a nested child's token spend to the owning parent", async () => {
-    const parent = { id: "parent-1", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 } };
+    const parent = { id: "parent-1", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } };
     records.set("parent-1", parent);
     spawn.mockImplementation((_pi, _ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.({ input: 100, output: 20, cacheWrite: 5 });
+      options.onAssistantUsage?.({ input: 100, output: 20, cacheWrite: 5, cacheRead: 200, cost: 0.002 });
       return "child-1";
     });
 
@@ -442,21 +442,21 @@ describe("child-safe nested Agent tools", () => {
       run_in_background: true,
     });
 
-    expect(parent.lifetimeUsage).toEqual({ input: 100, output: 20, cacheWrite: 5 });
+    expect(parent.lifetimeUsage).toEqual({ input: 100, output: 20, cacheWrite: 5, cacheRead: 200, cost: 0.002 });
   });
 
   it("attributes spend up the whole ancestor chain, not just one level", async () => {
     // A spawn callback fires only for that child's own turns, so a deeper
     // descendant would otherwise never reach the one record anyone can see.
-    const top = { id: "top", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 } };
+    const top = { id: "top", status: "running", lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 } };
     const middle = {
       id: "parent-1", status: "running", parentAgentId: "top",
-      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 },
     };
     records.set("top", top);
     records.set("parent-1", middle);
     spawn.mockImplementation((_pi, _ctx, _type, _prompt, options) => {
-      options.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1 });
+      options.onAssistantUsage?.({ input: 7, output: 3, cacheWrite: 1, cacheRead: 70, cost: 0.0007 });
       return "child-1";
     });
 
@@ -468,8 +468,8 @@ describe("child-safe nested Agent tools", () => {
       run_in_background: true,
     });
 
-    expect(middle.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
-    expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1 });
+    expect(middle.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1, cacheRead: 70, cost: 0.0007 });
+    expect(top.lifetimeUsage).toEqual({ input: 7, output: 3, cacheWrite: 1, cacheRead: 70, cost: 0.0007 });
   });
 
   it("files a nested transcript under the root session, honoring output_transcript", async () => {

@@ -33,7 +33,7 @@ import type {
   IsolationMode,
   ThinkingLevel,
 } from "./types.js";
-import { addUsage } from "./usage.js";
+import { addUsage, type LifetimeUsage } from "./usage.js";
 
 /**
  * Hard ceiling on nesting for every branch: main session = 0, its subagents = 1,
@@ -59,7 +59,7 @@ interface NestedSpawnOptions {
   isolation?: IsolationMode;
   invocation?: AgentInvocation;
   signal?: AbortSignal;
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  onAssistantUsage?: (usage: LifetimeUsage) => void;
   onSessionCreated?: (session: AgentSession) => void;
   depth: number;
   parentAgentId: string;
