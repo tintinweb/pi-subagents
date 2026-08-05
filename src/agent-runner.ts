@@ -831,7 +831,9 @@ export async function runAgent(
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
   const sessionManager = agentConfig?.persistSession
-    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
+    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
+        parentSession: ctx.sessionManager.getSessionFile(),
+      })
     : SessionManager.inMemory(effectiveCwd);
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
