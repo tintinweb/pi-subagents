@@ -311,6 +311,7 @@ export class FleetList {
           },
           keybindings,
           (message: string) => this.manager.steer(record.id, message),
+          this.showCost,
         );
       },
       {

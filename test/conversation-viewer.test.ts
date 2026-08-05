@@ -257,6 +257,42 @@ describe("ConversationViewer", () => {
     });
   });
 
+  describe("cost display", () => {
+    it("shows reported lifetime cost when enabled", () => {
+      const viewer = new ConversationViewer(
+        mockTui(),
+        mockSession(),
+        mockRecord({ lifetimeUsage: { input: 1_000, output: 200, cacheWrite: 0, cost: 0.018 } }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        () => true,
+      );
+
+      expect(viewer.render(80).join("\n")).toContain("~$0.018");
+    });
+
+    it("hides reported lifetime cost when disabled", () => {
+      const viewer = new ConversationViewer(
+        mockTui(),
+        mockSession(),
+        mockRecord({ lifetimeUsage: { input: 1_000, output: 200, cacheWrite: 0, cost: 0.018 } }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        () => false,
+      );
+
+      expect(viewer.render(80).join("\n")).not.toContain("~$0.018");
+    });
+  });
+
   describe("safety net against upstream wrapTextWithAnsi bugs", () => {
     // These tests call buildContentLines() directly (via the private method)
     // because render() has its own truncation via row(). The safety net in

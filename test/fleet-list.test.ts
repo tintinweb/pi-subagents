@@ -49,7 +49,7 @@ interface Harness {
   ui: FleetUICtx;
   manager: AgentManager;
   /** The overlay component (a real ConversationViewer) once one is opened. */
-  overlayComponent: () => { handleInput(data: string): void } | undefined;
+  overlayComponent: () => { handleInput(data: string): void; render(width: number): string[] } | undefined;
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
@@ -321,6 +321,19 @@ describe("FleetList rendering", () => {
     ], true);
     const agentLine = h.render(120).find(l => l.includes("Sleep then report 1"))!;
     expect(agentLine).toContain("~$0.018");
+  });
+
+  it("passes cost display to the selected agent popup", () => {
+    const h = harness([
+      makeRecord({ lifetimeUsage: { input: 13_100, output: 0, cacheWrite: 0, cost: 0.018 } }),
+    ], true);
+    h.press(DOWN);  // activate (main)
+    h.press(DOWN);  // select the agent
+    h.press(ENTER); // open the conversation popup
+
+    // The harness theme uses visible markup instead of ANSI escapes; use a wide
+    // render width so that markup does not affect the viewer's truncation path.
+    expect(h.overlayComponent()!.render(500).join("\n")).toContain("~$0.018");
   });
 
   it("hides reported cost when cost display is disabled", () => {
