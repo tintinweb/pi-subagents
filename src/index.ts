@@ -602,7 +602,7 @@ export default function (pi: ExtensionAPI) {
   // everything else; "off" = hide the widget entirely. Read live at render time.
   let widgetMode: WidgetMode = "background";
   function getWidgetMode(): WidgetMode { return widgetMode; }
-  const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
+  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, pi);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
@@ -1232,12 +1232,15 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background execution
       if (runInBackground) {
-        const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
+        let id: string;
+        const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(
+          effectiveMaxTurns,
+          () => { if (id) widget.onActivity(id); },
+        );
 
         // Wrap onSessionCreated to wire output file streaming.
         // The callback lazily reads record.outputFile (set right after spawn)
         // rather than closing over a value that doesn't exist yet.
-        let id: string;
         const origBgOnSession = bgCallbacks.onSessionCreated;
         bgCallbacks.onSessionCreated = (session: any) => {
           origBgOnSession(session);
@@ -1338,7 +1341,13 @@ Terse command-style prompts produce shallow, generic work.
         });
       };
 
-      const { state: fgState, callbacks: fgCallbacks } = createActivityTracker(effectiveMaxTurns, streamUpdate);
+      const { state: fgState, callbacks: fgCallbacks } = createActivityTracker(
+        effectiveMaxTurns,
+        () => {
+          streamUpdate();
+          if (fgId) widget.onActivity(fgId);
+        },
+      );
 
       // Wire session creation: register in widget + stream to output file.
       // The output file path is set synchronously after spawn (below),

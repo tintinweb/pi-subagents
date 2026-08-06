@@ -5,6 +5,7 @@
  * Uses the callback form of setWidget for themed rendering.
  */
 
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
@@ -86,6 +87,26 @@ export interface AgentDetails {
   maxTurns?: number;
   agentId?: string;
   error?: string;
+}
+
+/** Cached read-only working-tree statistics for a running agent. */
+export interface GitWorkingTreeSummary {
+  trackedFiles: number;
+  additions: number;
+  deletions: number;
+  untrackedFiles: number;
+}
+
+const GIT_SUMMARY_DEBOUNCE_MS = 250;
+const GIT_SUMMARY_TIMEOUT_MS = 1_000;
+
+/** Format tracked diff stats, explicitly separating untracked files from line totals. */
+export function formatGitSummary(summary: GitWorkingTreeSummary): string {
+  const files = `${summary.trackedFiles} file${summary.trackedFiles === 1 ? "" : "s"}`;
+  const untracked = summary.untrackedFiles > 0
+    ? ` · ${summary.untrackedFiles} untracked`
+    : "";
+  return `${files} · +${summary.additions} −${summary.deletions}${untracked}`;
 }
 
 // ---- Formatting helpers ----
@@ -227,6 +248,19 @@ export class AgentWidget {
   private tui: any | undefined;
   /** Last status bar text, used to avoid redundant setStatus calls. */
   private lastStatusText: string | undefined;
+  /** Latest successful Git summary per agent. */
+  private gitSummaries = new Map<string, GitWorkingTreeSummary>();
+  /** Debounce timers for Git refreshes, keyed by agent. */
+  private gitRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Agents with a Git query currently in flight. */
+  private gitRefreshes = new Set<string>();
+  /** Activity received while a Git query was in flight. */
+  private gitRefreshAgain = new Set<string>();
+  /** Prevent the render loop from retrying failed queries continuously. */
+  private gitRefreshAttempted = new Set<string>();
+  /** Generation guards late results after disposal, completion, or newer activity. */
+  private gitRefreshGeneration = new Map<string, number>();
+  private disposed = false;
 
   constructor(
     private manager: AgentManager,
@@ -237,6 +271,7 @@ export class AgentWidget {
      * extension supplies one defaulting to `"background"`.
      */
     private mode: () => WidgetMode = () => "all",
+    private pi?: Pick<ExtensionAPI, "exec">,
   ) {}
 
   /**
@@ -303,6 +338,110 @@ export class AgentWidget {
     if (!this.finishedTurnAge.has(agentId)) {
       this.finishedTurnAge.set(agentId, 0);
     }
+    this.clearGitState(agentId);
+  }
+
+  /** Schedule a refresh after activity settles without overlapping Git calls. */
+  onActivity(agentId: string) {
+    if (this.disposed) return;
+    const agent = this.manager.getRecord(agentId);
+    if (!agent || agent.status !== "running" || !agent.cwd || !this.pi) return;
+    const cwd = agent.cwd;
+
+    this.gitRefreshAttempted.add(agentId);
+    const generation = (this.gitRefreshGeneration.get(agentId) ?? 0) + 1;
+    this.gitRefreshGeneration.set(agentId, generation);
+    const existing = this.gitRefreshTimers.get(agentId);
+    if (existing != null) clearTimeout(existing);
+    this.gitRefreshTimers.set(agentId, setTimeout(() => {
+      this.gitRefreshTimers.delete(agentId);
+      const current = this.manager.getRecord(agentId);
+      if (!current || current.status !== "running" || current.cwd !== cwd) return;
+      void this.refreshGitSummary(agentId, cwd, generation);
+    }, GIT_SUMMARY_DEBOUNCE_MS));
+  }
+
+  private ensureGitRefresh(agent: { id: string; status: string; cwd?: string }) {
+    if (!this.pi || agent.status !== "running" || !agent.cwd) return;
+    if (this.gitRefreshAttempted.has(agent.id)
+      || this.gitRefreshes.has(agent.id)
+      || this.gitRefreshTimers.has(agent.id)) return;
+    this.onActivity(agent.id);
+  }
+
+  private async refreshGitSummary(agentId: string, cwd: string, generation: number) {
+    const pi = this.pi;
+    if (!pi || this.gitRefreshes.has(agentId)) {
+      this.gitRefreshAgain.add(agentId);
+      return;
+    }
+    this.gitRefreshes.add(agentId);
+    try {
+      const diff = await pi.exec("git", ["diff", "--numstat", "HEAD", "--"], {
+        cwd,
+        timeout: GIT_SUMMARY_TIMEOUT_MS,
+      });
+      if (diff.code !== 0) {
+        this.omitGitSummary(agentId, cwd, generation);
+        return;
+      }
+
+      const untracked = await pi.exec("git", ["ls-files", "--others", "--exclude-standard"], {
+        cwd,
+        timeout: GIT_SUMMARY_TIMEOUT_MS,
+      });
+      if (untracked.code !== 0) {
+        this.omitGitSummary(agentId, cwd, generation);
+        return;
+      }
+
+      let trackedFiles = 0;
+      let additions = 0;
+      let deletions = 0;
+      for (const line of diff.stdout.split("\n")) {
+        if (!line) continue;
+        const [added, deleted] = line.split("\t");
+        trackedFiles++;
+        if (/^\d+$/.test(added ?? "")) additions += Number(added);
+        if (/^\d+$/.test(deleted ?? "")) deletions += Number(deleted);
+      }
+
+      const current = this.manager.getRecord(agentId);
+      if (this.disposed || generation !== this.gitRefreshGeneration.get(agentId)
+        || current?.status !== "running" || current.cwd !== cwd) return;
+      this.gitSummaries.set(agentId, {
+        trackedFiles,
+        additions,
+        deletions,
+        untrackedFiles: untracked.stdout.split("\n").filter(Boolean).length,
+      });
+      this.tui?.requestRender();
+    } catch {
+      // Git is an optional display enhancement; command failures stay invisible.
+      this.omitGitSummary(agentId, cwd, generation);
+    } finally {
+      this.gitRefreshes.delete(agentId);
+      if (this.gitRefreshAgain.delete(agentId)) this.onActivity(agentId);
+    }
+  }
+
+  /** Remove stale stats when the current Git refresh cannot produce a summary. */
+  private omitGitSummary(agentId: string, cwd: string, generation: number) {
+    const current = this.manager.getRecord(agentId);
+    if (this.disposed || generation !== this.gitRefreshGeneration.get(agentId)
+      || current?.status !== "running" || current.cwd !== cwd) return;
+    if (this.gitSummaries.delete(agentId)) this.tui?.requestRender();
+  }
+
+  private clearGitState(agentId: string) {
+    const timer = this.gitRefreshTimers.get(agentId);
+    if (timer != null) clearTimeout(timer);
+    this.gitRefreshTimers.delete(agentId);
+    this.gitRefreshes.delete(agentId);
+    this.gitRefreshAgain.delete(agentId);
+    this.gitRefreshAttempted.delete(agentId);
+    this.gitSummaries.delete(agentId);
+    this.gitRefreshGeneration.set(agentId, (this.gitRefreshGeneration.get(agentId) ?? 0) + 1);
   }
 
   /** Render a finished agent line. */
@@ -392,6 +531,8 @@ export class AgentWidget {
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);
+      const gitSummary = this.gitSummaries.get(a.id);
+      if (gitSummary) parts.push(formatGitSummary(gitSummary));
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
@@ -488,7 +629,7 @@ export class AgentWidget {
     let queuedCount = 0;
     let hasFinished = false;
     for (const a of allAgents) {
-      if (a.status === "running") { runningCount++; }
+      if (a.status === "running") { runningCount++; this.ensureGitRefresh(a); }
       else if (a.status === "queued") { queuedCount++; }
       else if (a.completedAt && this.shouldShowFinished(a.id, a.status)) { hasFinished = true; }
     }
@@ -562,5 +703,12 @@ export class AgentWidget {
     this.widgetRegistered = false;
     this.tui = undefined;
     this.lastStatusText = undefined;
+    this.disposed = true;
+    for (const timer of this.gitRefreshTimers.values()) clearTimeout(timer);
+    this.gitRefreshTimers.clear();
+    this.gitRefreshAgain.clear();
+    this.gitRefreshAttempted.clear();
+    this.gitSummaries.clear();
+    this.gitRefreshGeneration.clear();
   }
 }
