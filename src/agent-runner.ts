@@ -396,7 +396,7 @@ export interface RunOptions {
    * Lets callers maintain a lifetime accumulator that survives compaction
    * (which replaces session.state.messages and resets stats-derived sums).
    */
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number; cost?: number }) => void;
   /**
    * Called when the session successfully compacts. `tokensBefore` is upstream's
    * pre-compaction context size estimate. Aborted compactions don't fire.
@@ -935,11 +935,15 @@ export async function runAgent(
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
-      if (u) options.onAssistantUsage?.({
-        input: u.input ?? 0,
-        output: u.output ?? 0,
-        cacheWrite: u.cacheWrite ?? 0,
-      });
+      if (u) {
+        const cost = typeof u.cost?.total === "number" && Number.isFinite(u.cost.total) ? u.cost.total : undefined;
+        options.onAssistantUsage?.({
+          input: u.input ?? 0,
+          output: u.output ?? 0,
+          cacheWrite: u.cacheWrite ?? 0,
+          ...(cost !== undefined ? { cost } : {}),
+        });
+      }
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
@@ -981,7 +985,7 @@ export async function resumeAgent(
   prompt: string,
   options: {
     onToolActivity?: (activity: ToolActivity) => void;
-    onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+    onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number; cost?: number }) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
@@ -999,11 +1003,15 @@ export async function resumeAgent(
         if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
         if (event.type === "message_end" && event.message.role === "assistant") {
           const u = (event.message as any).usage;
-          if (u) options.onAssistantUsage?.({
-            input: u.input ?? 0,
-            output: u.output ?? 0,
-            cacheWrite: u.cacheWrite ?? 0,
-          });
+          if (u) {
+            const cost = typeof u.cost?.total === "number" && Number.isFinite(u.cost.total) ? u.cost.total : undefined;
+            options.onAssistantUsage?.({
+              input: u.input ?? 0,
+              output: u.output ?? 0,
+              cacheWrite: u.cacheWrite ?? 0,
+              ...(cost !== undefined ? { cost } : {}),
+            });
+          }
         }
         if (event.type === "compaction_end" && !event.aborted && event.result) {
           options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });

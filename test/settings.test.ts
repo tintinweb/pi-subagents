@@ -284,6 +284,38 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir).scopeModels).toBeUndefined();
     });
 
+    it("accepts showCost boolean (true and false)", () => {
+      writeProject({ showCost: true });
+      expect(loadSettings(projectDir)).toEqual({ showCost: true });
+      writeProject({ showCost: false });
+      expect(loadSettings(projectDir)).toEqual({ showCost: false });
+    });
+
+    it("drops non-boolean showCost", () => {
+      writeProject({ showCost: "yes" });
+      expect(loadSettings(projectDir).showCost).toBeUndefined();
+      writeProject({ showCost: 1 });
+      expect(loadSettings(projectDir).showCost).toBeUndefined();
+      writeProject({ showCost: null });
+      expect(loadSettings(projectDir).showCost).toBeUndefined();
+    });
+
+    it("accepts showGroupSummary boolean (true and false)", () => {
+      writeProject({ showGroupSummary: true });
+      expect(loadSettings(projectDir)).toEqual({ showGroupSummary: true });
+      writeProject({ showGroupSummary: false });
+      expect(loadSettings(projectDir)).toEqual({ showGroupSummary: false });
+    });
+
+    it("drops non-boolean showGroupSummary", () => {
+      writeProject({ showGroupSummary: "yes" });
+      expect(loadSettings(projectDir).showGroupSummary).toBeUndefined();
+      writeProject({ showGroupSummary: 1 });
+      expect(loadSettings(projectDir).showGroupSummary).toBeUndefined();
+      writeProject({ showGroupSummary: null });
+      expect(loadSettings(projectDir).showGroupSummary).toBeUndefined();
+    });
+
     it("accepts disableDefaultAgents boolean (true and false)", () => {
       writeProject({ disableDefaultAgents: true });
       expect(loadSettings(projectDir)).toEqual({ disableDefaultAgents: true });
@@ -420,6 +452,8 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setShowCost: vi.fn(),
+        setShowGroupSummary: vi.fn(),
       };
     });
 
@@ -466,6 +500,8 @@ describe("settings persistence", () => {
           toolDescriptionMode: "compact",
           fleetView: false,
           widgetMode: "off",
+          showCost: true,
+          showGroupSummary: true,
         },
         appliers,
       );
@@ -479,6 +515,8 @@ describe("settings persistence", () => {
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
       expect(appliers.setFleetView).toHaveBeenCalledWith(false);
       expect(appliers.setWidgetMode).toHaveBeenCalledWith("off");
+      expect(appliers.setShowCost).toHaveBeenCalledWith(true);
+      expect(appliers.setShowGroupSummary).toHaveBeenCalledWith(true);
     });
 
     it("applies widgetMode; skips it when absent", () => {
@@ -515,6 +553,13 @@ describe("settings persistence", () => {
       expect(appliers.setOutputTranscript).toHaveBeenCalledWith(false);
       applySettings({ outputTranscript: true }, appliers);
       expect(appliers.setOutputTranscript).toHaveBeenCalledWith(true);
+    });
+
+    it("applies showGroupSummary (both true and false)", () => {
+      applySettings({ showGroupSummary: false }, appliers);
+      expect(appliers.setShowGroupSummary).toHaveBeenCalledWith(false);
+      applySettings({ showGroupSummary: true }, appliers);
+      expect(appliers.setShowGroupSummary).toHaveBeenCalledWith(true);
     });
 
     it("applies defaultMaxTurns: 0 as the explicit unlimited marker", () => {
@@ -578,6 +623,8 @@ describe("settings persistence", () => {
         setOutputTranscript: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
+        setShowCost: vi.fn(),
+        setShowGroupSummary: vi.fn(),
       };
     });
 

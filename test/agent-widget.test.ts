@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { renderRunningAgentStatus } from "../src/index.js";
+import { formatGroupSummary, renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
 
@@ -54,28 +54,55 @@ describe("renderRunningAgentStatus", () => {
   });
 });
 
+describe("formatGroupSummary", () => {
+  const summary = {
+    count: 3,
+    partial: false,
+    totalTokens: 42_200,
+    totalCost: 0.042,
+  };
+
+  it("shows aggregate token usage without cost when cost display is disabled", () => {
+    expect(formatGroupSummary(summary, false)).toBe("3 agents completed · 42.2k token");
+  });
+
+  it("includes aggregate cost only when cost display is enabled", () => {
+    expect(formatGroupSummary(summary, true)).toBe("3 agents completed · 42.2k token · ~$0.042");
+  });
+
+  it("marks partial groups", () => {
+    expect(formatGroupSummary({ ...summary, partial: true }, false)).toBe("3 agents completed (partial) · 42.2k token");
+  });
+});
+
 describe("AgentWidget", () => {
   const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
 
-  function makeActivity(): AgentActivity {
+  function makeActivity(cost?: number): AgentActivity {
     return {
       activeTools: new Map(),
       toolUses: 0,
       responseText: "",
       turnCount: 1,
-      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost },
     };
   }
 
-  function makeRecord(id: string, opts: { isBackground?: boolean; parentAgentId?: string } = {}) {
+  function makeRecord(id: string, opts: {
+    isBackground?: boolean;
+    parentAgentId?: string;
+    status?: "running" | "steered";
+    lifetimeUsage?: { input: number; output: number; cacheWrite: number; cost?: number };
+  } = {}) {
     return {
       id,
       type: "general-purpose",
       description: `${id} description`,
-      status: "running",
+      status: opts.status ?? "running",
       toolUses: 0,
       startedAt: Date.now(),
-      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      completedAt: opts.status === "steered" ? Date.now() : undefined,
+      lifetimeUsage: opts.lifetimeUsage ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
       isBackground: opts.isBackground,
       parentAgentId: opts.parentAgentId,
@@ -83,11 +110,12 @@ describe("AgentWidget", () => {
   }
 
   /** Render the widget for a manager and return the produced lines ("" if nothing rendered). */
-  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode): string {
+  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode, showCost?: () => boolean, cost?: number): string {
     const widget = new AgentWidget(
       manager as any,
-      new Map([[activityId, makeActivity()]]),
+      new Map([[activityId, makeActivity(cost)]]),
       mode,
+      showCost,
     );
     let factory: any;
     widget.setUICtx({
@@ -139,6 +167,30 @@ describe("AgentWidget", () => {
   });
 
   // "off" hides the widget entirely — even a background agent renders nothing.
+  it("shows cost only when cost display is enabled", () => {
+    const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
+    expect(renderLines(manager, "background", () => "background", () => false, 0.018)).not.toContain("~$0.018");
+    expect(renderLines(manager, "background", () => "background", () => true, 0.018)).toContain("~$0.018");
+  });
+
+  it("keeps lifetime tokens and cost on a finished turn-limited agent", () => {
+    const manager = {
+      listAgents: () => [makeRecord("limited", {
+        isBackground: true,
+        status: "steered",
+        lifetimeUsage: { input: 1_000, output: 200, cacheWrite: 0, cost: 0.018 },
+      })],
+    };
+    const lines = renderLines(manager, "limited", () => "background", () => true);
+    const hiddenCostLines = renderLines(manager, "limited", () => "background", () => false);
+
+    expect(lines).toContain("1.2k token");
+    expect(lines).toContain("~$0.018");
+    expect(lines).toContain("turn limit");
+    expect(hiddenCostLines).toContain("1.2k token");
+    expect(hiddenCostLines).not.toContain("~$0.018");
+  });
+
   it("renders nothing in 'off' mode", () => {
     const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
     expect(renderLines(manager, "background", () => "off")).toBe("");

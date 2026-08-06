@@ -32,7 +32,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentRecord, type GroupSummary, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -52,7 +52,7 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
+import { addUsage, formatCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
 
@@ -77,6 +77,23 @@ export function renderRunningAgentStatus(
 function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
   const t = getLifetimeTotal(o.lifetimeUsage);
   return t > 0 ? formatTokens(t) : "";
+}
+
+/** Format an agent's reported model cost, or "" when unavailable. */
+function formatLifetimeCost(o: { lifetimeUsage: LifetimeUsage }): string {
+  return formatCost(o.lifetimeUsage.cost);
+}
+
+/** Format aggregate stats for a grouped notification. */
+export function formatGroupSummary(summary: GroupSummary, includeCost: boolean): string {
+  const countLabel = `${summary.count} agent${summary.count === 1 ? "" : "s"} completed${summary.partial ? " (partial)" : ""}`;
+  const parts = [countLabel];
+  if (summary.totalTokens > 0) parts.push(formatTokens(summary.totalTokens));
+  if (includeCost) {
+    const cost = formatCost(summary.totalCost);
+    if (cost) parts.push(cost);
+  }
+  return parts.join(" · ");
 }
 
 /**
@@ -117,7 +134,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     onSessionCreated: (session: any) => {
       state.session = session;
     },
-    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number }) => {
+    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number; cost?: number }) => {
       addUsage(state.lifetimeUsage, usage);
       onStreamUpdate?.();
     },
@@ -152,7 +169,7 @@ function escapeXml(s: string): string {
 }
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
-function formatTaskNotification(record: AgentRecord, resultMaxLen: number): string {
+function formatTaskNotification(record: AgentRecord, resultMaxLen: number, includeCost = false): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
   const totalTokens = getLifetimeTotal(record.lifetimeUsage);
@@ -174,7 +191,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number): stri
     `<status>${escapeXml(status)}</status>`,
     `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
-    `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}<duration_ms>${durationMs}</duration_ms></usage>`,
+    `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}${includeCost && record.lifetimeUsage.cost !== undefined ? `<cost>${record.lifetimeUsage.cost}</cost>` : ""}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join('\n');
 }
@@ -190,6 +207,7 @@ function buildDetails(
     ...base,
     toolUses: record.toolUses,
     tokens: formatLifetimeTokens(record),
+    cost: record.lifetimeUsage.cost,
     turnCount: activity?.turnCount,
     maxTurns: activity?.maxTurns,
     durationMs: (record.completedAt ?? Date.now()) - record.startedAt,
@@ -212,6 +230,7 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
     turnCount: activity?.turnCount ?? 0,
     maxTurns: activity?.maxTurns,
     totalTokens,
+    cost: record.lifetimeUsage.cost,
     durationMs: record.completedAt ? record.completedAt - record.startedAt : 0,
     outputFile: record.outputFile,
     error: record.error,
@@ -228,6 +247,11 @@ export default function (pi: ExtensionAPI) {
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
+
+  let costDisplayEnabled = false;
+  function isCostDisplayEnabled(): boolean { return costDisplayEnabled; }
+  let groupSummaryEnabled = false;
+  function isGroupSummaryEnabled(): boolean { return groupSummaryEnabled; }
 
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
@@ -251,6 +275,7 @@ export default function (pi: ExtensionAPI) {
         if (d.turnCount > 0) parts.push(formatTurns(d.turnCount, d.maxTurns));
         if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
         if (d.totalTokens > 0) parts.push(formatTokens(d.totalTokens));
+        if (isCostDisplayEnabled() && d.cost !== undefined) parts.push(formatCost(d.cost));
         if (d.durationMs > 0) parts.push(formatMs(d.durationMs));
         if (parts.length) {
           line += "\n  " + parts.map(p => theme.fg("dim", p)).join(" " + theme.fg("dim", "·") + " ");
@@ -274,7 +299,12 @@ export default function (pi: ExtensionAPI) {
       }
 
       const all = [d, ...(d.others ?? [])];
-      return new Text(all.map(renderOne).join("\n"), 0, 0);
+      const summary = isGroupSummaryEnabled() && d.groupSummary
+        ? formatGroupSummary(d.groupSummary, isCostDisplayEnabled())
+        : "";
+      const rendered = all.map(renderOne);
+      if (summary) rendered.unshift(theme.fg("dim", summary));
+      return new Text(rendered.join("\n"), 0, 0);
     }
   );
 
@@ -319,7 +349,7 @@ export default function (pi: ExtensionAPI) {
   function emitIndividualNudge(record: AgentRecord) {
     if (record.resultConsumed) return;  // re-check at send time
 
-    const notification = formatTaskNotification(record, 500);
+    const notification = formatTaskNotification(record, 500, isCostDisplayEnabled());
     const footer = record.outputFile ? `\nFull transcript available at: ${record.outputFile}` : '';
 
     pi.sendMessage<NotificationDetails>({
@@ -349,13 +379,22 @@ export default function (pi: ExtensionAPI) {
         const unconsumed = records.filter(r => !r.resultConsumed);
         if (unconsumed.length === 0) { widget.update(); return; }
 
-        const notifications = unconsumed.map(r => formatTaskNotification(r, 300)).join('\n\n');
+        const notifications = unconsumed.map(r => formatTaskNotification(r, 300, isCostDisplayEnabled())).join('\n\n');
         const label = partial
           ? `${unconsumed.length} agent(s) finished (partial — others still running)`
           : `${unconsumed.length} agent(s) finished`;
 
         const [first, ...rest] = unconsumed;
+        const costs = unconsumed
+          .map((record) => record.lifetimeUsage.cost)
+          .filter((cost): cost is number => cost !== undefined && Number.isFinite(cost));
         const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
+        details.groupSummary = {
+          count: unconsumed.length,
+          partial,
+          totalTokens: unconsumed.reduce((total, record) => total + getLifetimeTotal(record.lifetimeUsage), 0),
+          totalCost: costs.length === unconsumed.length ? costs.reduce((total, cost) => total + cost, 0) : undefined,
+        };
         if (rest.length > 0) {
           details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
         }
@@ -602,11 +641,13 @@ export default function (pi: ExtensionAPI) {
   // everything else; "off" = hide the widget entirely. Read live at render time.
   let widgetMode: WidgetMode = "background";
   function getWidgetMode(): WidgetMode { return widgetMode; }
-  const widget = new AgentWidget(manager, agentActivity, getWidgetMode);
+  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isCostDisplayEnabled);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
+  function setCostDisplayEnabled(b: boolean): void { costDisplayEnabled = b; widget.update(); }
+  function setGroupSummaryEnabled(b: boolean): void { groupSummaryEnabled = b; }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  const fleet = new FleetList(manager, agentActivity);
+  const fleet = new FleetList(manager, agentActivity, isCostDisplayEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -762,6 +803,8 @@ export default function (pi: ExtensionAPI) {
       setOutputTranscript: setOutputTranscriptDefault,
       setMaxSubagentDepth: setMaxSubagentDepth,
       setFallbackSubagent: setFallbackSubagent,
+      setShowCost: setCostDisplayEnabled,
+      setShowGroupSummary: setGroupSummaryEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -986,6 +1029,7 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (d.toolUses > 0) parts.push(`${d.toolUses} tool use${d.toolUses === 1 ? "" : "s"}`);
         if (d.tokens) parts.push(d.tokens);
+        if (isCostDisplayEnabled() && d.cost !== undefined) parts.push(formatCost(d.cost));
         return parts.map(p => fgPreservingNestedStyles(theme, "dim", p)).join(" " + theme.fg("dim", "·") + " ");
       };
 
@@ -1325,6 +1369,7 @@ Terse command-style prompts produce shallow, generic work.
           ...detailBase,
           toolUses: fgState.toolUses,
           tokens: formatLifetimeTokens(fgState),
+          cost: fgState.lifetimeUsage.cost,
           turnCount: fgState.turnCount,
           maxTurns: fgState.maxTurns,
           durationMs: Date.now() - startedAt,
@@ -1421,6 +1466,10 @@ Terse command-style prompts produce shallow, generic work.
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
       const statsParts = [`${record.toolUses} tool uses`];
       if (tokenText) statsParts.push(tokenText);
+      if (isCostDisplayEnabled()) {
+        const costText = formatLifetimeCost(record);
+        if (costText) statsParts.push(costText);
+      }
       return textResult(
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
         (record.result?.trim() || "No output."),
@@ -1479,6 +1528,10 @@ Terse command-style prompts produce shallow, generic work.
       const contextPercent = getSessionContextPercent(record.session);
       const statsParts = [`Tool uses: ${record.toolUses}`];
       if (tokens) statsParts.push(tokens);
+      if (isCostDisplayEnabled()) {
+        const costText = formatLifetimeCost(record);
+        if (costText) statsParts.push(`Cost: ${costText}`);
+      }
       if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
       if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
       statsParts.push(`Duration: ${duration}`);
@@ -1554,6 +1607,10 @@ Terse command-style prompts produce shallow, generic work.
         const contextPercent = getSessionContextPercent(record.session);
         const stateParts: string[] = [];
         if (tokens) stateParts.push(tokens);
+        if (isCostDisplayEnabled()) {
+          const costText = formatLifetimeCost(record);
+          if (costText) stateParts.push(costText);
+        }
         stateParts.push(`${record.toolUses} tool ${record.toolUses === 1 ? "use" : "uses"}`);
         if (contextPercent !== null) stateParts.push(`context ${Math.round(contextPercent)}% full`);
         if (record.compactionCount) stateParts.push(`${record.compactionCount} compaction${record.compactionCount === 1 ? "" : "s"}`);
@@ -1772,7 +1829,7 @@ Terse command-style prompts produce shallow, generic work.
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        }, keybindings, (message: string) => manager.steer(record.id, message));
+        }, keybindings, (message: string) => manager.steer(record.id, message), isCostDisplayEnabled);
       },
       {
         overlay: true,
@@ -2152,6 +2209,8 @@ ${systemPrompt}
       // explicit configuration — which then fails loudly if general-purpose later
       // goes away. undefined is dropped by JSON.stringify.
       fallbackSubagent: getFallbackSubagent(),
+      showCost: isCostDisplayEnabled(),
+      showGroupSummary: isGroupSummaryEnabled(),
     };
   }
 
@@ -2240,6 +2299,20 @@ ${systemPrompt}
           label: "Output transcript",
           description: "Write each subagent's .output transcript by default. A custom agent's output_transcript frontmatter overrides this.",
           currentValue: getOutputTranscriptDefault() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "showCost",
+          label: "Cost display",
+          description: "Show reported model cost in agent progress and results",
+          currentValue: isCostDisplayEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "showGroupSummary",
+          label: "Group summary",
+          description: "Show aggregate stats for grouped background-agent notifications",
+          currentValue: isGroupSummaryEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -2334,6 +2407,14 @@ ${systemPrompt}
         const enabled = value === "on";
         setOutputTranscriptDefault(enabled);
         notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
+      } else if (id === "showCost") {
+        const enabled = value === "on";
+        setCostDisplayEnabled(enabled);
+        notifyApplied(ctx, `Cost display ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "showGroupSummary") {
+        const enabled = value === "on";
+        setGroupSummaryEnabled(enabled);
+        notifyApplied(ctx, `Group summary ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
         notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);

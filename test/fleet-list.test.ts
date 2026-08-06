@@ -49,7 +49,7 @@ interface Harness {
   ui: FleetUICtx;
   manager: AgentManager;
   /** The overlay component (a real ConversationViewer) once one is opened. */
-  overlayComponent: () => { handleInput(data: string): void } | undefined;
+  overlayComponent: () => { handleInput(data: string): void; render(width: number): string[] } | undefined;
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
@@ -65,7 +65,7 @@ interface Harness {
   widgetTui: { requestRender(): void; focusedComponent?: unknown };
 }
 
-function harness(agents: AgentRecord[]): Harness {
+function harness(agents: AgentRecord[], showCost = false): Harness {
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
   let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
   let editorText = "";
@@ -93,7 +93,7 @@ function harness(agents: AgentRecord[]): Harness {
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map());
+  const fleet = new FleetList(manager, new Map(), () => showCost);
   fleet.setUICtx(ui);
   fleet.update();
 
@@ -313,6 +313,35 @@ describe("FleetList rendering", () => {
     expect(agentLine).toContain(getDisplayName("general-purpose"));
     expect(agentLine).toContain("↓ 13.1k tokens");
     expect(agentLine).toMatch(/\d+s · ↓/); // "<seconds>s · ↓ ..." (timing-agnostic)
+  });
+
+  it("shows reported cost when cost display is enabled", () => {
+    const h = harness([
+      makeRecord({ lifetimeUsage: { input: 13_100, output: 0, cacheWrite: 0, cost: 0.018 } }),
+    ], true);
+    const agentLine = h.render(120).find(l => l.includes("Sleep then report 1"))!;
+    expect(agentLine).toContain("~$0.018");
+  });
+
+  it("passes cost display to the selected agent popup", () => {
+    const h = harness([
+      makeRecord({ lifetimeUsage: { input: 13_100, output: 0, cacheWrite: 0, cost: 0.018 } }),
+    ], true);
+    h.press(DOWN);  // activate (main)
+    h.press(DOWN);  // select the agent
+    h.press(ENTER); // open the conversation popup
+
+    // The harness theme uses visible markup instead of ANSI escapes; use a wide
+    // render width so that markup does not affect the viewer's truncation path.
+    expect(h.overlayComponent()!.render(500).join("\n")).toContain("~$0.018");
+  });
+
+  it("hides reported cost when cost display is disabled", () => {
+    const h = harness([
+      makeRecord({ lifetimeUsage: { input: 13_100, output: 0, cacheWrite: 0, cost: 0.018 } }),
+    ]);
+    const agentLine = h.render(120).find(l => l.includes("Sleep then report 1"))!;
+    expect(agentLine).not.toContain("~$0.018");
   });
 
   it("orders agents earliest-launched first (top)", () => {

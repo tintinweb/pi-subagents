@@ -533,6 +533,24 @@ describe("agent-runner usage callback wiring", () => {
     expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0 }]);
   });
 
+  it("runAgent forwards reported cost when message_end includes it", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    const seen: any[] = [];
+    session.prompt = vi.fn(async () => {
+      emitMessageEnd(listeners, { input: 50, output: 10, cacheWrite: 2, cost: { total: 0.018 } });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      onAssistantUsage: (u) => seen.push(u),
+    });
+
+    expect(seen).toEqual([{ input: 50, output: 10, cacheWrite: 2, cost: 0.018 }]);
+  });
+
   it("runAgent skips the callback when message_end has no usage field", async () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
@@ -553,7 +571,7 @@ describe("agent-runner usage callback wiring", () => {
     const seen: any[] = [];
 
     session.prompt = vi.fn(async () => {
-      emitMessageEnd(listeners, { input: 10, output: 20, cacheWrite: 5 });
+      emitMessageEnd(listeners, { input: 10, output: 20, cacheWrite: 5, cost: { total: 0.004 } });
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED" }] });
     });
 
@@ -561,7 +579,7 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5 }]);
+    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5, cost: 0.004 }]);
   });
 
   it("forwards compaction_end events to onCompaction (only when not aborted)", async () => {

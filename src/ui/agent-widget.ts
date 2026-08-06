@@ -9,7 +9,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { AgentManager } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
-import { getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
+import { formatCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
 
 // ---- Constants ----
 
@@ -84,6 +84,8 @@ export interface AgentDetails {
   turnCount?: number;
   /** Effective max turns (undefined = unlimited). */
   maxTurns?: number;
+  /** Reported model cost, when available. */
+  cost?: number;
   agentId?: string;
   error?: string;
 }
@@ -237,6 +239,7 @@ export class AgentWidget {
      * extension supplies one defaulting to `"background"`.
      */
     private mode: () => WidgetMode = () => "all",
+    private showCost: () => boolean = () => false,
   ) {}
 
   /**
@@ -306,7 +309,7 @@ export class AgentWidget {
   }
 
   /** Render a finished agent line. */
-  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string }, theme: Theme): string {
+  private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string; lifetimeUsage: LifetimeUsage }, theme: Theme): string {
     const name = getDisplayName(a.type);
     const modeLabel = getPromptModeLabel(a.type);
     const duration = formatMs((a.completedAt ?? Date.now()) - a.startedAt);
@@ -336,6 +339,11 @@ export class AgentWidget {
     const activity = this.agentActivity.get(a.id);
     if (activity) parts.push(formatTurns(activity.turnCount, activity.maxTurns));
     if (a.toolUses > 0) parts.push(`${a.toolUses} tool use${a.toolUses === 1 ? "" : "s"}`);
+    const totalTokens = getLifetimeTotal(a.lifetimeUsage);
+    if (totalTokens > 0) parts.push(formatTokens(totalTokens));
+    if (this.showCost() && a.lifetimeUsage.cost !== undefined) {
+      parts.push(formatCost(a.lifetimeUsage.cost));
+    }
     parts.push(duration);
 
     const modeTag = modeLabel ? ` ${theme.fg("dim", `(${modeLabel})`)}` : "";
@@ -384,7 +392,8 @@ export class AgentWidget {
 
       const bg = this.agentActivity.get(a.id);
       const toolUses = bg?.toolUses ?? a.toolUses;
-      const tokens = getLifetimeTotal(bg?.lifetimeUsage);
+      const usage = bg?.lifetimeUsage ?? a.lifetimeUsage;
+      const tokens = getLifetimeTotal(usage);
       const contextPercent = getSessionContextPercent(bg?.session);
       const tokenText = tokens > 0 ? formatSessionTokens(tokens, contextPercent, theme, a.compactionCount) : "";
 
@@ -392,6 +401,7 @@ export class AgentWidget {
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);
+      if (this.showCost() && usage.cost !== undefined) parts.push(formatCost(usage.cost));
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 

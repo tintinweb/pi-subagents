@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getLifetimeTotal, getSessionContextPercent, getSessionTokens } from "../src/usage.js";
+import { addUsage, formatCost, getLifetimeTotal, getSessionContextPercent, getSessionTokens } from "../src/usage.js";
 
 // Regression for issue #38 — token semantics + context indicator
 describe("usage", () => {
@@ -47,6 +47,26 @@ describe("usage", () => {
         }),
       };
       expect(getSessionContextPercent(session)).toBe(25);
+    });
+  });
+
+  describe("cost", () => {
+    it("accumulates reported cost without affecting token totals", () => {
+      const usage = { input: 100, output: 20, cacheWrite: 5 };
+      addUsage(usage, { input: 10, output: 2, cacheWrite: 1, cost: 0.012 });
+      addUsage(usage, { input: 20, output: 3, cacheWrite: 0, cost: 0.006 });
+
+      expect(usage.input).toBe(130);
+      expect(usage.output).toBe(25);
+      expect(usage.cacheWrite).toBe(6);
+      expect(usage.cost).toBeCloseTo(0.018);
+      expect(getLifetimeTotal(usage)).toBe(161);
+    });
+
+    it("formats reported cost and omits unavailable values", () => {
+      expect(formatCost(0.018)).toBe("~$0.018");
+      expect(formatCost(undefined)).toBe("");
+      expect(formatCost(Number.NaN)).toBe("");
     });
   });
 

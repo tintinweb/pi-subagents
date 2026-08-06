@@ -9,7 +9,7 @@ import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
-import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import { formatCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
@@ -45,6 +45,8 @@ export class ConversationViewer implements Component {
     keybindings?: ViewerKeybindings,
     /** Send a steering message to the agent. Omitted → no compose affordance. */
     private onSteer?: (message: string) => void,
+    /** Read live cost-display preference. Omitted → hide reported cost. */
+    private showCost: () => boolean = () => false,
   ) {
     this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
@@ -152,10 +154,14 @@ export class ConversationViewer implements Component {
     const headerParts: string[] = [duration];
     const toolUses = this.activity?.toolUses ?? this.record.toolUses;
     if (toolUses > 0) headerParts.unshift(`${toolUses} tool${toolUses === 1 ? "" : "s"}`);
-    const tokens = getLifetimeTotal(this.activity?.lifetimeUsage);
+    const usage = this.activity?.lifetimeUsage ?? this.record.lifetimeUsage;
+    const tokens = getLifetimeTotal(usage);
     if (tokens > 0) {
       const percent = getSessionContextPercent(this.activity?.session);
       headerParts.push(formatSessionTokens(tokens, percent, th, this.record.compactionCount));
+    }
+    if (this.showCost() && usage?.cost !== undefined) {
+      headerParts.push(formatCost(usage.cost));
     }
 
     lines.push(row(
