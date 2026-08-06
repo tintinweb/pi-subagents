@@ -1,7 +1,14 @@
-import { describe, expect, it } from "vitest";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it, vi } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
+import {
+  type AgentActivity,
+  AgentWidget,
+  fgPreservingNestedStyles,
+  formatGitSummary,
+  formatSessionTokens,
+} from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -67,18 +74,26 @@ describe("AgentWidget", () => {
     };
   }
 
-  function makeRecord(id: string, opts: { isBackground?: boolean; parentAgentId?: string } = {}) {
+  function makeRecord(id: string, opts: {
+    isBackground?: boolean;
+    parentAgentId?: string;
+    status?: "running" | "queued" | "completed";
+    cwd?: string;
+    completedAt?: number;
+  } = {}) {
     return {
       id,
       type: "general-purpose",
       description: `${id} description`,
-      status: "running",
+      status: opts.status ?? "running",
       toolUses: 0,
       startedAt: Date.now(),
       lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
       isBackground: opts.isBackground,
       parentAgentId: opts.parentAgentId,
+      cwd: opts.cwd,
+      completedAt: opts.completedAt,
     };
   }
 
@@ -142,5 +157,123 @@ describe("AgentWidget", () => {
   it("renders nothing in 'off' mode", () => {
     const manager = { listAgents: () => [makeRecord("background", { isBackground: true })] };
     expect(renderLines(manager, "background", () => "off")).toBe("");
+  });
+
+  it("renders a debounced Git summary in the running card", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = makeRecord("live", { cwd: "/repo" });
+      const exec = vi.fn()
+        .mockResolvedValueOnce({ code: 0, stdout: "82\t16\tsrc/file.ts\n" })
+        .mockResolvedValueOnce({ code: 0, stdout: "" });
+      const manager = {
+        listAgents: () => [record],
+        getRecord: (id: string) => id === record.id ? record : undefined,
+      };
+      const widget = new AgentWidget(
+        manager as any,
+        new Map([[record.id, makeActivity()]]),
+        () => "all",
+        { exec } as unknown as Pick<ExtensionAPI, "exec">,
+      );
+      let factory: any;
+      widget.setUICtx({
+        setStatus: () => {},
+        setWidget: (_key, content) => { factory = content; },
+      });
+      widget.update();
+      await vi.runAllTimersAsync();
+
+      const lines = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme)
+        .render()
+        .join("\n");
+      expect(lines).toContain("1 file · +82 −16");
+      expect(exec).toHaveBeenNthCalledWith(
+        1,
+        "git",
+        ["diff", "--numstat", "HEAD", "--"],
+        expect.objectContaining({ cwd: "/repo" }),
+      );
+      widget.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("omits a cached Git summary after the current refresh fails", async () => {
+    vi.useFakeTimers();
+    try {
+      const record = makeRecord("live", { cwd: "/repo" });
+      const exec = vi.fn()
+        .mockResolvedValueOnce({ code: 0, stdout: "82\t16\tsrc/file.ts\n" })
+        .mockResolvedValueOnce({ code: 0, stdout: "" })
+        .mockResolvedValueOnce({ code: 128, stdout: "" });
+      const manager = {
+        listAgents: () => [record],
+        getRecord: (id: string) => id === record.id ? record : undefined,
+      };
+      const widget = new AgentWidget(
+        manager as any,
+        new Map([[record.id, makeActivity()]]),
+        () => "all",
+        { exec } as unknown as Pick<ExtensionAPI, "exec">,
+      );
+      let factory: any;
+      widget.setUICtx({
+        setStatus: () => {},
+        setWidget: (_key, content) => { factory = content; },
+      });
+      widget.update();
+      await vi.runAllTimersAsync();
+      widget.onActivity(record.id);
+      await vi.runAllTimersAsync();
+
+      const lines = factory({ terminal: { columns: 120 }, requestRender: () => {} }, theme)
+        .render()
+        .join("\n");
+      expect(lines).not.toContain("1 file · +82 −16");
+      widget.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("labels untracked files instead of including them in line totals", () => {
+    expect(formatGitSummary({ trackedFiles: 2, additions: 82, deletions: 16, untrackedFiles: 1 }))
+      .toBe("2 files · +82 −16 · 1 untracked");
+  });
+
+  it("does not query queued, completed, or no-cwd records", async () => {
+    vi.useFakeTimers();
+    try {
+      const records = [
+        makeRecord("queued", { status: "queued", cwd: "/repo" }),
+        makeRecord("completed", { status: "completed", cwd: "/repo", completedAt: Date.now() }),
+        makeRecord("no-cwd"),
+      ];
+      const exec = vi.fn();
+      const manager = {
+        listAgents: () => records,
+        getRecord: (id: string) => records.find(record => record.id === id),
+      };
+      const widget = new AgentWidget(
+        manager as any,
+        new Map(records.map(record => [record.id, makeActivity()])),
+        () => "all",
+        { exec } as unknown as Pick<ExtensionAPI, "exec">,
+      );
+      widget.setUICtx({
+        setStatus: () => {},
+        setWidget: (_key, content) => {
+          if (content) content({ terminal: { columns: 120 }, requestRender: () => {} }, theme);
+        },
+      });
+      widget.update();
+      await vi.runAllTimersAsync();
+      expect(exec).not.toHaveBeenCalled();
+      widget.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -710,6 +710,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
       mockCtx, "general-purpose", "test",
       expect.objectContaining({ cwd: "/", configCwd: "/tmp" }),
     );
+    expect(manager.getRecord(id)?.cwd).toBe("/");
   });
 
   it("without cwd, configCwd stays unset — existing behavior untouched", async () => {
@@ -726,6 +727,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     const opts = vi.mocked(runAgent).mock.lastCall![3];
     expect(opts.cwd).toBeUndefined();
     expect(opts.configCwd).toBeUndefined();
+    expect(manager.getRecord(id)?.cwd).toBe("/tmp");
   });
 
   it("cwd: null (RPC 'unset') behaves exactly like omitting cwd", async () => {
@@ -766,6 +768,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
       expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp" }),
     );
     expect(cleanupWorktree).toHaveBeenCalledWith("/", expect.anything(), "test");
+    expect(manager.getRecord(id)?.cwd).toBe("/wt/copy/packages/api");
   });
 
   it("plain worktree (no cwd) keeps the historical root working dir even when workPath differs", async () => {
