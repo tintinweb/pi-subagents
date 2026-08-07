@@ -256,6 +256,38 @@ describe("ConversationViewer", () => {
       }
     });
   });
+  describe("Markdown rendering", () => {
+
+    it("renders assistant Markdown instead of raw source markers", () => {
+      const messages = [
+        { role: "assistant", content: [{ type: "text", text: "# Heading\n\n- first\n- second\n\n**bold**" }] },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(200, 80), mockSession(messages), mockRecord({ status: "completed" }), undefined, ansiTheme(), vi.fn(),
+      );
+      const output = viewer.render(80).join("\n");
+
+      expect(output).toContain("Heading");
+      expect(output).not.toContain("# Heading");
+      expect(output).not.toContain("**bold**");
+    });
+
+    it("renders complete tool-result Markdown without the old 500-character truncation", () => {
+      const sentinel = "END_OF_CTX_RESULT";
+      const text = `## ctx_execute\n\n\`\`\`javascript\n${"const value = 1;\n".repeat(40)}\`\`\`\n\n${sentinel}`;
+      const messages = [
+        { role: "toolResult", toolUseId: "t1", content: [{ type: "text", text }] },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(2000, 80), mockSession(messages), mockRecord({ status: "completed" }), undefined, ansiTheme(), vi.fn(),
+      );
+      const output = viewer.render(80).join("\n");
+
+      expect(output).toContain(sentinel);
+      expect(output).not.toContain("... (truncated)");
+    });
+  });
+
 
   describe("safety net against upstream wrapTextWithAnsi bugs", () => {
     // These tests call buildContentLines() directly (via the private method)

@@ -6,7 +6,7 @@
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
-import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, Input, Markdown, type MarkdownTheme, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
@@ -31,6 +31,8 @@ export class ConversationViewer implements Component {
   private keys: ViewerKeys;
   /** Steering composer — present while the user is typing a message to the agent. */
   private composer: Input | undefined;
+  /** Viewer-local Markdown styling avoids depending on Pi's global theme initialization in tests and embedded sessions. */
+  private readonly markdownTheme: MarkdownTheme;
 
   constructor(
     private tui: TUI,
@@ -46,6 +48,22 @@ export class ConversationViewer implements Component {
     /** Send a steering message to the agent. Omitted → no compose affordance. */
     private onSteer?: (message: string) => void,
   ) {
+    this.markdownTheme = {
+      heading: text => theme.bold(theme.fg("accent", text)),
+      link: text => theme.fg("accent", text),
+      linkUrl: text => theme.fg("muted", text),
+      code: text => theme.fg("muted", text),
+      codeBlock: text => theme.fg("muted", text),
+      codeBlockBorder: text => theme.fg("dim", text),
+      quote: text => theme.fg("muted", text),
+      quoteBorder: text => theme.fg("dim", text),
+      hr: text => theme.fg("dim", text),
+      listBullet: text => theme.fg("accent", text),
+      bold: text => theme.bold(text),
+      italic: text => text,
+      strikethrough: text => theme.fg("dim", text),
+      underline: text => text,
+    };
     this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
       if (this.closed) return;
@@ -316,22 +334,17 @@ export class ConversationViewer implements Component {
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.bold("[Assistant]"));
         if (textParts.length > 0) {
-          for (const line of wrapTextWithAnsi(textParts.join("\n").trim(), width)) {
-            lines.push(line);
-          }
+          lines.push(...new Markdown(textParts.join("\n").trim(), 0, 0, this.markdownTheme).render(width));
         }
         for (const name of toolCalls) {
           lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
         }
       } else if (msg.role === "toolResult") {
-        const text = extractText(msg.content);
-        const truncated = text.length > 500 ? text.slice(0, 500) + "... (truncated)" : text;
-        if (!truncated.trim()) continue;
+        const text = extractText(msg.content).trim();
+        if (!text) continue;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.fg("dim", "[Result]"));
-        for (const line of wrapTextWithAnsi(truncated.trim(), width)) {
-          lines.push(th.fg("dim", line));
-        }
+        lines.push(...new Markdown(text, 0, 0, this.markdownTheme).render(width));
       } else if ((msg as any).role === "bashExecution") {
         const bash = msg as any;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
