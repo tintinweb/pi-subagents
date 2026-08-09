@@ -940,7 +940,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context.",
+          description: "Optional agent ID to resume from. Continues from previous context. Combine with run_in_background to resume detached and be notified on completion.",
         }),
       ),
       isolated: Type.Optional(
@@ -1215,6 +1215,65 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
+
+        // Background resume: detached run that notifies on completion, mirroring
+        // a background spawn. Previously run_in_background was silently ignored
+        // on resume (this branch returned before the background branch below),
+        // so a resumed agent always blocked the main loop until it finished.
+        if (runInBackground) {
+          const id = existing.id;
+          const joinMode = resolveJoinMode(defaultJoinMode, true);
+          existing.toolCallId = toolCallId;
+          if (joinMode) existing.joinMode = joinMode;
+          // Session already exists — attach a fresh transcript for THIS run;
+          // streaming is wired directly below (no onSessionCreated fires).
+          attachTranscript(existing, id);
+
+          const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
+          const record = await manager.resume(params.resume, params.prompt, signal, {
+            isBackground: true,
+            onToolActivity: bgCallbacks.onToolActivity,
+            onAssistantUsage: bgCallbacks.onAssistantUsage,
+          });
+          if (!record) {
+            return textResult(`Failed to resume agent "${params.resume}".`);
+          }
+          if (record.session && record.outputFile) {
+            record.outputCleanup = streamToOutputFile(record.session, record.outputFile, id, ctx.cwd);
+          }
+
+          if (joinMode != null && joinMode !== 'async') {
+            currentBatchAgents.push({ id, joinMode });
+            if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+            batchFinalizeTimer = setTimeout(finalizeBatch, 100);
+          }
+
+          agentActivity.set(id, bgState);
+          widget.ensureTimer();
+          widget.update();
+          fleet.ensureTimer();
+          fleet.update();
+
+          pi.events.emit("subagents:created", {
+            id,
+            type: subagentType,
+            description: params.description,
+            isBackground: true,
+          });
+
+          const isQueued = record.status === "queued";
+          return textResult(
+            `Agent ${isQueued ? "queued" : "resumed"} in background.\n` +
+            `Agent ID: ${id}\n` +
+            `Type: ${displayName}\n` +
+            (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
+            (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
+            `\nYou will be notified when this agent completes.\n` +
+            `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
+            { ...detailBase, toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
+          );
+        }
+
         const record = await manager.resume(params.resume, params.prompt, signal);
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
