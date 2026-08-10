@@ -1,6 +1,7 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -23,8 +24,16 @@ const {
     },
   },
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
-  sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
-  sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
+  sessionManagerInMemory: vi.fn(() => ({
+    kind: "memory-session-manager",
+    isPersisted: () => false,
+    getSessionFile: () => undefined,
+  })),
+  sessionManagerCreate: vi.fn(() => ({
+    kind: "persistent-session-manager",
+    isPersisted: () => false,
+    getSessionFile: () => undefined,
+  })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
@@ -287,13 +296,156 @@ describe("agent-runner final output capture", () => {
     expect(ctorArgs.appendSystemPromptOverride(["would-be-loaded"])).toEqual([]);
   });
 
+  it("does not bind or prompt a real runner session created for a pre-aborted caller", async () => {
+    const { session } = createSession("SHOULD NOT RUN");
+    createAgentSession.mockResolvedValue({ session });
+    const controller = new AbortController();
+    controller.abort();
+    const onSessionCreated = vi.fn();
+
+    const result = await runAgent(ctx, "Explore", "do not run", {
+      pi,
+      signal: controller.signal,
+      onSessionCreated,
+    });
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(session.bindExtensions).not.toHaveBeenCalled();
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(onSessionCreated).toHaveBeenCalledWith(session);
+    expect(result).toEqual(expect.objectContaining({ responseText: "", session }));
+  });
+
+  it("disposes and removes only its fresh persisted session artifact when binding fails", async () => {
+    const sessionFile = join(tmpdir(), `subagents-bind-failure-${Date.now()}.jsonl`);
+    const { session } = createSession("SHOULD NOT RUN");
+    Object.assign(session, {
+      sessionFile,
+      dispose: vi.fn(),
+      bindExtensions: vi.fn(async () => {
+        writeFileSync(sessionFile, "new session artifact");
+        throw new Error("binding failed");
+      }),
+    });
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerCreate.mockReturnValueOnce({
+      isPersisted: () => true,
+      getSessionFile: () => sessionFile,
+    });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      name: "Explore",
+      description: "Explore",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      persistSession: true,
+      systemPrompt: "You are Explore.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+    });
+    await expect(runAgent(ctx, "Explore", "do not run", { pi })).rejects.toThrow("binding failed");
+
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(existsSync(sessionFile)).toBe(false);
+  });
+
+  it("preserves the binding failure when cleanup fails", async () => {
+    const sessionFile = join(tmpdir(), `subagents-cleanup-failure-${Date.now()}.jsonl`);
+    const { session } = createSession("SHOULD NOT RUN");
+    Object.assign(session, {
+      sessionFile,
+      dispose: vi.fn(() => { throw new Error("dispose failed"); }),
+      bindExtensions: vi.fn(async () => {
+        writeFileSync(sessionFile, "new session artifact");
+        throw new Error("binding failed");
+      }),
+    });
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerCreate.mockReturnValueOnce({
+      isPersisted: () => true,
+      getSessionFile: () => sessionFile,
+    });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      name: "Explore",
+      description: "Explore",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      persistSession: true,
+      systemPrompt: "You are Explore.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+    });
+
+    try {
+      await expect(runAgent(ctx, "Explore", "do not run", { pi })).rejects.toThrow("binding failed");
+      expect(session.dispose).toHaveBeenCalledTimes(1);
+      expect(existsSync(sessionFile)).toBe(false);
+    } finally {
+      rmSync(sessionFile, { force: true });
+    }
+  });
+
+  it("does not remove a pre-existing session file when binding fails", async () => {
+    const sessionFile = join(tmpdir(), `subagents-existing-session-${Date.now()}.jsonl`);
+    const { session } = createSession("SHOULD NOT RUN");
+    Object.assign(session, {
+      sessionFile,
+      dispose: vi.fn(),
+      bindExtensions: vi.fn(async () => { throw new Error("binding failed"); }),
+    });
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerCreate.mockReturnValueOnce({
+      isPersisted: () => true,
+      getSessionFile: () => sessionFile,
+    });
+    vi.mocked(getAgentConfig).mockReturnValueOnce({
+      name: "Explore",
+      description: "Explore",
+      builtinToolNames: ["read"],
+      extensions: false,
+      skills: false,
+      persistSession: true,
+      systemPrompt: "You are Explore.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+    });
+    writeFileSync(sessionFile, "existing session artifact");
+
+    try {
+      await expect(runAgent(ctx, "Explore", "do not run", { pi })).rejects.toThrow("binding failed");
+      expect(session.dispose).toHaveBeenCalledTimes(1);
+      expect(existsSync(sessionFile)).toBe(true);
+    } finally {
+      rmSync(sessionFile, { force: true });
+    }
+  });
+
   it("resumeAgent also falls back to the final assistant message text", async () => {
     const { session } = createSession("RESUMED");
 
-    const result = await resumeAgent(session as any, "Continue");
+    const result = await resumeAgent(session as unknown as AgentSession, "Continue");
 
     expect(result.text).toBe("RESUMED");
     expect(result.failure).toBeUndefined();
+  });
+
+  it("aborts an already-aborted resumed session without prompting", async () => {
+    const { session } = createSession("SHOULD NOT RESUME");
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await resumeAgent(session as unknown as AgentSession, "do not resume", { signal: controller.signal });
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(result).toEqual({ text: "", aborted: true });
   });
 
   it("sets the agent name as session name before binding extensions", async () => {
@@ -787,7 +939,7 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerInMemory).toHaveBeenCalledWith("/tmp");
     expect(sessionManagerCreate).not.toHaveBeenCalled();
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      sessionManager: { kind: "memory-session-manager" },
+      sessionManager: expect.objectContaining({ kind: "memory-session-manager" }),
     }));
   });
 
@@ -802,7 +954,7 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
     expect(sessionManagerCreate).toHaveBeenCalledWith("/tmp", "/normal/pi/sessions");
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
-      sessionManager: { kind: "persistent-session-manager" },
+      sessionManager: expect.objectContaining({ kind: "persistent-session-manager" }),
     }));
   });
 

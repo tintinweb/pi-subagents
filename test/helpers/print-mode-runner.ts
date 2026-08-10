@@ -305,15 +305,22 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     if (!options.steps && !options.respond) {
       throw new Error("runPrintMode (faux mode): provide `respond` or `steps`");
     }
-    faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
-    model = faux.getModel();
+    faux = registerFauxProvider({
+      provider: "faux",
+      models: [
+        { id: "faux-1", contextWindow: 200_000 },
+        { id: "faux-other", contextWindow: 200_000 },
+      ],
+    });
+    model = faux.getModel("faux-1");
     // Structural faux registry (matches the existing e2e suites): the parent
     // session uses `model` directly; subagents inherit it via ctx.model since
     // resolveDefaultModel falls back to the parent model when no model is pinned.
     modelRegistry = {
-      find: () => model,
-      getAll: () => [model],
-      getAvailable: () => [model],
+      find: (provider: string, modelId: string) =>
+        provider === "faux" ? faux?.getModel(modelId) : undefined,
+      getAll: () => faux?.models ?? [],
+      getAvailable: () => faux?.models ?? [],
       hasConfiguredAuth: () => true,
       isUsingOAuth: () => false,
       // createAgentSession's injected streamFn checks `auth.ok` and throws

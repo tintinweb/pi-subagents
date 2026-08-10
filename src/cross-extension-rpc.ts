@@ -9,6 +9,9 @@
  *   error   → { success: false, error: string }
  */
 
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentManager } from "./agent-manager.js";
+import { sanitizeAgentCause } from "./agent-outcome.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
@@ -25,16 +28,15 @@ export type RpcReply<T = void> =
 /** RPC protocol version — bumped when the envelope or method contracts change. */
 export const PROTOCOL_VERSION = 2;
 
-/** Minimal AgentManager interface needed by the spawn/stop RPCs. */
-export interface SpawnCapable {
-  spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
-  abort(id: string): boolean;
-}
+/** Minimal AgentManager surface needed by the spawn/stop RPCs. */
+export type SpawnCapable = Pick<AgentManager, "spawn" | "abort">;
+
+type RpcSpawnOptions = Parameters<SpawnCapable["spawn"]>[4];
 
 export interface RpcDeps {
   events: EventBus;
-  pi: unknown;                    // passed through to manager.spawn
-  getCtx: () => unknown | undefined;  // returns current ExtensionContext
+  pi: ExtensionAPI;
+  getCtx: () => ExtensionContext | undefined;
   manager: SpawnCapable;
 }
 
@@ -60,9 +62,10 @@ function handleRpc<P extends { requestId: string }>(
       const reply: { success: true; data?: unknown } = { success: true };
       if (data !== undefined) reply.data = data;
       events.emit(`${channel}:reply:${params.requestId}`, reply);
-    } catch (err: any) {
+    } catch (cause) {
       events.emit(`${channel}:reply:${params.requestId}`, {
-        success: false, error: err?.message ?? String(err),
+        success: false,
+        error: sanitizeAgentCause(cause),
       });
     }
   });
@@ -79,7 +82,12 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     return { version: PROTOCOL_VERSION };
   });
 
-  const unsubSpawn = handleRpc<{ requestId: string; type: string; prompt: string; options?: any }>(
+  const unsubSpawn = handleRpc<{
+    requestId: string;
+    type: string;
+    prompt: string;
+    options?: Record<string, unknown>;
+  }>(
     events, "subagents:rpc:spawn", ({ type, prompt, options }) => {
       const ctx = getCtx();
       if (!ctx) throw new Error("No active session");
@@ -108,7 +116,9 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
         normalizedOptions = { ...normalizedOptions, model: resolved };
       }
 
-      return { id: manager.spawn(pi, ctx, type, prompt, normalizedOptions) };
+      return {
+        id: manager.spawn(pi, ctx, type, prompt, normalizedOptions as unknown as RpcSpawnOptions),
+      };
     },
   );
 

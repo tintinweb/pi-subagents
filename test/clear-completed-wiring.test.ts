@@ -164,8 +164,13 @@ describe("issue #108: unread completed background agents survive session events"
     // Now a session switch SHOULD clean it up (consumed records are not preserved).
     await lifecycle.get("session_before_switch")?.();
 
-    const second = await tools.get("get_subagent_result").execute("tc-read2", { agent_id: id }, undefined, undefined, ctx());
-    expect(textOf(second)).toContain("Agent not found");
+    await expect(tools.get("get_subagent_result").execute(
+      "tc-read2",
+      { agent_id: id },
+      undefined,
+      undefined,
+      ctx(),
+    )).rejects.toThrow("Agent not found");
 
     await lifecycle.get("session_shutdown")?.({}, ctx());
   });

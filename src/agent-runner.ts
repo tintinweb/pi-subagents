@@ -2,7 +2,7 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
@@ -17,6 +17,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { sanitizeAgentCause } from "./agent-outcome.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
@@ -486,7 +487,9 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
     const msg = session.messages[i];
     if (msg.role !== "assistant") continue;
     if (msg.stopReason === "error") {
-      return (msg as { errorMessage?: string }).errorMessage?.trim() || "provider error with no output";
+      return sanitizeAgentCause(
+        (msg as { errorMessage?: string }).errorMessage ?? "provider error with no output",
+      );
     }
     if (msg.stopReason === "length" && !extractText(msg.content).trim()) {
       return "run hit the output token limit before producing any text";
@@ -503,7 +506,14 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
   const onAbort = () => session.abort();
-  signal.addEventListener("abort", onAbort, { once: true });
+  // AbortSignal does not replay an abort to listeners added later. A child
+  // session can be created after its caller was stopped, so synchronously carry
+  // that state across before it can bind extensions or start a prompt.
+  if (signal.aborted) {
+    onAbort();
+  } else {
+    signal.addEventListener("abort", onAbort, { once: true });
+  }
   return () => signal.removeEventListener("abort", onAbort);
 }
 
@@ -833,6 +843,12 @@ export async function runAgent(
   const sessionManager = agentConfig?.persistSession
     ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
     : SessionManager.inMemory(effectiveCwd);
+  // `SessionManager.create()` allocates a fresh session path but does not write
+  // it until the session first persists. Keep that exact manager-owned path and
+  // its prior existence state so a failed pre-acceptance setup can remove only
+  // the artifact this invocation created — never a resumed/shared session.
+  const ownedSessionFile = sessionManager.isPersisted() ? sessionManager.getSessionFile() : undefined;
+  const ownedSessionFileExisted = ownedSessionFile ? existsSync(ownedSessionFile) : false;
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
@@ -861,40 +877,80 @@ export async function runAgent(
   }
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const baseSessionName = agentConfig?.name ?? type;
-  session.setSessionName(
-    options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
-  );
+  // Do not start session initialization or a model turn for a caller that was
+  // already cancelled. Still publish the aborted session so the manager owns it
+  // and can retain an honest caller_stop lifecycle record rather than treating
+  // this as a pre-session startup failure.
+  if (options.signal?.aborted) {
+    options.onSessionCreated?.(session);
+    cleanupAbort();
+    return { responseText: "", session, aborted: false, steered: false };
+  }
 
-  // Bind extensions so that session_start fires and extensions can initialize
-  // (e.g. loading credentials, setting up state). Tool gating already happened
-  // at session construction via the `tools:` allowlist above — no separate
-  // post-bind filter is needed. All ExtensionBindings fields are optional.
-  await session.bindExtensions({
-    onError: (err) => {
-      options.onToolActivity?.({
-        type: "end",
-        toolName: `extension-error:${err.extensionPath}`,
-      });
-    },
-  });
+  try {
+    const baseSessionName = agentConfig?.name ?? type;
+    session.setSessionName(
+      options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
+    );
 
-  // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
-  // the ACTIVE set still needs managing: pi activates only its four default
-  // built-ins at turn 1, and `ext:` narrowing has no registry-level expression
-  // (we can't deny the name of a tool that hasn't registered yet). Both are
-  // handled below by re-deriving scope from the loader's live extension maps —
-  // `registerTool` writes into those same maps, so late arrivals are judged too.
-  if (!noExtensions) {
-    installExtensionToolScope(session, {
-      loader,
-      toolNames,
-      disallowedSet,
-      extNames,
-      narrowing,
-      nestedToolNames,
+    // Bind extensions so that session_start fires and extensions can initialize
+    // (e.g. loading credentials, setting up state). Tool gating already happened
+    // at session construction via the `tools:` allowlist above — no separate
+    // post-bind filter is needed. All ExtensionBindings fields are optional.
+    await session.bindExtensions({
+      onError: (err) => {
+        options.onToolActivity?.({
+          type: "end",
+          toolName: `extension-error:${err.extensionPath}`,
+        });
+      },
     });
+
+    // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
+    // the ACTIVE set still needs managing: pi activates only its four default
+    // built-ins at turn 1, and `ext:` narrowing has no registry-level expression
+    // (we can't deny the name of a tool that hasn't registered yet). Both are
+    // handled below by re-deriving scope from the loader's live extension maps —
+    // `registerTool` writes into those same maps, so late arrivals are judged too.
+    if (!noExtensions) {
+      installExtensionToolScope(session, {
+        loader,
+        toolNames,
+        disallowedSet,
+        extNames,
+        narrowing,
+        nestedToolNames,
+      });
+    }
+  } catch (cause) {
+    cleanupAbort();
+    // Cleanup is best-effort: neither disposal nor removal of a fresh artifact
+    // may hide the bind/init failure that explains why this session was rejected.
+    try {
+      session.dispose();
+    } catch {
+      // Preserve the original setup failure.
+    }
+    // The session's file is a SessionManager-owned fresh path. Only remove it
+    // when this invocation allocated that same path and it did not pre-exist.
+    // `session.sessionFile` is deliberately re-read after dispose through Pi's
+    // public AgentSession API; a session that switched files during setup is
+    // not ours to delete.
+    try {
+      if (
+        ownedSessionFile &&
+        !ownedSessionFileExisted &&
+        session.sessionFile === ownedSessionFile &&
+        existsSync(ownedSessionFile)
+      ) {
+        unlinkSync(ownedSessionFile);
+      }
+    } catch {
+      // Preserve the original setup failure.
+    }
+    throw cause;
   }
 
   options.onSessionCreated?.(session);
@@ -947,7 +1003,6 @@ export async function runAgent(
   });
 
   const collector = collectResponseText(session);
-  const cleanupAbort = forwardAbortSignal(session, options.signal);
 
   // Build the effective prompt: optionally prepend parent context
   let effectivePrompt = prompt;
@@ -985,13 +1040,21 @@ export async function resumeAgent(
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
     signal?: AbortSignal;
   } = {},
-): Promise<{ text: string; failure?: string }> {
+): Promise<{ text: string; failure?: string; aborted: boolean }> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
+
+  // Match runAgent's pre-abort boundary: an aborted continuation must not
+  // create a new prompt or invoke any tools on an existing session.
+  if (options.signal?.aborted) {
+    collector.unsubscribe();
+    cleanupAbort();
+    return { text: "", aborted: true };
+  }
 
   const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
     ? session.subscribe((event: AgentSessionEvent) => {
@@ -1022,6 +1085,7 @@ export async function resumeAgent(
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
     failure: finalTurnError(session, startLen),
+    aborted: options.signal?.aborted ?? false,
   };
 }
 

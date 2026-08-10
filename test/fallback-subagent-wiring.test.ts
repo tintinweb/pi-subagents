@@ -106,7 +106,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
       const { tools } = boot();
       setFallbackSubagent(NO_FALLBACK);
 
-      const result = await tools.get("Agent").execute(
+      await expect(tools.get("Agent").execute(
         "tc-1",
         {
           prompt: "do it",
@@ -115,10 +115,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
           run_in_background: background,
         },
         undefined, undefined, ctx(),
-      );
+      )).rejects.toThrow('Unknown or disabled agent type: "definitely-missing"');
 
-      expect(textOf(result)).toContain('Unknown or disabled agent type: "definitely-missing"');
-      expect(textOf(result)).toContain("scout");
       // The whole point: nothing ran.
       expect(runAgent).not.toHaveBeenCalled();
     });
@@ -172,13 +170,12 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(getAllTypes()).toContain("retired");
     expect(getAvailableTypes()).not.toContain("retired");
 
-    const result = await tools.get("Agent").execute(
+    await expect(tools.get("Agent").execute(
       "tc-4",
       { prompt: "do it", description: "disabled dispatch", subagent_type: "retired" },
       undefined, undefined, ctx(),
-    );
+    )).rejects.toThrow("Unknown or disabled agent type");
 
-    expect(textOf(result)).toContain("Unknown or disabled agent type");
     expect(runAgent).not.toHaveBeenCalled();
   });
 

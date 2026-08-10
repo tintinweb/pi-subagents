@@ -4,6 +4,7 @@
  * a string. Drives the registered `Agent` / `get_subagent_result` tools and
  * inspects the text delivered back, for a turn-limit abort and a user stop.
  */
+import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -82,25 +83,15 @@ describe("status note reaches the parent through the real handlers", () => {
     );
 
     const out = textOf(res);
-    // Exact lead clause, not just "turn limit": a steered/aborted mix-up would
-    // otherwise slip through, and they are different outcomes.
-    expect(out).toContain("aborted at the turn limit");
-    expect(out).toContain("partial work so far");     // partial result still delivered
-    expect(out).not.toContain("STOPPED BY THE USER"); // not mislabelled as a user stop
-
-    // The two answers a foreground parent needs: is this all of it, and is the
-    // task done. The first is what #174 turned on — the parent has no agent id,
-    // so it must not read "partial" as "go fetch the rest".
-    expect(out).toContain("everything the agent produced is above");
-    expect(out).toContain("the task is unfinished");
-    // State only, never an instruction to act (see getForegroundOutcomeNote):
-    // advising a fresh run to save one wasted tool call is a bet nothing here
-    // can measure. And naming the tool we steer away from only raises its salience.
-    expect(out).not.toContain("re-spawn");
-    expect(out).not.toContain("get_subagent_result");
+    expect(out).toContain("status: aborted");
+    expect(out).toContain("category: max_turns");
+    expect(out).toContain("recovery: resume_same_agent");
+    expect(out).toContain("fresh_spawn: forbidden");
+    expect(out).toContain("agent_id:");
+    expect(out).toContain("partial work so far");
   });
 
-  it("foreground user-stop → tells the parent NOT to restart it unasked", async () => {
+  it("foreground user-stop → tells the parent to resume the accepted same agent", async () => {
     // Pi delivers a user ESC as an abort on the tool's signal; the manager wires
     // that to abort(id) (#44), landing the record on "stopped" — deliberately
     // distinct from a turn-limit "aborted", because the correct next action is
@@ -118,26 +109,48 @@ describe("status note reaches the parent through the real handlers", () => {
       parent.signal, undefined, ctx(),
     );
 
-    // The manager only wires addEventListener("abort", …) and never checks
-    // signal.aborted upfront (agent-manager.ts:240-243), so aborting before the
-    // listener is attached would silently land on "completed" instead. Flush
-    // first rather than relying on spawn() happening in execute()'s synchronous
-    // prefix, which any future await in that path would quietly break.
     await new Promise((r) => setImmediate(r));
     parent.abort(); // the user hits ESC
     finish({ responseText: "partial work so far", session: { dispose: vi.fn() }, aborted: false, steered: false });
 
     const out = textOf(await call);
-    expect(out).toContain("STOPPED BY THE USER");
-    expect(out).toContain("everything the agent produced is above");
-    // Same claim, same confidence, same words as the aborted case — only the
-    // lead clause distinguishes them.
-    expect(out).toContain("the task is unfinished");
-    // State only, here most of all. Advice to re-spawn would re-run work a human
-    // deliberately killed; advice to ask first presumes someone is there to ask,
-    // which is false under `pi -p`, scheduled jobs, and background-driven runs.
-    expect(out).not.toContain("re-spawn");
-    expect(out).not.toContain("ask before");
+    expect(out).toContain("status: stopped");
+    expect(out).toContain("category: caller_stop");
+    expect(out).toContain("recovery: resume_same_agent");
+    expect(out).toContain("fresh_spawn: forbidden");
+    expect(out).toContain("partial work so far");
+  });
+
+  it("foreground pre-aborted caller signal keeps same-agent recovery once its session exists", async () => {
+    let childWasAbortedAtInvocation: boolean | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
+      childWasAbortedAtInvocation = options.signal?.aborted;
+      return Promise.resolve({
+        responseText: "partial work so far",
+        session: { dispose: vi.fn() } as unknown as AgentSession,
+        aborted: false,
+        steered: false,
+      });
+    });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const parent = new AbortController();
+    parent.abort();
+
+    const res = await tools.get("Agent").execute(
+      "tc-pre-aborted",
+      { prompt: "go", description: "d", subagent_type: "general-purpose" },
+      parent.signal,
+      undefined,
+      ctx(),
+    );
+
+    const out = textOf(res);
+    expect(childWasAbortedAtInvocation).toBe(true);
+    expect(out).toContain("status: stopped");
+    expect(out).toContain("category: caller_stop");
+    expect(out).toContain("recovery: resume_same_agent");
+    expect(out).toContain("fresh_spawn: forbidden");
   });
 
   it("hides nested records from top-level tools, registry, transcripts, and lifecycle", async () => {
@@ -181,13 +194,15 @@ describe("status note reaches the parent through the real handlers", () => {
     await new Promise(resolve => setTimeout(resolve, 0));
 
     expect(registry.getRecord(id)).toBeUndefined();
+    // Nested IDs stay hidden from top-level tools; #180 surfaces missing/hidden
+    // agents as Pi tool errors (throws) rather than soft text results.
     for (const [name, params] of [
       ["get_subagent_result", { agent_id: id }],
       ["steer_subagent", { agent_id: id, message: "stop" }],
       ["Agent", { resume: id, prompt: "continue", description: "resume", subagent_type: "general-purpose" }],
     ] as const) {
-      const result = await tools.get(name).execute("tc-nested", params, undefined, undefined, ctx());
-      expect(textOf(result)).toContain("Agent not found");
+      await expect(tools.get(name).execute("tc-nested", params, undefined, undefined, ctx()))
+        .rejects.toThrow(/Agent not found/);
     }
     expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:started", expect.objectContaining({ id }));
     expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:completed", expect.objectContaining({ id }));
