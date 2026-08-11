@@ -29,7 +29,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { extensionCanonicalName, runAgent } from "../src/agent-runner.js";
-import { registerAgents } from "../src/agent-types.js";
+import { buildAgentRegistry } from "../src/agent-types.js";
 import type { AgentConfig } from "../src/types.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
@@ -69,7 +69,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
    * return the real session's active tool names captured at construction time.
    */
   async function activeToolsFor(cfg: Partial<AgentConfig>): Promise<string[]> {
-    registerAgents(
+    const registry = buildAgentRegistry(
       new Map([
         [
           "e2e",
@@ -105,6 +105,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     try {
       await runAgent(ctx, "e2e", "go", {
         pi: makePi(),
+        registry,
         model,
         onSessionCreated: (s) => {
           active = s.getActiveToolNames();

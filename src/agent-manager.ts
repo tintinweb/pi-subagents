@@ -13,7 +13,7 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
-import type { AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, AgentInvocation, AgentRecord, IsolationMode, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage } from "./usage.js";
 import { cleanupWorktree, createWorktree, pruneWorktrees, } from "./worktree.js";
 
@@ -119,10 +119,20 @@ interface SpawnOptions {
   configCwd?: string;
   /** Root session id, inherited by nested launches so transcripts stay grouped. */
   rootSessionId?: string;
+  /** Registry the spawned agent's config resolves from — the spawning session's live registry, or a nested branch's root registry. */
+  registry: Map<string, AgentConfig>;
+  /** Registry builder threaded to nested delegation (applies the session's `disableDefaultAgents`). */
+  buildRegistryFor?: (configCwd: string) => Map<string, AgentConfig>;
 }
 
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
+  /**
+   * The owning session's working directory — where dispose() prunes orphaned
+   * worktrees. Set by the session (index.ts, on session_start); falls back to
+   * `process.cwd()`, which is the same directory in the CLI.
+   */
+  sessionCwd?: string;
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
@@ -275,6 +285,8 @@ export class AgentManager {
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      registry: options.registry,
+      buildRegistryFor: options.buildRegistryFor,
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,
@@ -682,7 +694,7 @@ export class AgentManager {
     }
     this.agents.clear();
     // Prune any orphaned git worktrees (crash recovery)
-    try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
+    try { pruneWorktrees(this.sessionCwd ?? process.cwd()); } catch { /* ignore */ }
     // Also prune repos that caller-supplied cwds created worktrees in — a clean
     // exit with in-flight agents would otherwise leave stale registrations there.
     for (const repo of this.worktreeRepos) {

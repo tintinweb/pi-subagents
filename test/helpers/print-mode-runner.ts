@@ -117,8 +117,9 @@ export interface RunPrintModeOptions {
    */
   hold?: boolean;
   /**
-   * Run before the parent turn, after globals are isolated — e.g.
-   * `registerAgents(loadCustomAgents(cwd))` to install frontmatter agents.
+   * Run before the parent turn, after globals are isolated. Custom agents in
+   * `<cwd>/.pi/agents` need no registration here — the extension discovers
+   * them from its session cwd itself (per-session state, #206).
    */
   beforeRun?: () => void | Promise<void>;
   /**
@@ -257,9 +258,9 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
   const ownsCwd = options.cwd == null;
   const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "subagents-print-"));
 
-  // chdir into cwd: the extension discovers project custom agents from process.cwd()
-  // (not ctx.cwd), and re-reads them on every Agent invocation — so a custom agent
-  // is only spawnable if process.cwd() points at the dir holding it. Restored on
+  // chdir into cwd: matches the CLI, where the process cwd IS the session cwd.
+  // (Discovery itself keys off the session cwd since #206 — the chdir keeps the
+  // provisional pre-session_start value identical too.) Restored on
   // dispose. (Vitest isolates test files per process, so this doesn't race.)
   const prevCwd = process.cwd();
   process.chdir(cwd);

@@ -7,7 +7,7 @@
  *
  *   test/fixtures/.pi/agents/*.md         (pre-configured agent templates)
  *     → real loadCustomAgents()           (frontmatter → parseToolsField/ext:)
- *     → registerAgents()                  (real registry)
+ *     → buildAgentRegistry()              (real registry, passed to runAgent)
  *     → real runAgent() [headless]        (real DefaultResourceLoader loads the
  *                                          real .mjs extension fixtures)
  *     → real createAgentSession()         (real pi-mono tool gating)
@@ -30,9 +30,10 @@ import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../src/agent-runner.js";
-import { getAgentConfig, registerAgents } from "../src/agent-types.js";
+import { buildAgentRegistry, getAgentConfigIn } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { resolveAgentInvocationConfig } from "../src/invocation-config.js";
+import type { AgentConfig } from "../src/types.js";
 import { registerFauxProvider } from "./helpers/pi-ai.js";
 
 // Real pi-mono (loader + dynamic extension import + session construction) — a
@@ -70,6 +71,8 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
   let prevHome: string | undefined;
   let hermeticDir: string;
   let faux: ReturnType<typeof registerFauxProvider>;
+  /** The registry runAgent resolves against — per-session state (#206). */
+  let registry: Map<string, AgentConfig>;
 
   beforeAll(() => {
     // Isolate global discovery (getAgentDir / ~/.pi) so the dev's real agents
@@ -83,9 +86,9 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
 
     // Load the templates through the REAL loader (project agents come from
-    // <cwd>/.pi/agents → FIXTURES_DIR/.pi/agents) and install them in the
-    // registry runAgent reads from.
-    registerAgents(loadCustomAgents(FIXTURES_DIR));
+    // <cwd>/.pi/agents → FIXTURES_DIR/.pi/agents) and build the registry
+    // runAgent reads from (passed per run — per-session state, #206).
+    registry = buildAgentRegistry(loadCustomAgents(FIXTURES_DIR));
   });
 
   afterAll(() => {
@@ -118,12 +121,13 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
     // Mirror production: the caller resolves frontmatter-locked fields (isolated,
     // inherit_context, …) into runAgent options via resolveAgentInvocationConfig.
     // isolated is the one that affects tool gating (forces extensions:false + drops ext:).
-    const resolved = resolveAgentInvocationConfig(getAgentConfig(agentName), { modelFromParams: false } as any);
+    const resolved = resolveAgentInvocationConfig(getAgentConfigIn(registry, agentName), { modelFromParams: false } as any);
 
     let active: string[] = [];
     let prompt = "";
     try {
       await runAgent(ctx, agentName, "go", {
+        registry,
         pi,
         model,
         cwd: FIXTURES_DIR,
@@ -154,7 +158,7 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
       expect(s.present.length + s.promptContains.length + s.promptAbsent.length).toBeGreaterThan(0);
       // Each loaded as ITS OWN agent — guards against runAgent silently falling
       // back to general-purpose when a template fails to parse/register.
-      const cfg = getAgentConfig(s.name);
+      const cfg = getAgentConfigIn(registry, s.name);
       expect(cfg, `template "${s.name}" did not register (parse error or name mismatch?)`).toBeDefined();
       expect(cfg?.name).toBe(s.name);
     }

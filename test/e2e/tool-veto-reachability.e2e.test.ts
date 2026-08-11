@@ -41,7 +41,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { runAgent } from "../../src/agent-runner.js";
-import { registerAgents } from "../../src/agent-types.js";
+import { buildAgentRegistry } from "../../src/agent-types.js";
 import type { AgentConfig } from "../../src/types.js";
 import { registerFauxProvider } from "../helpers/pi-ai.js";
 
@@ -74,7 +74,7 @@ describe("tool veto reachability against real pi-mono", () => {
   });
 
   it("pi installs a chainable beforeToolCall, and runAgent's veto blocks out-of-scope tools", async () => {
-    registerAgents(
+    const registry = buildAgentRegistry(
       new Map([
         [
           "veto",
@@ -113,6 +113,7 @@ describe("tool veto reachability against real pi-mono", () => {
     let session: any;
     try {
       await runAgent(ctx, "veto", "go", {
+        registry,
         pi: makePi(),
         model,
         onSessionCreated: (s: any) => {

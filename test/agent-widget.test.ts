@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { buildAgentRegistry } from "../src/agent-types.js";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatSessionTokens } from "../src/ui/agent-widget.js";
@@ -87,6 +88,7 @@ describe("AgentWidget", () => {
     const widget = new AgentWidget(
       manager as any,
       new Map([[activityId, makeActivity()]]),
+      buildAgentRegistry(new Map()),
       mode,
     );
     let factory: any;

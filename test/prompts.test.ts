@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { getAgentConfig, registerAgents } from "../src/agent-types.js";
+import { type AgentTypeState, createAgentTypeState } from "../src/agent-types.js";
 import { buildAgentPrompt } from "../src/prompts.js";
 import type { AgentConfig, EnvInfo } from "../src/types.js";
 
@@ -15,13 +15,15 @@ const envNoGit: EnvInfo = {
   platform: "linux",
 };
 
-// Initialize default agents
+// Initialize default agents — in a per-test state instance (#206)
+let state: AgentTypeState;
 beforeEach(() => {
-  registerAgents(new Map());
+  state = createAgentTypeState();
+  state.register(new Map());
 });
 
 function getDefaultConfig(name: string): AgentConfig {
-  return getAgentConfig(name)!;
+  return state.getAgentConfig(name)!;
 }
 
 describe("buildAgentPrompt", () => {
