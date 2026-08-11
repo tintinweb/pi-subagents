@@ -82,6 +82,18 @@ describe("usage", () => {
     it("getCacheBreakdown returns zeros when usage is undefined", () => {
       expect(getCacheBreakdown(undefined)).toEqual({ cacheRead: 0, cacheWrite: 0 });
     });
+
+    // cacheRead is optional (additive change) so consumers who construct
+    // LifetimeUsage/addUsage-delta literals without it (e.g. pre-existing
+    // callers unaware of this field) keep compiling and behaving as if it
+    // were 0 — this must never become a required-field breaking change.
+    it("cacheRead is optional — omitting it behaves as if it were 0", () => {
+      const lifetime: LifetimeUsage = { input: 0, output: 0, cacheWrite: 0 };
+      addUsage(lifetime, { input: 100, output: 50, cacheWrite: 20 });
+      expect(lifetime).toEqual({ input: 100, output: 50, cacheWrite: 20, cacheRead: 0 });
+      expect(getLifetimeTotal(lifetime)).toBe(170);
+      expect(getCacheBreakdown(lifetime)).toEqual({ cacheRead: 0, cacheWrite: 20 });
+    });
   });
 
   describe("getLifetimeTotal", () => {

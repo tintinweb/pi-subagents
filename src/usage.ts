@@ -21,7 +21,7 @@
  * turns if you want the peak instead of the latest — both are legitimate,
  * summing is not.
  */
-export type LifetimeUsage = { input: number; output: number; cacheWrite: number; cacheRead: number };
+export type LifetimeUsage = { input: number; output: number; cacheWrite: number; cacheRead?: number };
 
 /**
  * Sum of lifetime usage components, or 0 if undefined. Deliberately excludes
@@ -55,7 +55,7 @@ export function addUsage(into: LifetimeUsage, delta: LifetimeUsage): void {
   into.input += delta.input;
   into.output += delta.output;
   into.cacheWrite += delta.cacheWrite;
-  into.cacheRead = delta.cacheRead;
+  into.cacheRead = delta.cacheRead ?? 0;
 }
 
 /** Minimal shape we read from upstream `getSessionStats()`. */

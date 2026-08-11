@@ -59,7 +59,7 @@ interface NestedSpawnOptions {
   isolation?: IsolationMode;
   invocation?: AgentInvocation;
   signal?: AbortSignal;
-  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number; cacheRead: number }) => void;
+  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number; cacheRead?: number }) => void;
   onSessionCreated?: (session: AgentSession) => void;
   depth: number;
   parentAgentId: string;

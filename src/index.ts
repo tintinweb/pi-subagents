@@ -117,7 +117,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     onSessionCreated: (session: any) => {
       state.session = session;
     },
-    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number; cacheRead: number }) => {
+    onAssistantUsage: (usage: { input: number; output: number; cacheWrite: number; cacheRead?: number }) => {
       addUsage(state.lifetimeUsage, usage);
       onStreamUpdate?.();
     },
@@ -393,7 +393,7 @@ export default function (pi: ExtensionAPI) {
     const u = record.lifetimeUsage;
     const total = getLifetimeTotal(u);
     const tokens = total > 0
-      ? { input: u.input, output: u.output, total, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite }
+      ? { input: u.input, output: u.output, total, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite }
       : undefined;
     return {
       id: record.id,
