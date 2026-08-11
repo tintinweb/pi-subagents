@@ -1262,23 +1262,22 @@ Terse command-style prompts produce shallow, generic work.
           }
         };
 
-        try {
-          id = manager.spawn(pi, ctx, subagentType, params.prompt, {
-            description: params.description,
-            model,
-            maxTurns: effectiveMaxTurns,
-            isolated,
-            inheritContext,
-            thinkingLevel: thinking,
-            isBackground: true,
-            isolation,
-            invocation: agentInvocation,
-            rootSessionId: ctx.sessionManager.getSessionId(),
-            ...bgCallbacks,
-          });
-        } catch (err) {
-          return textResult(err instanceof Error ? err.message : String(err));
-        }
+        // A throw here means the agent never started. Let it out: pi marks a
+        // tool call failed only when execute throws, and a returned message
+        // reads to the model as a subagent that ran and reported this (#179).
+        id = manager.spawn(pi, ctx, subagentType, params.prompt, {
+          description: params.description,
+          model,
+          maxTurns: effectiveMaxTurns,
+          isolated,
+          inheritContext,
+          thinkingLevel: thinking,
+          isBackground: true,
+          isolation,
+          invocation: agentInvocation,
+          rootSessionId: ctx.sessionManager.getSessionId(),
+          ...bgCallbacks,
+        });
 
         // Set output file + join mode synchronously after spawn, before the
         // event loop yields — onSessionCreated is async so this is safe.
@@ -1409,18 +1408,16 @@ Terse command-style prompts produce shallow, generic work.
           attachTranscript(fgRec, fgAgentId);
         });
         record = fgResult.record;
-      } catch (err) {
+      } finally {
+        // Runs on both paths, so a startup throw — which now propagates, see
+        // the background spawn above (#179) — no longer leaves the spinner
+        // ticking or a finished agent on the widget.
         clearInterval(spinnerInterval);
-        return textResult(err instanceof Error ? err.message : String(err));
-      }
-
-      clearInterval(spinnerInterval);
-
-      // Clean up foreground agent from widget
-      if (fgId) {
-        agentActivity.delete(fgId);
-        widget.markFinished(fgId);
-        fleet.onAgentFinished(fgId);
+        if (fgId) {
+          agentActivity.delete(fgId);
+          widget.markFinished(fgId);
+          fleet.onAgentFinished(fgId);
+        }
       }
 
       // Get final token count
