@@ -16,6 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
+import { renderAgentName } from "./agent-color.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -969,10 +970,18 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Custom rendering: Claude Code style ----
 
-    renderCall(args, theme) {
-      const displayName = args.subagent_type ? getDisplayName(args.subagent_type) : "Agent";
+    renderCall(args, theme, context) {
+      let restoreBackground = theme.getBgAnsi("toolSuccessBg");
+      if (context.isPartial) restoreBackground = theme.getBgAnsi("toolPendingBg");
+      else if (context.isError) restoreBackground = theme.getBgAnsi("toolErrorBg");
+
       const desc = args.description ?? "";
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold(displayName)) + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
+      const name = renderAgentName(args.subagent_type, theme, {
+        fallbackColor: "toolTitle",
+        restoreBackground,
+        bold: true,
+      });
+      return new Text("▸ " + name + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
     renderResult(result, { expanded, isPartial }, theme) {
@@ -1873,6 +1882,7 @@ Terse command-style prompts produce shallow, generic work.
     const fmFields: string[] = [];
     fmFields.push(`description: ${JSON.stringify(cfg.description)}`);
     if (cfg.displayName) fmFields.push(`display_name: ${cfg.displayName}`);
+    if (cfg.color) fmFields.push(`color: ${JSON.stringify(cfg.color)}`);
     fmFields.push(`tools: ${cfg.builtinToolNames?.join(", ") || "all"}`);
     if (cfg.model) fmFields.push(`model: ${cfg.model}`);
     if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
@@ -2005,7 +2015,9 @@ The file format is a markdown file with YAML frontmatter and a system prompt bod
 
 \`\`\`markdown
 ---
+name: <optional UI display name; Claude Code-compatible alias for display_name>
 description: <one-line description shown in UI>
+color: <optional name badge color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
 tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
 model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
 thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>

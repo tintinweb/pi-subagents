@@ -295,6 +295,7 @@ export function getToolNamesForType(type: string): string[] {
 /** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object). Falls back to general-purpose. */
 export function getConfig(type: string): {
   displayName: string;
+  color?: string;
   description: string;
   builtinToolNames: string[];
   extensions: true | string[] | false;
@@ -307,6 +308,7 @@ export function getConfig(type: string): {
   if (config && config.enabled !== false) {
     return {
       displayName: config.displayName ?? config.name,
+      color: config.color,
       description: config.description,
       builtinToolNames: config.builtinToolNames ?? BUILTIN_TOOL_NAMES,
       extensions: config.extensions,
@@ -321,6 +323,7 @@ export function getConfig(type: string): {
   if (gp && gp.enabled !== false) {
     return {
       displayName: gp.displayName ?? gp.name,
+      color: gp.color,
       description: gp.description,
       builtinToolNames: gp.builtinToolNames ?? BUILTIN_TOOL_NAMES,
       extensions: gp.extensions,
