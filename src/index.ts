@@ -636,6 +636,12 @@ export default function (pi: ExtensionAPI) {
   function isSchedulingEnabled(): boolean { return schedulingEnabled; }
   function setSchedulingEnabled(b: boolean) { schedulingEnabled = b; }
 
+  // Per-invocation gate: when true, every Agent tool call shows an
+  // allow/disallow/steer picker before spawning. Defaults to off.
+  let subagentGateEnabled = false;
+  function isSubagentGateEnabled(): boolean { return subagentGateEnabled; }
+  function setSubagentGateEnabled(b: boolean) { subagentGateEnabled = b; }
+
   // ---- Disable default agents configuration ----
   // When enabled, the three hardcoded default agents (general-purpose, Explore,
   // Plan) are not registered. User-defined agents from project/global custom
@@ -768,6 +774,7 @@ export default function (pi: ExtensionAPI) {
       setOutputTranscript: setOutputTranscriptDefault,
       setMaxSubagentDepth: setMaxSubagentDepth,
       setFallbackSubagent: setFallbackSubagent,
+      setSubagentGate: setSubagentGateEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1063,6 +1070,27 @@ Terse command-style prompts produce shallow, generic work.
 
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
+
+      // ---- Subagent gate: allow/disallow/steer picker ----
+      // Skipped for resume (continues existing work) and scheduled jobs
+      // (fire automatically, no user present to pick).
+      if (isSubagentGateEnabled() && !params.resume && !params.schedule) {
+        const choice = await ctx.ui.select(
+          `Allow subagent: ${params.description}`,
+          ["Allow", "Disallow", "Steer"],
+        );
+        if (choice !== "Allow" && choice !== "Steer") {
+          // Disallow or Esc — block the invocation
+          return textResult(`User blocked subagent "${params.description}". Proceed without it.`);
+        }
+        if (choice === "Steer") {
+          const steerMsg = await ctx.ui.input("Steering message (prepended to agent prompt)");
+          if (steerMsg === undefined) {
+            return textResult(`User blocked subagent "${params.description}". Proceed without it.`);
+          }
+          params = { ...params, prompt: `[User guidance]\n${steerMsg}\n\n[Task]\n${params.prompt}` };
+        }
+      }
 
       const rawType = params.subagent_type as SubagentType;
       // Single decision point for dispatch (#183): unknown, disabled and
@@ -2159,6 +2187,7 @@ ${systemPrompt}
       // explicit configuration — which then fails loudly if general-purpose later
       // goes away. undefined is dropped by JSON.stringify.
       fallbackSubagent: getFallbackSubagent(),
+      subagentGate: isSubagentGateEnabled(),
     };
   }
 
@@ -2277,6 +2306,13 @@ ${systemPrompt}
           currentValue: getToolDescriptionMode(),
           values: ["full", "compact", "custom"],
         },
+        {
+          id: "subagentGate",
+          label: "Subagent gate",
+          description: "Show allow/disallow/steer picker before every Agent tool invocation (skipped for resume and scheduled jobs)",
+          currentValue: isSubagentGateEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
       ];
     }
 
@@ -2362,6 +2398,10 @@ ${systemPrompt}
       } else if (id === "widgetMode") {
         setWidgetMode(value as WidgetMode);
         notifyApplied(ctx, `Widget set to ${value}`);
+      } else if (id === "subagentGate") {
+        const enabled = value === "on";
+        setSubagentGateEnabled(enabled);
+        notifyApplied(ctx, `Subagent gate ${enabled ? "enabled" : "disabled"}`);
       }
     }
 
