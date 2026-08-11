@@ -18,7 +18,7 @@ function makeRecord(id: string, overrides: Partial<AgentRecord> = {}): AgentReco
     status: "completed",
     toolUses: 0,
     startedAt: 0,
-    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+    lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cacheRead: 0 },
     ...overrides,
   };
 }

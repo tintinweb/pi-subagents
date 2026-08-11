@@ -116,8 +116,12 @@ export interface AgentRecord {
   outputCleanup?: () => void;
   /**
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
-   * compaction. Total = input + output + cacheWrite (cacheRead deliberately
-   * excluded — see issue #38). Initialized to zeros at spawn.
+   * compaction. `getLifetimeTotal()` = input + output + cacheWrite
+   * (cacheRead deliberately excluded from that sum — see issue #38 and the
+   * `LifetimeUsage` doc comment in usage.ts). `cacheRead` is exposed as an
+   * additional field on the record (most recent per-turn value, not summed)
+   * so telemetry consumers can report real cache-read/cache-write breakdown
+   * per dispatch. Initialized to zeros at spawn.
    */
   lifetimeUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */

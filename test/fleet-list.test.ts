@@ -29,7 +29,7 @@ function makeRecord(over: Partial<AgentRecord> = {}): AgentRecord {
     toolUses: 0,
     startedAt: Date.now(),
     session: FAKE_SESSION as any,
-    lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0 },
+    lifetimeUsage: { input: 13100, output: 0, cacheWrite: 0, cacheRead: 0 },
     compactionCount: 0,
     ...over,
   } as AgentRecord;

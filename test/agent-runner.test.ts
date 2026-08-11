@@ -508,11 +508,14 @@ describe("agent-runner usage callback wiring", () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    const seen: Array<{ input: number; output: number; cacheWrite: number }> = [];
+    const seen: Array<{ input: number; output: number; cacheWrite: number; cacheRead: number }> = [];
     session.prompt = vi.fn(async () => {
-      // Two assistant messages over the run
-      emitMessageEnd(listeners, { input: 100, output: 50, cacheWrite: 10 });
-      emitMessageEnd(listeners, { input: 200, output: 80, cacheWrite: 20 });
+      // Two assistant messages over the run. cacheRead is a per-turn
+      // cumulative snapshot (see issue #38), so the two values are expected
+      // to differ, not sum, on the callback side — accumulation semantics
+      // live in usage.ts's addUsage(), not here.
+      emitMessageEnd(listeners, { input: 100, output: 50, cacheWrite: 10, cacheRead: 1000 });
+      emitMessageEnd(listeners, { input: 200, output: 80, cacheWrite: 20, cacheRead: 2500 });
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
     });
 
@@ -522,8 +525,8 @@ describe("agent-runner usage callback wiring", () => {
     });
 
     expect(seen).toEqual([
-      { input: 100, output: 50, cacheWrite: 10 },
-      { input: 200, output: 80, cacheWrite: 20 },
+      { input: 100, output: 50, cacheWrite: 10, cacheRead: 1000 },
+      { input: 200, output: 80, cacheWrite: 20, cacheRead: 2500 },
     ]);
   });
 
@@ -542,7 +545,7 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0 }]);
+    expect(seen).toEqual([{ input: 50, output: 0, cacheWrite: 0, cacheRead: 0 }]);
   });
 
   it("runAgent skips the callback when message_end has no usage field", async () => {
@@ -565,7 +568,7 @@ describe("agent-runner usage callback wiring", () => {
     const seen: any[] = [];
 
     session.prompt = vi.fn(async () => {
-      emitMessageEnd(listeners, { input: 10, output: 20, cacheWrite: 5 });
+      emitMessageEnd(listeners, { input: 10, output: 20, cacheWrite: 5, cacheRead: 3000 });
       session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED" }] });
     });
 
@@ -573,7 +576,7 @@ describe("agent-runner usage callback wiring", () => {
       onAssistantUsage: (u) => seen.push(u),
     });
 
-    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5 }]);
+    expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5, cacheRead: 3000 }]);
   });
 
   it("forwards compaction_end events to onCompaction (only when not aborted)", async () => {
