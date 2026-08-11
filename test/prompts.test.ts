@@ -433,4 +433,98 @@ describe("buildAgentPrompt", () => {
       expect(prompt.indexOf("<worktree_isolation>")).toBeGreaterThan(prompt.indexOf("<sub_agent_context>"));
     });
   });
+
+  // The static per-agent-type body (config.systemPrompt) must
+  // form a byte-identical prefix across spawns regardless of cwd/branch
+  // drift, so it has to precede the variable env block, not follow it.
+  describe("cacheable static-body-before-env-block ordering", () => {
+    it("replace mode: config.systemPrompt precedes the env block", () => {
+      const config: AgentConfig = {
+        name: "replacer",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "UNIQUE_STATIC_BODY_MARKER",
+        promptMode: "replace",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const prompt = buildAgentPrompt(config, "/workspace", env);
+      const bodyIdx = prompt.indexOf("UNIQUE_STATIC_BODY_MARKER");
+      const envIdx = prompt.indexOf("# Environment");
+      expect(bodyIdx).toBeGreaterThan(-1);
+      expect(envIdx).toBeGreaterThan(-1);
+      expect(bodyIdx).toBeLessThan(envIdx);
+    });
+
+    it("replace mode: prefix up to end of systemPrompt is identical across differing cwd/branch", () => {
+      const config: AgentConfig = {
+        name: "replacer",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "Static instructions that must stay cacheable.",
+        promptMode: "replace",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const promptA = buildAgentPrompt(config, "/workspace/one", { isGitRepo: true, branch: "main", platform: "darwin" });
+      const promptB = buildAgentPrompt(config, "/workspace/two", { isGitRepo: true, branch: "feature/x", platform: "darwin" });
+      const marker = "Static instructions that must stay cacheable.";
+      const prefixEnd = promptA.indexOf(marker) + marker.length;
+      expect(promptA.slice(0, prefixEnd)).toBe(promptB.slice(0, prefixEnd));
+      // Sanity: the two prompts do genuinely differ later (env block), so this
+      // isn't a vacuous match on two identical calls.
+      expect(promptA).not.toBe(promptB);
+      expect(promptA).toContain("/workspace/one");
+      expect(promptB).toContain("/workspace/two");
+    });
+
+    it("append mode: config.systemPrompt (agent_instructions) precedes the env block", () => {
+      const config: AgentConfig = {
+        name: "appender",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "UNIQUE_STATIC_BODY_MARKER",
+        promptMode: "append",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const prompt = buildAgentPrompt(config, "/workspace", env, "Parent prompt.");
+      const bodyIdx = prompt.indexOf("UNIQUE_STATIC_BODY_MARKER");
+      const envIdx = prompt.indexOf("# Environment");
+      expect(bodyIdx).toBeGreaterThan(-1);
+      expect(envIdx).toBeGreaterThan(-1);
+      expect(bodyIdx).toBeLessThan(envIdx);
+    });
+
+    it("append mode: prefix through customSection is identical across differing cwd/branch", () => {
+      const config: AgentConfig = {
+        name: "appender",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "Static per-type instructions.",
+        promptMode: "append",
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+      const promptA = buildAgentPrompt(config, "/workspace/one", { isGitRepo: true, branch: "main", platform: "darwin" }, "Parent prompt.");
+      const promptB = buildAgentPrompt(config, "/workspace/two", { isGitRepo: true, branch: "feature/x", platform: "darwin" }, "Parent prompt.");
+      const marker = "</agent_instructions>";
+      const prefixEnd = promptA.indexOf(marker) + marker.length;
+      expect(prefixEnd).toBeGreaterThan(marker.length - 1);
+      expect(promptA.slice(0, prefixEnd)).toBe(promptB.slice(0, prefixEnd));
+      expect(promptA).not.toBe(promptB);
+    });
+  });
 });

@@ -21,8 +21,8 @@ export interface PromptExtras {
 /**
  * Build the system prompt for an agent from its config.
  *
- * - "replace" mode: env header + config.systemPrompt (full control, no parent identity)
- * - "append" mode: parent system prompt + sub-agent context + env header + config.systemPrompt
+ * - "replace" mode: config.systemPrompt (full control, no parent identity) + env header
+ * - "append" mode: parent system prompt + sub-agent context + config.systemPrompt + env header
  * - "append" with empty systemPrompt: pure parent clone
  *
  * Both modes include an `<active_agent name="${config.name}"/>` tag so downstream
@@ -31,6 +31,18 @@ export interface PromptExtras {
  * is prepended; in append mode it follows the shared inherited content so the
  * parent prompt forms an identical, cacheable byte prefix with the parent
  * session (the LLM's KV cache can then reuse those tokens across every spawn).
+ *
+ * Within each mode, the STATIC per-agent-type body (`config.systemPrompt`,
+ * typically 1-2KB) is placed BEFORE the VARIABLE env block (cwd/branch, which
+ * drifts across spawns in the same session/repo as the user cd's around or
+ * commits land) and the worktree block (which names a per-spawn path). Only
+ * `activeAgentTag` stays at the front of the static block in both modes —
+ * it depends solely on `config.name`, which is invariant for repeated spawns
+ * of the same agent type, so it doesn't break the cacheable prefix. This
+ * ordering means every spawn of the same agent type shares an identical byte
+ * prefix through the end of `config.systemPrompt`, letting the LLM's KV
+ * cache reuse it even when cwd/branch/worktree info differs between spawns.
+ * Memory/skill extras remain last (session-specific, never worth caching).
  *
  * @param parentSystemPrompt  The parent agent's effective system prompt (for append mode).
  * @param extras  Optional extra sections to inject (memory, preloaded skills).
@@ -95,18 +107,26 @@ You are operating as a sub-agent invoked to handle a specific task.
     // Place shared/stable content first so the LLM's KV cache can reuse the
     // inherited prefix across all subagent invocations. The parent prompt is
     // placed verbatim (no wrapper tag) so it forms an identical byte prefix
-    // with the parent session, maximising KV cache hits. The <active_agent>
-    // tag and env block vary per call and are placed after the cached prefix.
-    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + customSection + extrasSuffix;
+    // with the parent session, maximising KV cache hits. `activeAgentTag` and
+    // `customSection` (config.systemPrompt) are static per agent type — kept
+    // adjacent to the cached prefix. `envBlock`/`worktreeBlock` vary per
+    // spawn (cwd/branch drift, per-spawn worktree path) and are placed after,
+    // so a run of same-type spawns keeps sharing this whole prefix even as
+    // cwd/branch change between them.
+    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + customSection + envBlock + worktreeBlock + extrasSuffix;
   }
 
-  // "replace" mode — env header + the config's full system prompt
+  // "replace" mode — the config's full system prompt + env header
   const replaceHeader = `You are a pi coding agent sub-agent.
-You have been invoked to handle a specific task autonomously.
+You have been invoked to handle a specific task autonomously.`;
 
-${envBlock}`;
-
-  return activeAgentTag + replaceHeader + worktreeBlock + "\n\n" + config.systemPrompt + extrasSuffix;
+  // Static per-agent-type body (activeAgentTag + replaceHeader + systemPrompt)
+  // comes first so it forms an identical, cacheable byte prefix across every
+  // spawn of this agent type. The variable envBlock/worktreeBlock (cwd,
+  // branch, worktree path — all of which can drift between spawns in the
+  // same session) are placed after, instead of before, so they no longer
+  // invalidate that cached prefix.
+  return activeAgentTag + replaceHeader + "\n\n" + config.systemPrompt + "\n\n" + envBlock + worktreeBlock + extrasSuffix;
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */
