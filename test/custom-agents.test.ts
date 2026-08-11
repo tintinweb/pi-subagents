@@ -151,6 +151,8 @@ Just a prompt.`);
     const agent = result.get("minimal")!;
 
     expect(agent.name).toBe("minimal");
+    expect(agent.displayName).toBeUndefined();
+    expect(agent.color).toBeUndefined();
     expect(agent.description).toBe("minimal"); // defaults to filename
     expect(agent.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES); // all tools
     expect(agent.extensions).toBe(true); // inherit all
@@ -582,8 +584,9 @@ enabled: false
     expect(agent.enabled).toBe(false);
   });
 
-  it("parses display_name frontmatter", () => {
+  it("parses display_name frontmatter and gives it precedence over Claude Code name", () => {
     writeAgent("myagent", `---
+name: Claude Name
 description: My Agent
 display_name: MyAgent
 ---
@@ -592,6 +595,21 @@ Agent prompt.`);
 
     const result = loadCustomAgents(tmpDir);
     expect(result.get("myagent")!.displayName).toBe("MyAgent");
+  });
+
+  it("uses Claude Code name as the display-name fallback", () => {
+    writeAgent("code-reviewer", `---
+name: Code Reviewer
+description: Reviews code
+color: "#8B5CF6"
+---
+
+Agent prompt.`);
+
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("code-reviewer")!.name).toBe("code-reviewer");
+    expect(result.get("code-reviewer")!.displayName).toBe("Code Reviewer");
+    expect(result.get("code-reviewer")!.color).toBe("#8B5CF6");
   });
 
   it("parses disallowed_tools as csv list", () => {

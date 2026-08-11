@@ -62,7 +62,8 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
 
     agents.set(name, {
       name,
-      displayName: str(fm.display_name),
+      displayName: str(fm.display_name) ?? str(fm.name),
+      color: str(fm.color),
       description: str(fm.description) ?? name,
       builtinToolNames,
       extSelectors,

@@ -23,7 +23,10 @@ export type IsolationMode = "worktree";
 /** Unified agent configuration — used for both default and user-defined agents. */
 export interface AgentConfig {
   name: string;
+  /** UI name. `display_name` wins; Claude Code's `name` is accepted as a fallback. */
   displayName?: string;
+  /** Claude Code-compatible name color (named color or #RRGGBB). */
+  color?: string;
   description: string;
   builtinToolNames?: string[];
   /** Raw `ext:` selector entries from the `tools:` CSV, e.g. ["ext:foo", "ext:bar/x"].

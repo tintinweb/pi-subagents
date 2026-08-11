@@ -190,6 +190,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   const fmFields: string[] = [];
   fmFields.push(`description: ${JSON.stringify(cfg.description)}`);
   if (cfg.displayName) fmFields.push(`display_name: ${cfg.displayName}`);
+  if (cfg.color) fmFields.push(`color: ${JSON.stringify(cfg.color)}`);
   // Absent means "all built-ins"; an EMPTY list means explicitly zero. Writing
   // `all` for both would hand a deliberately tool-less agent the whole toolbox
   // the first time it is ejected.
