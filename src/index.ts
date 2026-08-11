@@ -972,16 +972,10 @@ Terse command-style prompts produce shallow, generic work.
     renderResult(result, { expanded, isPartial }, theme, renderContext) {
       const details = result.details as AgentDetails | undefined;
       const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-      const knownStatuses = new Set<AgentDetails["status"]>([
-        "running",
-        "background",
-        "completed",
-        "steered",
-        "stopped",
-        "error",
-        "aborted",
-      ]);
-      if (renderContext.isError || !details || !knownStatuses.has(details.status)) {
+      // Pi reports pre-execution failures (extension block, abort, argument
+      // validation) as `{ content: [reason], details: {} }` with isError set —
+      // no status to render, so show the reason instead of inventing one (#199).
+      if (renderContext.isError || !details?.status) {
         return new Text(text, 0, 0);
       }
 
@@ -1043,6 +1037,12 @@ Terse command-style prompts produce shallow, generic work.
         let line = theme.fg("dim", "■") + (s ? " " + s : "");
         line += "\n" + theme.fg("dim", "  ⎿  Stopped");
         return new Text(line, 0, 0);
+      }
+
+      // Anything left ("queued", or a status added later) has no rendering of
+      // its own — the turn-limit wording below must not be the catch-all.
+      if (details.status !== "error" && details.status !== "aborted") {
+        return new Text(text, 0, 0);
       }
 
       // ---- Error / Aborted (hard max_turns) ----

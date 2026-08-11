@@ -46,6 +46,7 @@ describe("Agent tool invocation error rendering", () => {
     ["missing details", undefined],
     ["empty details", {}],
     ["unknown status", { status: "unknown" }],
+    ["a status with no rendering of its own", { status: "queued" }],
   ])("shows the real result text for %s", (_name, details) => {
     const output = render(agentTool(), {
       content: [{ type: "text", text: "Unstructured Agent result." }],
