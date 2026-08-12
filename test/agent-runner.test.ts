@@ -413,7 +413,10 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
     expect(result.responseText).toBe("truncated but useful answer");
   });
 
-  it("does NOT flag an empty final turn that stopped cleanly (no false failures)", async () => {
+  it("flags an empty final turn that stopped cleanly even when an EARLIER message had text", async () => {
+    // Pre-fix this passed as "completed": the terminal "stop" with no text
+    // slipped through, and the walk-back fallback surfaced the earlier
+    // "did the work" as the result. An empty terminal stop is a no-output run.
     const session = sessionEnding(
       { role: "assistant", content: [{ type: "text", text: "did the work" }] },
       { role: "toolResult", content: [] },
@@ -423,8 +426,50 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
 
     const result = await runAgent(ctx, "Explore", "go", { pi });
 
-    expect(result.failure).toBeUndefined();
+    expect(result.failure).toBe("run ended without producing any text");
     expect(result.responseText).toBe("did the work"); // walk-back fallback preserved
+  });
+
+  it("flags a final clean stop whose text block is empty (the stale-result hole)", async () => {
+    // Observed on long opus runs: the final assistant message is
+    // content: [{ type: "thinking", ... }, { type: "text", text: "" }] with
+    // stopReason "stop". The empty text block used to pass as "completed" and
+    // the walk-back fallback surfaced the run's OPENING line as the result.
+    const session = sessionEnding({
+      role: "assistant",
+      content: [{ type: "thinking", thinking: "…" }, { type: "text", text: "" }],
+      stopReason: "stop",
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBe("run ended without producing any text");
+    expect(result.responseText).toBe("");
+  });
+
+  it("does NOT flag a clean stop that produced text", async () => {
+    const session = sessionEnding({
+      role: "assistant",
+      content: [{ type: "text", text: "the answer" }],
+      stopReason: "stop",
+    });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBeUndefined();
+    expect(result.responseText).toBe("the answer");
+  });
+
+  it("does NOT flag an empty turn that stopped with toolUse (mid-run, never final)", async () => {
+    const session = sessionEnding({ role: "assistant", content: [], stopReason: "toolUse" });
+    createAgentSession.mockResolvedValue({ session });
+
+    const result = await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(result.failure).toBeUndefined();
+    expect(result.responseText).toBe(""); // a tool call, not a terminal answer
   });
 
   it("resumeAgent applies the same rule", async () => {
