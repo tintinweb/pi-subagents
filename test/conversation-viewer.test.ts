@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
 
@@ -34,9 +35,11 @@ function mockTui(rows = 40, columns = 80) {
   } as any;
 }
 
-function mockSession(messages: any[] = []) {
+function mockSession(messages: any[] = [], runtime?: { provider: string; id: string; thinkingLevel: string }) {
   return {
     messages,
+    model: runtime ? { provider: runtime.provider, id: runtime.id } : undefined,
+    thinkingLevel: runtime?.thinkingLevel,
     subscribe: vi.fn(() => vi.fn()),
     dispose: vi.fn(),
     getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
@@ -76,6 +79,27 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer", () => {
+  it("shows the live runtime model ID with its model-dependent thinking level", () => {
+    const viewer = new ConversationViewer(
+      mockTui(30, 120),
+      mockSession([], { provider: "openai-codex", id: "gpt-5.6-sol", thinkingLevel: "xhigh" }),
+      mockRecord({
+        invocation: {
+          modelName: "stale/primary",
+          thinking: "max",
+          maxTurns: 60,
+        },
+      }),
+      undefined,
+      ansiTheme(),
+      vi.fn(),
+    );
+
+    const rendered = viewer.render(120).map(line => stripVTControlCharacters(line)).join("\n");
+    expect(rendered).toContain("openai-codex/gpt-5.6-sol · thinking: xhigh · max turns: 60");
+    expect(rendered).not.toContain("stale/primary");
+  });
+
   describe("render width safety", () => {
     const widths = [40, 80, 120, 216];
 

@@ -59,6 +59,145 @@ function ctx() {
 
 const textOf = (r: any): string => r.content[0].text;
 
+function modelCtx() {
+  const context = ctx();
+  context.model = {
+    provider: "openai-codex",
+    id: "gpt-5.6-sol",
+    name: "GPT-5.6 Sol",
+  };
+  return context;
+}
+
+function runtimeSession(provider = "openai-codex", id = "gpt-5.6-sol", thinkingLevel = "xhigh") {
+  return {
+    model: { provider, id, name: "Ambiguous Display Name" },
+    thinkingLevel,
+    dispose: vi.fn(),
+  } as never;
+}
+
+describe("Agent tool model display", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("shows the canonical runtime model with its effective thinking in collapsed and expanded results", async () => {
+    const session = runtimeSession();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+      options.onSessionCreated?.(session);
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const tool = tools.get("Agent");
+    const onUpdate = vi.fn();
+
+    const result = await tool.execute(
+      "tc-model",
+      { prompt: "go", description: "d", subagent_type: "general-purpose", thinking: "max" },
+      undefined,
+      onUpdate,
+      modelCtx(),
+    );
+
+    for (const candidate of [onUpdate.mock.calls.at(-1)?.[0], result]) {
+      const collapsed = tool.renderResult(candidate, { expanded: false, isPartial: false }, {
+        fg: (_color: string, text: string) => text,
+      }).render(120).join("\n");
+      const expanded = tool.renderResult(candidate, { expanded: true, isPartial: false }, {
+        fg: (_color: string, text: string) => text,
+      }).render(120).join("\n");
+      expect(collapsed).toContain("openai-codex/gpt-5.6-sol");
+      expect(expanded).toContain("openai-codex/gpt-5.6-sol");
+      expect(collapsed).toContain("thinking:");
+      expect(expanded).toContain("thinking:");
+      expect(collapsed).not.toContain("Ambiguous Display Name");
+    }
+    expect(result.details.tags).toContain("thinking: xhigh");
+  });
+
+  it("shows the canonical pre-session model in the immediate background result", async () => {
+    let releaseSession: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+      await new Promise<void>(resolve => { releaseSession = resolve; });
+      const session = runtimeSession("anthropic", "claude-sonnet-4-6", "high");
+      options.onSessionCreated?.(session);
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const tool = tools.get("Agent");
+    const result = await tool.execute(
+      "tc-background-model",
+      {
+        prompt: "go",
+        description: "d",
+        subagent_type: "general-purpose",
+        run_in_background: true,
+        thinking: "max",
+      },
+      undefined,
+      undefined,
+      modelCtx(),
+    );
+
+    for (const expanded of [false, true]) {
+      const rendered = tool.renderResult(result, { expanded, isPartial: false }, {
+        fg: (_color: string, text: string) => text,
+      }).render(120).join("\n");
+      expect(rendered).toContain("openai-codex/gpt-5.6-sol");
+      expect(rendered).toContain("thinking:");
+      expect(rendered).not.toContain("anthropic/claude-sonnet-4-6");
+    }
+    releaseSession?.();
+    await new Promise(resolve => setTimeout(resolve, 0));
+  });
+
+  it("uses the existing session metadata when resuming", async () => {
+    const session = runtimeSession("anthropic", "claude-opus-4-6", "high");
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options) => {
+      options.onSessionCreated?.(session);
+      return { responseText: "first", session, aborted: false, steered: false };
+    });
+    const { pi, tools } = makePi();
+    subagentsExtension(pi);
+    const tool = tools.get("Agent");
+    const first = await tool.execute(
+      "tc-resume-first",
+      { prompt: "go", description: "original", subagent_type: "general-purpose", run_in_background: true },
+      undefined,
+      undefined,
+      modelCtx(),
+    );
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const agentId = first.details.agentId;
+    const conflictingCtx = modelCtx();
+    conflictingCtx.model = { provider: "google", id: "gemini-3-pro", name: "Gemini" };
+
+    session.model = { provider: "anthropic", id: "claude-sonnet-4-6", name: "Switched" };
+    session.thinkingLevel = "medium";
+    const resumed = await tool.execute(
+      "tc-resume-second",
+      {
+        prompt: "continue",
+        description: "changed",
+        subagent_type: "Explore",
+        model: "google/gemini-3-pro",
+        thinking: "minimal",
+        resume: agentId,
+      },
+      undefined,
+      undefined,
+      conflictingCtx,
+    );
+    const rendered = tool.renderResult(resumed, { expanded: false, isPartial: false }, {
+      fg: (_color: string, text: string) => text,
+    }).render(120).join("\n");
+    expect(rendered).toContain("anthropic/claude-sonnet-4-6");
+    expect(rendered).toContain("thinking: medium");
+    expect(rendered).not.toContain("google/gemini-3-pro");
+  });
+});
+
 describe("status note reaches the parent through the real handlers", () => {
   afterEach(() => {
     delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
