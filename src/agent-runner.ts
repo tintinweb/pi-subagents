@@ -837,8 +837,15 @@ export async function runAgent(
   const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
-  const sessionManager = agentConfig?.persistSession
-    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir)
+  // Persist subagent sessions by default so Agent-tool subagents become
+  // first-class, parent-linked sessions (like spawn_subsession children).
+  // persist_session: false in the agent config remains an explicit opt-out.
+  const shouldPersist = agentConfig?.persistSession !== false;
+  const parentSessionFile = ctx.sessionManager?.getSessionFile?.();
+  const sessionManager = shouldPersist
+    ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
+        ...(parentSessionFile ? { parentSession: parentSessionFile } : {}),
+      })
     : SessionManager.inMemory(effectiveCwd);
 
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
