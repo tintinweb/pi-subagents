@@ -12,7 +12,6 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 
 function makePi() {
@@ -73,7 +72,6 @@ describe("strictAgentFiles gates extension activation", () => {
     else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     if (originalHome == null) delete process.env.HOME;
     else process.env.HOME = originalHome;
-    registerAgents(new Map());
     rmSync(cwd, { recursive: true, force: true });
   });
 

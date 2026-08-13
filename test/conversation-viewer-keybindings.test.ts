@@ -1,5 +1,6 @@
 import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
+import { buildAgentRegistry } from "../src/agent-types.js";
 import type { AgentRecord } from "../src/types.js";
 import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import type { ViewerKeybindings } from "../src/ui/viewer-keys.js";
@@ -46,7 +47,7 @@ function createViewer(keybindings?: ViewerKeybindings) {
     fg: (_color: string, text: string) => text,
     bold: (text: string) => text,
   } as any;
-  const viewer = new ConversationViewer(tui, session, record, undefined, theme, vi.fn(), undefined, keybindings);
+  const viewer = new ConversationViewer(tui, session, record, buildAgentRegistry(new Map()), undefined, theme, vi.fn(), undefined, keybindings);
   viewer.render(80); // sets lastInnerW and scrolls to bottom (autoScroll)
   return viewer;
 }

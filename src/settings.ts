@@ -263,8 +263,14 @@ function readSettingsFile(path: string): SubagentsSettings {
   }
 }
 
-/** Load merged settings: global provides defaults, project overrides. */
-export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
+/**
+ * Load merged settings: global provides defaults, project overrides.
+ *
+ * `cwd` is the session's working directory — required, no `process.cwd()`
+ * default: in an embedding host the process cwd is not the session's project
+ * (#206), and a defaulted parameter is exactly how that class of bug hides.
+ */
+export function loadSettings(cwd: string): SubagentsSettings {
   return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
 }
 
@@ -273,7 +279,7 @@ export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
  * Returns `true` on success, `false` if the write (or mkdir) failed so the
  * caller can surface a warning — persistence isn't fatal but isn't silent.
  */
-export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()): boolean {
+export function saveSettings(s: SubagentsSettings, cwd: string): boolean {
   const path = projectPath(cwd);
   try {
     mkdirSync(dirname(path), { recursive: true });
@@ -303,6 +309,46 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
 }
 
 /**
+ * Built-in defaults for every settings key — the value in effect when no
+ * settings file names it. Mirrors the initializers that live next to each
+ * setter (and the defaults the `SubagentsSettings` docs promise); `Required`
+ * so a new settings key can't ship without declaring its default here.
+ * `fallbackSubagent` is excluded: its default is `undefined` (the historical
+ * general-purpose fallback), which an optional field can't distinguish from
+ * "absent" — `applyDefaultSettings` resets it explicitly instead.
+ */
+export const DEFAULT_SETTINGS: Required<Omit<SubagentsSettings, "fallbackSubagent">> = {
+  maxConcurrent: 4,
+  defaultMaxTurns: 0, // 0 = unlimited — the convention normalizeMaxTurns understands
+  graceTurns: 5,
+  defaultJoinMode: "smart",
+  schedulingEnabled: true,
+  scopeModels: false,
+  strictAgentFiles: false,
+  disableDefaultAgents: false,
+  toolDescriptionMode: "full",
+  fleetView: true,
+  widgetMode: "background",
+  outputTranscript: true,
+  maxSubagentDepth: 2,
+};
+
+/**
+ * Reset in-memory state to the built-in defaults. `applySettings` fires
+ * appliers only for keys present in the settings it's given — right for
+ * layering a file over current state, but when that state was built for a
+ * *different* directory (session_start adopting the session cwd, #206), the
+ * previous directory's policy would survive wherever the new tree's settings
+ * are silent. Run this first, then apply the new tree's settings on top.
+ */
+export function applyDefaultSettings(appliers: SettingsAppliers): void {
+  applySettings(DEFAULT_SETTINGS, appliers);
+  // The one reset applySettings can't express: `undefined` restores the
+  // historical general-purpose fallback.
+  appliers.setFallbackSubagent(undefined);
+}
+
+/**
  * Format the user-facing toast for a settings mutation. Pure function —
  * routes the success/failure of `saveSettings` into the right message + level
  * so the UI layer (index.ts) stays a thin wire between input and notification.
@@ -324,7 +370,7 @@ export function persistToastFor(
 export function applyAndEmitLoaded(
   appliers: SettingsAppliers,
   emit: SettingsEmit,
-  cwd: string = process.cwd(),
+  cwd: string,
 ): SubagentsSettings {
   const settings = loadSettings(cwd);
   applySettings(settings, appliers);
@@ -342,7 +388,7 @@ export function saveAndEmitChanged(
   snapshot: SubagentsSettings,
   successMsg: string,
   emit: SettingsEmit,
-  cwd: string = process.cwd(),
+  cwd: string,
 ): { message: string; level: "info" | "warning" } {
   const persisted = saveSettings(snapshot, cwd);
   emit("subagents:settings_changed", { settings: snapshot, persisted });

@@ -2,13 +2,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { type AgentTypeState, buildAgentRegistry, createAgentTypeState } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, type NestedAgentManager } from "../src/nested-tools.js";
 import { encodeCwd } from "../src/output-file.js";
 
 let cwd: string;
+/**
+ * Stand-in for the owning session's per-session registry state (#206). Nested
+ * tools never receive it — they resolve from their own config root via
+ * `buildRegistryFor` — so tests assert it stays untouched.
+ */
+let sessionState: AgentTypeState;
 let manager: NestedAgentManager;
 let records: Map<string, any>;
 let spawn: ReturnType<typeof vi.fn>;
@@ -51,6 +57,7 @@ function tools(
     maxSubagentDepth,
     allowedSubagents,
     configCwd,
+    buildRegistryFor: (root) => buildAgentRegistry(loadCustomAgents(root)),
   });
 }
 
@@ -62,7 +69,8 @@ beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "nested-tools-test-"));
   writeAgent("scout");
   writeAgent("reviewer");
-  registerAgents(loadCustomAgents(cwd));
+  sessionState = createAgentTypeState();
+  sessionState.register(loadCustomAgents(cwd));
   records = new Map();
   spawn = vi.fn((_pi, _ctx, type, _prompt, options) => {
     const id = `child-${records.size + 1}`;
@@ -152,14 +160,14 @@ describe("child-safe nested Agent tools", () => {
     expect(spawnAndWait).toHaveBeenCalledTimes(1);
   });
 
-  it("resolves nested types without touching the process-global registry", async () => {
+  it("resolves nested types without touching the session's registry", async () => {
     // A worktree-isolated parent hands its own config root down. Resolving from
-    // it must not swap the registry the main session and every other agent read.
+    // it must not swap the registry the owning session and every other agent read.
     const otherCwd = mkdtempSync(join(tmpdir(), "nested-tools-config-"));
     const otherAgentDir = join(otherCwd, ".pi", "agents");
     mkdirSync(otherAgentDir, { recursive: true });
     writeFileSync(join(otherAgentDir, "branch-only.md"), "---\ndescription: branch-only\n---\nbranch-only\n");
-    const before = getAvailableTypes();
+    const before = sessionState.getAvailableTypes();
 
     try {
       const [agent] = tools("all", 1, 2, otherCwd);
@@ -172,8 +180,8 @@ describe("child-safe nested Agent tools", () => {
       // Resolved from the inherited root...
       expect(result.isError).toBe(false);
       // ...without leaking it into the shared registry.
-      expect(getAvailableTypes()).toEqual(before);
-      expect(getAvailableTypes()).not.toContain("branch-only");
+      expect(sessionState.getAvailableTypes()).toEqual(before);
+      expect(sessionState.getAvailableTypes()).not.toContain("branch-only");
     } finally {
       rmSync(otherCwd, { recursive: true, force: true });
     }
@@ -236,7 +244,7 @@ describe("child-safe nested Agent tools", () => {
 
   it("rejects unknown or disabled nested agent types instead of falling back", async () => {
     writeAgent("disabled", "enabled: false\n");
-    registerAgents(loadCustomAgents(cwd));
+    sessionState.register(loadCustomAgents(cwd));
     const [agent] = tools();
 
     for (const subagentType of ["missing", "disabled"]) {
@@ -340,21 +348,20 @@ describe("child-safe nested Agent tools", () => {
     // The contract nested delegation documents is "rejected rather than falling
     // back" — a top-level fallback must not hand a nested caller an agent its
     // allowlist never named.
-    setFallbackSubagent("scout");
-    try {
-      const [agent] = tools(["scout"]);
-      const result = await execute(agent, {
-        subagent_type: "definitely-missing",
-        description: "typo",
-        prompt: "Do work",
-      });
+    // The fallback policy lives in the owning session's state (#206), which
+    // nested tools never receive — so even a session configured to fall back
+    // cannot make a nested dispatch substitute an agent.
+    sessionState.setFallbackSubagent("scout");
+    const [agent] = tools(["scout"]);
+    const result = await execute(agent, {
+      subagent_type: "definitely-missing",
+      description: "typo",
+      prompt: "Do work",
+    });
 
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Unknown or disabled nested agent type");
-      expect(spawnAndWait).not.toHaveBeenCalled();
-    } finally {
-      setFallbackSubagent(undefined);
-    }
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Unknown or disabled nested agent type");
+    expect(spawnAndWait).not.toHaveBeenCalled();
   });
 
   it("hands the branch cap down to the child it spawns", async () => {
@@ -490,7 +497,7 @@ describe("child-safe nested Agent tools", () => {
 
       // The child's own frontmatter still wins.
       writeAgent("quiet", "output_transcript: false\n");
-      registerAgents(loadCustomAgents(cwd));
+      sessionState.register(loadCustomAgents(cwd));
       records.delete("child-1");
       await execute(agent, { subagent_type: "quiet", description: "untraced", prompt: "Do work" });
       expect(records.get("child-1").outputFile).toBeUndefined();

@@ -21,8 +21,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type Context, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { registerAgents } from "../src/agent-types.js";
-import { loadCustomAgents } from "../src/custom-agents.js";
 import { encodeCwd } from "../src/output-file.js";
 import {
   agentCall,
@@ -159,7 +157,6 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
       cwd,
       respond,
       live: false,
-      beforeRun: () => { registerAgents(loadCustomAgents(cwd)); },
     });
 
     // pi admitted the injected nested tools into the opted-in child's active set,
@@ -223,7 +220,6 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
         cwd,
         respond,
         live: false,
-        beforeRun: () => { registerAgents(loadCustomAgents(cwd)); },
       });
 
       // The background child ran and its output came back through the id the

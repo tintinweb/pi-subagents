@@ -1,27 +1,37 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  type AgentTypeState,
   BUILTIN_TOOL_NAMES,
-  getAgentConfig,
-  getAvailableTypes,
-  getConfig,
-  getDefaultAgentNames,
+  createAgentTypeState,
   getMemoryToolNames,
   getReadOnlyMemoryToolNames,
-  getToolNamesForType,
-  getUserAgentNames,
-  isDefaultsDisabled,
-  isValidType,
   NO_FALLBACK,
-  registerAgents,
   resolveEnabledTypeIn,
-  resolveSpawnType,
   resolveSpawnTypeIn,
-  resolveType,
-  setDefaultsDisabled,
-  setFallbackSubagent,
 } from "../src/agent-types.js";
 import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import type { AgentConfig } from "../src/types.js";
+
+// The registry moved from module scope into per-session state (#206). The API
+// surface is unchanged — rebind the old names to one state instance so the
+// test bodies below stay as they were; `registerAgents` refills that
+// instance's registry in place, exactly like the old module-global one (and,
+// like it, leaves disableDefaults/fallbackSubagent alone — the afterEach
+// resets below still matter).
+const state: AgentTypeState = createAgentTypeState();
+const registerAgents = (userAgents: Map<string, AgentConfig>) => state.register(userAgents);
+const getAgentConfig = (name: string) => state.getAgentConfig(name);
+const getAvailableTypes = () => state.getAvailableTypes();
+const getConfig = (type: string) => state.getConfig(type);
+const getDefaultAgentNames = () => state.getDefaultAgentNames();
+const getToolNamesForType = (type: string) => state.getToolNamesForType(type);
+const getUserAgentNames = () => state.getUserAgentNames();
+const isDefaultsDisabled = () => state.isDefaultsDisabled();
+const isValidType = (type: string) => state.isValidType(type);
+const resolveSpawnType = (requested: unknown) => state.resolveSpawnType(requested);
+const resolveType = (name: string) => state.resolveType(name);
+const setDefaultsDisabled = (b: boolean) => state.setDefaultsDisabled(b);
+const setFallbackSubagent = (v: string | undefined) => state.setFallbackSubagent(v);
 
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -138,7 +148,7 @@ describe("agent type registry", () => {
   });
 
   describe("disable defaults", () => {
-    // Module-level flag — always reset so later describes see the default roster.
+    // Instance flag — always reset so later describes see the default roster.
     afterEach(() => {
       setDefaultsDisabled(false);
       registerAgents(new Map());
@@ -481,13 +491,55 @@ describe("resolveSpawnType — fail-closed dispatch (#183)", () => {
     // Nested delegation uses this seam so a project-level fallback can't hand a
     // nested caller an agent its allowlist never named.
     const registry = roster();
-    setFallbackSubagent("router");
     expect(resolveEnabledTypeIn(registry, "typoo")).toBeUndefined();
     expect(resolveEnabledTypeIn(registry, "retired")).toBeUndefined();
     expect(resolveEnabledTypeIn(registry, " SCOUT ")).toBe("scout");
-    // ...while the policy layer still honors it.
-    expect(resolveSpawnTypeIn(registry, "typoo")).toEqual({
+    // ...while the policy layer still honors a fallback — passed explicitly,
+    // since resolveSpawnTypeIn is pure over both the registry and the policy
+    // (the ambient module state it used to read is per-session now, #206).
+    expect(resolveSpawnTypeIn(registry, "typoo", "router")).toEqual({
       ok: true, type: "router", fellBackFrom: "typoo",
     });
+  });
+});
+
+describe("per-session agent-type state (#206)", () => {
+  it("two states register different rosters without interfering", () => {
+    // The embedding-host shape: two live sessions in different projects, each
+    // reloading its own definitions. With module-scope state this was
+    // last-writer-wins; with per-session instances both resolve their own.
+    const sessionA = createAgentTypeState();
+    const sessionB = createAgentTypeState();
+    sessionA.register(new Map([["alpha", makeAgentConfig({ name: "alpha" })]]));
+    sessionB.register(new Map([["beta", makeAgentConfig({ name: "beta" })]]));
+
+    expect(sessionA.isValidType("alpha")).toBe(true);
+    expect(sessionA.isValidType("beta")).toBe(false);
+    expect(sessionB.isValidType("beta")).toBe(true);
+    expect(sessionB.isValidType("alpha")).toBe(false);
+  });
+
+  it("registry settings are per-state too", () => {
+    const strict = createAgentTypeState();
+    const lax = createAgentTypeState();
+    strict.setFallbackSubagent(NO_FALLBACK);
+    strict.setDefaultsDisabled(true);
+    strict.register(new Map());
+    lax.register(new Map());
+
+    expect(strict.resolveSpawnType("nope").ok).toBe(false);
+    expect(lax.resolveSpawnType("nope")).toEqual({ ok: true, type: "general-purpose", fellBackFrom: "nope" });
+    expect(strict.getAvailableTypes()).toEqual([]);
+    expect(lax.isValidType("Explore")).toBe(true);
+  });
+
+  it("registry() is a stable reference that register() refills in place", () => {
+    // A spawn queued with this reference must observe mid-session reloads —
+    // the same live semantics the process-wide registry had.
+    const session = createAgentTypeState();
+    const ref = session.registry();
+    session.register(new Map([["late", makeAgentConfig({ name: "late" })]]));
+    expect(session.registry()).toBe(ref);
+    expect(ref.has("late")).toBe(true);
   });
 });

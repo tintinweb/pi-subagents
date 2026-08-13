@@ -14,9 +14,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { type AgentTypeState, createAgentTypeState, NO_FALLBACK } from "../src/agent-types.js";
+
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
+
+// Per-session registry state (#206): the scheduler resolves fire-time types
+// against the owning session's state, handed to start().
+let agentTypes: AgentTypeState;
+const startScheduler = (scheduler: SubagentScheduler, pi: any, ctx: any, manager: any, store: any) => {
+  agentTypes = createAgentTypeState();
+  agentTypes.register(new Map());
+  scheduler.start(pi, ctx, manager, store, agentTypes, () => new Map());
+};
 
 function makeMockManager() {
   const spawnFn = vi.fn(() => "agent-" + Math.random().toString(36).slice(2, 10));
@@ -107,7 +117,7 @@ describe("SubagentScheduler — lifecycle", () => {
     manager = makeMockManager();
     pi = makeMockPi();
     ctx = makeMockCtx();
-    scheduler.start(pi, ctx, manager, store);
+    startScheduler(scheduler, pi, ctx, manager, store);
   });
 
   afterEach(() => {
@@ -216,7 +226,7 @@ describe("SubagentScheduler — lifecycle", () => {
     // Re-arm: stop drops timers, start re-reads store.list() and calls scheduleJob
     // for every enabled job → the past-branch fires for our seeded record.
     scheduler.stop();
-    scheduler.start(pi, ctx, manager, store);
+    startScheduler(scheduler, pi, ctx, manager, store);
 
     const reloaded = scheduler.list().find(j => j.id === "reload-test");
     expect(reloaded?.enabled).toBe(false);
@@ -243,16 +253,12 @@ describe("SubagentScheduler — fire path", () => {
     manager = makeMockManager();
     pi = makeMockPi();
     ctx = makeMockCtx();
-    scheduler.start(pi, ctx, manager, store);
+    startScheduler(scheduler, pi, ctx, manager, store);
   });
 
   afterEach(() => {
     scheduler.stop();
     vi.useRealTimers();
-    // Module-global: restore here, not at the end of a test body, so a failing
-    // assertion can't leak strict dispatch into every test that follows.
-    setFallbackSubagent(undefined);
-    registerAgents(new Map());
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -272,8 +278,8 @@ describe("SubagentScheduler — fire path", () => {
   it("refuses at fire time when the job's agent type no longer resolves", () => {
     // The registry is what production populates at activation; a job outliving
     // its agent must not silently run something else (#183).
-    registerAgents(new Map());
-    setFallbackSubagent(NO_FALLBACK);
+    agentTypes.register(new Map());
+    agentTypes.setFallbackSubagent(NO_FALLBACK);
     const job = scheduler.addJob({
       name: "gone", description: "vanished agent", schedule: "+1s",
       subagent_type: "deleted-since", prompt: "run",

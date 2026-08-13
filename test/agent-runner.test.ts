@@ -63,17 +63,16 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
   SettingsManager: { create: settingsManagerCreate },
 }));
 
-vi.mock("../src/agent-types.js", () => ({
-  BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],
-  getConfig: vi.fn(() => ({
+vi.mock("../src/agent-types.js", () => {
+  const getConfig = vi.fn(() => ({
     displayName: "Explore",
     description: "Explore",
     builtinToolNames: ["read"],
     extensions: false,
     skills: false,
     promptMode: "replace",
-  })),
-  getAgentConfig: vi.fn(() => ({
+  }));
+  const getAgentConfig = vi.fn(() => ({
     name: "Explore",
     description: "Explore",
     builtinToolNames: ["read"],
@@ -84,11 +83,25 @@ vi.mock("../src/agent-types.js", () => ({
     inheritContext: false,
     runInBackground: false,
     isolated: false,
-  })),
-  getMemoryToolNames: vi.fn(() => []),
-  getReadOnlyMemoryToolNames: vi.fn(() => []),
-  getToolNamesForType: vi.fn(() => ["read"]),
-}));
+  }));
+  const getToolNamesForType = vi.fn(() => ["read"]);
+  return {
+    BUILTIN_TOOL_NAMES: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+    // The runner reads the registry-parameterized `*In` variants now (#206);
+    // the mocks ignore the registry argument, so the same fn objects serve
+    // both names and the per-test `vi.mocked(getConfig)…` steering below
+    // keeps working unchanged.
+    getConfig,
+    getConfigIn: getConfig,
+    getAgentConfig,
+    getAgentConfigIn: getAgentConfig,
+    getToolNamesForType,
+    getToolNamesForTypeIn: getToolNamesForType,
+    getMemoryToolNames: vi.fn(() => []),
+    getReadOnlyMemoryToolNames: vi.fn(() => []),
+    buildAgentRegistry: vi.fn((userAgents: Map<string, unknown>) => userAgents),
+  };
+});
 
 vi.mock("../src/env.js", () => ({
   detectEnv: vi.fn(async () => ({ isGitRepo: false, branch: "", platform: "linux" })),
@@ -122,10 +135,23 @@ import {
   getAgentConversation,
   parseExtensionsSpec,
   parseExtSelectors,
+  type RunOptions,
   resumeAgent,
-  runAgent,
+  runAgent as runAgentActual,
   SUBAGENT_TOOL_NAMES,
 } from "../src/agent-runner.js";
+
+/**
+ * `runAgent` with the now-required per-session `registry` defaulted (#206) —
+ * the mocked config lookups above ignore it, so an empty Map serves every
+ * test here without touching each call site.
+ */
+const runAgent = (
+  ctx: Parameters<typeof runAgentActual>[0],
+  type: Parameters<typeof runAgentActual>[1],
+  prompt: string,
+  options: Omit<RunOptions, "registry"> & Partial<Pick<RunOptions, "registry">>,
+) => runAgentActual(ctx, type, prompt, { registry: new Map(), ...options });
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
 let lastSession: ReturnType<typeof createSession>["session"] | undefined;

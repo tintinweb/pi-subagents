@@ -19,10 +19,10 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
-import { resolveSpawnType } from "./agent-types.js";
+import type { AgentTypeState } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
-import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
 
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
@@ -53,13 +53,24 @@ export class SubagentScheduler {
   private pi: ExtensionAPI | undefined;
   private ctx: ExtensionContext | undefined;
   private manager: AgentManager | undefined;
+  private agentTypes: AgentTypeState | undefined;
+  private buildRegistryFor: ((root: string) => Map<string, AgentConfig>) | undefined;
 
   /** Start the scheduler: bind to a session's store and arm enabled jobs. */
-  start(pi: ExtensionAPI, ctx: ExtensionContext, manager: AgentManager, store: ScheduleStore): void {
+  start(
+    pi: ExtensionAPI,
+    ctx: ExtensionContext,
+    manager: AgentManager,
+    store: ScheduleStore,
+    agentTypes: AgentTypeState,
+    buildRegistryFor: (root: string) => Map<string, AgentConfig>,
+  ): void {
     this.pi = pi;
     this.ctx = ctx;
     this.manager = manager;
     this.store = store;
+    this.agentTypes = agentTypes;
+    this.buildRegistryFor = buildRegistryFor;
 
     for (const job of store.list()) {
       if (job.enabled) this.scheduleJob(job);
@@ -76,6 +87,8 @@ export class SubagentScheduler {
     this.pi = undefined;
     this.ctx = undefined;
     this.manager = undefined;
+    this.agentTypes = undefined;
+    this.buildRegistryFor = undefined;
   }
 
   /** True if start() has bound a store and the scheduler is active. */
@@ -222,7 +235,8 @@ export class SubagentScheduler {
     const pi = this.pi;
     const ctx = this.ctx;
     const manager = this.manager;
-    if (!store || !pi || !ctx || !manager) return;
+    const agentTypes = this.agentTypes;
+    if (!store || !pi || !ctx || !manager || !agentTypes) return;
     const job = store.get(id);
     if (!job?.enabled) return;
 
@@ -239,18 +253,20 @@ export class SubagentScheduler {
 
     let agentId: string;
     try {
-      // Re-resolve at fire time against the registry as it stands. This does not
-      // reload from disk (the scheduler has no reason to rebuild process-global
-      // state from a timer), so it catches changes that went through /agents or
+      // Re-resolve at fire time against the session's registry as it stands.
+      // This does not reload from disk (the scheduler has no reason to rebuild
+      // the registry from a timer), so it catches changes that went through /agents or
       // an Agent call — not a file deleted directly from a shell. The catch below turns
       // this into lastStatus: "error" plus an error event, like any other
       // fire-time failure.
-      const dispatch = resolveSpawnType(job.subagent_type);
+      const dispatch = agentTypes.resolveSpawnType(job.subagent_type);
       if (!dispatch.ok) throw new Error(dispatch.message);
       agentId = manager.spawn(pi, ctx, dispatch.type, job.prompt, {
         description: job.description,
         isBackground: true,
         bypassQueue: true,
+        registry: agentTypes.registry(),
+        buildRegistryFor: this.buildRegistryFor,
         model: resolvedModel,
         maxTurns: job.max_turns,
         isolated: job.isolated,

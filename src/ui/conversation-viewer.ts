@@ -8,7 +8,7 @@
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import { type Component, Input, matchesKey, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
-import type { AgentRecord } from "../types.js";
+import type { AgentConfig, AgentRecord } from "../types.js";
 import { getLifetimeTotal, getSessionContextPercent } from "../usage.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatDuration, formatSessionTokens, getDisplayName, getPromptModeLabel } from "./agent-widget.js";
@@ -36,6 +36,8 @@ export class ConversationViewer implements Component {
     private tui: TUI,
     private session: AgentSession,
     private record: AgentRecord,
+    /** The owning session's live agent registry — display names resolve here. */
+    private registry: Map<string, AgentConfig>,
     private activity: AgentActivity | undefined,
     private theme: Theme,
     private done: (result: undefined) => void,
@@ -137,8 +139,8 @@ export class ConversationViewer implements Component {
 
     // Header
     lines.push(hrTop);
-    const name = getDisplayName(this.record.type);
-    const modeLabel = getPromptModeLabel(this.record.type);
+    const name = getDisplayName(this.registry, this.record.type);
+    const modeLabel = getPromptModeLabel(this.registry, this.record.type);
     const modeTag = modeLabel ? ` ${th.fg("dim", `(${modeLabel})`)}` : "";
     const statusIcon = this.record.status === "running"
       ? th.fg("accent", "●")

@@ -1,9 +1,13 @@
 import { Editor, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
+import { buildAgentRegistry } from "../src/agent-types.js";
 import type { AgentRecord } from "../src/types.js";
 import { getDisplayName } from "../src/ui/agent-widget.js";
 import { FleetList, type FleetUICtx, formatFleetElapsed, formatFleetTokens } from "../src/ui/fleet-list.js";
+
+/** Default-agents registry — display names resolve from it (#206). */
+const registry = buildAgentRegistry(new Map());
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
 const DOWN = "\x1b[B";
@@ -93,7 +97,7 @@ function harness(agents: AgentRecord[]): Harness {
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map());
+  const fleet = new FleetList(manager, new Map(), registry);
   fleet.setUICtx(ui);
   fleet.update();
 
@@ -231,7 +235,7 @@ describe("FleetList navigation", () => {
       const agents = [makeRecord({ id: "a1" })];
       const listAgents = vi.fn(() => agents);
       const manager = { listAgents, abort: () => true } as unknown as AgentManager;
-      const fleet = new FleetList(manager, new Map());
+      const fleet = new FleetList(manager, new Map(), registry);
       fleet.setUICtx({
         setWidget: () => {}, onTerminalInput: () => () => {}, getEditorText: () => "",
         notify: () => {}, custom: (() => new Promise<undefined>(() => {})) as FleetUICtx["custom"],
@@ -310,7 +314,7 @@ describe("FleetList rendering", () => {
     expect(lines.find(l => l.includes("main"))).toContain("●"); // main selected by default
     const agentLine = lines.find(l => l.includes("Sleep then report 1"))!;
     expect(agentLine).toContain("○");
-    expect(agentLine).toContain(getDisplayName("general-purpose"));
+    expect(agentLine).toContain(getDisplayName(registry, "general-purpose"));
     expect(agentLine).toContain("↓ 13.1k tokens");
     expect(agentLine).toMatch(/\d+s · ↓/); // "<seconds>s · ↓ ..." (timing-agnostic)
   });

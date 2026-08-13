@@ -101,7 +101,7 @@ function hashOf(path: string): string {
 export function resolveEnabledModels(
   patterns: string[] | undefined,
   registry: ModelRegistryRef,
-  cwd: string = process.cwd(),
+  cwd: string,
 ): Set<string> | undefined {
   // Fast path: check cache (stat both project and global settings.json files)
   const patternsKey = JSON.stringify(patterns);

@@ -21,63 +21,25 @@ export const BUILTIN_TOOL_NAMES: string[] = [
   ...new Set([...createCodingTools("."), ...createReadOnlyTools(".")].map((t) => t.name)),
 ];
 
-/** Unified runtime registry of all agents (defaults + user-defined). */
-const agents = new Map<string, AgentConfig>();
-
-/** When true, DEFAULT_AGENTS are skipped during registration. */
-let disableDefaults = false;
-
-/** Check whether default agents are disabled. */
-export function isDefaultsDisabled(): boolean { return disableDefaults; }
-
-/** Set whether default agents are disabled. */
-export function setDefaultsDisabled(b: boolean): void { disableDefaults = b; }
-
 /** `fallbackSubagent` value that disables the fallback entirely (strict dispatch). */
 export const NO_FALLBACK = "none";
 
 /**
- * Agent type substituted when a caller-supplied `subagent_type` doesn't resolve
- * to exactly one enabled agent. `undefined` keeps the historical behavior
- * (general-purpose); `NO_FALLBACK` makes dispatch fail closed. Set from
- * `subagents.json` (`fallbackSubagent`).
- *
- * Module state rather than an index.ts closure because every caller-supplied
- * spawn path needs it — the Agent tool, the scheduler, and cross-extension RPC.
- */
-let fallbackSubagent: string | undefined;
-
-/** Get the configured fallback agent type. undefined = general-purpose. */
-export function getFallbackSubagent(): string | undefined { return fallbackSubagent; }
-
-/** Set the configured fallback agent type. undefined = general-purpose. */
-export function setFallbackSubagent(v: string | undefined): void { fallbackSubagent = v; }
-
-/**
  * Build a registry map: DEFAULT_AGENTS first (unless disabled via settings),
  * then user agents overlaid on top (same name overrides the default).
- * Pure — callers that must not disturb the process-wide registry (nested
- * delegation resolving agents from its own config root) build their own map.
+ * Pure — every caller builds registries for its own root: the per-session
+ * state below for the session's config root, nested delegation for its own.
  */
-export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
+export function buildAgentRegistry(
+  userAgents: Map<string, AgentConfig>,
+  disableDefaults = false,
+): Map<string, AgentConfig> {
   const registry = new Map<string, AgentConfig>();
   if (!disableDefaults) {
     for (const [name, config] of DEFAULT_AGENTS) registry.set(name, config);
   }
   for (const [name, config] of userAgents) registry.set(name, config);
   return registry;
-}
-
-/**
- * Register agents into the unified registry.
- * Starts with DEFAULT_AGENTS, then overlays user agents (overrides defaults with same name).
- * Disabled agents (enabled === false) are kept in the registry but excluded from spawning.
- */
-export function registerAgents(userAgents: Map<string, AgentConfig>): void {
-  agents.clear();
-  for (const [name, config] of buildAgentRegistry(userAgents)) {
-    agents.set(name, config);
-  }
 }
 
 /** Case-insensitive key resolution within a registry. */
@@ -88,11 +50,6 @@ function resolveKeyIn(registry: Map<string, AgentConfig>, name: string): string 
     if (key.toLowerCase() === lower) return key;
   }
   return undefined;
-}
-
-/** Case-insensitive key resolution. */
-function resolveKey(name: string): string | undefined {
-  return resolveKeyIn(agents, name);
 }
 
 /** Resolve a type name case-insensitively in a registry. Returns the canonical key or undefined. */
@@ -161,19 +118,25 @@ export type SpawnTypeResolution =
  * Resolve a caller-supplied agent type against a registry, applying the
  * `fallbackSubagent` policy. The single decision point for every caller-supplied
  * spawn — the Agent tool, the scheduler, cross-extension RPC, and the nested
- * tools — so a type that fails here never reaches `runAgent`, where `getConfig`
+ * tools — so a type that fails here never reaches `runAgent`, where `getConfigIn`
  * would silently substitute general-purpose.
  *
  * Unknown, disabled, and case-ambiguous names are all treated the same way:
  * the caller named something that doesn't identify exactly one enabled agent.
  *
- * Pure over `registry` — callers that need fresh agent files reload before
- * calling (the Agent tool already does, per spawn). Reloading here would mean
- * importing custom-agents.ts, which imports this module.
+ * Pure over `registry` and `fallbackSubagent` — callers that need fresh agent
+ * files reload before calling (the Agent tool already does, per spawn).
+ * Reloading here would mean importing custom-agents.ts, which imports this
+ * module.
+ *
+ * `fallbackSubagent` is the type substituted when the requested one doesn't
+ * resolve: `undefined` keeps the historical behavior (general-purpose);
+ * `NO_FALLBACK` makes dispatch fail closed. Set from `subagents.json`.
  */
 export function resolveSpawnTypeIn(
   registry: Map<string, AgentConfig>,
   requested: unknown,
+  fallbackSubagent?: string,
 ): SpawnTypeResolution {
   const raw = typeof requested === "string" ? requested.trim() : "";
   const available = () => getAvailableTypesIn(registry).join(", ") || "(none)";
@@ -218,48 +181,23 @@ export function resolveSpawnTypeIn(
   return { ok: true, type: "general-purpose", fellBackFrom: raw };
 }
 
-/** Resolve a caller-supplied agent type against the process-wide registry. */
-export function resolveSpawnType(requested: unknown): SpawnTypeResolution {
-  return resolveSpawnTypeIn(agents, requested);
+/** Get all type names in a registry, including disabled (for UI listing). */
+export function getAllTypesIn(registry: Map<string, AgentConfig>): string[] {
+  return [...registry.keys()];
 }
 
-/** Resolve a type name case-insensitively. Returns the canonical key or undefined. */
-export function resolveType(name: string): string | undefined {
-  return resolveKey(name);
-}
-
-/** Get the agent config for a type (case-insensitive). */
-export function getAgentConfig(name: string): AgentConfig | undefined {
-  return getAgentConfigIn(agents, name);
-}
-
-/** Get all enabled type names (for spawning and tool descriptions). */
-export function getAvailableTypes(): string[] {
-  return getAvailableTypesIn(agents);
-}
-
-/** Get all type names including disabled (for UI listing). */
-export function getAllTypes(): string[] {
-  return [...agents.keys()];
-}
-
-/** Get names of default agents currently in the registry. */
-export function getDefaultAgentNames(): string[] {
-  return [...agents.entries()]
+/** Get names of default agents in a registry. */
+export function getDefaultAgentNamesIn(registry: Map<string, AgentConfig>): string[] {
+  return [...registry.entries()]
     .filter(([_, config]) => config.isDefault === true)
     .map(([name]) => name);
 }
 
-/** Get names of user-defined agents (non-defaults) currently in the registry. */
-export function getUserAgentNames(): string[] {
-  return [...agents.entries()]
+/** Get names of user-defined agents (non-defaults) in a registry. */
+export function getUserAgentNamesIn(registry: Map<string, AgentConfig>): string[] {
+  return [...registry.entries()]
     .filter(([_, config]) => config.isDefault !== true)
     .map(([name]) => name);
-}
-
-/** Check if a type is valid and enabled (case-insensitive). */
-export function isValidType(type: string): boolean {
-  return isValidTypeIn(agents, type);
 }
 
 /** Tool names required for memory management. */
@@ -282,18 +220,18 @@ export function getReadOnlyMemoryToolNames(existingToolNames: Set<string>): stri
   return READONLY_MEMORY_TOOL_NAMES.filter(n => !existingToolNames.has(n));
 }
 
-/** Get built-in tool names for a type (case-insensitive). */
-export function getToolNamesForType(type: string): string[] {
-  const key = resolveKey(type);
-  const raw = key ? agents.get(key) : undefined;
+/** Get built-in tool names for a type (case-insensitive) from a registry. */
+export function getToolNamesForTypeIn(registry: Map<string, AgentConfig>, type: string): string[] {
+  const key = resolveKeyIn(registry, type);
+  const raw = key ? registry.get(key) : undefined;
   const config = raw?.enabled !== false ? raw : undefined;
   // `undefined` (definition omitted the field) → all built-ins; an explicit `[]`
   // (`tools: none` or a `tools:` with only `ext:` entries) → zero built-ins.
   return config?.builtinToolNames ?? [...BUILTIN_TOOL_NAMES];
 }
 
-/** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object). Falls back to general-purpose. */
-export function getConfig(type: string): {
+/** Get config for a type (case-insensitive, returns a SubagentTypeConfig-compatible object) from a registry. Falls back to general-purpose. */
+export function getConfigIn(registry: Map<string, AgentConfig>, type: string): {
   displayName: string;
   description: string;
   builtinToolNames: string[];
@@ -302,8 +240,8 @@ export function getConfig(type: string): {
   skills: true | string[] | false;
   promptMode: "replace" | "append";
 } {
-  const key = resolveKey(type);
-  const config = key ? agents.get(key) : undefined;
+  const key = resolveKeyIn(registry, type);
+  const config = key ? registry.get(key) : undefined;
   if (config && config.enabled !== false) {
     return {
       displayName: config.displayName ?? config.name,
@@ -317,7 +255,7 @@ export function getConfig(type: string): {
   }
 
   // Fallback for unknown/disabled types — general-purpose config
-  const gp = agents.get("general-purpose");
+  const gp = registry.get("general-purpose");
   if (gp && gp.enabled !== false) {
     return {
       displayName: gp.displayName ?? gp.name,
@@ -341,3 +279,69 @@ export function getConfig(type: string): {
   };
 }
 
+/**
+ * Per-session agent-type state: the registry plus the two settings that shape
+ * it (`disableDefaultAgents`, `fallbackSubagent`).
+ *
+ * One instance lives in the extension's activation closure — activation is
+ * per-session, so sessions in one embedding host process (SDK: several
+ * concurrent `createAgentSession`s in different directories) each resolve
+ * against their own registry instead of a process-wide singleton, where
+ * per-session reloads would be last-writer-wins. In the CLI (one session,
+ * `process.cwd() === ctx.cwd`) behavior is unchanged.
+ *
+ * `registry()` returns a stable Map reference that `register()` mutates in
+ * place, so a spawn queued with the reference observes mid-session reloads —
+ * the same live semantics the process-wide registry had.
+ */
+export interface AgentTypeState {
+  /** The live registry. Stable reference; contents replaced by `register()`. */
+  registry(): Map<string, AgentConfig>;
+  /** Rebuild the registry from user agents (defaults first unless disabled). */
+  register(userAgents: Map<string, AgentConfig>): void;
+  isDefaultsDisabled(): boolean;
+  setDefaultsDisabled(b: boolean): void;
+  getFallbackSubagent(): string | undefined;
+  setFallbackSubagent(v: string | undefined): void;
+  resolveType(name: string): string | undefined;
+  getAgentConfig(name: string): AgentConfig | undefined;
+  getAvailableTypes(): string[];
+  getAllTypes(): string[];
+  getDefaultAgentNames(): string[];
+  getUserAgentNames(): string[];
+  isValidType(type: string): boolean;
+  getToolNamesForType(type: string): string[];
+  getConfig(type: string): ReturnType<typeof getConfigIn>;
+  resolveSpawnType(requested: unknown): SpawnTypeResolution;
+}
+
+/** Create an empty per-session agent-type state. */
+export function createAgentTypeState(): AgentTypeState {
+  const agents = new Map<string, AgentConfig>();
+  let disableDefaults = false;
+  let fallbackSubagent: string | undefined;
+
+  return {
+    registry: () => agents,
+    register(userAgents) {
+      agents.clear();
+      for (const [name, config] of buildAgentRegistry(userAgents, disableDefaults)) {
+        agents.set(name, config);
+      }
+    },
+    isDefaultsDisabled: () => disableDefaults,
+    setDefaultsDisabled(b) { disableDefaults = b; },
+    getFallbackSubagent: () => fallbackSubagent,
+    setFallbackSubagent(v) { fallbackSubagent = v; },
+    resolveType: (name) => resolveTypeIn(agents, name),
+    getAgentConfig: (name) => getAgentConfigIn(agents, name),
+    getAvailableTypes: () => getAvailableTypesIn(agents),
+    getAllTypes: () => getAllTypesIn(agents),
+    getDefaultAgentNames: () => getDefaultAgentNamesIn(agents),
+    getUserAgentNames: () => getUserAgentNamesIn(agents),
+    isValidType: (type) => isValidTypeIn(agents, type),
+    getToolNamesForType: (type) => getToolNamesForTypeIn(agents, type),
+    getConfig: (type) => getConfigIn(agents, type),
+    resolveSpawnType: (requested) => resolveSpawnTypeIn(agents, requested, fallbackSubagent),
+  };
+}

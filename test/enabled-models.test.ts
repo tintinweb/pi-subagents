@@ -2,7 +2,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type ModelRegistryRef, readEnabledModels, resolveEnabledModels } from "../src/enabled-models.js";
+import { type ModelRegistryRef, readEnabledModels, resolveEnabledModels as resolveEnabledModelsActual } from "../src/enabled-models.js";
+
+/**
+ * `resolveEnabledModels` now requires the session cwd (#206 — no
+ * `process.cwd()` parameter default). These tests exercise pattern
+ * resolution, not settings discovery, so a directory with no settings
+ * files serves them all.
+ */
+const resolveEnabledModels = (
+  patterns: string[] | undefined,
+  registry: ModelRegistryRef,
+  cwd: string = join(tmpdir(), "pi-subagents-enabled-models-no-settings"),
+) => resolveEnabledModelsActual(patterns, registry, cwd);
 
 /** Mock models matching typical registry shape. */
 const MODELS = [

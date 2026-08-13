@@ -20,7 +20,8 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { runAgent } from "../src/agent-runner.js";
-import { getAllTypes, getAvailableTypes, NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { buildAgentRegistry, getAllTypesIn, getAvailableTypesIn } from "../src/agent-types.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import subagentsExtension from "../src/index.js";
 
 function makePi() {
@@ -54,6 +55,16 @@ function writeAgents(): void {
   writeFileSync(join(dir, "retired.md"), "---\ndescription: Retired\ntools: read\nenabled: false\n---\nRetired.\n");
 }
 
+/**
+ * Configure `fallbackSubagent: none` the way production receives it: through
+ * `<cwd>/.pi/subagents.json`, applied at activation (the per-session state is
+ * closure-internal now, #206 — there is no module-level setter to poke).
+ * Must run before boot().
+ */
+function writeStrictDispatchSettings(): void {
+  writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ fallbackSubagent: "none" }));
+}
+
 function ctx() {
   return {
     hasUI: false,
@@ -84,14 +95,12 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   });
 
   afterEach(() => {
-    setFallbackSubagent(undefined);
     delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
     process.chdir(originalCwd);
     if (originalAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
     if (originalHome == null) delete process.env.HOME;
     else process.env.HOME = originalHome;
-    registerAgents(new Map());
     rmSync(cwd, { recursive: true, force: true });
   });
 
@@ -103,8 +112,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
 
   for (const background of [false, true]) {
     it(`refuses an unknown type without spawning (run_in_background: ${background})`, async () => {
+      writeStrictDispatchSettings();
       const { tools } = boot();
-      setFallbackSubagent(NO_FALLBACK);
 
       const result = await tools.get("Agent").execute(
         "tc-1",
@@ -165,12 +174,14 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   });
 
   it("refuses a disabled type, which used to dispatch with a mixed identity", async () => {
+    writeStrictDispatchSettings();
     const { tools } = boot();
-    setFallbackSubagent(NO_FALLBACK);
     // Pin the fixture: without this the test passes identically if retired.md
     // stopped loading, since "unknown" and "disabled" share one message.
-    expect(getAllTypes()).toContain("retired");
-    expect(getAvailableTypes()).not.toContain("retired");
+    // Loaded through the same real loader the extension uses.
+    const fixtureRegistry = buildAgentRegistry(loadCustomAgents(cwd));
+    expect(getAllTypesIn(fixtureRegistry)).toContain("retired");
+    expect(getAvailableTypesIn(fixtureRegistry)).not.toContain("retired");
 
     const result = await tools.get("Agent").execute(
       "tc-4",
@@ -207,6 +218,7 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     // resume replays a stored session; the type is required by the schema but
     // unused. Gating it would make a live agent unresumable the moment its type
     // is deleted or disabled — the opposite of what strict dispatch is for.
+    writeStrictDispatchSettings();
     const { tools } = boot();
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "first", session: { dispose: vi.fn() } as any, aborted: false, steered: false,
@@ -220,7 +232,6 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
       ?? (spawned as any).details?.agentId;
     expect(id).toBeTruthy();
 
-    setFallbackSubagent(NO_FALLBACK);
     const resumed = await tools.get("Agent").execute(
       "tc-7",
       { resume: id, prompt: "keep going", description: "resume", subagent_type: "deleted-since" },
@@ -233,8 +244,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
   it("applies the same contract to cross-extension spawns", async () => {
     // The registry entry is what RPC callers reach; it must not be a way around
     // the setting. A throw here becomes an error envelope at the RPC boundary.
+    writeStrictDispatchSettings();
     boot();
-    setFallbackSubagent(NO_FALLBACK);
     const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
 
     expect(() => registry.spawn({}, ctx(), "definitely-missing", "do it", { description: "rpc" }))

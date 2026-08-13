@@ -17,16 +17,17 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { BUILTIN_TOOL_NAMES, buildAgentRegistry, getAgentConfigIn, getConfigIn, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForTypeIn } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
+import { loadCustomAgents } from "./custom-agents.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentConfig, SubagentType, ThinkingLevel } from "./types.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -360,6 +361,20 @@ export interface ToolActivity {
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
+  /**
+   * The agent registry this run resolves its type against — the spawning
+   * session's live registry (per-session state in index.ts), or the nested
+   * root registry for nested delegation. Read at run time rather than at
+   * spawn time so a queued spawn sees mid-session agent-file reloads, the
+   * same semantics the process-wide registry had.
+   */
+  registry: Map<string, AgentConfig>;
+  /**
+   * Build a registry for a config root, applying the session's registry
+   * settings (`disableDefaultAgents`). Threaded to nested delegation, whose
+   * own config root may differ from the session's.
+   */
+  buildRegistryFor?: (configCwd: string) => Map<string, AgentConfig>;
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
   model?: Model<any>;
@@ -526,8 +541,8 @@ export async function runAgent(
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
-  const config = getConfig(type);
-  const agentConfig = getAgentConfig(type);
+  const config = getConfigIn(options.registry, type);
+  const agentConfig = getAgentConfigIn(options.registry, type);
 
   // Resolve working directory: worktree override > parent cwd
   const effectiveCwd = options.cwd ?? ctx.cwd;
@@ -559,7 +574,7 @@ export async function runAgent(
     }
   }
 
-  let toolNames = getToolNamesForType(type);
+  let toolNames = getToolNamesForTypeIn(options.registry, type);
 
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
@@ -773,6 +788,10 @@ export async function runAgent(
         maxSubagentDepth: effectiveMaxDepth,
         allowedSubagents: agentConfig.allowedSubagents,
         configCwd,
+        // Default preserves the pre-threading nested behavior: defaults
+        // enabled, non-strict load from the branch's own config root.
+        buildRegistryFor:
+          options.buildRegistryFor ?? ((root: string) => buildAgentRegistry(loadCustomAgents(root))),
       })
     : [];
   const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
