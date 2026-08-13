@@ -129,6 +129,15 @@ export interface SubagentsSettings {
    * meaning one thing here and another in the resolver.
    */
   fallbackSubagent?: string;
+  /**
+   * When true, every Agent tool invocation shows an allow/disallow/steer picker
+   * before the subagent spawns. The user can:
+   *   - Allow: proceed normally
+   *   - Disallow: block the invocation (returns an error to the LLM)
+   *   - Steer: prompt for a message that gets prepended to the agent's prompt
+   * Defaults to false (no gate). Skipped for resume and scheduled invocations.
+   */
+  subagentGate?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -149,6 +158,7 @@ export interface SettingsAppliers {
   setOutputTranscript: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
   setFallbackSubagent: (v: string | undefined) => void;
+  setSubagentGate: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -226,6 +236,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.outputTranscript === "boolean") {
     out.outputTranscript = r.outputTranscript;
   }
+  if (typeof r.subagentGate === "boolean") {
+    out.subagentGate = r.subagentGate;
+  }
   if (r.fallbackSubagent === false) {
     // The only non-string spelling worth accepting: a boolean would otherwise be
     // dropped, silently leaving the PERMISSIVE default in place. Every string is
@@ -300,6 +313,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
+  if (typeof s.subagentGate === "boolean") appliers.setSubagentGate(s.subagentGate);
 }
 
 /**
