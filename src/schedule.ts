@@ -44,6 +44,7 @@ export interface NewJobInput {
   max_turns?: number;
   isolated?: boolean;
   isolation?: IsolationMode;
+  session_file?: string;
 }
 
 export class SubagentScheduler {
@@ -107,6 +108,7 @@ export class SubagentScheduler {
       max_turns: input.max_turns,
       isolated: input.isolated,
       isolation: input.isolation,
+      session_file: input.session_file,
       enabled: true,
       createdAt: new Date().toISOString(),
       runCount: 0,
@@ -256,6 +258,7 @@ export class SubagentScheduler {
         isolated: job.isolated,
         thinkingLevel: job.thinking,
         isolation: job.isolation,
+        sessionFile: job.session_file,
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);

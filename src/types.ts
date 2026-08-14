@@ -55,6 +55,8 @@ export interface AgentConfig {
    * "all" = any enabled agent; string[] = only those agent types.
    */
   allowedSubagents?: "all" | string[];
+  /** Optional explicit session JSONL file. Implies persistence and resumes/appends when the file exists. */
+  sessionFile?: string;
   systemPrompt: string;
   promptMode: "replace" | "append";
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
@@ -211,6 +213,8 @@ export interface ScheduledSubagent {
   max_turns?: number;
   isolated?: boolean;
   isolation?: IsolationMode;
+  /** Explicit session JSONL file. Implies persistence and resumes/appends when the file exists. */
+  session_file?: string;
 
   // state
   enabled: boolean;
