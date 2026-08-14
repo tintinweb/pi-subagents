@@ -16,7 +16,7 @@ import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type Exten
 import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { abortable } from "./abortable.js";
-import { renderAgentName } from "./agent-color.js";
+import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, findAgentFile, isEmptyStub, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, normalizeMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, steerAgent } from "./agent-runner.js";
@@ -999,10 +999,25 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Custom rendering: Claude Code style ----
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
+      // A badge closes its own background, which would clear the tool block's row tint
+      // for the rest of the line, so the badge restores it. The tint is opened here too:
+      // the TUI's Box paints it, but HTML export takes it from CSS, and restoring a
+      // background the line never opened is what banded the export before. The line is
+      // deliberately left open — Box.applyBackgroundToLine pads to width and *then*
+      // wraps, so closing here would leave that padding untinted, and HTML export closes
+      // any open span per line anyway. No badge means no tint, so an uncolored agent
+      // renders exactly the line it always did.
+      const rowBackground = hasAgentBadge(args.subagent_type)
+        ? theme.getBgAnsi(context.isPartial ? "toolPendingBg" : context.isError ? "toolErrorBg" : "toolSuccessBg")
+        : "";
       const desc = args.description ?? "";
-      const name = renderAgentName(args.subagent_type, theme, { fallbackColor: "toolTitle", bold: true });
-      return new Text("▸ " + name + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
+      const name = renderAgentName(args.subagent_type, theme, {
+        fallbackColor: "toolTitle",
+        restoreBackground: rowBackground,
+        bold: true,
+      });
+      return new Text(rowBackground + "▸ " + name + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
     renderResult(result, { expanded, isPartial }, theme, renderContext) {
@@ -2014,7 +2029,7 @@ The file format is a markdown file with YAML frontmatter and a system prompt bod
 \`\`\`markdown
 ---
 description: <one-line description shown in UI>
-color: <optional agent name color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
+color: <optional agent name badge color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
 tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
 model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
 thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>

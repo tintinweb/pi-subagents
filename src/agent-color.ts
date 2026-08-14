@@ -1,9 +1,10 @@
 /**
- * agent-color.ts — Claude Code-compatible agent name colors.
+ * agent-color.ts — Claude Code-compatible agent name badges.
  *
- * Claude Code defines eight named subagent colors and renders the agent name in
- * that color. Agency Agents also uses six-digit hex values and a few extra
- * palette names, which are accepted here so those definitions render as written.
+ * Claude Code renders a subagent's name as a badge: the configured color is the
+ * background, the text an inverse foreground. Its eight named colors are
+ * reproduced here, along with six-digit hex and the extra palette names Agency
+ * Agents uses, so those definitions render as written.
  */
 
 import { getConfig } from "./agent-types.js";
@@ -38,6 +39,8 @@ const NAMED_AGENT_COLORS: Readonly<Record<string, string>> = {
 
 const CUBE_VALUES = [0, 95, 135, 175, 215, 255];
 const GRAY_VALUES = Array.from({ length: 24 }, (_, i) => 8 + i * 10);
+const BLACK = { r: 0, g: 0, b: 0 };
+const WHITE = { r: 255, g: 255, b: 255 };
 
 type Rgb = { r: number; g: number; b: number };
 type ColorMode = "truecolor" | "256color";
@@ -51,6 +54,8 @@ export interface AgentNameTheme {
 export interface AgentNameStyle {
   /** Existing theme foreground used when no valid agent color is configured. */
   fallbackColor?: string;
+  /** Reapply an enclosing background after the badge instead of resetting it. */
+  restoreBackground?: string;
   bold?: boolean;
 }
 
@@ -75,23 +80,44 @@ function nearest(values: readonly number[], value: number): number {
   return values.reduce((best, v, i) => (Math.abs(value - v) < Math.abs(value - values[best]) ? i : best), 0);
 }
 
-/** Quantize to the xterm-256 palette the way pi's own theme does. */
-function rgbTo256({ r, g, b }: Rgb): number {
+/**
+ * Quantize to the xterm-256 palette the way pi's own theme does, returning both
+ * the index to emit and the color the terminal will actually show — badge
+ * contrast is judged against the latter.
+ */
+function rgbTo256({ r, g, b }: Rgb): { index: number; rgb: Rgb } {
   const [rIndex, gIndex, bIndex] = [r, g, b].map((channel) => nearest(CUBE_VALUES, channel));
   const distance = ({ r: cr, g: cg, b: cb }: Rgb) => 0.299 * (r - cr) ** 2 + 0.587 * (g - cg) ** 2 + 0.114 * (b - cb) ** 2;
   const grayIndex = nearest(GRAY_VALUES, Math.round(0.299 * r + 0.587 * g + 0.114 * b));
-  const gray = GRAY_VALUES[grayIndex];
+  const gray = { r: GRAY_VALUES[grayIndex], g: GRAY_VALUES[grayIndex], b: GRAY_VALUES[grayIndex] };
   const cube = { r: CUBE_VALUES[rIndex], g: CUBE_VALUES[gIndex], b: CUBE_VALUES[bIndex] };
   // Only near-neutral colors may take the gray ramp; anything else keeps its tint.
-  if (Math.max(r, g, b) - Math.min(r, g, b) < 10 && distance({ r: gray, g: gray, b: gray }) < distance(cube)) {
-    return 232 + grayIndex;
+  if (Math.max(r, g, b) - Math.min(r, g, b) < 10 && distance(gray) < distance(cube)) {
+    return { index: 232 + grayIndex, rgb: gray };
   }
-  return 16 + 36 * rIndex + 6 * gIndex + bIndex;
+  return { index: 16 + 36 * rIndex + 6 * gIndex + bIndex, rgb: cube };
+}
+
+function ansiColor(layer: "foreground" | "background", color: Rgb | number): string {
+  const code = layer === "foreground" ? 38 : 48;
+  return typeof color === "number"
+    ? `\u001b[${code};5;${color}m`
+    : `\u001b[${code};2;${color.r};${color.g};${color.b}m`;
+}
+
+function relativeLuminance({ r, g, b }: Rgb): number {
+  const linear = (value: number) => {
+    const channel = value / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b);
 }
 
 /**
- * Render one name in `color` when it is valid; invalid or omitted colors
- * preserve the caller's existing theme styling.
+ * Render one name as a padded background badge when `color` is valid. Claude
+ * Code uses one inverse color for every badge's text; black or white is picked
+ * by WCAG contrast here instead, so each palette entry stays readable. Invalid
+ * or omitted colors preserve the caller's existing theme styling.
  */
 export function renderAgentNameLabel(
   name: string,
@@ -100,14 +126,27 @@ export function renderAgentNameLabel(
   style: AgentNameStyle = {},
 ): string {
   const resolved = resolveAgentColor(color);
-  const text = style.bold ? theme.bold(name) : name;
-  if (!resolved) return style.fallbackColor ? theme.fg(style.fallbackColor, text) : text;
+  if (!resolved) {
+    const text = style.bold ? theme.bold(name) : name;
+    return style.fallbackColor ? theme.fg(style.fallbackColor, text) : text;
+  }
 
   const rgb = parseHex(resolved);
-  const ansi = (theme.getColorMode?.() ?? "truecolor") === "256color"
-    ? `\u001b[38;5;${rgbTo256(rgb)}m`
-    : `\u001b[38;2;${rgb.r};${rgb.g};${rgb.b}m`;
-  return `${ansi}${text}\u001b[39m`;
+  const quantized = (theme.getColorMode?.() ?? "truecolor") === "256color" ? rgbTo256(rgb) : undefined;
+  const shown = quantized?.rgb ?? rgb;
+  const contrasting = relativeLuminance(shown) > 0.179 ? BLACK : WHITE;
+  const label = style.bold ? theme.bold(` ${name} `) : ` ${name} `;
+
+  return ansiColor("background", quantized?.index ?? rgb)
+    + ansiColor("foreground", quantized ? rgbTo256(contrasting).index : contrasting)
+    + label
+    + "\u001b[39m"
+    + (style.restoreBackground ?? "\u001b[49m");
+}
+
+/** Whether an agent renders as a badge — i.e. it has a valid configured color. */
+export function hasAgentBadge(type: string | undefined): boolean {
+  return type !== undefined && resolveAgentColor(getConfig(type).color) !== undefined;
 }
 
 /** Render a registered agent's display name with its configured color. */

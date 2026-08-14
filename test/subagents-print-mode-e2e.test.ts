@@ -196,6 +196,39 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(toolResults[0]).not.toMatch(/Unknown agent type/i);
   });
 
+  it("a colored agent's name badge never reaches print-mode text", async () => {
+    // Badges are a TUI concern: print mode renders no tool components, and the text the
+    // model and `pi -p` see is built from plain display names. An escape sequence here
+    // would mean color leaking into transcripts, headless output and the parent prompt.
+    const cwd = mkdtempSync(join(tmpdir(), "subagents-color-"));
+    tmpDirs.push(cwd);
+    mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "agents", "painted.md"),
+      '---\nname: Painted Agent\ncolor: purple\ndescription: "A colored agent."\n---\nBe brief.\n',
+    );
+
+    run = await runPrintMode({
+      prompt: "Delegate to the painted agent.",
+      cwd,
+      respond: routeBySession({
+        parentInitial: agentCall({
+          subagent_type: "painted",
+          description: "paint",
+          prompt: "Report in.",
+          run_in_background: false,
+        }),
+        parentFinal: "Done.",
+        subagent: "Painted Agent reporting in.",
+      }),
+    });
+
+    const result = agentToolResults(run.parentSession)[0];
+    expect(result).toContain("Painted Agent reporting in."); // the escape check below is not vacuous
+    expect(result).not.toContain("\u001b");
+    expect(conversationText(run.parentSession)).not.toContain("\u001b");
+  });
+
   it("errors clearly when faux mode is given no script", async () => {
     await expect(runPrintMode({ prompt: "x" })).rejects.toThrow(/provide `respond` or `steps`/);
   });

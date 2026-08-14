@@ -23,20 +23,41 @@ describe("resolveAgentColor", () => {
 });
 
 describe("renderAgentNameLabel", () => {
-  it("colors the name without changing its width", () => {
+  it("renders a padded truecolor badge with readable foreground", () => {
     const ansiTheme = {
       ...theme,
       bold: (text: string) => `\u001b[1m${text}\u001b[22m`,
     };
-    const label = renderAgentNameLabel("Code Reviewer", "purple", ansiTheme, { bold: true });
-    expect(label).toBe("\u001b[38;2;130;125;189m\u001b[1mCode Reviewer\u001b[22m\u001b[39m");
-    expect(visibleWidth(label)).toBe("Code Reviewer".length);
+    const badge = renderAgentNameLabel("Code Reviewer", "purple", ansiTheme, { bold: true });
+    expect(badge).toContain("\u001b[48;2;130;125;189m");
+    expect(badge).toContain(" Code Reviewer ");
+    expect(visibleWidth(badge)).toBe("Code Reviewer".length + 2);
+
+    // Badge text follows the background's luminance: #827DBD is light enough for black,
+    // #1E3A8A is not. Both sit either side of the 0.179 WCAG threshold.
+    expect(badge).toContain("\u001b[38;2;0;0;0m");
+    expect(renderAgentNameLabel("Tester", "navy", theme)).toContain("\u001b[38;2;255;255;255m");
   });
 
-  it("quantizes to the xterm palette in 256-color mode", () => {
+  it("judges contrast against the effective color in 256-color mode", () => {
     const ansiTheme = { ...theme, getColorMode: () => "256color" as const };
-    expect(renderAgentNameLabel("Reviewer", "#C430C4", ansiTheme)).toContain("\u001b[38;5;170m");
-    expect(renderAgentNameLabel("Reviewer", "#808080", ansiTheme)).toContain("\u001b[38;5;244m");
+    const label = renderAgentNameLabel("Reviewer", "#C430C4", ansiTheme);
+    expect(label).toContain("\u001b[48;5;170m");
+    expect(label).toContain("\u001b[38;5;16m");
+
+    const neutral = renderAgentNameLabel("Reviewer", "#808080", ansiTheme);
+    expect(neutral).toContain("\u001b[48;5;244m");
+  });
+
+  it("restores an enclosing tool background after the badge", () => {
+    const label = renderAgentNameLabel("Reviewer", "purple", theme, {
+      restoreBackground: "\u001b[48;2;1;2;3m",
+    });
+    expect(label).toMatch(/\u001b\[39m\u001b\[48;2;1;2;3m$/);
+  });
+
+  it("resets the background when the caller paints none", () => {
+    expect(renderAgentNameLabel("Reviewer", "purple", theme)).toMatch(/\u001b\[39m\u001b\[49m$/);
   });
 
   it("preserves existing theme styling without a valid color", () => {
