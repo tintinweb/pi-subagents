@@ -257,4 +257,42 @@ describe("AgentWidget overflow accounting", () => {
     expect(lines.join("\n")).toContain("1 queued");
     expect(footer(lines)).toBeUndefined();
   });
+
+  // A background resume runs an agent that already finished once. markFinished
+  // only seeds an age it has not seen before, so without markRunning the agent
+  // carries its previous run's age — already past the linger limit — and the
+  // resumed run's ✓ line never renders: the agent just disappears.
+  it("shows the completion line again after a finished agent is resumed", () => {
+    const agent = record("resumed", "completed");
+    const activity = new Map([[agent.id, {
+      activeTools: new Map(),
+      toolUses: 0,
+      responseText: "",
+      turnCount: 1,
+      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    } as AgentActivity]]);
+    const widget = new AgentWidget({ listAgents: () => [agent] } as any, activity, () => "all");
+    let factory: any;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k: any, c: any) => { factory = c; } } as any);
+    const render = () => {
+      widget.update();
+      return (factory?.({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render() ?? []).join("\n");
+    };
+
+    // First run finishes and ages out of the widget.
+    widget.markFinished(agent.id);
+    widget.onTurnStart();
+    widget.onTurnStart();
+    expect(render()).not.toContain("resumed description");
+
+    // Background resume puts it back on the running list.
+    agent.status = "running";
+    widget.markRunning(agent.id);
+    expect(render()).toContain("resumed description");
+
+    // ...and its completion is visible when the resumed run settles.
+    agent.status = "completed";
+    widget.markFinished(agent.id);
+    expect(render()).toContain("resumed description");
+  });
 });

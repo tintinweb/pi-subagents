@@ -306,6 +306,17 @@ export class AgentWidget {
     }
   }
 
+  /**
+   * Drop an agent's finished-age (call when a settled agent starts running
+   * again, i.e. a background resume). markFinished only seeds an age it has not
+   * seen before, so a resumed agent would otherwise keep the age from its
+   * previous run — already past the linger limit, hiding the new run's
+   * completion line entirely.
+   */
+  markRunning(agentId: string) {
+    this.finishedTurnAge.delete(agentId);
+  }
+
   /** Render a finished agent line. */
   private renderFinishedLine(a: { id: string; type: SubagentType; status: string; description: string; toolUses: number; startedAt: number; completedAt?: number; error?: string }, theme: Theme): string {
     const modeLabel = getPromptModeLabel(a.type);

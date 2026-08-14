@@ -29,7 +29,7 @@ import { resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-conf
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
-import { createOutputFilePath, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -988,7 +988,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context.",
+          description: "Optional agent ID to resume from. Continues from previous context. Combine with run_in_background to resume detached and be notified on completion. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
       isolated: Type.Optional(
@@ -1287,6 +1287,108 @@ Terse command-style prompts produce shallow, generic work.
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
+
+        // Background resume: detached run that notifies on completion, mirroring
+        // a background spawn. Previously run_in_background was silently ignored
+        // on resume (this branch returned before the background branch below),
+        // so a resumed agent always blocked the main loop until it finished.
+        if (runInBackground) {
+          const id = existing.id;
+          // A detached resume hands control back while the record stays
+          // "running", so nothing stops the model from resuming the same agent
+          // again mid-run. manager.resume() refuses that (it would orphan the
+          // live run's abort controller); say why here, where the model can act
+          // on it, instead of letting it read as a generic failure.
+          if (existing.status === "running" || existing.status === "queued") {
+            return textResult(
+              `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+              `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
+            );
+          }
+
+          const joinMode = resolveJoinMode(defaultJoinMode, true);
+          existing.toolCallId = toolCallId;
+          if (joinMode) existing.joinMode = joinMode;
+          // Reuse the agent's transcript rather than starting a fresh one: the
+          // path is deterministic per agent+session, so writing an initial entry
+          // would truncate the previous run's turns (see ensureOutputFile).
+          if (outputTranscript) {
+            existing.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
+            ensureOutputFile(existing.outputFile);
+          }
+          // Anchor streaming past the turns already on disk, captured BEFORE the
+          // run starts. The resumed prompt lands as an ordinary user message at
+          // this index, so it is written exactly once.
+          const transcriptAnchor = existing.session.messages.length;
+
+          const { state: bgState, callbacks: bgCallbacks } = createActivityTracker(effectiveMaxTurns);
+          // resumeAgent has no onSessionCreated — the session predates this run —
+          // so seed it directly, or the widget shows no context % for the agent.
+          bgState.session = existing.session;
+
+          // No `signal`: a background spawn deliberately omits it, and a detached
+          // resume must behave the same. Passing it would abort this agent when
+          // the parent turn is interrupted (user Esc), while agents started with
+          // run_in_background in that same turn keep going.
+          const record = await manager.resume(params.resume, params.prompt, undefined, {
+            isBackground: true,
+            onToolActivity: bgCallbacks.onToolActivity,
+            onAssistantUsage: bgCallbacks.onAssistantUsage,
+            // Fires when the run actually starts — immediately, or on queue
+            // drain. Wiring it here (rather than after resume() returns) means a
+            // resume stopped while still queued never started streaming, so
+            // there is no subscription left behind for a later run to trip over.
+            onStarted: () => {
+              const rec = manager.getRecord(id);
+              if (rec?.session && rec.outputFile) {
+                rec.outputCleanup = streamToOutputFile(rec.session, rec.outputFile, id, ctx.cwd, transcriptAnchor);
+              }
+            },
+          });
+          if (!record) {
+            return textResult(`Failed to resume agent "${params.resume}".`);
+          }
+
+          if (joinMode != null && joinMode !== 'async') {
+            currentBatchAgents.push({ id, joinMode });
+            if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
+            batchFinalizeTimer = setTimeout(finalizeBatch, 100);
+          }
+
+          agentActivity.set(id, bgState);
+          // This agent already finished once, so the widget holds a finished-age
+          // for it that is past the linger limit — without clearing it, the
+          // resumed run's ✓/✗ line never renders and the agent just vanishes.
+          widget.markRunning(id);
+          widget.ensureTimer();
+          widget.update();
+          fleet.ensureTimer();
+          fleet.update();
+
+          // Resume ignores subagent_type (the record keeps the type it was
+          // spawned with), so report the record's own identity — a "created"
+          // event carrying the caller's type would re-register the agent under
+          // the wrong one in cross-extension mirrors keyed by id.
+          pi.events.emit("subagents:created", {
+            id,
+            type: existing.type,
+            description: existing.description,
+            isBackground: true,
+          });
+
+          const isQueued = record.status === "queued";
+          return textResult(
+            `Agent ${isQueued ? "queued" : "resumed"} in background.\n` +
+            `Agent ID: ${id}\n` +
+            `Type: ${existing.type}\n` +
+            (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
+            (isQueued ? `Position: queued (max ${manager.getMaxConcurrent()} concurrent)\n` : "") +
+            `\nYou will be notified when this agent completes.\n` +
+            `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
+            { ...detailBase, subagentType: existing.type, displayName: existing.type, toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
+          );
+        }
+
         const record = await manager.resume(params.resume, params.prompt, signal);
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);

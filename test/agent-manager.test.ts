@@ -1547,3 +1547,235 @@ describe("AgentManager — waitForAll", () => {
     expect(manager.getRecord(id)?.status).toBe("error");
   });
 });
+
+describe("AgentManager — background resume", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    manager?.dispose();
+  });
+
+  // Spawn a background agent and let it settle so it holds a session to resume.
+  async function spawnSettled(mgr: AgentManager): Promise<string> {
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const id = mgr.spawn(mockPi, mockCtx, "general-purpose", "task", {
+      description: "task",
+      isBackground: true,
+    });
+    await mgr.getRecord(id)!.promise;
+    return id;
+  }
+
+  it("returns immediately with a running record + promise, then settles and fires onComplete", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    const id = await spawnSettled(manager);
+    onComplete.mockClear(); // drop the spawn's own completion
+
+    // Deferred resumeAgent so we can observe the mid-flight state.
+    let finish!: (v: { text: string; failure?: string }) => void;
+    vi.mocked(resumeAgent).mockImplementation(
+      () => new Promise((resolve) => { finish = resolve; }),
+    );
+
+    const record = await manager.resume(id, "keep going", undefined, { isBackground: true });
+    // Returned immediately: still running, with a tracked promise, no notify yet.
+    expect(record?.status).toBe("running");
+    expect(record?.promise).toBeDefined();
+    expect(onComplete).not.toHaveBeenCalled();
+
+    finish({ text: "second" });
+    await record!.promise;
+
+    expect(manager.getRecord(id)!.status).toBe("completed");
+    expect(manager.getRecord(id)!.result).toBe("second");
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("a failed final turn on a background resume maps to error and still notifies", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    const id = await spawnSettled(manager);
+    onComplete.mockClear();
+
+    vi.mocked(resumeAgent).mockResolvedValue({
+      text: "partial",
+      failure: "provider exploded",
+    } as any);
+
+    const record = await manager.resume(id, "again", undefined, { isBackground: true });
+    await record!.promise;
+
+    expect(manager.getRecord(id)!.status).toBe("error");
+    expect(manager.getRecord(id)!.error).toBe("provider exploded");
+    expect(manager.getRecord(id)!.result).toBe("partial"); // #144: keep this-run text
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("forwards activity/usage callbacks to the resumed run", async () => {
+    manager = new AgentManager();
+    const id = await spawnSettled(manager);
+
+    const onToolActivity = vi.fn();
+    const onAssistantUsage = vi.fn();
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
+      opts.onToolActivity?.({ type: "end", toolName: "grep" });
+      opts.onAssistantUsage?.({ input: 5, output: 3, cacheWrite: 0 });
+      return { text: "ok" };
+    });
+
+    const record = await manager.resume(id, "go", undefined, {
+      isBackground: true,
+      onToolActivity,
+      onAssistantUsage,
+    });
+    await record!.promise;
+
+    expect(onToolActivity).toHaveBeenCalledWith({ type: "end", toolName: "grep" });
+    expect(onAssistantUsage).toHaveBeenCalledWith({ input: 5, output: 3, cacheWrite: 0 });
+    // Internal record bookkeeping still runs alongside the forwarded callbacks.
+    expect(manager.getRecord(id)!.toolUses).toBe(1);
+    expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 5, output: 3, cacheWrite: 0 });
+  });
+
+  it("queues a background resume when the concurrency pool is full", async () => {
+    manager = new AgentManager(undefined, 1); // maxConcurrent = 1
+    const id = await spawnSettled(manager);
+
+    // Occupy the single slot with a never-settling background spawn.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const blockerId = manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
+      description: "blocker",
+      isBackground: true,
+    });
+    expect(manager.getRecord(blockerId)!.status).toBe("running");
+
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(resumeAgent).mockClear(); // drop call history from earlier tests
+    const record = await manager.resume(id, "later", undefined, { isBackground: true });
+
+    expect(record?.status).toBe("queued");
+    expect(resumeAgent).not.toHaveBeenCalled();
+  });
+
+  it("foreground resume is unchanged: awaits inline and does not fire onComplete", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    const id = await spawnSettled(manager);
+    onComplete.mockClear();
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "inline result" } as any);
+    const record = await manager.resume(id, "sync");
+
+    expect(record?.status).toBe("completed");
+    expect(record?.result).toBe("inline result");
+    // Foreground resume returns its result inline and never notified (historical).
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  // A detached resume returns while the record is still "running", so nothing
+  // stops a second resume of the same agent. Starting one would replace
+  // record.abortController — leaving the live run unreachable from /agents stop
+  // and abortAll() — and then reject from session.prompt(), whose settle path
+  // would report a failure and abort the children of a run still in progress.
+  it("refuses to background-resume an agent whose run is still in flight", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    const id = await spawnSettled(manager);
+    onComplete.mockClear();
+
+    vi.mocked(resumeAgent).mockClear();
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+
+    const first = await manager.resume(id, "go", undefined, { isBackground: true });
+    expect(first?.status).toBe("running");
+    const liveController = manager.getRecord(id)!.abortController;
+
+    const second = await manager.resume(id, "go again", undefined, { isBackground: true });
+
+    expect(second).toBeUndefined();
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
+    // The in-flight run is untouched: same controller, still running, no
+    // spurious completion notification.
+    expect(manager.getRecord(id)!.abortController).toBe(liveController);
+    expect(manager.getRecord(id)!.status).toBe("running");
+    expect(onComplete).not.toHaveBeenCalled();
+    // Still stoppable — the point of keeping the original controller.
+    expect(manager.abort(id)).toBe(true);
+    expect(liveController!.signal.aborted).toBe(true);
+  });
+
+  it("refuses to background-resume an agent that is still queued", async () => {
+    manager = new AgentManager(undefined, 1); // maxConcurrent = 1
+    const id = await spawnSettled(manager);
+
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
+      description: "blocker",
+      isBackground: true,
+    });
+
+    vi.mocked(resumeAgent).mockClear();
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    expect((await manager.resume(id, "later", undefined, { isBackground: true }))?.status).toBe("queued");
+
+    expect(await manager.resume(id, "later again", undefined, { isBackground: true })).toBeUndefined();
+    expect(resumeAgent).not.toHaveBeenCalled();
+  });
+
+  // onStarted is where the Agent tool hangs output-file streaming. It must fire
+  // when the run actually begins — not when resume() returns — or a resume that
+  // is stopped while queued leaves a live session subscription behind: abort()
+  // drops a queued record without reaching settle(), which is what tears that
+  // subscription down.
+  it("fires onStarted when the run starts, not when a queued resume is registered", async () => {
+    manager = new AgentManager(undefined, 1); // maxConcurrent = 1
+    const id = await spawnSettled(manager);
+
+    // Occupy the only slot with a run we can release on demand.
+    let releaseBlocker!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((resolve) => { releaseBlocker = resolve; }));
+    manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
+      description: "blocker",
+      isBackground: true,
+    });
+
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    const onStarted = vi.fn();
+    const record = await manager.resume(id, "later", undefined, { isBackground: true, onStarted });
+
+    expect(record?.status).toBe("queued");
+    expect(onStarted).not.toHaveBeenCalled();
+
+    releaseBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(record!.id)!.promise?.catch(() => {});
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(manager.getRecord(id)!.status).toBe("running");
+    expect(onStarted).toHaveBeenCalledTimes(1);
+  });
+
+  it("never fires onStarted for a queued resume that is stopped before it drains", async () => {
+    manager = new AgentManager(undefined, 1); // maxConcurrent = 1
+    const id = await spawnSettled(manager);
+
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
+      description: "blocker",
+      isBackground: true,
+    });
+
+    vi.mocked(resumeAgent).mockImplementation(() => new Promise(() => {}));
+    const onStarted = vi.fn();
+    await manager.resume(id, "later", undefined, { isBackground: true, onStarted });
+
+    expect(manager.abort(id)).toBe(true);
+    expect(manager.getRecord(id)!.status).toBe("stopped");
+    expect(onStarted).not.toHaveBeenCalled();
+  });
+});

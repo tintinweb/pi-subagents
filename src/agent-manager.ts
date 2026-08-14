@@ -121,6 +121,32 @@ interface SpawnOptions {
   rootSessionId?: string;
 }
 
+interface ResumeOptions {
+  /**
+   * Run the resumed turn detached in the background: return immediately with
+   * the record still "running" (or "queued" at the concurrency limit) and
+   * notify on completion via onComplete, exactly like a background spawn.
+   * Default (false/undefined) runs the resume inline and returns the settled
+   * record — the historical behavior.
+   */
+  isBackground?: boolean;
+  /** Called on tool start/end with activity info (for streaming progress to UI). */
+  onToolActivity?: (activity: ToolActivity) => void;
+  /** Called once per assistant message_end with that message's usage delta. */
+  onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
+  /** Called when the session successfully compacts. */
+  onCompaction?: (info: CompactionInfo) => void;
+  /**
+   * Background resume only: called synchronously when the run actually starts —
+   * immediately, or later from drainQueue. Callers wire per-run side effects
+   * (output-file streaming) here rather than at the call site, so a resume that
+   * is stopped while still queued never leaves a subscription behind: `abort()`
+   * drops a queued record without reaching `settle()`, which is what would have
+   * torn that subscription down.
+   */
+  onStarted?: () => void;
+}
+
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -133,7 +159,7 @@ export class AgentManager {
   private worktreeRepos = new Set<string>();
 
   /** Queue of background agents waiting to start. */
-  private queue: { id: string; args: SpawnArgs }[] = [];
+  private queue: { id: string; start: () => void }[] = [];
   /** Number of currently running background agents. */
   private runningBackground = 0;
 
@@ -209,7 +235,7 @@ export class AgentManager {
 
     if (occupiesPoolSlot(record) && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
       // Queue it — will be started when a running agent completes
-      this.queue.push({ id, args });
+      this.queue.push({ id, start: () => this.startAgent(id, record, args) });
       return id;
     }
 
@@ -444,7 +470,7 @@ export class AgentManager {
       const record = this.agents.get(next.id);
       if (!record || record.status !== "queued") continue;
       try {
-        this.startAgent(next.id, record, next.args);
+        next.start();
       } catch (err) {
         // Late failure (e.g. strict worktree-isolation) — surface on the record
         // so the user/agent can see it via /agents, then keep draining.
@@ -503,10 +529,47 @@ export class AgentManager {
     id: string,
     prompt: string,
     signal?: AbortSignal,
+    options?: ResumeOptions,
   ): Promise<AgentRecord | undefined> {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
 
+    // Background resume: settle asynchronously and notify on completion exactly
+    // like a background spawn, returning immediately with the record still
+    // "running" — or "queued" when at the concurrency limit. Previously
+    // run_in_background was ignored on resume (the Agent tool's resume branch
+    // returned before its background branch, and resume() only ever awaited
+    // inline), so a resumed agent always blocked the caller until it finished.
+    if (options?.isBackground) {
+      // Never re-enter a run that is still in flight. Detaching means the caller
+      // gets control back while the record stays "running", so nothing stops the
+      // model from resuming the same agent again. Starting a second run would
+      // overwrite record.abortController — orphaning the live run beyond the
+      // reach of `/agents` stop and abortAll() — double-count the pool slot, and
+      // then reject from session.prompt() with "Agent is already processing",
+      // whose settle path would abort the LIVE run's children and report a
+      // failure for a run that is still going. Refuse instead, leaving the
+      // record untouched; the caller decides whether to wait or steer.
+      if (record.status === "running" || record.status === "queued") return undefined;
+
+      record.isBackground = true;
+      record.resultConsumed = false;
+      record.result = undefined;
+      record.error = undefined;
+      record.completedAt = undefined;
+      record.status = "queued";
+
+      const start = () => this.startResume(id, record, prompt, signal, options);
+      if (occupiesPoolSlot(record) && this.runningBackground >= this.maxConcurrent) {
+        // At the concurrency limit — queue it, drains when a slot frees.
+        this.queue.push({ id, start });
+      } else {
+        start();
+      }
+      return record;
+    }
+
+    // Foreground resume: run inline and return the settled record.
     record.status = "running";
     record.startedAt = Date.now();
     record.completedAt = undefined;
@@ -517,13 +580,16 @@ export class AgentManager {
       const { text, failure } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
+          options?.onToolActivity?.(activity);
         },
         onAssistantUsage: (usage) => {
           addUsage(record.lifetimeUsage, usage);
+          options?.onAssistantUsage?.(usage);
         },
         onCompaction: (info) => {
           record.compactionCount++;
           this.onCompact?.(record, info);
+          options?.onCompaction?.(info);
         },
         signal,
       });
@@ -544,6 +610,103 @@ export class AgentManager {
     this.abortOwnedChildren(id);
 
     return record;
+  }
+
+  /**
+   * Start a background resume run: detached, settling and notifying like
+   * startAgent's background path. Invoked immediately, or from drainQueue when
+   * a concurrency slot frees. The session already exists (resume reuses it), so
+   * there is no onSessionCreated to hang per-run wiring off — callers use
+   * `options.onStarted`, which fires on both the immediate and the drained path.
+   */
+  private startResume(
+    id: string,
+    record: AgentRecord,
+    prompt: string,
+    parentSignal: AbortSignal | undefined,
+    options: ResumeOptions,
+  ) {
+    if (!record.session) return;
+
+    record.status = "running";
+    record.startedAt = Date.now();
+    if (occupiesPoolSlot(record)) this.runningBackground++;
+    this.onStart?.(record);
+
+    // Fresh abort controller so /agents stop and steering target THIS run rather
+    // than the previous one's settled controller.
+    const abortController = new AbortController();
+    record.abortController = abortController;
+    // Optional, and NOT what the Agent tool passes for a detached resume: a
+    // parent signal aborts on the parent's own interrupt (user Esc), which is
+    // right for a foreground run whose result the caller is awaiting, and wrong
+    // for a detached one — background spawns omit it for exactly this reason.
+    let detachParentSignal: (() => void) | undefined;
+    if (parentSignal) {
+      const onParentAbort = () => this.abort(id);
+      parentSignal.addEventListener("abort", onParentAbort, { once: true });
+      detachParentSignal = () => parentSignal.removeEventListener("abort", onParentAbort);
+    }
+
+    // Per-run side effects (output streaming) — see ResumeOptions.onStarted.
+    // After the record is in its running shape, before the run is kicked off.
+    try { options.onStarted?.(); } catch { /* ignore caller wiring errors */ }
+
+    const settle = () => {
+      detachParentSignal?.();
+      detachParentSignal = undefined;
+      // Final flush of streaming output file
+      if (record.outputCleanup) {
+        try { record.outputCleanup(); } catch { /* ignore */ }
+        record.outputCleanup = undefined;
+      }
+      // Children spawned during the resumed turn must not outlive it.
+      this.abortOwnedChildren(id);
+      if (occupiesPoolSlot(record)) this.runningBackground--;
+      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+      this.drainQueue();
+    };
+
+    const promise = resumeAgent(record.session, prompt, {
+      onToolActivity: (activity) => {
+        if (activity.type === "end") record.toolUses++;
+        options.onToolActivity?.(activity);
+      },
+      onAssistantUsage: (usage) => {
+        addUsage(record.lifetimeUsage, usage);
+        options.onAssistantUsage?.(usage);
+      },
+      onCompaction: (info) => {
+        record.compactionCount++;
+        this.onCompact?.(record, info);
+        options.onCompaction?.(info);
+      },
+      signal: abortController.signal,
+    })
+      .then(({ text, failure }) => {
+        // Don't overwrite status if externally stopped via abort().
+        if (record.status !== "stopped") {
+          // Same contract as the spawn path (#144): a failed final turn is an
+          // error, not a completion — but the resumed text stays available.
+          record.status = failure ? "error" : "completed";
+          if (failure) record.error = failure;
+        }
+        record.result = text;
+        record.completedAt ??= Date.now();
+        settle();
+        return text;
+      })
+      .catch((err) => {
+        if (record.status !== "stopped") {
+          record.status = "error";
+          record.error = err instanceof Error ? err.message : String(err);
+        }
+        record.completedAt ??= Date.now();
+        settle();
+        return "";
+      });
+
+    record.promise = promise;
   }
 
   /**

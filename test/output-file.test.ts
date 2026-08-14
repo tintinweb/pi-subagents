@@ -264,4 +264,33 @@ describe("streamToOutputFile", () => {
     session.fire({ type: "turn_end" });
     expect(readEntries()).toHaveLength(2);
   });
+
+  // A background resume reuses the agent's existing transcript and its existing
+  // session, which already holds every prior turn. Anchoring at the default 1
+  // would re-emit that whole history into the file behind the new run's turns.
+  it("starts at the given index so a resume appends only its own turns", () => {
+    const prior = [
+      { role: "user", content: "do the thing" },
+      { role: "assistant", content: [{ type: "text", text: "first answer" }] },
+      { role: "user", content: "and again" },
+      { role: "assistant", content: [{ type: "text", text: "second answer" }] },
+    ];
+    const session = makeFakeSession(prior);
+    streamToOutputFile(session as never, outPath, "agent-1", "/work", session.messages.length);
+
+    // The resumed prompt lands as an ordinary user message at the anchor index.
+    session.push({ role: "user", content: "keep going" });
+    session.push({ role: "assistant", content: [{ type: "text", text: "third answer" }] });
+    session.fire({ type: "turn_end" });
+
+    const entries = readEntries();
+    // Initial entry from beforeEach + exactly the two new messages — none of the
+    // four the session was already carrying.
+    expect(entries).toHaveLength(3);
+    const body = JSON.stringify(entries);
+    expect(body).toContain("keep going");
+    expect(body).toContain("third answer");
+    expect(body).not.toContain("first answer");
+    expect(body).not.toContain("second answer");
+  });
 });
