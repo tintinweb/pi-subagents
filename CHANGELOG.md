@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Custom agents can set `name` and `color`, so agent files shared with Claude Code keep their display identity** ([#216](https://github.com/tintinweb/pi-subagents/issues/216) — thanks [@HerbertGao](https://github.com/HerbertGao)). `name:` is accepted as a display-name fallback (`display_name:` still wins, and the filename still determines the `subagent_type` and dispatch identity), and `color:` tints the agent name in the `Agent` tool header, the widget, FleetView, and the conversation viewer. Claude Code's eight color names render with Claude Code's own values; six-digit hex and the Agency Agents palette aliases are accepted too, quantized to the xterm-256 palette on non-truecolor terminals the way pi's own theme does. A missing or invalid color preserves each surface's existing theme styling. Only the foreground is colored: a name that painted a background would have to close it again, and closing a background resets the row tint the tool block paints around it — in HTML `/export`, where that row tint comes from CSS rather than from the line, restoring it inline would have banded every agent header with the *pending* color.
+
 ## [0.15.2] - 2026-08-14
 
 ### Documentation

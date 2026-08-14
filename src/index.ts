@@ -999,17 +999,9 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Custom rendering: Claude Code style ----
 
-    renderCall(args, theme, context) {
-      let restoreBackground = theme.getBgAnsi("toolSuccessBg");
-      if (context.isPartial) restoreBackground = theme.getBgAnsi("toolPendingBg");
-      else if (context.isError) restoreBackground = theme.getBgAnsi("toolErrorBg");
-
+    renderCall(args, theme) {
       const desc = args.description ?? "";
-      const name = renderAgentName(args.subagent_type, theme, {
-        fallbackColor: "toolTitle",
-        restoreBackground,
-        bold: true,
-      });
+      const name = renderAgentName(args.subagent_type, theme, { fallbackColor: "toolTitle", bold: true });
       return new Text("▸ " + name + (desc ? "  " + theme.fg("muted", desc) : ""), 0, 0);
     },
 
@@ -2021,9 +2013,8 @@ The file format is a markdown file with YAML frontmatter and a system prompt bod
 
 \`\`\`markdown
 ---
-name: <optional UI display name; Claude Code-compatible alias for display_name>
 description: <one-line description shown in UI>
-color: <optional name badge color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
+color: <optional agent name color: red, blue, green, yellow, purple, orange, pink, cyan, an Agency Agents alias, or quoted "#RRGGBB">
 tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls. Use "none" for no tools. Omit for all tools>
 model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
 thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>

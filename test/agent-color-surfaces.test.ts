@@ -8,7 +8,7 @@ import { FleetList, type FleetUICtx } from "../src/ui/fleet-list.js";
 
 const TYPE = "colored-reviewer";
 const DISPLAY_NAME = "Code Reviewer";
-const PURPLE_BACKGROUND = "\u001b[48;2;155;89;182m";
+const PURPLE_FOREGROUND = "\u001b[38;2;130;125;189m";
 
 const config: AgentConfig = {
   name: TYPE,
@@ -24,7 +24,6 @@ const config: AgentConfig = {
 const theme = {
   fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
   bold: (text: string) => `*${text}*`,
-  getBgAnsi: (color: string) => `<${color}>`,
   getColorMode: () => "truecolor" as const,
 };
 
@@ -110,18 +109,16 @@ describe("custom agent color runtime surfaces", () => {
     try {
       const tool = tools.get("Agent");
       if (!tool) throw new Error("Agent tool was not registered");
-      const render = (context: { isPartial: boolean; isError: boolean }) => tool.renderCall(
+      const output = tool.renderCall(
         { subagent_type: TYPE, description: "Review this change" },
         theme,
-        context,
+        { isPartial: false, isError: false },
       ).render(120).join("\n");
-      const output = render({ isPartial: false, isError: false });
 
       expect(output).toContain(DISPLAY_NAME);
-      expect(output).toContain(PURPLE_BACKGROUND);
-      expect(output).toContain("<toolSuccessBg>");
-      expect(render({ isPartial: true, isError: false })).toContain("<toolPendingBg>");
-      expect(render({ isPartial: false, isError: true })).toContain("<toolErrorBg>");
+      expect(output).toContain(PURPLE_FOREGROUND);
+      // The tool block paints its own row background — the name must not reset it.
+      expect(output).not.toContain("\u001b[49m");
 
       const missingType = tool.renderCall(
         { description: "Review this change" },
@@ -129,7 +126,7 @@ describe("custom agent color runtime surfaces", () => {
         { isPartial: false, isError: false },
       ).render(120).join("\n");
       expect(missingType).toContain("<toolTitle>*Agent*</toolTitle>");
-      expect(missingType).not.toContain("\u001b[48;2;155;89;182m");
+      expect(missingType).not.toContain(PURPLE_FOREGROUND);
     } finally {
       await handlers.get("session_shutdown")?.({}, { hasUI: false, ui: {} });
     }
@@ -161,7 +158,7 @@ describe("custom agent color runtime surfaces", () => {
 
       expect(placement).toBe("aboveEditor");
       expect(output).toContain(DISPLAY_NAME);
-      expect(output).toContain(PURPLE_BACKGROUND);
+      expect(output).toContain(PURPLE_FOREGROUND);
     } finally {
       widget.dispose();
     }
@@ -194,7 +191,7 @@ describe("custom agent color runtime surfaces", () => {
       ).render(120).join("\n");
 
       expect(output).toContain(DISPLAY_NAME);
-      expect(output).toContain(PURPLE_BACKGROUND);
+      expect(output).toContain(PURPLE_FOREGROUND);
 
       registerColoredReviewer("invalid");
       const fallback = factory?.(
@@ -202,7 +199,7 @@ describe("custom agent color runtime surfaces", () => {
         theme,
       ).render(120).join("\n");
       expect(fallback).toContain(`<muted>${DISPLAY_NAME}</muted>`);
-      expect(fallback).not.toContain(PURPLE_BACKGROUND);
+      expect(fallback).not.toContain(PURPLE_FOREGROUND);
     } finally {
       fleet.dispose();
     }
@@ -222,7 +219,7 @@ describe("custom agent color runtime surfaces", () => {
     try {
       const output = viewer.render(120).join("\n");
       expect(output).toContain(DISPLAY_NAME);
-      expect(output).toContain(PURPLE_BACKGROUND);
+      expect(output).toContain(PURPLE_FOREGROUND);
     } finally {
       viewer.dispose();
     }
