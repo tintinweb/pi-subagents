@@ -488,6 +488,14 @@ export default function (pi: ExtensionAPI) {
     widget.update();
   }, undefined, (record) => {
     if (record.parentAgentId) return;
+    // Agent-tool spawns refresh these surfaces in their tool handler, but RPC
+    // and scheduler spawns enter through the manager directly.
+    if (currentCtx?.hasUI) {
+      widget.ensureTimer();
+      widget.update();
+      fleet.ensureTimer();
+      fleet.update();
+    }
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", {
       id: record.id,
@@ -589,6 +597,10 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    if (ctx.hasUI) {
+      widget.setUICtx(ctx.ui);
+      fleet.setUICtx(ctx.ui as any);
+    }
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
