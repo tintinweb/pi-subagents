@@ -484,6 +484,37 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     expect(disposeSpy).toHaveBeenCalledOnce();
   });
 
+  it("fires session_shutdown before disposing a session with extensions", async () => {
+    manager = new AgentManager();
+    const order: string[] = [];
+    const sess = {
+      extensionRunner: {
+        emit: vi.fn(async () => {
+          order.push("shutdown");
+        }),
+      },
+      dispose: vi.fn(() => {
+        order.push("dispose");
+      }),
+    };
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "done",
+      session: sess as any,
+      aborted: false,
+      steered: false,
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    await manager.getRecord(id)!.promise;
+
+    manager.clearCompleted();
+    // clearCompleted is sync; the emit/dispose chain runs on a microtask.
+    await vi.waitFor(() => expect(order).toEqual(["shutdown", "dispose"]));
+  });
+
   it("clearCompleted removes error and stopped records", async () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockRejectedValue(new Error("boom"));

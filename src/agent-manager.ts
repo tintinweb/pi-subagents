@@ -147,6 +147,41 @@ interface ResumeOptions {
   onStarted?: () => void;
 }
 
+/**
+ * Fire session_shutdown on a child session's extension runner, then dispose it.
+ *
+ * WHY (hack, not a pi-core fix): pi's `AgentSession.dispose()` invalidates the
+ * extension runner WITHOUT emitting `session_shutdown` — the lifecycle stop
+ * event extensions use to close session-scoped resources (heartbeats, open
+ * connections). `AgentSessionRuntime.dispose()` emits it before disposing;
+ * `AgentSession.dispose()` does not. Extensions that keep touching their ctx
+ * after invalidation throw "This extension ctx is stale after session
+ * replacement or reload", surfacing as an uncaughtException that can take the
+ * whole process down (seen with @4fu/pi-pwsh). Emitting the event ourselves via
+ * the public `session.extensionRunner` getter reproduces what
+ * `AgentSessionRuntime.dispose()` does, without a pi-core change.
+ *
+ * Order matters: the emit must resolve BEFORE dispose(), so a shutdown handler
+ * finishes (stopping its heartbeat) before the runner is invalidated. A handler
+ * that hangs blocks disposal — the same behavior as AgentSessionRuntime.dispose().
+ */
+async function disposeSession(session: AgentSession | undefined): Promise<void> {
+  if (!session) return;
+  const runner = session.extensionRunner;
+  if (runner) {
+    try {
+      await runner.emit({ type: "session_shutdown", reason: "quit" });
+    } catch {
+      // A throwing handler must not block disposal or crash the parent.
+    }
+  }
+  try {
+    session.dispose();
+  } catch {
+    // dispose() is best-effort cleanup.
+  }
+}
+
 export class AgentManager {
   private agents = new Map<string, AgentRecord>();
   private cleanupInterval: ReturnType<typeof setInterval>;
@@ -759,11 +794,13 @@ export class AgentManager {
     return true;
   }
 
-  /** Dispose a record's session and remove it from the map. */
+  /** Dispose a record's session (firing session_shutdown first) and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
-    record.session?.dispose?.();
+    const session = record.session;
+    // Eager detach: a second removeRecord/dispose must not re-emit on this session.
     record.session = undefined;
     this.agents.delete(id);
+    void disposeSession(session);
   }
 
   private cleanup() {
@@ -840,10 +877,13 @@ export class AgentManager {
     clearInterval(this.cleanupInterval);
     // Clear queue
     this.queue = [];
-    for (const record of this.agents.values()) {
-      record.session?.dispose();
-    }
+    const sessions = [...this.agents.values()]
+      .map(record => record.session)
+      .filter((session): session is AgentSession => session !== undefined);
+    // Eager detach before the async emit so a concurrent removeRecord can't re-emit.
+    for (const record of this.agents.values()) record.session = undefined;
     this.agents.clear();
+    void Promise.all(sessions.map(disposeSession));
     // Prune any orphaned git worktrees (crash recovery)
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
     // Also prune repos that caller-supplied cwds created worktrees in — a clean
