@@ -11,6 +11,11 @@ import type { AgentMentionMode, JoinMode, WidgetMode } from "./types.js";
 export interface SubagentsSettings {
   maxConcurrent?: number;
   /**
+   * Milliseconds before a top-level foreground Agent run is detached to the
+   * background. `0` or omitted disables the timeout. Defaults to `0`.
+   */
+  foregroundTimeoutMs?: number;
+  /**
    * 0 = unlimited — the extension's single source of truth for that convention:
    * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
    * `/agents` → Settings input prompt explicitly says "0 = unlimited".
@@ -164,6 +169,7 @@ export type ToolDescriptionMode = "full" | "compact" | "custom";
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
+  setForegroundTimeoutMs: (n: number) => void;
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
@@ -193,6 +199,7 @@ const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
 // that any realistic power-user setting passes through.
 const MAX_CONCURRENT_CEILING = 1024;
+export const FOREGROUND_TIMEOUT_CEILING_MS = 2_147_483_647;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
 const SUBAGENT_DEPTH_CEILING = 16;
@@ -208,6 +215,13 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.maxConcurrent as number) <= MAX_CONCURRENT_CEILING
   ) {
     out.maxConcurrent = r.maxConcurrent as number;
+  }
+  if (
+    Number.isInteger(r.foregroundTimeoutMs) &&
+    (r.foregroundTimeoutMs as number) >= 0 &&
+    (r.foregroundTimeoutMs as number) <= FOREGROUND_TIMEOUT_CEILING_MS
+  ) {
+    out.foregroundTimeoutMs = r.foregroundTimeoutMs as number;
   }
   if (
     Number.isInteger(r.defaultMaxTurns) &&
@@ -328,6 +342,7 @@ export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()):
 /** Apply persisted settings to the in-memory state via caller-supplied setters. */
 export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers): void {
   if (typeof s.maxConcurrent === "number") appliers.setMaxConcurrent(s.maxConcurrent);
+  if (typeof s.foregroundTimeoutMs === "number") appliers.setForegroundTimeoutMs(s.foregroundTimeoutMs);
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);

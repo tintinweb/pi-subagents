@@ -21,9 +21,10 @@
  * and "not found" was the correct answer. Test 3 pins the eviction rule that
  * DOES apply, so the two are not confused again.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -33,14 +34,16 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { FOREGROUND_TIMEOUT_CEILING_MS } from "../src/settings.js";
 
 function makePi() {
   const tools = new Map<string, any>();
   const lifecycle = new Map<string, any>();
+  const commands = new Map<string, any>();
   const pi = {
     registerMessageRenderer: vi.fn(),
     registerTool: vi.fn((t: any) => tools.set(t.name, t)),
-    registerCommand: vi.fn(),
+    registerCommand: vi.fn((name: string, command: any) => commands.set(name, command)),
     on: vi.fn((event: string, handler: any) => lifecycle.set(event, handler)),
     events: {
       emit: vi.fn(),
@@ -49,7 +52,7 @@ function makePi() {
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
   } as any;
-  return { pi, tools, lifecycle };
+  return { pi, tools, lifecycle, commands };
 }
 
 function ctx() {
@@ -123,6 +126,7 @@ describe("issue #174: foreground agent that hits max_turns", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     process.chdir(prevCwd);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
@@ -199,6 +203,319 @@ describe("issue #174: foreground agent that hits max_turns", () => {
     expect(out).toContain("THE-RESULT-PAYLOAD");
 
     await parent.lifecycle.get("session_shutdown")?.({}, ctx());
+  });
+
+  it("applies foregroundTimeoutMs and returns the live run as background", async () => {
+    vi.useFakeTimers();
+    writeFileSync(
+      join(tmpDir, ".pi", "subagents.json"),
+      JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "async", foregroundTimeoutMs: 1_000 }),
+    );
+    const session = { dispose: vi.fn(), messages: [], subscribe: vi.fn(() => vi.fn()) } as any;
+    let finish!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) => {
+      options.onSessionCreated?.(session);
+      return new Promise(resolve => { finish = resolve; });
+    });
+
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const parent = new AbortController();
+    const execution = tools.get("Agent").execute(
+      "tc-timeout",
+      { prompt: "keep working", description: "long task", subagent_type: "general-purpose" },
+      parent.signal,
+      undefined,
+      ctx(),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    const result = await execution;
+    const output = textOf(result);
+    expect(output).toContain("Agent sent to background");
+    const id = output.match(/Agent ID: (\S+)/)?.[1];
+    expect(id).toBeTruthy();
+
+    // Esc after the tool returned cannot stop the detached child.
+    parent.abort();
+    const running = await tools.get("get_subagent_result").execute(
+      "tc-status",
+      { agent_id: id },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    expect(textOf(running)).toContain("Status: running");
+
+    finish({ responseText: "FINISHED-SAME-RUN", session, aborted: false, steered: false });
+    await vi.advanceTimersByTimeAsync(200);
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(pi.sendMessage).toHaveBeenCalledTimes(1);
+    expect(pi.sendMessage.mock.calls[0][0].content).toContain("FINISHED-SAME-RUN");
+
+    await lifecycle.get("session_shutdown")?.({}, ctx());
+  });
+
+  it("releases a blocked foreground tool call and bounds shutdown when its runner hangs", async () => {
+    vi.useFakeTimers();
+    writeFileSync(
+      join(tmpDir, ".pi", "subagents.json"),
+      JSON.stringify({ schedulingEnabled: false, foregroundTimeoutMs: 0, outputTranscript: false }),
+    );
+    const session = { dispose: vi.fn(), messages: [], subscribe: vi.fn(() => vi.fn()) } as any;
+    let childSignal: AbortSignal | undefined;
+    let childId: string | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) => {
+      childSignal = options.signal;
+      childId = options.agentId;
+      options.onSessionCreated?.(session);
+      return new Promise(() => {});
+    });
+
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const execution = tools.get("Agent").execute(
+      "tc-blocked-shutdown",
+      { prompt: "hang", description: "blocked foreground", subagent_type: "general-purpose" },
+      new AbortController().signal,
+      undefined,
+      ctx(),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(childSignal).toBeDefined();
+    expect(childId).toBeDefined();
+    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+    const record = registry.getRecord(childId) as any;
+    const cleanup = vi.fn();
+    record.outputCleanup = cleanup;
+
+    const shutdown = lifecycle.get("session_shutdown")?.({}, ctx());
+    const result = await execution;
+
+    expect(childSignal?.aborted).toBe(true);
+    expect(textOf(result)).toContain("STOPPED BY THE USER");
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(session.dispose).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(cleanup).not.toHaveBeenCalled();
+    expect(session.dispose).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    await shutdown;
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(record.outputCleanup).toBeUndefined();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(cleanup.mock.invocationCallOrder[0]).toBeLessThan(
+      session.dispose.mock.invocationCallOrder[0],
+    );
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("clears pending smart-join batch finalization on shutdown", async () => {
+    vi.useFakeTimers();
+    writeFileSync(
+      join(tmpDir, ".pi", "subagents.json"),
+      JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "smart", outputTranscript: false }),
+    );
+    const session = { dispose: vi.fn(), messages: [], subscribe: vi.fn(() => vi.fn()) } as any;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) => {
+      options.onSessionCreated?.(session);
+      return Promise.resolve({ responseText: "done", session, aborted: false, steered: false });
+    });
+
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    await tools.get("Agent").execute(
+      "tc-batch-shutdown",
+      {
+        prompt: "finish now",
+        description: "pending batch",
+        subagent_type: "general-purpose",
+        run_in_background: true,
+      },
+      undefined,
+      undefined,
+      ctx(),
+    );
+
+    await lifecycle.get("session_shutdown")?.({}, ctx());
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("disposes an active join group and suppresses its late completion", async () => {
+    vi.useFakeTimers();
+    writeFileSync(
+      join(tmpDir, ".pi", "subagents.json"),
+      JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "smart", outputTranscript: false }),
+    );
+    const sessions = [
+      { dispose: vi.fn(), messages: [], subscribe: vi.fn(() => vi.fn()) },
+      { dispose: vi.fn(), messages: [], subscribe: vi.fn(() => vi.fn()) },
+    ] as any[];
+    let finishSecond!: (value: any) => void;
+    let secondSignal: AbortSignal | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt, options: any) => {
+      const session = prompt === "first" ? sessions[0] : sessions[1];
+      options.onSessionCreated?.(session);
+      if (prompt === "first") {
+        return Promise.resolve({ responseText: "first done", session, aborted: false, steered: false });
+      }
+      secondSignal = options.signal;
+      return new Promise(resolve => { finishSecond = resolve; });
+    });
+
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    for (const prompt of ["first", "second"]) {
+      await tools.get("Agent").execute(
+        `tc-group-${prompt}`,
+        {
+          prompt,
+          description: `${prompt} group member`,
+          subagent_type: "general-purpose",
+          run_in_background: true,
+        },
+        undefined,
+        undefined,
+        ctx(),
+      );
+    }
+    await vi.advanceTimersByTimeAsync(100);
+
+    const shutdown = lifecycle.get("session_shutdown")?.({}, ctx());
+    expect(secondSignal?.aborted).toBe(true);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await shutdown;
+
+    finishSecond({ responseText: "late second", session: sessions[1], aborted: true, steered: false });
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("stops a detached foreground run cleanly on session shutdown without notifying", async () => {
+    vi.useFakeTimers();
+    writeFileSync(
+      join(tmpDir, ".pi", "subagents.json"),
+      JSON.stringify({
+        schedulingEnabled: false,
+        defaultJoinMode: "async",
+        foregroundTimeoutMs: 1,
+        outputTranscript: false,
+      }),
+    );
+    const session = {
+      dispose: vi.fn(),
+      messages: [],
+      subscribe: vi.fn(() => vi.fn()),
+    } as any;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) =>
+      new Promise(resolve => {
+        options.onSessionCreated?.(session);
+        options.signal.addEventListener("abort", () => {
+          resolve({ responseText: "partial", session, aborted: true, steered: false });
+        }, { once: true });
+      }),
+    );
+
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const execution = tools.get("Agent").execute(
+      "tc-shutdown",
+      { prompt: "keep working", description: "shutdown task", subagent_type: "general-purpose" },
+      new AbortController().signal,
+      undefined,
+      ctx(),
+    );
+    await vi.advanceTimersByTimeAsync(1);
+    const result = await execution;
+    const id = textOf(result).match(/Agent ID: (\S+)/)?.[1];
+    expect(id).toBeTruthy();
+
+    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+    const record = registry.getRecord(id) as any;
+    const cleanup = vi.fn();
+    record.outputCleanup = cleanup;
+
+    await lifecycle.get("session_shutdown")?.({}, ctx());
+    await record.promise;
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    expect(record.status).toBe("stopped");
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(record.outputCleanup).toBeUndefined();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("shows and persists Foreground timeout in /agents Settings", async () => {
+    initTheme(undefined, false);
+    const { pi, lifecycle, commands } = makePi();
+    subagentsExtension(pi);
+    const rendered: string[] = [];
+    const select = vi.fn()
+      .mockResolvedValueOnce("Settings")
+      .mockResolvedValueOnce(undefined);
+    const invalidTimeout = String(FOREGROUND_TIMEOUT_CEILING_MS + 1);
+    const validTimeout = String(FOREGROUND_TIMEOUT_CEILING_MS);
+    const input = vi.fn()
+      .mockResolvedValueOnce(invalidTimeout)
+      .mockResolvedValueOnce(validTimeout);
+    const notify = vi.fn();
+    const custom = vi.fn()
+      .mockImplementationOnce((factory: any) => new Promise(resolve => {
+        const component = factory(
+          { requestRender: vi.fn(), terminal: { rows: 40, columns: 120 } },
+          {},
+          undefined,
+          resolve,
+        );
+        rendered.push(...component.render(120));
+        component.handleInput("\x1b[B"); // Foreground timeout is the second numeric row.
+        component.handleInput("\r");
+      }))
+      .mockImplementationOnce(async (factory: any) => {
+        const component = factory(
+          { requestRender: vi.fn(), terminal: { rows: 40, columns: 120 } },
+          {},
+          undefined,
+          vi.fn(),
+        );
+        rendered.push(...component.render(120));
+        return undefined;
+      });
+    const commandCtx = {
+      ...ctx(),
+      hasUI: true,
+      ui: {
+        ...ctx().ui,
+        select,
+        input,
+        custom,
+        notify,
+      },
+    } as any;
+
+    await commands.get("agents").handler("", commandCtx);
+
+    expect(rendered.join("\n")).toContain("Foreground timeout");
+    const label = "Foreground timeout in milliseconds (0 = disabled)";
+    expect(input.mock.calls).toEqual([
+      [label, "0"],
+      [label, invalidTimeout],
+    ]);
+    expect(JSON.parse(readFileSync(join(tmpDir, ".pi", "subagents.json"), "utf-8")).foregroundTimeoutMs)
+      .toBe(FOREGROUND_TIMEOUT_CEILING_MS);
+    expect(notify).toHaveBeenCalledWith(
+      `Foreground timeout set to ${FOREGROUND_TIMEOUT_CEILING_MS} ms`,
+      "info",
+    );
+    expect(notify.mock.calls.flat().join(" ")).not.toContain(invalidTimeout);
+    await lifecycle.get("session_shutdown")?.({}, commandCtx);
   });
 
   it("IS evicted by a session switch — its result was already delivered inline", async () => {

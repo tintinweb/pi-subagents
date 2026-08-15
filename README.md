@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 4) and smart group join (consolidated notifications)
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
 - **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
-- **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Stop a still-running agent by pressing `x` (then `x` again to confirm) — both work for background agents too
+- **Conversation viewer** — select any agent in `/agents` to open a live-scrolling overlay of its full conversation (auto-follows new content, scroll up to pause). Steer a running agent inline by pressing `Enter` to open a composer, typing, then `Enter` to send (`Esc` or an empty submit returns) — the message appears as a user message and redirects the agent after its current tool. Press `b` on a live foreground run to send that same session and in-flight work to the background, or stop a still-running agent by pressing `x` (then `x` again to confirm)
 - **Custom agent types** — define agents in `.pi/agents/<name>.md` or `.agents/agents/<name>.md` (project) or globally, with YAML frontmatter: custom system prompts, model selection, thinking levels, tool restrictions, and Claude Code-compatible colored name badges
 - **Nested subagents** — opt-in, default-off delegation: a custom agent that sets `allowed_subagents` gets its own ownership-scoped `Agent`, `get_subagent_result`, and `steer_subagent` tools, depth-capped from the main session (default 2). It can control only its own children, they are stopped when it finishes, and their transcripts and token spend roll up to it. The allowlist is a privilege boundary — a child runs with its own tools, so pick it as carefully as `tools:` itself
 - **Agent mentions** — subagents are first-class: type `@explore also check the RPC path` at the prompt and it goes to that agent instead of the main model, without a word of it entering the chat. One syntax covers the whole lifecycle — message it while it runs, resume it once it has finished, reopen its session from disk long after that, or start it if it never ran. Mentioning an agent that isn't running spawns it through an off-screen clone of the conversation, so it gets Claude Code's context-written prompt and a real `Agent` tool call without a word of it reaching the chat; `direct` mode starts it here from your text instead, with no model call at all. The orchestrator can `name` an agent so you address it as `@auth-audit`, and handles work in `steer_subagent`/`get_subagent_result` too. `@` completes live agents, resumable ones, and startable types alongside pi's file completion; `@main` forces text back to the main model. Toggle via `/agents → Settings → Agent mentions`
@@ -61,7 +61,7 @@ Agent({
 })
 ```
 
-Foreground agents block until complete and return results inline. Background agents return an ID immediately and notify you on completion.
+Foreground agents block until complete and return results inline by default. A live foreground run can be sent to the background with `b` in its conversation viewer or by the optional `foregroundTimeoutMs` setting; the same run continues and returns its ID. Background agents return an ID immediately and notify you on completion.
 
 ### Scheduling
 
@@ -127,7 +127,7 @@ While subagents are running, a Claude Code-style navigable list renders **below*
                                                                                    ↓ 3 more
 ```
 
-The list is ordered earliest-launched first, and only shows agents you can actually open (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
+The list is ordered earliest-launched first, and only shows agents you can actually open (pending/queued agents with no session yet appear once they start). At an **empty prompt**, press `↓` (or `←`) to move focus from the prompt into the list — the selected row is marked `●`, the rest `○`. `↑`/`↓` move the selection, `Enter` opens the selected agent's live conversation overlay (it auto-updates as the agent works), and `Esc` (or `↑` above `main`) returns to the prompt. Selecting `main` returns to the normal view. Inside the overlay, press `Enter` to steer the running agent — type a message and `Enter` to send it (`Esc` or an empty submit returns), and it redirects the agent the same way the `steer_subagent` tool does. For a currently-running foreground Agent call, press `b` to send that same live run to the background; the foreground tool call returns its agent ID, and the child continues without a restart. The `b` hint is hidden for background, queued, and finished agents. A viewer stays open when its agent finishes so you can read the final output, and finished agents linger in the list for a few seconds before dropping out. Typing anything at a non-empty prompt behaves normally — the list only captures arrow keys when the prompt is empty. Disable it entirely via `/agents → Settings → Fleet view`.
 
 ### Agent mentions
 
@@ -436,10 +436,10 @@ The `/agents` command opens an interactive menu:
 Running agents (2) — 1 running, 1 done     ← only shown when agents exist
 Agent types (6)                             ← unified list: defaults + custom
 Create new agent                            ← manual wizard or AI-generated
-Settings                                    ← max concurrency, max turns, grace turns, join mode
+Settings                                    ← max concurrency, foreground timeout, max turns, grace turns, join mode
 ```
 
-- **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns), or press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call). A stopped agent reports its partial output flagged as incomplete, not as a completion.
+- **Running agents** — select one to open its live conversation viewer. While it's still running, press `Enter` to open the steering composer, then `Enter` again to send a message that redirects the agent (same mechanism as the `steer_subagent` tool; `Esc` or an empty submit returns). On a live foreground run, press `b` to send the same session and in-flight work to the background without stopping or restarting it. Press `x` (then `x` again to confirm) to stop/abort it — including **background** agents, which a global Esc can't unambiguously target (Esc still stops a blocking foreground `Agent` call before detachment). A stopped agent reports its partial output flagged as incomplete, not as a completion.
 - **Agent types** — unified list with source indicators: `•` (project), `◦` (global), `✕` (disabled). Each row shows the agent's model, and the highlighted agent's full description appears below the list. The model column flags `(unavailable, fallback: inherit)` when a configured model can't be resolved (it would silently inherit the parent model), and shows `(→ provider/id)` when it resolves to a different provider or version than configured. Select an agent to manage it:
   - **Default agents** (no override): Eject (export as `.md`), Disable
   - **Default agents** (ejected/overridden): Edit, Disable, Reset to default, Delete
@@ -448,7 +448,7 @@ Settings                                    ← max concurrency, max turns, grac
 - **Eject** — writes the embedded default config as a `.md` file to project or personal location, so you can customize it
 - **Disable/Enable** — toggle agent availability. Disabled agents stay visible in the list (marked `✕`) and can be re-enabled
 - **Create new agent** — choose project/personal location, then manual wizard (step-by-step prompts for name, tools, model, thinking, system prompt) or AI-generated (describe what the agent should do and a sub-agent writes the `.md` file). Any name is allowed, including default agent names (overrides them)
-- **Settings** — configure max concurrency, default max turns, grace turns, and join mode at runtime
+- **Settings** — configure max concurrency, foreground timeout, default max turns, grace turns, and join mode at runtime
 
 ## Graceful Max Turns
 
@@ -469,7 +469,7 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 
 Background agents are subject to a configurable concurrency limit (default: 4). Excess agents are automatically queued and start as running agents complete. The widget shows queued agents as a collapsed count.
 
-Foreground agents bypass the queue — they block the parent anyway.
+Foreground agents bypass the queue — they block the parent anyway. If a live foreground run is sent to the background while all slots are full, it keeps running and counts as an extra occupied slot. New queued work does not start until the running count drops below the configured limit.
 
 ## Join Strategies
 
@@ -510,12 +510,14 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, foreground timeout, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, foreground timeout disabled, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+
+**Foreground timeout** (`foregroundTimeoutMs`, default `0`): the number of milliseconds a top-level foreground Agent run can block before it is sent to the background. `0` or a missing field disables the timeout and preserves normal blocking behavior. The same child session and in-flight work continue; the foreground tool call returns the agent ID and later receives the normal background completion notification. Frontmatter `run_in_background` and explicit `run_in_background: true` launches keep their current immediate background behavior. Also settable from `/agents → Settings → Foreground timeout`.
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 

@@ -539,6 +539,10 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
  */
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
+  if (signal.aborted) {
+    session.abort();
+    return () => {};
+  }
   const onAbort = () => session.abort();
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);

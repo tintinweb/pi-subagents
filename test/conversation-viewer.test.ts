@@ -402,6 +402,61 @@ describe("ConversationViewer", () => {
     });
   });
 
+  describe("background key", () => {
+    const W = 80;
+
+    it("shows b only for a running foreground agent and detaches once", () => {
+      const record = mockRecord({ status: "running", isBackground: false });
+      const onBackground = vi.fn(() => { record.isBackground = true; });
+      const tui = mockTui(30, W);
+      const viewer = new ConversationViewer(
+        tui,
+        mockSession(),
+        record,
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+        undefined,
+        undefined,
+        undefined,
+        onBackground,
+      );
+
+      expect(viewer.render(W).join("\n")).toContain("b background");
+      viewer.handleInput("b");
+      expect(onBackground).toHaveBeenCalledTimes(1);
+      expect(tui.requestRender).toHaveBeenCalled();
+      expect(viewer.render(W).join("\n")).not.toContain("b background");
+      viewer.handleInput("b");
+      expect(onBackground).toHaveBeenCalledTimes(1);
+    });
+
+    it("hides and ignores b for background, queued, and completed agents", () => {
+      for (const overrides of [
+        { status: "running" as const, isBackground: true },
+        { status: "queued" as const, isBackground: false },
+        { status: "completed" as const, isBackground: false },
+      ]) {
+        const onBackground = vi.fn();
+        const viewer = new ConversationViewer(
+          mockTui(30, W),
+          mockSession(),
+          mockRecord(overrides),
+          undefined,
+          ansiTheme(),
+          vi.fn(),
+          undefined,
+          undefined,
+          undefined,
+          onBackground,
+        );
+        expect(viewer.render(W).join("\n")).not.toContain("b background");
+        viewer.handleInput("b");
+        expect(onBackground).not.toHaveBeenCalled();
+      }
+    });
+  });
+
   describe("steer composer", () => {
     const W = 80;
 

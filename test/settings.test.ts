@@ -85,6 +85,7 @@ describe("settings persistence", () => {
   it("round-trips values: saveSettings then loadSettings", () => {
     const settings = {
       maxConcurrent: 7,
+      foregroundTimeoutMs: 45_000,
       defaultMaxTurns: 30,
       graceTurns: 3,
       defaultJoinMode: "smart" as const,
@@ -190,6 +191,12 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ defaultMaxTurns: 0 });
   });
 
+  it("merges foregroundTimeoutMs with project precedence and keeps 0 as disabled", () => {
+    writeGlobal({ foregroundTimeoutMs: 60_000 });
+    writeProject({ foregroundTimeoutMs: 0 });
+    expect(loadSettings(projectDir)).toEqual({ foregroundTimeoutMs: 0 });
+  });
+
   it("ignores unknown extra fields on load (forward-compat)", () => {
     writeProject({ maxConcurrent: 2, futureField: "ignored" });
     const loaded = loadSettings(projectDir);
@@ -232,6 +239,17 @@ describe("settings persistence", () => {
     it("drops negative defaultMaxTurns", () => {
       writeProject({ defaultMaxTurns: -1 });
       expect(loadSettings(projectDir)).toEqual({});
+    });
+
+    it("accepts a non-negative integer foregroundTimeoutMs and drops invalid values", () => {
+      for (const value of [0, 1, 2_147_483_647]) {
+        writeProject({ foregroundTimeoutMs: value });
+        expect(loadSettings(projectDir)).toEqual({ foregroundTimeoutMs: value });
+      }
+      for (const value of [-1, 1.5, "1000", 2_147_483_648]) {
+        writeProject({ foregroundTimeoutMs: value });
+        expect(loadSettings(projectDir)).toEqual({});
+      }
     });
 
     it("drops graceTurns < 1", () => {
@@ -450,6 +468,7 @@ describe("settings persistence", () => {
     beforeEach(() => {
       appliers = {
         setMaxConcurrent: vi.fn(),
+        setForegroundTimeoutMs: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
@@ -480,6 +499,11 @@ describe("settings persistence", () => {
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
     });
 
+    it("applies foregroundTimeoutMs including the disabled value", () => {
+      applySettings({ foregroundTimeoutMs: 0 }, appliers);
+      expect(appliers.setForegroundTimeoutMs).toHaveBeenCalledWith(0);
+    });
+
     it("applies fallbackSubagent through to the registry", () => {
       // Without this, deleting the applySettings line for this field leaves the
       // whole suite green while `subagents.json` silently stops working.
@@ -488,8 +512,9 @@ describe("settings persistence", () => {
     });
 
     it("applies only the fields that are present", () => {
-      applySettings({ maxConcurrent: 4, graceTurns: 3, maxSubagentDepth: 1 }, appliers);
+      applySettings({ maxConcurrent: 4, foregroundTimeoutMs: 2_500, graceTurns: 3, maxSubagentDepth: 1 }, appliers);
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(4);
+      expect(appliers.setForegroundTimeoutMs).toHaveBeenCalledWith(2_500);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(3);
       expect(appliers.setMaxSubagentDepth).toHaveBeenCalledWith(1);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
@@ -502,6 +527,7 @@ describe("settings persistence", () => {
       applySettings(
         {
           maxConcurrent: 8,
+          foregroundTimeoutMs: 60_000,
           defaultMaxTurns: 50,
           graceTurns: 7,
           defaultJoinMode: "group",
@@ -515,6 +541,7 @@ describe("settings persistence", () => {
         appliers,
       );
       expect(appliers.setMaxConcurrent).toHaveBeenCalledWith(8);
+      expect(appliers.setForegroundTimeoutMs).toHaveBeenCalledWith(60_000);
       expect(appliers.setDefaultMaxTurns).toHaveBeenCalledWith(50);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
       expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
@@ -633,6 +660,7 @@ describe("settings persistence", () => {
     beforeEach(() => {
       appliers = {
         setMaxConcurrent: vi.fn(),
+        setForegroundTimeoutMs: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),

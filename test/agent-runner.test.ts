@@ -2340,6 +2340,34 @@ describe("agent-runner turn limits", () => {
 // nothing checked that the signal actually reaches the session, so a child could
 // be marked stopped while it keeps running and burning tokens.
 describe("agent-runner abort signal forwarding", () => {
+  it("aborts before prompting when the signal fired before child session creation", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const controller = new AbortController();
+    controller.abort();
+    const { session } = createSession("NEVER STARTED NORMALLY");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, signal: controller.signal });
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(session.abort.mock.invocationCallOrder[0]).toBeLessThan(
+      session.prompt.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("resumeAgent aborts immediately when its signal is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const { session } = createSession("RESUME");
+
+    await resumeAgent(session as any, "continue", { signal: controller.signal });
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(session.abort.mock.invocationCallOrder[0]).toBeLessThan(
+      session.prompt.mock.invocationCallOrder[0],
+    );
+  });
+
   it("aborts the session when the parent signal fires mid-run", async () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
     const controller = new AbortController();

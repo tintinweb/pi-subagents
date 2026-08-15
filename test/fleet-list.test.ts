@@ -41,6 +41,12 @@ function fakeManager(agents: AgentRecord[]): AgentManager {
     listAgents: () => agents,
     abort: () => true,
     steer: vi.fn(() => true),
+    detachForeground: vi.fn((id: string) => {
+      const record = agents.find(agent => agent.id === id);
+      if (!record || record.status !== "running" || record.isBackground !== false) return false;
+      record.isBackground = true;
+      return true;
+    }),
   } as unknown as AgentManager;
 }
 
@@ -93,7 +99,7 @@ function harness(agents: AgentRecord[]): Harness {
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map());
+  const fleet = new FleetList(manager, new Map(), record => manager.detachForeground(record.id));
   fleet.setUICtx(ui);
   fleet.update();
 
@@ -397,6 +403,21 @@ describe("FleetList overlay lifecycle", () => {
     // Selection follows a2 ("two") to its new position, not whatever is at idx 2 now.
     expect(h.render().find(l => l.includes("two"))).toContain("●");
     expect(h.render().find(l => l.includes("three"))).toContain("○");
+  });
+
+  it("wires the viewer's b action to the same foreground record", () => {
+    const agents = [makeRecord({ id: "live", description: "the one", isBackground: false })];
+    const h = harness(agents);
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press(ENTER);
+
+    const viewer = h.overlayComponent();
+    expect(viewer).toBeDefined();
+    viewer!.handleInput("b");
+
+    expect(h.manager.detachForeground).toHaveBeenCalledWith("live");
+    expect(agents[0].isBackground).toBe(true);
   });
 
   it("wires the viewer's steer composer to manager.steer with the agent id", () => {
