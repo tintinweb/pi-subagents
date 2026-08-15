@@ -113,6 +113,7 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
     // resultConsumed is set by spawnAndWait so onComplete skips notifications
     expect(completedRecord!.resultConsumed).toBe(true);
     expect(record).toBe(completedRecord);
+    expect(manager.detachForeground(record.id)).toBe(false);
   });
 });
 
@@ -1018,6 +1019,34 @@ describe("AgentManager — parent abort signal forwarding (#44)", () => {
   let manager: AgentManager;
   afterEach(() => manager?.dispose());
 
+  it("starts with the child already stopped when the parent signal was pre-aborted", async () => {
+    manager = new AgentManager();
+    const parent = new AbortController();
+    parent.abort();
+    let childSignal: AbortSignal | undefined;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
+      childSignal = options.signal;
+      return Promise.resolve({
+        responseText: "",
+        session: mockSession(),
+        aborted: true,
+        steered: false,
+      });
+    });
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "x",
+      isBackground: false,
+      signal: parent.signal,
+    });
+    const record = manager.getRecord(id)!;
+
+    expect(record.status).toBe("stopped");
+    expect(childSignal?.aborted).toBe(true);
+    await record.promise;
+    expect(record.status).toBe("stopped");
+  });
+
   it("aborts the child when the parent signal aborts", () => {
     manager = new AgentManager();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
@@ -1034,6 +1063,176 @@ describe("AgentManager — parent abort signal forwarding (#44)", () => {
     parent.abort();
     expect(record.status).toBe("stopped");
     expect(record.completedAt).toBeGreaterThan(0);
+  });
+});
+
+describe("AgentManager — foreground detachment", () => {
+  let manager: AgentManager;
+
+  afterEach(() => {
+    vi.useRealTimers();
+    manager?.dispose();
+  });
+
+  it("returns spawnAndWait promptly while the same run continues and notifies once", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    const parent = new AbortController();
+    const session = mockSession();
+    let finish!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) => {
+      options.onSessionCreated?.(session);
+      return new Promise(resolve => { finish = resolve; });
+    });
+
+    let id = "";
+    const waiting = manager.spawnAndWait(mockPi, mockCtx, "X", "live", {
+      description: "live",
+      signal: parent.signal,
+    }, spawnedId => { id = spawnedId; });
+    const record = manager.getRecord(id)!;
+    const runPromise = record.promise;
+    const childController = record.abortController;
+
+    expect(manager.detachForeground(id)).toBe(true);
+    const detached = await waiting;
+    expect(detached.record).toBe(record);
+    expect(record.status).toBe("running");
+    expect(record.isBackground).toBe(true);
+    expect(record.promise).toBe(runPromise);
+    expect(record.session).toBe(session);
+    expect(onComplete).not.toHaveBeenCalled();
+
+    // The foreground tool's signal no longer owns this detached child.
+    parent.abort();
+    expect(record.status).toBe("running");
+    expect(childController?.signal.aborted).toBe(false);
+    expect(manager.detachForeground(id)).toBe(false);
+
+    finish({ responseText: "done", session, aborted: false, steered: false });
+    await runPromise;
+    expect(record.status).toBe("completed");
+    expect(record.resultConsumed).toBe(false);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a parent Esc before detachment as a normal foreground stop", async () => {
+    const onComplete = vi.fn();
+    manager = new AgentManager(onComplete);
+    const parent = new AbortController();
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) =>
+      new Promise(resolve => {
+        options.signal.addEventListener("abort", () => {
+          resolve({ responseText: "partial", session: mockSession(), aborted: true, steered: false });
+        });
+      }),
+    );
+
+    let id = "";
+    const waiting = manager.spawnAndWait(
+      mockPi,
+      mockCtx,
+      "X",
+      "stop first",
+      { description: "stop first", signal: parent.signal },
+      spawnedId => { id = spawnedId; },
+    );
+    parent.abort();
+    expect(manager.detachForeground(id)).toBe(false);
+
+    const { record } = await waiting;
+    expect(record.status).toBe("stopped");
+    expect(record.isBackground).toBe(false);
+    expect(record.resultConsumed).toBe(true);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("automatically detaches at the configured timeout without aborting the run", async () => {
+    vi.useFakeTimers();
+    manager = new AgentManager();
+    manager.setForegroundTimeoutMs(1_000);
+    const session = mockSession();
+    let finish!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+
+    let id = "";
+    const waiting = manager.spawnAndWait(
+      mockPi,
+      mockCtx,
+      "X",
+      "timed",
+      { description: "timed" },
+      spawnedId => { id = spawnedId; },
+    );
+    let returned = false;
+    void waiting.then(() => { returned = true; });
+
+    await vi.advanceTimersByTimeAsync(999);
+    expect(returned).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const { record } = await waiting;
+    expect(record.id).toBe(id);
+    expect(record.status).toBe("running");
+    expect(record.isBackground).toBe(true);
+    expect(record.abortController?.signal.aborted).toBe(false);
+
+    finish({ responseText: "done", session, aborted: false, steered: false });
+    await record.promise;
+  });
+
+  it("keeps normal foreground blocking when the timeout is disabled", async () => {
+    vi.useFakeTimers();
+    manager = new AgentManager();
+    expect(manager.getForegroundTimeoutMs()).toBe(0);
+    let finish!: (value: any) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+
+    const waiting = manager.spawnAndWait(mockPi, mockCtx, "X", "blocking", { description: "blocking" });
+    let returned = false;
+    void waiting.then(() => { returned = true; });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(returned).toBe(false);
+
+    finish({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await waiting;
+  });
+
+  it("counts a detached foreground run above capacity and holds queued work", async () => {
+    const resolvers = new Map<string, (value: any) => void>();
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, prompt) =>
+      new Promise(resolve => { resolvers.set(prompt, resolve); }),
+    );
+    manager = new AgentManager(undefined, 1);
+
+    const blockerId = manager.spawn(mockPi, mockCtx, "X", "blocker", {
+      description: "blocker",
+      isBackground: true,
+    });
+    let foregroundId = "";
+    const foregroundWait = manager.spawnAndWait(
+      mockPi,
+      mockCtx,
+      "X",
+      "foreground",
+      { description: "foreground" },
+      id => { foregroundId = id; },
+    );
+    const queuedId = manager.spawn(mockPi, mockCtx, "X", "queued", {
+      description: "queued",
+      isBackground: true,
+    });
+    expect(manager.getRecord(queuedId)?.status).toBe("queued");
+
+    expect(manager.detachForeground(foregroundId)).toBe(true);
+    await foregroundWait;
+    resolvers.get("blocker")!({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(blockerId)!.promise;
+    // The detached run still occupies one slot, so this cannot drain yet.
+    expect(manager.getRecord(queuedId)?.status).toBe("queued");
+
+    resolvers.get("foreground")!({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+    await manager.getRecord(foregroundId)!.promise;
+    expect(manager.getRecord(queuedId)?.status).toBe("running");
   });
 });
 

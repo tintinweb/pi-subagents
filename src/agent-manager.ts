@@ -25,6 +25,8 @@ export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; toke
 
 /** Default max concurrent background agents. */
 const DEFAULT_MAX_CONCURRENT = 4;
+/** Largest delay Node timers accept without overflowing to an immediate timer. */
+const MAX_FOREGROUND_TIMEOUT_MS = 2_147_483_647;
 
 /**
  * How many evicted agents stay addressable by name. Only a bound on memory —
@@ -130,6 +132,11 @@ interface SpawnOptions {
   invocation?: AgentInvocation;
   /** Parent abort signal — when aborted, the subagent is also stopped. */
   signal?: AbortSignal;
+  /**
+   * Foreground-only timeout before the same live run is sent to the background.
+   * `undefined` uses the manager default; `0` disables it for this spawn.
+   */
+  foregroundTimeoutMs?: number;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
@@ -203,6 +210,16 @@ export class AgentManager {
   private queue: { id: string; start: () => void }[] = [];
   /** Number of currently running background agents. */
   private runningBackground = 0;
+  /** Top-level records that currently occupy a background pool slot. */
+  private poolSlots = new Set<string>();
+  /** Parent AbortSignal listener cleanup, removable when a foreground run detaches. */
+  private parentSignalCleanups = new Map<string, () => void>();
+  /** Resolves spawnAndWait as soon as its live foreground run detaches. */
+  private foregroundDetachWaiters = new Map<string, () => void>();
+  /** 0 disables automatic foreground detachment. */
+  private foregroundTimeoutMs = 0;
+  /** Shared settlement for repeated shutdown requests. */
+  private shutdownSettlement?: Promise<void>;
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -228,6 +245,38 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  /** Set the default foreground timeout. `0` disables automatic detachment. */
+  setForegroundTimeoutMs(ms: number): void {
+    this.foregroundTimeoutMs = Number.isFinite(ms)
+      ? Math.min(MAX_FOREGROUND_TIMEOUT_MS, Math.max(0, Math.trunc(ms)))
+      : 0;
+  }
+
+  getForegroundTimeoutMs(): number {
+    return this.foregroundTimeoutMs;
+  }
+
+  /** Count a top-level background run once, including a detached foreground run. */
+  private acquirePoolSlot(record: AgentRecord): void {
+    if (!occupiesPoolSlot(record) || this.poolSlots.has(record.id)) return;
+    this.poolSlots.add(record.id);
+    this.runningBackground++;
+  }
+
+  /** Release a top-level background slot once. */
+  private releasePoolSlot(record: AgentRecord): void {
+    if (!this.poolSlots.delete(record.id)) return;
+    this.runningBackground--;
+  }
+
+  /** Remove the parent interrupt listener without aborting the child. */
+  private detachParentSignal(id: string): void {
+    const cleanup = this.parentSignalCleanups.get(id);
+    if (!cleanup) return;
+    this.parentSignalCleanups.delete(id);
+    cleanup();
   }
 
   /**
@@ -345,17 +394,20 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    this.acquirePoolSlot(record);
     this.onStart?.(record);
 
-    // Wire parent abort signal to stop the subagent when the parent is interrupted
-    let detachParentSignal: (() => void) | undefined;
+    // Wire parent abort signal to stop the subagent when the parent is interrupted.
+    // A foreground-to-background detach removes this listener while the run stays live.
     if (options.signal) {
-      const onParentAbort = () => this.abort(id);
-      options.signal.addEventListener("abort", onParentAbort, { once: true });
-      detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
+      if (options.signal.aborted) {
+        this.abort(id);
+      } else {
+        const onParentAbort = () => this.abort(id);
+        options.signal.addEventListener("abort", onParentAbort, { once: true });
+        this.parentSignalCleanups.set(id, () => options.signal!.removeEventListener("abort", onParentAbort));
+      }
     }
-    const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
 
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -439,7 +491,7 @@ export class AgentManager {
         record.session = session;
         record.completedAt ??= Date.now();
 
-        detach();
+        this.detachParentSignal(id);
 
         // Final flush of streaming output file
         if (record.outputCleanup) {
@@ -462,13 +514,13 @@ export class AgentManager {
 
         this.abortOwnedChildren(id);
 
-        // Fire onComplete for foreground agents too — lifecycle symmetry.
-        // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
+        // Read the live record mode, not the spawn-time option: a foreground run
+        // can become background while this same promise is still in flight.
+        if (!record.isBackground) {
           record.resultConsumed = true;
           try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
         } else {
-          if (occupiesPoolSlot(record)) this.runningBackground--;
+          this.releasePoolSlot(record);
           try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
           this.drainQueue();
         }
@@ -482,7 +534,7 @@ export class AgentManager {
         record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
 
-        detach();
+        this.detachParentSignal(id);
 
         // Final flush of streaming output file on error
         if (record.outputCleanup) {
@@ -500,14 +552,13 @@ export class AgentManager {
 
         this.abortOwnedChildren(id);
 
-        // Fire onComplete for foreground agents too — lifecycle symmetry.
-        // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
+        // Read the live record mode, as on the success path above.
+        if (!record.isBackground) {
           record.resultConsumed = true;
-          this.onComplete?.(record);
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
         } else {
-          if (occupiesPoolSlot(record)) this.runningBackground--;
-          this.onComplete?.(record);
+          this.releasePoolSlot(record);
+          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
           this.drainQueue();
         }
         return "";
@@ -588,8 +639,51 @@ export class AgentManager {
       this.onSpawned = prevOnSpawned;
     }
     const record = this.agents.get(id)!;
-    await record.promise;
+    let resolveDetached!: () => void;
+    const detached = new Promise<void>((resolve) => { resolveDetached = resolve; });
+    this.foregroundDetachWaiters.set(id, resolveDetached);
+
+    const timeoutMs = options.parentAgentId === undefined
+      ? options.foregroundTimeoutMs ?? this.foregroundTimeoutMs
+      : 0;
+    const timeout = timeoutMs > 0
+      ? setTimeout(() => this.detachForeground(id), timeoutMs)
+      : undefined;
+    timeout?.unref();
+
+    try {
+      await Promise.race([record.promise, detached]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (this.foregroundDetachWaiters.get(id) === resolveDetached) {
+        this.foregroundDetachWaiters.delete(id);
+      }
+    }
     return { id, record };
+  }
+
+  /**
+   * Send a running top-level foreground agent to the background without changing
+   * its session, promise, or abort controller. Returns false when the transition
+   * is no longer valid or already happened.
+   */
+  detachForeground(id: string): boolean {
+    const record = this.agents.get(id);
+    if (
+      !record
+      || record.parentAgentId !== undefined
+      || record.status !== "running"
+      || record.isBackground !== false
+    ) {
+      return false;
+    }
+
+    this.detachParentSignal(id);
+    record.isBackground = true;
+    record.resultConsumed = false;
+    this.acquirePoolSlot(record);
+    this.foregroundDetachWaiters.get(id)?.();
+    return true;
   }
 
   /**
@@ -700,7 +794,7 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    this.acquirePoolSlot(record);
     this.onStart?.(record);
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
@@ -732,7 +826,7 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
-      if (occupiesPoolSlot(record)) this.runningBackground--;
+      this.releasePoolSlot(record);
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
@@ -989,6 +1083,26 @@ export class AgentManager {
     return count;
   }
 
+  /**
+   * Stop all work, release foreground tool calls, and settle the promises that
+   * existed when shutdown began. The caller owns the bounded fallback because
+   * it also owns the final manager and UI disposal order.
+   */
+  stopForShutdown(): Promise<void> {
+    if (this.shutdownSettlement) return this.shutdownSettlement;
+
+    const inFlight = [...this.agents.values()]
+      .map(record => record.promise)
+      .filter((promise): promise is Promise<string> => promise !== undefined);
+
+    this.abortAll();
+    for (const resolveDetached of this.foregroundDetachWaiters.values()) resolveDetached();
+    this.foregroundDetachWaiters.clear();
+
+    this.shutdownSettlement = Promise.allSettled(inFlight).then(() => {});
+    return this.shutdownSettlement;
+  }
+
   /** Wait for all running and queued agents to complete (including queued ones). */
   async waitForAll(): Promise<void> {
     // Loop because drainQueue respects the concurrency limit — as running
@@ -1006,9 +1120,17 @@ export class AgentManager {
 
   dispose() {
     clearInterval(this.cleanupInterval);
+    for (const id of this.parentSignalCleanups.keys()) this.detachParentSignal(id);
+    this.foregroundDetachWaiters.clear();
+    this.poolSlots.clear();
+    this.runningBackground = 0;
     // Clear queue
     this.queue = [];
     for (const record of this.agents.values()) {
+      if (record.outputCleanup) {
+        try { record.outputCleanup(); } catch { /* ignore */ }
+        record.outputCleanup = undefined;
+      }
       record.session?.dispose();
     }
     this.agents.clear();

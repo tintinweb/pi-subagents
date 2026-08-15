@@ -34,7 +34,7 @@ import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, FOREGROUND_TIMEOUT_CEILING_MS, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
@@ -61,6 +61,13 @@ import { selectItem } from "./ui/select-item.js";
 import { addUsage, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 
 // ---- Shared helpers ----
+
+/**
+ * Abort-aware runners normally settle at once. One second still allows their
+ * transcript and worktree cleanup to finish without letting a hung provider or
+ * tool block host shutdown forever.
+ */
+const SHUTDOWN_SETTLEMENT_TIMEOUT_MS = 1_000;
 
 /** Tool execute return value for a text response. */
 function textResult(msg: string, details?: AgentDetails) {
@@ -338,6 +345,8 @@ export default function (pi: ExtensionAPI) {
   // ---- Agent activity tracking + widget ----
   const agentActivity = new Map<string, AgentActivity>();
 
+  let shuttingDown = false;
+
   // ---- Cancellable pending notifications ----
   // Holds notifications briefly so get_subagent_result can cancel them
   // before they reach pi.sendMessage (fire-and-forget).
@@ -348,9 +357,11 @@ export default function (pi: ExtensionAPI) {
   const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
 
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
+    if (shuttingDown) return;
     cancelNudge(key);
     pendingNudges.set(key, setTimeout(() => {
       pendingNudges.delete(key);
+      if (shuttingDown) return;
       try { send(); } catch { /* ignore stale completion side-effect errors */ }
     }, delay));
   }
@@ -389,6 +400,7 @@ export default function (pi: ExtensionAPI) {
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
+      if (shuttingDown) return;
       for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
 
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
@@ -445,8 +457,11 @@ export default function (pi: ExtensionAPI) {
     };
   }
 
-  // Background completion: route through group join or send individual nudge
+  // Background completion: route through group join or send individual nudge.
+  // Shutdown suppresses callbacks before it waits for runner cleanup, so late
+  // settlement cannot recreate cleared notification timers.
   const manager = new AgentManager((record) => {
+    if (shuttingDown) return;
     // Nested children report only through their owning parent's scoped tools.
     // Keep them out of top-level lifecycle, transcript, notification, and UI channels.
     if (record.parentAgentId) return;
@@ -907,6 +922,7 @@ export default function (pi: ExtensionAPI) {
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
   pi.on("session_shutdown", async () => {
+    shuttingDown = true;
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -918,9 +934,24 @@ export default function (pi: ExtensionAPI) {
       delete (globalThis as any)[MANAGER_KEY];
     }
     scheduler.stop();
-    manager.abortAll();
+    if (batchFinalizeTimer) {
+      clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = undefined;
+    }
+    currentBatchAgents = [];
+    groupJoin.dispose();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+
+    const settlement = manager.stopForShutdown();
+    let settlementTimer: ReturnType<typeof setTimeout> | undefined;
+    const boundedFallback = new Promise<void>(resolve => {
+      settlementTimer = setTimeout(resolve, SHUTDOWN_SETTLEMENT_TIMEOUT_MS);
+    });
+    await Promise.race([settlement, boundedFallback]);
+    if (settlementTimer) clearTimeout(settlementTimer);
+
+    widget.dispose();
     fleet.dispose();
     manager.dispose();
   });
@@ -936,7 +967,15 @@ export default function (pi: ExtensionAPI) {
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  const fleet = new FleetList(manager, agentActivity);
+  const fleet = new FleetList(manager, agentActivity, sendForegroundToBackground);
+  function sendForegroundToBackground(record: AgentRecord): boolean {
+    if (!manager.detachForeground(record.id)) return false;
+    widget.ensureTimer();
+    widget.update();
+    fleet.ensureTimer();
+    fleet.update();
+    return true;
+  }
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -1005,6 +1044,10 @@ export default function (pi: ExtensionAPI) {
   /** Finalize the current batch: if 2+ smart-mode agents, register as a group. */
   function finalizeBatch() {
     batchFinalizeTimer = undefined;
+    if (shuttingDown) {
+      currentBatchAgents = [];
+      return;
+    }
     const batchAgents = [...currentBatchAgents];
     currentBatchAgents = [];
 
@@ -1176,6 +1219,7 @@ export default function (pi: ExtensionAPI) {
   applyAndEmitLoaded(
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+      setForegroundTimeoutMs: (n) => manager.setForegroundTimeoutMs(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
@@ -1893,7 +1937,9 @@ Terse command-style prompts produce shallow, generic work.
           ...fgCallbacks,
         }, (fgAgentId) => {
           // onSpawned: called synchronously after spawn, before onSessionCreated fires.
-          // Set up the output file so streamToOutputFile can pick it up.
+          // Set up every record-owned surface before a very short timeout can detach it.
+          fgId = fgAgentId;
+          agentActivity.set(fgAgentId, fgState);
           const fgRec = manager.getRecord(fgAgentId);
           attachTranscript(fgRec, fgAgentId);
         });
@@ -1904,10 +1950,34 @@ Terse command-style prompts produce shallow, generic work.
         // ticking or a finished agent on the widget.
         clearInterval(spinnerInterval);
         if (fgId) {
-          agentActivity.delete(fgId);
-          widget.markFinished(fgId);
-          fleet.onAgentFinished(fgId);
+          const current = manager.getRecord(fgId);
+          if (current?.isBackground && current.status === "running") {
+            // The tool call is done, but this same agent is not. Keep its live
+            // activity/session surfaces until the background completion path
+            // performs the normal final cleanup and notification.
+            widget.ensureTimer();
+            widget.update();
+            fleet.ensureTimer();
+            fleet.update();
+          } else {
+            agentActivity.delete(fgId);
+            widget.markFinished(fgId);
+            fleet.onAgentFinished(fgId);
+          }
         }
+      }
+
+      if (record.isBackground) {
+        return textResult(
+          `${fallbackNote}Agent sent to background.\n` +
+          `Agent ID: ${record.id}\n` +
+          `Type: ${displayName}\n` +
+          `Description: ${record.description}\n` +
+          (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
+          `\nThe same live run is continuing. You will be notified when it completes.\n` +
+          `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
+          { ...detailBase, toolUses: record.toolUses, tokens: formatLifetimeTokens(fgState), durationMs: Date.now() - record.startedAt, status: "background" as const, agentId: record.id },
+        );
       }
 
       // Get final token count
@@ -2260,7 +2330,11 @@ Terse command-style prompts produce shallow, generic work.
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        }, keybindings, (message: string) => manager.steer(record.id, message));
+        }, keybindings, (message: string) => manager.steer(record.id, message), () => {
+          if (sendForegroundToBackground(record)) {
+            ctx.ui.notify(`Sent "${record.description}" to the background.`, "info");
+          }
+        });
       },
       {
         overlay: true,
@@ -2510,6 +2584,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
     const { record } = await manager.spawnAndWait(pi, ctx, "general-purpose", generatePrompt, {
       description: `Generate ${name} agent`,
       maxTurns: 5,
+      // This command needs the file before it can continue its wizard flow.
+      foregroundTimeoutMs: 0,
     });
 
     if (record.status === "error") {
@@ -2613,6 +2689,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
   function snapshotSettings() {
     return {
       maxConcurrent: manager.getMaxConcurrent(),
+      foregroundTimeoutMs: manager.getForegroundTimeoutMs(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -2648,11 +2725,12 @@ Write the file using the write tool. Only write the file, nothing else.`;
   const _settingsSnapshotIsComplete: _NoMissingSettingsKeys = true;
   void _settingsSnapshotIsComplete;
 
-  const NUMERIC_IDS = new Set(["maxConcurrent", "defaultMaxTurns", "graceTurns", "maxSubagentDepth"]);
+  const NUMERIC_IDS = new Set(["maxConcurrent", "foregroundTimeoutMs", "defaultMaxTurns", "graceTurns", "maxSubagentDepth"]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
+      const ftm = manager.getForegroundTimeoutMs();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -2671,6 +2749,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Max concurrent background agents (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
+        },
+        {
+          id: "foregroundTimeoutMs",
+          label: "Foreground timeout",
+          description: "Send live foreground runs to the background after this many milliseconds (0 = disabled, Enter to type)",
+          currentValue: String(ftm),
+          values: [String(ftm)],
         },
         {
           id: "defaultMaxTurns",
@@ -2786,6 +2871,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
         if (n >= 1) {
           manager.setMaxConcurrent(n);
           notifyApplied(ctx, `Max concurrency set to ${n}`);
+        }
+      } else if (id === "foregroundTimeoutMs") {
+        const n = parseInt(value, 10);
+        if (n >= 0 && n <= FOREGROUND_TIMEOUT_CEILING_MS) {
+          manager.setForegroundTimeoutMs(n);
+          notifyApplied(
+            ctx,
+            n === 0 ? "Foreground timeout disabled" : `Foreground timeout set to ${n} ms`,
+          );
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
@@ -2928,19 +3022,23 @@ Write the file using the write tool. Only write the file, nothing else.`;
     if (result && NUMERIC_IDS.has(result)) {
       const current = result === "maxConcurrent"
         ? String(manager.getMaxConcurrent())
-        : result === "defaultMaxTurns"
-          ? String(getDefaultMaxTurns() ?? 0)
-          : result === "maxSubagentDepth"
-            ? String(getMaxSubagentDepth())
-            : String(getGraceTurns());
+        : result === "foregroundTimeoutMs"
+          ? String(manager.getForegroundTimeoutMs())
+          : result === "defaultMaxTurns"
+            ? String(getDefaultMaxTurns() ?? 0)
+            : result === "maxSubagentDepth"
+              ? String(getMaxSubagentDepth())
+              : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
         ? "Max concurrency (1+)"
-        : result === "defaultMaxTurns"
-          ? "Default max turns (0 = unlimited)"
-          : result === "maxSubagentDepth"
-            ? "Nested depth (0/1 = nesting off)"
-            : "Grace turns (1+)";
+        : result === "foregroundTimeoutMs"
+          ? "Foreground timeout in milliseconds (0 = disabled)"
+          : result === "defaultMaxTurns"
+            ? "Default max turns (0 = unlimited)"
+            : result === "maxSubagentDepth"
+              ? "Nested depth (0/1 = nesting off)"
+              : "Grace turns (1+)";
 
       // Loop until user enters a valid integer or cancels (Esc / null).
       // Silently trims whitespace; rejects non-numeric input by re-prompting.
@@ -2948,7 +3046,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
       while (input != null) {
         const trimmed = input.trim();
         const n = Number(trimmed);
-        if (trimmed !== "" && Number.isInteger(n)) {
+        const inRange = result !== "foregroundTimeoutMs"
+          || (n >= 0 && n <= FOREGROUND_TIMEOUT_CEILING_MS);
+        if (trimmed !== "" && Number.isInteger(n) && inRange) {
           applyValue(result, String(n));
           await showSettings(ctx);
           return;

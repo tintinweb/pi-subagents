@@ -46,6 +46,8 @@ export class ConversationViewer implements Component {
     keybindings?: ViewerKeybindings,
     /** Send a steering message to the agent. Omitted → no compose affordance. */
     private onSteer?: (message: string) => void,
+    /** Detach this live foreground run. Omitted → no background affordance. */
+    private onBackground?: () => void,
   ) {
     this.keys = createViewerKeys(keybindings);
     this.unsubscribe = session.subscribe(() => {
@@ -75,6 +77,15 @@ export class ConversationViewer implements Component {
     if (matchesKey(data, "enter") && this.canSteer()) {
       this.stopArmed = false;
       this.openComposer();
+      return;
+    }
+
+    // Send this same live foreground run to the background. This is a one-way,
+    // single-press transition; the manager rejects stale or repeated attempts.
+    if (matchesKey(data, "b") && this.canSendToBackground()) {
+      this.stopArmed = false;
+      this.onBackground?.();
+      this.tui.requestRender();
       return;
     }
 
@@ -197,6 +208,7 @@ export class ConversationViewer implements Component {
       const sep = th.fg("dim", " · ");
       const actions: string[] = [];
       if (this.canSteer()) actions.push(th.fg("dim", "Enter steer"));
+      if (this.canSendToBackground()) actions.push(th.fg("dim", "b background"));
       if (this.isStoppable()) {
         actions.push(this.stopArmed ? th.fg("error", "x again to STOP") : th.fg("dim", "x stop"));
       }
@@ -229,6 +241,11 @@ export class ConversationViewer implements Component {
   /** Steerable only when a steer handler exists and the agent is still active. */
   private canSteer(): boolean {
     return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
+  }
+
+  /** Only a currently-running foreground Agent call can detach. */
+  private canSendToBackground(): boolean {
+    return !!this.onBackground && this.record.status === "running" && this.record.isBackground === false;
   }
 
   /** Open the inline steering composer and route subsequent input to it. */

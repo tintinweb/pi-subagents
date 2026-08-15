@@ -94,6 +94,8 @@ export class FleetList {
   constructor(
     private manager: AgentManager,
     private agentActivity: Map<string, AgentActivity>,
+    /** Detach a live foreground run and refresh extension-owned surfaces. */
+    private onBackground?: (record: AgentRecord) => boolean,
   ) {}
 
   // ---- Lifecycle ----
@@ -311,6 +313,11 @@ export class FleetList {
           },
           keybindings,
           (message: string) => this.manager.steer(record.id, message),
+          () => {
+            if (this.onBackground?.(record)) {
+              this.ui?.notify(`Sent "${record.description}" to the background.`, "info");
+            }
+          },
         );
       },
       {
