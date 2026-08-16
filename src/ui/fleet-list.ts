@@ -12,9 +12,8 @@
  */
 
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { renderAgentName } from "../agent-color.js";
+import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import type { AgentManager } from "../agent-manager.js";
-import { getConfig } from "../agent-types.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, type Theme } from "./agent-widget.js";
@@ -373,12 +372,14 @@ export class FleetList {
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
-    // The selected row renders uniformly in the theme's primary text color —
-    // badge colors included — so it reads as one selection (#230).
+    // The selected row renders in the theme's primary text color so it reads as
+    // one selection (#230). A configured badge survives — Claude Code's FleetView
+    // keeps the agent color on the selected row too and only bolds it — which also
+    // keeps the row's width fixed as the selection moves.
     const selected = rosterIndex === sel;
-    const name = selected
-      ? theme.fg("text", record.type ? getConfig(record.type).displayName : "Agent")
-      : renderAgentName(record.type, theme, { fallbackColor: "muted" });
+    const name = renderAgentName(record.type, theme, selected
+      ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
+      : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
     const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
     const tokens = getLifetimeTotal(this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage);

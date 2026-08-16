@@ -1,7 +1,8 @@
 import { Editor, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
-import type { AgentRecord } from "../src/types.js";
+import { registerAgents } from "../src/agent-types.js";
+import type { AgentConfig, AgentRecord } from "../src/types.js";
 import { getDisplayName } from "../src/ui/agent-widget.js";
 import { FleetList, type FleetUICtx, formatFleetElapsed, formatFleetTokens } from "../src/ui/fleet-list.js";
 
@@ -16,6 +17,28 @@ const ENTER = "\r";
 const DOWN_RELEASE = "\x1b[1;1:3B";
 
 const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => `*${s}*` };
+
+/** An agent that renders as a badge — no default agent configures a color. */
+const BADGED_TYPE = "colored-reviewer";
+const PURPLE_BACKGROUND = "\u001b[48;2;130;125;189m";
+const BADGED_CONFIG: AgentConfig = {
+  name: BADGED_TYPE,
+  displayName: "Code Reviewer",
+  color: "purple",
+  description: "Reviews code",
+  extensions: false,
+  skills: false,
+  systemPrompt: "Review code.",
+  promptMode: "replace",
+};
+
+/**
+ * Visible text of a rendered row: ANSI stripped, along with this theme's fake
+ * `<color>` / `*bold*` markers — all three stand in for zero-width escapes.
+ */
+function plain(row: string): string {
+  return row.replace(/\u001b\[[0-9;]*m/g, "").replace(/<\/?[a-zA-Z]+>|\*/g, "");
+}
 
 /** A no-op session so a record is "openable" by default (the list hides session-less agents). */
 const FAKE_SESSION = { subscribe: () => () => {}, messages: [] };
@@ -193,13 +216,38 @@ describe("FleetList navigation", () => {
     expect(selected).toContain("<accent>●</accent>");
     expect(selected).toContain("<text>one</text>");
     expect(selected).toMatch(/<text>\d+s · ↓ [\d.]+k? tokens<\/text>/);
-    // Agent display name rendered with the text token too (badge suppressed).
+    // Agent display name rendered with the text token too (this type has no badge).
     expect(selected).toContain(`<text>${getDisplayName("general-purpose")}</text>`);
     // Inactive rows keep the muted/dim treatment.
     const unselected = h.render().find(l => l.includes("two"))!;
     expect(unselected).toContain("<dim>○</dim>");
     expect(unselected).toMatch(/<dim>\d+s · ↓ [\d.]+k? tokens<\/dim>/);
     expect(unselected).not.toContain("<text>");
+  });
+
+  it("keeps a color badge on the selected row, bolded, without shifting it (#230)", () => {
+    registerAgents(new Map([[BADGED_TYPE, BADGED_CONFIG]]));
+    try {
+      const h = harness([
+        makeRecord({ id: "a1", type: BADGED_TYPE, description: "one" }),
+        makeRecord({ id: "a2", type: BADGED_TYPE, description: "two" }),
+      ]);
+      h.press(DOWN); // activate → main
+      const before = h.render().find(l => l.includes("one"))!;
+      expect(before).toContain(`${PURPLE_BACKGROUND}`);
+      expect(before).toContain(` ${BADGED_CONFIG.displayName} `);
+
+      h.press(DOWN); // → a1
+      const selected = h.render().find(l => l.includes("one"))!;
+      // Selection bolds the badge rather than repainting it (Claude Code's FleetView) …
+      expect(selected).toContain(PURPLE_BACKGROUND);
+      expect(selected).toContain(`* ${BADGED_CONFIG.displayName} *`);
+      expect(selected).not.toContain(`<text>${BADGED_CONFIG.displayName}`);
+      // … so the description stays in the same column as when unselected.
+      expect(plain(selected).indexOf("one")).toBe(plain(before).indexOf("one"));
+    } finally {
+      registerAgents(new Map());
+    }
   });
 
   it("moves selection down/up and clamps at the ends", () => {
