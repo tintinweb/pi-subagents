@@ -14,6 +14,7 @@
 import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgentName } from "../agent-color.js";
 import type { AgentManager } from "../agent-manager.js";
+import { getConfig } from "../agent-types.js";
 import type { AgentRecord } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, type Theme } from "./agent-widget.js";
@@ -368,14 +369,22 @@ export class FleetList {
   }
 
   private bullet(rosterIndex: number, sel: number, theme: Theme): string {
-    return rosterIndex === sel ? theme.fg("accent", "●") : theme.fg("dim", "○");
+    return rosterIndex === sel ? theme.fg("text", "●") : theme.fg("dim", "○");
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${renderAgentName(record.type, theme, { fallbackColor: "muted" })}  ${record.description}`;
+    // The selected row renders uniformly in the theme's primary text color —
+    // badge colors included — so it reads as one selection (#230).
+    const selected = rosterIndex === sel;
+    const name = selected
+      ? theme.fg("text", record.type ? getConfig(record.type).displayName : "Agent")
+      : renderAgentName(record.type, theme, { fallbackColor: "muted" });
+    const description = selected ? theme.fg("text", record.description) : record.description;
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
     const tokens = getLifetimeTotal(this.agentActivity.get(record.id)?.lifetimeUsage ?? record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
-    const right = theme.fg("dim", `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}`);
+    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}`;
+    const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);
   }
 }

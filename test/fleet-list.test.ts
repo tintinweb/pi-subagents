@@ -181,6 +181,26 @@ describe("FleetList navigation", () => {
     expect(h.render().find(l => l.includes("two"))).toContain("○");
   });
 
+  it("renders the whole selected row in the theme's primary text color (#230)", () => {
+    const h = harness([
+      makeRecord({ id: "a1", description: "one" }),
+      makeRecord({ id: "a2", description: "two" }),
+    ]);
+    h.press(DOWN); // activate → main
+    h.press(DOWN); // → a1
+    const selected = h.render().find(l => l.includes("one"))!;
+    expect(selected).toContain("<text>●</text>");
+    expect(selected).toContain("<text>one</text>");
+    expect(selected).toMatch(/<text>\d+s · ↓ [\d.]+k? tokens<\/text>/);
+    // Agent display name rendered with the text token too (badge suppressed).
+    expect(selected).toContain(`<text>${getDisplayName("general-purpose")}</text>`);
+    // Inactive rows keep the muted/dim treatment.
+    const unselected = h.render().find(l => l.includes("two"))!;
+    expect(unselected).toContain("<dim>○</dim>");
+    expect(unselected).toMatch(/<dim>\d+s · ↓ [\d.]+k? tokens<\/dim>/);
+    expect(unselected).not.toContain("<text>");
+  });
+
   it("moves selection down/up and clamps at the ends", () => {
     const agents = [
       makeRecord({ id: "a1", description: "one" }),
