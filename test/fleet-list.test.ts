@@ -189,7 +189,8 @@ describe("FleetList navigation", () => {
     h.press(DOWN); // activate → main
     h.press(DOWN); // → a1
     const selected = h.render().find(l => l.includes("one"))!;
-    expect(selected).toContain("<text>●</text>");
+    // Selection marker keeps accent color; row content uses primary text color.
+    expect(selected).toContain("<accent>●</accent>");
     expect(selected).toContain("<text>one</text>");
     expect(selected).toMatch(/<text>\d+s · ↓ [\d.]+k? tokens<\/text>/);
     // Agent display name rendered with the text token too (badge suppressed).

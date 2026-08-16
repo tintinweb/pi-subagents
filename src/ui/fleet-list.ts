@@ -369,7 +369,7 @@ export class FleetList {
   }
 
   private bullet(rosterIndex: number, sel: number, theme: Theme): string {
-    return rosterIndex === sel ? theme.fg("text", "●") : theme.fg("dim", "○");
+    return rosterIndex === sel ? theme.fg("accent", "●") : theme.fg("dim", "○");
   }
 
   private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
