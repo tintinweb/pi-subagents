@@ -346,6 +346,7 @@ export class AgentManager {
       this.worktreeRepos.add(baseCwd);
     }
 
+    record.cwd = worktreeCwd ?? customCwd ?? ctx.cwd;
     record.status = "running";
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
