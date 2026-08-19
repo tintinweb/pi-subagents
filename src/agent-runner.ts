@@ -26,7 +26,9 @@ import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
+import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { CompiledSchema } from "./workflow/json-schema.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -36,6 +38,7 @@ import type { SubagentType, ThinkingLevel } from "./types.js";
  */
 export const SUBAGENT_TOOL_NAMES = {
   AGENT: "Agent",
+  WORKFLOW: "SubagentWorkflow",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
 } as const;
@@ -232,11 +235,18 @@ export function installExtensionToolScope(
     disallowedSet: Set<string> | undefined;
     extNames: Set<string>;
     narrowing: Map<string, Set<string>>;
-    /** Opt-in nested-delegation tool names to keep active despite the EXCLUDED strip. */
-    nestedToolNames: Set<string>;
+    /**
+     * Injected `customTools` to keep active regardless of the built-in list.
+     *
+     * Two kinds arrive here and they are blocked for different reasons: opt-in
+     * nested-delegation tools share EXCLUDED_TOOL_NAMES' names, and
+     * StructuredOutput is simply not a built-in, so neither survives a `keep`
+     * seeded from `toolNames`.
+     */
+    readmitToolNames: Set<string>;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing, nestedToolNames } = ctx;
+  const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames } = ctx;
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -258,12 +268,11 @@ export function installExtensionToolScope(
       }
     }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
-    // Opt-in nested delegation tools share EXCLUDED_TOOL_NAMES' names but are
-    // legitimately active for this agent — re-admit them so the renarrow keeps
-    // them in the active set and beforeToolCall doesn't block them.
-    for (const name of nestedToolNames) {
-      if (!disallowedSet?.has(name)) keep.add(name);
-    }
+    // Injected tools are legitimately active for this agent — re-admit them so
+    // the renarrow keeps them in the active set and beforeToolCall doesn't
+    // block them. Already vetted against `disallowed_tools` by the caller,
+    // which is the only place that knows which kind may be taken back.
+    for (const name of readmitToolNames) keep.add(name);
     return keep;
   };
 
@@ -439,6 +448,14 @@ export interface RunOptions {
    * pre-compaction context size estimate. Aborted compactions don't fire.
    */
   onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+  /**
+   * Make this child report through a `StructuredOutput` tool built from this
+   * schema, and put the validated payload on {@link RunResult.structuredJson}.
+   *
+   * Already compiled by the caller, so a schema this runtime cannot validate
+   * fails at the call that wrote it rather than inside the child.
+   */
+  structuredOutput?: CompiledSchema;
   /** Runtime bridge for opt-in child-safe nested delegation. */
   nestedRuntime?: {
     manager: NestedAgentManager;
@@ -465,6 +482,18 @@ export interface RunResult {
    * stop that produced text (a legitimate truncated answer).
    */
   failure?: string;
+  /**
+   * The validated `StructuredOutput` payload as canonical JSON, when the caller
+   * asked for a schema and the child produced one.
+   *
+   * Deliberately not folded into {@link responseText}: `record.result` picks up
+   * a worktree branch note on the way out, which would leave the caller with
+   * unparseable JSON, and merging the two would make "produced structured
+   * output" indistinguishable from "happened to answer in JSON".
+   */
+  structuredJson?: string;
+  /** Whether the extra structured-output prompt had to be sent. */
+  structuredRetried?: boolean;
 }
 
 /**
@@ -808,6 +837,28 @@ export async function runAgent(
     : [];
   const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
 
+  // The `agent({ schema })` contract: this child reports its answer by calling
+  // StructuredOutput, and `structuredJson` below is what the caller reads. The
+  // schema was already compiled by whoever asked for it, so a bad one failed
+  // before any of this ran.
+  const structuredCapture = options.structuredOutput ? createStructuredCapture() : undefined;
+  const structuredTools = options.structuredOutput && structuredCapture
+    ? [createStructuredOutputTool(options.structuredOutput, structuredCapture)]
+    : [];
+  const structuredToolNames = new Set(structuredTools.map(tool => tool.name));
+  // Re-admitted together at every gate below. Kept as one set so a new injected
+  // tool cannot be added to some of the three gates and forgotten at the rest.
+  //
+  // `disallowed_tools` is applied HERE rather than at the gates, because the two
+  // kinds answer to it differently: a nested delegation tool is an opt-in the
+  // agent's own frontmatter can take back, while StructuredOutput exists only
+  // because this call asked for a schema — removing it would make the request
+  // unsatisfiable by construction rather than merely restricted.
+  const readmitToolNames = new Set([
+    ...[...nestedToolNames].filter(name => !disallowedSet?.has(name)),
+    ...structuredToolNames,
+  ]);
+
   // ─── Tool scoping ───────────────────────────────────────────────────────
   //
   // Some extensions register their tools ASYNCHRONOUSLY, long after the
@@ -847,6 +898,11 @@ export async function runAgent(
         (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
       ),
       ...[...nestedToolNames].filter((t) => !disallowedSet?.has(t)),
+      // Not filtered through `disallowedSet`, unlike the nested tools above:
+      // the caller asked for a schema, and removing the only tool that can
+      // satisfy it would make the request unsatisfiable by construction rather
+      // than merely restricted.
+      ...structuredToolNames,
     ];
   } else {
     // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
@@ -860,7 +916,10 @@ export async function runAgent(
     }
     if (disallowedSet) {
       // disallowed_tools wins even over an opt-in nested tool of the same name.
-      for (const name of disallowedSet) denyTools.add(name);
+      // Not over StructuredOutput, though — see the allowlist branch above.
+      for (const name of disallowedSet) {
+        if (!structuredToolNames.has(name)) denyTools.add(name);
+      }
     }
     sessionExcludeTools = [...denyTools];
   }
@@ -908,7 +967,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: nestedTools,
+    customTools: [...nestedTools, ...structuredTools],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {
@@ -951,7 +1010,7 @@ export async function runAgent(
       disallowedSet,
       extNames,
       narrowing,
-      nestedToolNames,
+      readmitToolNames,
     });
   }
 
@@ -1019,8 +1078,20 @@ export async function runAgent(
   // Boundary for the history fallback: only assistant text produced from here
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
+  let structuredRetried = false;
   try {
     await session.prompt(effectivePrompt);
+
+    // One more prompt when a schema was asked for and nothing usable came back
+    // — the model answered in prose, or only ever called the tool invalidly.
+    // Inside this `try`, so the turn tracking, the text collector and above all
+    // the abort forwarding are still live: torn down first, a retry would be
+    // unkillable.
+    if (structuredCapture !== undefined && structuredCapture.json === undefined
+      && !aborted && options.signal?.aborted !== true) {
+      structuredRetried = true;
+      await session.prompt(structuredRetryPrompt(structuredCapture));
+    }
   } finally {
     unsubTurns();
     collector.unsubscribe();
@@ -1028,7 +1099,23 @@ export async function runAgent(
   }
 
   const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
-  return { responseText, session, aborted, steered: softLimitReached, failure: finalTurnError(session, startLen) };
+  // A child asked for structured output that never gave any has failed, however
+  // articulate its prose was. Reported through `failure` so it travels the same
+  // path as a provider error rather than arriving as a successful empty answer.
+  const structuredFailure = structuredCapture !== undefined && structuredCapture.json === undefined
+    ? structuredCapture.lastError !== undefined
+      ? `The agent's StructuredOutput call did not match the required schema: ${structuredCapture.lastError}`
+      : "The agent did not report its answer through StructuredOutput."
+    : undefined;
+  return {
+    responseText,
+    session,
+    aborted,
+    steered: softLimitReached,
+    failure: finalTurnError(session, startLen) ?? structuredFailure,
+    ...(structuredCapture?.json !== undefined ? { structuredJson: structuredCapture.json } : {}),
+    ...(structuredRetried ? { structuredRetried } : {}),
+  };
 }
 
 /**

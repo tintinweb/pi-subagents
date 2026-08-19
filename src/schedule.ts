@@ -266,7 +266,6 @@ export class SubagentScheduler {
 
     this.emit({ type: "fired", jobId: id, agentId, name: job.name });
 
-    const record = manager.getRecord(agentId);
     const finalize = (status: "success" | "error") => {
       const next = this.getNextRun(id);
       const current = store.get(id);
@@ -281,18 +280,16 @@ export class SubagentScheduler {
     // AgentManager's promise resolves either way (its .catch returns ""), so we
     // can't infer success/failure from the promise — read record.status instead.
     // Terminal states: completed/steered = success; error/aborted/stopped = error.
-    if (record?.promise) {
-      record.promise
-        .then(() => {
-          const r = manager.getRecord(agentId);
-          const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
-          finalize(failed ? "error" : "success");
-        })
-        .catch(() => finalize("error"));
-    } else {
-      // Spawn returned without a promise (defensive — bypassQueue path always sets one).
-      finalize("success");
-    }
+    // awaitStartup first: with isolation: "worktree" the run promise only exists
+    // once the repo copy is made, and a failed copy rejects here.
+    manager.awaitStartup(agentId)
+      .then(() => manager.getRecord(agentId)?.promise)
+      .then(() => {
+        const r = manager.getRecord(agentId);
+        const failed = r?.status === "error" || r?.status === "aborted" || r?.status === "stopped";
+        finalize(failed ? "error" : "success");
+      })
+      .catch(() => finalize("error"));
   }
 
   private emit(event: ScheduleChangeEvent): void {

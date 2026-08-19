@@ -78,6 +78,7 @@ beforeEach(() => {
   manager = {
     spawn,
     spawnAndWait,
+    awaitStartup: vi.fn(async () => {}),
     getRecord: (id: string) => records.get(id),
     resume: vi.fn(),
   } as any;
@@ -283,6 +284,27 @@ describe("child-safe nested Agent tools", () => {
       prompt: "Continue",
     })).isError).toBe(true);
     expect(manager.resume).not.toHaveBeenCalled();
+  });
+
+  it("reports a background child that fails to start as a tool error", async () => {
+    // Under isolation: "worktree" the child is not running when spawn() returns
+    // — the repo copy is awaited. The failure must reach the parent as an error
+    // result, not as "Nested agent started in background".
+    vi.mocked(manager.awaitStartup).mockRejectedValueOnce(
+      new Error('Cannot run with isolation: "worktree"'),
+    );
+    const [agent] = tools(["scout"]);
+
+    const result = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+      run_in_background: true,
+      isolation: "worktree",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('isolation: "worktree"');
   });
 
   it("waits for a queued owned child to start and settle", async () => {

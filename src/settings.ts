@@ -159,6 +159,27 @@ export interface SubagentsSettings {
    */
   worktreeIsolation?: boolean;
   /**
+   * Master switch for scripted workflows. Defaults to `true`.
+   *
+   * Off is not a soft hide: the `SubagentWorkflow` tool is never registered, so
+   * the model is not told it exists and cannot call it, the `/agents`
+   * Workflows entry is hidden, and `--subagents-workflow-file` is refused.
+   *
+   * Absent is not the same as `true`. Unset means *auto*: on, but yielding to
+   * another extension that already offers a workflow tool, because two
+   * orchestrators in one tool spec is a worse default than none — the model
+   * has to guess which to call, and pays for both descriptions to find out.
+   * Setting it explicitly pins the answer in both directions: `true` keeps
+   * ours whatever else is loaded, `false` is off regardless. See
+   * `resolveWorkflowCollisions` in index.ts.
+   *
+   * Read once at extension init, before registration, so flipping it in
+   * `/agents → Settings` takes effect on the next pi session — the same
+   * contract `schedulingEnabled` has, and for the same reason: a tool spec is
+   * fixed once pi has it.
+   */
+  workflowsEnabled?: boolean;
+  /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
    * disables nesting project-wide. Read when a subagent session is built, so a
@@ -201,6 +222,7 @@ export interface SettingsAppliers {
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setWorktreeIsolation: (b: boolean) => void;
+  setWorkflowsEnabled: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
   setFallbackSubagent: (v: string | undefined) => void;
 }
@@ -294,6 +316,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.worktreeIsolation === "boolean") {
     out.worktreeIsolation = r.worktreeIsolation;
   }
+  if (typeof r.workflowsEnabled === "boolean") {
+    out.workflowsEnabled = r.workflowsEnabled;
+  }
   if (r.fallbackSubagent === false) {
     // The only non-string spelling worth accepting: a boolean would otherwise be
     // dropped, silently leaving the PERMISSIVE default in place. Every string is
@@ -371,6 +396,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
   if (typeof s.worktreeIsolation === "boolean") appliers.setWorktreeIsolation(s.worktreeIsolation);
+  if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
 }
 
 /**

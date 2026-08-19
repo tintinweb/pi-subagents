@@ -85,6 +85,9 @@ function makePi() {
       tools.set(registered.name, registered);
     }),
     registerCommand: vi.fn(),
+    registerEntryRenderer: vi.fn(),
+    registerFlag: vi.fn(),
+    getFlag: vi.fn(),
     on: vi.fn((event: string, handler: unknown) => handlers.set(event, handler as SessionHandler)),
     events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
     appendEntry: vi.fn(),

@@ -171,6 +171,16 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips workflowsEnabled; drops non-boolean", () => {
+    saveSettings({ workflowsEnabled: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: true });
+    saveSettings({ workflowsEnabled: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: false });
+    writeProject({ workflowsEnabled: "on" } as any);
+    // Dropped, not coerced — a truthy string must not switch the feature on.
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
     writeProject({ schedulingEnabled: "yes" } as any);
     expect(loadSettings(projectDir)).toEqual({});

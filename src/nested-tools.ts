@@ -77,6 +77,8 @@ export interface NestedAgentManager {
     prompt: string,
     options: NestedSpawnOptions,
   ): string;
+  /** Resolves once the spawned agent is running; rejects on a startup failure. */
+  awaitStartup(id: string): Promise<void>;
   spawnAndWait(
     pi: ExtensionAPI,
     ctx: ExtensionContext,
@@ -332,6 +334,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           // Synchronous, before the event loop yields — onSessionCreated fires
           // asynchronously inside runAgent, so the file is attached in time.
           attachTranscript(id);
+          // Worktree isolation starts the agent asynchronously; surface its
+          // failure as a tool error, like the synchronous throw used to.
+          await context.manager.awaitStartup(id);
           return textResult(`Nested agent started in background. Agent ID: ${id}`);
         }
 
