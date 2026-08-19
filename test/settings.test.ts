@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyAndEmitLoaded,
   applySettings,
+  loadRequiredExtensionPaths,
   loadSettings,
   persistToastFor,
   type SettingsAppliers,
@@ -61,6 +62,13 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("fails closed when global required extension settings are malformed", () => {
+    writeFileSync(globalFile(), "not json {{");
+    expect(() => loadRequiredExtensionPaths()).toThrow("Cannot enforce required subagent extensions");
+    writeGlobal({ requiredExtensions: [""] });
+    expect(() => loadRequiredExtensionPaths()).toThrow("must contain non-empty strings");
+  });
+
   it("loads from global when no project file", () => {
     writeGlobal({ maxConcurrent: 16, graceTurns: 10 });
     expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 16, graceTurns: 10 });
@@ -69,6 +77,16 @@ describe("settings persistence", () => {
   it("loads from project when no global file", () => {
     writeProject({ maxConcurrent: 8, defaultJoinMode: "group" });
     expect(loadSettings(projectDir)).toEqual({ maxConcurrent: 8, defaultJoinMode: "group" });
+  });
+
+  it("keeps required extensions global-only", () => {
+    writeGlobal({ requiredExtensions: ["extensions/policy.ts", "~/shared-policy.ts"] });
+    writeProject({ requiredExtensions: ["./disable-policy.ts"] });
+    expect(loadSettings(projectDir)).not.toHaveProperty("requiredExtensions");
+    expect(loadRequiredExtensionPaths()).toEqual([
+      join(globalDir, "extensions/policy.ts"),
+      join(process.env.HOME!, "shared-policy.ts"),
+    ]);
   });
 
   it("merges global + project with project winning on conflicts", () => {

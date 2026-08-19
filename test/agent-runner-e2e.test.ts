@@ -23,7 +23,7 @@
  * provider registers in a different `pi-ai` module instance than the one
  * pi-coding-agent streams through, which is brittle and orthogonal to gating.)
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,15 +52,22 @@ function makePi() {
 describe("agent-runner end-to-end (real pi-mono session + real extension)", () => {
   let cwd: string;
   let faux: ReturnType<typeof registerFauxProvider>;
+  let originalAgentDir: string | undefined;
 
   beforeEach(() => {
     cwd = mkdtempSync(join(tmpdir(), "subagents-e2e-"));
+    originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = join(cwd, "agent");
+    mkdirSync(process.env.PI_CODING_AGENT_DIR, { recursive: true });
     // Only used as a valid Model object for createAgentSession; we never rely
     // on it actually streaming (we assert on the pre-prompt gated tool set).
     faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
   });
   afterEach(() => {
     faux.unregister();
+    if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    delete process.env.PI_SUBAGENT_REQUIRED_MARKER;
     rmSync(cwd, { recursive: true, force: true });
   });
 
@@ -68,7 +75,7 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
    * Register `cfg` as agent type "e2e", run it through the REAL runAgent, and
    * return the real session's active tool names captured at construction time.
    */
-  async function activeToolsFor(cfg: Partial<AgentConfig>): Promise<string[]> {
+  async function activeToolsFor(cfg: Partial<AgentConfig>, isolated = false, rethrow = false): Promise<string[]> {
     registerAgents(
       new Map([
         [
@@ -106,11 +113,13 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       await runAgent(ctx, "e2e", "go", {
         pi: makePi(),
         model,
+        isolated,
         onSessionCreated: (s) => {
           active = s.getActiveToolNames();
         },
       });
-    } catch {
+    } catch (error) {
+      if (rethrow) throw error;
       // A no-op/erroring prompt turn is fine — the gated tool set is fixed at
       // construction, which `onSessionCreated` already captured.
     }
@@ -128,6 +137,27 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     const active = await activeToolsFor({ extensions: false });
     expect(active).not.toContain(EXT_TOOL);
     for (const b of BUILTINS) expect(active).toContain(b);
+  });
+
+  it("loads global required handlers into isolated agents without exposing their tools", async () => {
+    const marker = join(cwd, "required-handler-loaded");
+    process.env.PI_SUBAGENT_REQUIRED_MARKER = marker;
+    writeFileSync(
+      join(process.env.PI_CODING_AGENT_DIR!, "subagents.json"),
+      JSON.stringify({ requiredExtensions: [FIXTURE] }),
+    );
+    const active = await activeToolsFor({ extensions: false }, true);
+    expect(existsSync(marker)).toBe(true);
+    expect(active).not.toContain(EXT_TOOL);
+    for (const b of BUILTINS) expect(active).toContain(b);
+  });
+
+  it("fails closed when a globally required extension cannot load", async () => {
+    writeFileSync(
+      join(process.env.PI_CODING_AGENT_DIR!, "subagents.json"),
+      JSON.stringify({ requiredExtensions: [join(cwd, "missing-policy.ts")] }),
+    );
+    await expect(activeToolsFor({ extensions: false }, true, true)).rejects.toThrow("Required subagent extension failed to load");
   });
 
   it("disallowedTools removes a real extension tool from the live session", async () => {

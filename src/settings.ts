@@ -3,7 +3,8 @@
 // - Project: <cwd>/.pi/subagents.json — written by /agents → Settings; overrides global on load
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
 import type { AgentMentionMode, JoinMode, WidgetMode } from "./types.js";
@@ -236,6 +237,11 @@ export interface SubagentsSettings {
   showCost?: boolean;
 }
 
+interface GlobalSubagentsSettings extends SubagentsSettings {
+  /** Handler-only extensions loaded into every child, including isolated agents. */
+  requiredExtensions?: string[];
+}
+
 export type ToolDescriptionMode = "full" | "compact" | "custom";
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -279,10 +285,14 @@ const GRACE_TURNS_CEILING = 1_000;
 const SUBAGENT_DEPTH_CEILING = 16;
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
-function sanitize(raw: unknown): SubagentsSettings {
+function sanitize(raw: unknown): GlobalSubagentsSettings {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
-  const out: SubagentsSettings = {};
+  const out: GlobalSubagentsSettings = {};
+  if (Array.isArray(r.requiredExtensions)
+    && r.requiredExtensions.every((entry) => typeof entry === "string" && entry.trim())) {
+    out.requiredExtensions = [...new Set(r.requiredExtensions.map((entry) => (entry as string).trim()))];
+  }
   if (
     Number.isInteger(r.maxConcurrent) &&
     (r.maxConcurrent as number) >= 1 &&
@@ -373,8 +383,8 @@ function sanitize(raw: unknown): SubagentsSettings {
   return out;
 }
 
-function globalPath(): string {
-  return join(getAgentDir(), "subagents.json");
+function globalPath(agentDir: string = getAgentDir()): string {
+  return join(agentDir, "subagents.json");
 }
 
 function projectPath(cwd: string): string {
@@ -386,7 +396,7 @@ function projectPath(cwd: string): string {
  * exists but can't be parsed emits a warning to stderr so users aren't
  * silently reverted to defaults — and still returns `{}` so startup proceeds.
  */
-function readSettingsFile(path: string): SubagentsSettings {
+function readSettingsFile(path: string): GlobalSubagentsSettings {
   if (!existsSync(path)) return {};
   try {
     return sanitize(JSON.parse(readFileSync(path, "utf-8")));
@@ -397,9 +407,41 @@ function readSettingsFile(path: string): SubagentsSettings {
   }
 }
 
-/** Load merged settings: global provides defaults, project overrides. */
+/** Load merged settings: global provides defaults, project overrides except the global-only required extensions. */
 export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
-  return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
+  const global = { ...readSettingsFile(globalPath()) };
+  const project = { ...readSettingsFile(projectPath(cwd)) };
+  delete global.requiredExtensions;
+  delete project.requiredExtensions;
+  return { ...global, ...project };
+}
+
+function readRequiredExtensions(path: string): string[] {
+  if (!existsSync(path)) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`Cannot enforce required subagent extensions from ${path}: ${reason}`);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Cannot enforce required subagent extensions: ${path} must contain an object`);
+  }
+  const value = (parsed as Record<string, unknown>).requiredExtensions;
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim())) {
+    throw new Error(`Cannot enforce required subagent extensions: ${path}.requiredExtensions must contain non-empty strings`);
+  }
+  return [...new Set(value as string[])];
+}
+
+/** Resolve globally required extension paths relative to the Pi agent directory. */
+export function loadRequiredExtensionPaths(agentDir: string = getAgentDir()): string[] {
+  return readRequiredExtensions(globalPath(agentDir)).map((entry) => {
+    if (entry === "~" || entry.startsWith("~/")) return join(homedir(), entry.slice(2));
+    return isAbsolute(entry) ? entry : join(agentDir, entry);
+  });
 }
 
 /**

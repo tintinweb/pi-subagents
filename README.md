@@ -307,7 +307,7 @@ All fields are optional — sensible defaults for everything.
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | — | Pin this agent to background (`true`) or foreground (`false`). Omit to follow `backgroundByDefault` |
-| `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
+| `isolated` | `false` | Specialist mode: forces optional `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools surface; global `requiredExtensions` policy handlers still run. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
@@ -358,7 +358,7 @@ exclude_extensions: pi-notify     # everything except pi-notify (with extensions
 extensions: [mcp]
 tools: "*, ext:mcp/search"
 
-isolated: true                    # hermetic: built-ins only, no extensions/skills/context
+isolated: true                    # built-ins only; no optional extensions/skills/context
 ```
 
 A few rules the examples don't make obvious:
@@ -517,7 +517,15 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, default m
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `4`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled). `requiredExtensions` is the exception: it is read only from the global file, so project configuration cannot weaken machine-level policy.
+
+**Required extensions** (`requiredExtensions`, global only): absolute paths, `~/` paths, or paths relative to `~/.pi/agent` for handler-only extensions loaded into every child session, including `isolated: true` agents. Their lifecycle and tool-call handlers run, but their registered tools are never exposed to the child model. This is intended for permission, audit, and policy enforcement—not ordinary tool extensions.
+
+```json
+{
+  "requiredExtensions": ["/opt/company/pi-policy.ts"]
+}
+```
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
@@ -583,7 +591,7 @@ EOF
 
 Every project now starts with concurrency 16 and grace 10, without ever touching the menu. Individual projects can still override via `/agents` → Settings.
 
-**Failure behavior:** missing file is silent; malformed JSON logs a `[pi-subagents] Ignoring malformed settings at …` warning to stderr; invalid/out-of-range field values are dropped per-field; write failures downgrade the `/agents` toast to a warning with `(session only; failed to persist)`.
+**Failure behavior:** missing files are silent. Malformed ordinary settings log a warning and fall back to defaults, but a malformed global file or invalid `requiredExtensions` blocks subagent startup because policy enforcement cannot be proven. Invalid ordinary fields are dropped per-field; write failures downgrade the `/agents` toast to a warning with `(session only; failed to persist)`.
 
 ## Events
 

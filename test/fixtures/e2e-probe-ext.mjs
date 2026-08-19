@@ -10,6 +10,11 @@ import { writeFileSync } from "node:fs";
 import { Type } from "@sinclair/typebox";
 
 export default function (pi) {
+  pi.on("session_start", async () => {
+    if (process.env.PI_SUBAGENT_REQUIRED_MARKER) {
+      writeFileSync(process.env.PI_SUBAGENT_REQUIRED_MARKER, "loaded");
+    }
+  });
   pi.registerTool({
     name: "e2e_probe",
     label: "E2E Probe",

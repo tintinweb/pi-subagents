@@ -25,6 +25,7 @@ import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
+import { loadRequiredExtensionPaths } from "./settings.js";
 import { preloadSkills } from "./skill-loader.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
@@ -222,8 +223,8 @@ export function parseExtSelectors(entries: string[]): {
  * outlive the `runAgent` call so resumed/steered turns stay scoped. pi's `dispose()`
  * clears `_eventListeners`, so they die with the session rather than leaking.
  *
- * Only meaningful when extensions are loaded — under `noExtensions`/`isolated` the
- * static `allowedToolNames` allowlist already gates the registry itself.
+ * Only meaningful when optional extensions are loaded — under `noExtensions`/`isolated`
+ * the static `allowedToolNames` allowlist gates the registry while required handlers bind.
  */
 export function installExtensionToolScope(
   session: AgentSession,
@@ -233,11 +234,13 @@ export function installExtensionToolScope(
     disallowedSet: Set<string> | undefined;
     extNames: Set<string>;
     narrowing: Map<string, Set<string>>;
+    /** Extensions loaded for handlers only; their tools never enter the child scope. */
+    handlerOnlyPaths: Set<string>;
     /** Opt-in nested-delegation tool names to keep active despite the EXCLUDED strip. */
     nestedToolNames: Set<string>;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing, nestedToolNames } = ctx;
+  const { loader, toolNames, disallowedSet, extNames, narrowing, handlerOnlyPaths, nestedToolNames } = ctx;
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -247,6 +250,7 @@ export function installExtensionToolScope(
     const keep = new Set(toolNames.filter((t) => !disallowedSet?.has(t)));
     const optInActive = extNames.size > 0;
     for (const extension of loader.getExtensions().extensions) {
+      if (handlerOnlyPaths.has(resolve(extension.path))) continue;
       const canons = extensionCanonicalNames(extension.path);
       if (optInActive && !canons.some((c) => extNames.has(c))) continue;
       // First alias that carries a narrowing set — a user won't narrow one
@@ -636,6 +640,7 @@ export async function runAgent(
   const noSkills = skills === false || Array.isArray(skills);
 
   const agentDir = getAgentDir();
+  const requiredExtensionPaths = new Set(loadRequiredExtensionPaths(agentDir).map((entry) => resolve(entry)));
 
   // Extension loading:
   // - true  → all default-discovered extensions
@@ -663,7 +668,8 @@ export async function runAgent(
     ? parseExtensionsSpec(extensions, configCwd)
     : undefined;
   const keepNames = extensionsSpec?.names ?? new Set<string>();
-  // `exclude_extensions:` is a denylist applied AFTER the include set — exclude wins.
+  // `exclude_extensions:` is a denylist applied AFTER the optional include set.
+  // Globally required handler extensions cannot be excluded by agent frontmatter.
   // Plain canonical names only (case-insensitive). Note: excluded extensions'
   // factories still run once during reload() (see comment above) — exclusion
   // suppresses handler binding and tool registration; it is not a sandbox.
@@ -673,21 +679,26 @@ export async function runAgent(
   // It's only needed when we're neither loading everything without excludes
   // (`extensions: true` or a `"*"` wildcard) nor nothing (`noExtensions`).
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
-  const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+  const additionalExtensionPaths = [...new Set([
+    ...(extensionsSpec?.paths ?? []),
+    ...requiredExtensionPaths,
+  ])];
   // Pre-filter discovered set, captured by the override — the exclude-typo warning
   // must compare against this, not the surviving set (absence from survivors is
   // an exclude *succeeding*).
   let discoveredNames: Set<string> | undefined;
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
-    noExtensions || (loadAll && !hasExcludes)
+    requiredExtensionPaths.size === 0 && (noExtensions || (loadAll && !hasExcludes))
       ? undefined
       : (base) => {
           discoveredNames = new Set(base.extensions.flatMap((e) => extensionCanonicalNames(e.path)));
           return {
             ...base,
             extensions: base.extensions.filter((e) => {
+              if (requiredExtensionPaths.has(resolve(e.path))) return true;
+              if (noExtensions) return false;
               const canons = extensionCanonicalNames(e.path);
-              if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
+              if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins for optional extensions
               return loadAll || canons.some((n) => keepNames.has(n));
             }),
           };
@@ -696,8 +707,8 @@ export async function runAgent(
   const loader = new DefaultResourceLoader({
     cwd: configCwd,
     agentDir,
-    noExtensions,
-    additionalExtensionPaths,
+    noExtensions: noExtensions && requiredExtensionPaths.size === 0,
+    additionalExtensionPaths: additionalExtensionPaths.length ? additionalExtensionPaths : undefined,
     extensionsOverride,
     noSkills,
     noPromptTemplates: true,
@@ -707,6 +718,11 @@ export async function runAgent(
     appendSystemPromptOverride: () => [],
   });
   await runInChildSessionContext(() => loader.reload());
+  const loadedExtensionPaths = new Set(loader.getExtensions().extensions.map((extension) => resolve(extension.path)));
+  const missingRequiredExtension = [...requiredExtensionPaths].find((entry) => !loadedExtensionPaths.has(entry));
+  if (missingRequiredExtension) {
+    throw new Error(`Required subagent extension failed to load: ${missingRequiredExtension}`);
+  }
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -839,8 +855,8 @@ export async function runAgent(
   //     predicate installed after bind — the active set is what the LLM sees,
   //     so a registry tool that is never activated is invisible and uncallable.
   //
-  // `noExtensions`/`isolated` keeps the historical static allowlist: nothing
-  // async can appear there, and a hard registry gate is the correct boundary.
+  // `noExtensions`/`isolated` keeps the historical static tool allowlist. Required
+  // handler extensions may bind, but their tools cannot enter the registry scope.
   const builtinToolNameSet = new Set(toolNames);
 
   let sessionTools: string[] | undefined;
@@ -935,14 +951,19 @@ export async function runAgent(
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
+  let requiredBindingError: Error | undefined;
   await session.bindExtensions({
     onError: (err) => {
       options.onToolActivity?.({
         type: "end",
         toolName: `extension-error:${err.extensionPath}`,
       });
+      if (requiredExtensionPaths.has(resolve(err.extensionPath))) {
+        requiredBindingError = new Error(`Required subagent extension failed to bind: ${err.extensionPath}`);
+      }
     },
   });
+  if (requiredBindingError) throw requiredBindingError;
 
   // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
   // the ACTIVE set still needs managing: pi activates only its four default
@@ -957,6 +978,7 @@ export async function runAgent(
       disallowedSet,
       extNames,
       narrowing,
+      handlerOnlyPaths: requiredExtensionPaths,
       nestedToolNames,
     });
   }
