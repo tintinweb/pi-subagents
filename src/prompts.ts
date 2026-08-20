@@ -3,6 +3,7 @@
  */
 
 import type { AgentConfig, EnvInfo } from "./types.js";
+import type { ResolvedIsolationBackend } from "./worktree.js";
 
 /** Extra sections to inject into the system prompt (memory, skills, etc.). */
 export interface PromptExtras {
@@ -16,6 +17,8 @@ export interface PromptExtras {
    * to stay in the copy.
    */
   worktreeBase?: string;
+  /** Resolved repository backend for the isolated workspace. */
+  worktreeBackend?: ResolvedIsolationBackend;
 }
 
 /**
@@ -44,9 +47,16 @@ export function buildAgentPrompt(
 ): string {
   const activeAgentTag = `<active_agent name="${config.name}"/>\n\n`;
 
+  const gitInfo = `Git repository: yes\nBranch: ${env.branch}`;
+  const repositoryInfo = env.vcs === "jj"
+    ? `Jujutsu repository: yes\nWorking copy: ${env.change || "unknown"}` +
+      (env.isGitRepo ? `\n${gitInfo}` : "")
+    : env.isGitRepo
+      ? gitInfo
+      : "Not a version-controlled repository";
   const envBlock = `# Environment
 Working directory: ${cwd}
-${env.isGitRepo ? `Git repository: yes\nBranch: ${env.branch}` : "Not a git repository"}
+${repositoryInfo}
 Platform: ${env.platform}`;
 
   // A worktree agent is told its cwd twice: by the env block above (the copy)
@@ -54,8 +64,15 @@ Platform: ${env.platform}`;
   // append mode, or the task prompt in either mode. It follows the latter and
   // works in the shared tree (#187), so resolve the contradiction explicitly.
   const worktreeBlock = extras?.worktreeBase
-    ? `\n\n<worktree_isolation>
-Your working directory is an isolated git worktree copy of ${extras.worktreeBase}.
+    ? extras.worktreeBackend === "jj"
+      ? `\n\n<worktree_isolation>
+Your working directory is an isolated Jujutsu workspace created from ${extras.worktreeBase}.
+Work only inside it — never in ${extras.worktreeBase}, even if other instructions name that path as your working directory.
+Use jj for version-control operations. Git commands do not work inside this workspace.
+This workspace shares its repository and operation log with the main checkout. Do not run jj op or jj workspace commands, and do not rewrite or abandon changes outside this workspace's own work.
+</worktree_isolation>`
+      : `\n\n<worktree_isolation>
+Your working directory is an isolated Git worktree copy of ${extras.worktreeBase}.
 Work only inside it — never in ${extras.worktreeBase}, even if other instructions name that path as your working directory.
 </worktree_isolation>`
     : "";

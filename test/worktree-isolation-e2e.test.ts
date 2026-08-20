@@ -44,6 +44,7 @@ function initGitRepo(): string {
   git(dir, "init");
   git(dir, "config", "user.email", "test@test.com");
   git(dir, "config", "user.name", "Test");
+  git(dir, "config", "commit.gpgsign", "false");
   writeFileSync(join(dir, "README.md"), "# Test repo");
   git(dir, "add", "README.md");
   git(dir, "commit", "-m", "initial");

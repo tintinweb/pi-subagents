@@ -72,13 +72,14 @@ describe("settings persistence", () => {
   });
 
   it("merges global + project with project winning on conflicts", () => {
-    writeGlobal({ maxConcurrent: 16, graceTurns: 10, defaultJoinMode: "async" });
-    writeProject({ maxConcurrent: 4, defaultMaxTurns: 50 });
+    writeGlobal({ maxConcurrent: 16, graceTurns: 10, defaultJoinMode: "async", isolationBackend: "jj" });
+    writeProject({ maxConcurrent: 4, defaultMaxTurns: 50, isolationBackend: "git" });
     expect(loadSettings(projectDir)).toEqual({
       maxConcurrent: 4, // project wins
       graceTurns: 10, // from global
       defaultJoinMode: "async", // from global
       defaultMaxTurns: 50, // from project only
+      isolationBackend: "git", // project wins
     });
   });
 
@@ -88,6 +89,7 @@ describe("settings persistence", () => {
       defaultMaxTurns: 30,
       graceTurns: 3,
       defaultJoinMode: "smart" as const,
+      isolationBackend: "jj" as const,
       schedulingEnabled: false,
       toolDescriptionMode: "compact" as const,
     };
@@ -337,6 +339,17 @@ describe("settings persistence", () => {
       }
     });
 
+    it("accepts valid isolation backends and drops invalid values", () => {
+      for (const backend of ["auto", "jj", "git"] as const) {
+        writeProject({ isolationBackend: backend });
+        expect(loadSettings(projectDir)).toEqual({ isolationBackend: backend });
+      }
+      writeProject({ isolationBackend: "svn" });
+      expect(loadSettings(projectDir)).toEqual({});
+      writeProject({ isolationBackend: false });
+      expect(loadSettings(projectDir)).toEqual({});
+    });
+
     it("accepts scopeModels boolean (true and false)", () => {
       writeProject({ scopeModels: true });
       expect(loadSettings(projectDir)).toEqual({ scopeModels: true });
@@ -494,6 +507,7 @@ describe("settings persistence", () => {
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
+        setIsolationBackend: vi.fn(),
         setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
@@ -531,6 +545,7 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
+      expect(appliers.setIsolationBackend).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
@@ -551,6 +566,7 @@ describe("settings persistence", () => {
       expect(appliers.setMaxSubagentDepth).toHaveBeenCalledWith(1);
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
+      expect(appliers.setIsolationBackend).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
     });
@@ -562,6 +578,7 @@ describe("settings persistence", () => {
           defaultMaxTurns: 50,
           graceTurns: 7,
           defaultJoinMode: "group",
+          isolationBackend: "jj",
           schedulingEnabled: false,
           scopeModels: true,
           disableDefaultAgents: true,
@@ -575,6 +592,7 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultMaxTurns).toHaveBeenCalledWith(50);
       expect(appliers.setGraceTurns).toHaveBeenCalledWith(7);
       expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
+      expect(appliers.setIsolationBackend).toHaveBeenCalledWith("jj");
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
       expect(appliers.setStrictAgentFiles).not.toHaveBeenCalled();  // absent from this snapshot
@@ -714,6 +732,7 @@ describe("settings persistence", () => {
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
+        setIsolationBackend: vi.fn(),
         setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),

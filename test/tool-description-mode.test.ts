@@ -218,6 +218,9 @@ describe("toolDescriptionMode", () => {
     });
     const desc: string = tools.get("Agent").description;
     expect(desc).toContain('RULES:\n- Use isolation: "worktree"');
+    expect(desc).toContain("configured backend");
+    expect(desc).toContain("jj bookmark or Git branch");
+    expect(desc).not.toContain("own git worktree");
   });
 
   it("{{isolationGuideline}} expands to the empty string when worktree isolation is disabled", () => {

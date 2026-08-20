@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
-import type { AgentMentionMode, JoinMode, WidgetMode } from "./types.js";
+import type { AgentMentionMode, IsolationBackend, JoinMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -19,20 +19,14 @@ export interface SubagentsSettings {
   graceTurns?: number;
   defaultJoinMode?: JoinMode;
   /**
-   * Whether a top-level `Agent` spawn that doesn't say runs detached.
-   * Defaults to `true`, following Claude Code, where the agent backgrounds
-   * unless the caller passes `run_in_background: false`. Set `false` to restore
-   * the previous behaviour, where an unqualified spawn blocked the turn and
-   * returned its result inline.
-   *
-   * Top-level only. Nested spawns (a subagent spawning its own) always default
-   * to foreground regardless of this setting — see `nested-tools.ts`, where a
-   * detached child would be killed by `abortOwnedChildren` when its parent
-   * settles, with no notification path to deliver its result.
-   *
-   * An explicit `run_in_background` on the call, or in the agent file's
-   * frontmatter, overrides this in both directions; the setting only decides
-   * what "unspecified" means.
+   * Backend for `isolation: worktree`. `auto` (default) chooses the nearest
+   * repository; at a colocated root it prefers Jujutsu, then Git. Explicit
+   * `jj` or `git` disables fallback and fails loudly when inapplicable.
+   */
+  isolationBackend?: IsolationBackend;
+  /**
+   * Whether an unqualified top-level `Agent` spawn runs detached. Defaults to
+   * `true`; nested spawns always default to foreground.
    */
   backgroundByDefault?: boolean;
   /**
@@ -244,6 +238,7 @@ export interface SettingsAppliers {
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
+  setIsolationBackend: (backend: IsolationBackend) => void;
   setBackgroundByDefault: (b: boolean) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
@@ -266,6 +261,7 @@ export interface SettingsAppliers {
 export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
+const VALID_ISOLATION_BACKENDS: ReadonlySet<string> = new Set<IsolationBackend>(["auto", "jj", "git"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
@@ -313,6 +309,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode as JoinMode;
+  }
+  if (typeof r.isolationBackend === "string" && VALID_ISOLATION_BACKENDS.has(r.isolationBackend)) {
+    out.isolationBackend = r.isolationBackend as IsolationBackend;
   }
   if (typeof r.backgroundByDefault === "boolean") {
     out.backgroundByDefault = r.backgroundByDefault;
@@ -426,6 +425,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
   if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);
+  if (s.isolationBackend) appliers.setIsolationBackend(s.isolationBackend);
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);

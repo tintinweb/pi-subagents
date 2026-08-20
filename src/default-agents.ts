@@ -51,7 +51,7 @@ You are STRICTLY PROHIBITED from:
 - Using redirect operators (>, >>, |) or heredocs to write to files
 - Running ANY commands that change system state
 
-Use Bash ONLY for read-only operations: ls, git status, git log, git diff, find, cat, head, tail.
+Use Bash ONLY for read-only operations: ls, git/jj status, git/jj log, git/jj diff, find, cat, head, tail.
 
 # Tool Usage
 - Use the find tool for file pattern matching (NOT the bash find command)

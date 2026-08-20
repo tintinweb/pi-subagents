@@ -27,7 +27,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Fuzzy model selection** — specify models by name (`"haiku"`, `"sonnet"`) instead of full IDs, with automatic filtering to only available/configured models
 - **Context inheritance** — optionally fork the parent conversation into a sub-agent so it knows what's been discussed
 - **Persistent agent memory** — three scopes (project, local, user) with automatic read-only fallback for agents without write tools
-- **Git worktree isolation** — run agents in isolated repo copies; changes auto-committed to branches on completion
+- **Configurable repository isolation** — run agents in isolated Jujutsu workspaces or Git worktrees; `auto` chooses the nearest repo and prefers jj at a colocated root, preserving changes on bookmarks or branches
 - **Skill preloading** — inject named skills into agent system prompts, discovered from `.pi/skills/`, `.agents/skills/`, and global locations (Pi-standard `<name>/SKILL.md` directory layout supported)
 - **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
@@ -214,7 +214,7 @@ Individual agent results render Claude Code-style in the conversation:
 
 Completed results can be expanded (ctrl+o in pi) to show the full agent output inline.
 
-By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which commits the agent's work to a git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
+By default, foreground and background agents each stream their full conversation to a per-subagent transcript — a JSON-lines file at `<os-tmpdir>/pi-subagents-<uid>/<cwd>/<session>/tasks/<agent-id>.output` (owner-only `0700`, cleared on reboot). Set `output_transcript: false` on a custom agent to write no transcript path or file for it, or set `outputTranscript: false` in `subagents.json` to make transcripts opt-in for the whole project (frontmatter overrides the project default). This governs **only** the transcript: it is independent of `persist_session` (the pi session on disk), and it does not affect `isolation: worktree` (which preserves the agent's work on a jj bookmark or Git branch) or `memory:` (durable files) — set those accordingly if the goal is to keep a run off disk entirely. Background agent completion notifications render as styled boxes:
 
 ```
 ✓ Find auth files completed
@@ -296,7 +296,7 @@ All fields are optional — sensible defaults for everything.
 | `skills` | `true` | `true` inherits the parent's skills; `false` inherits none. A comma-separated list preloads **only** those skills into the system prompt and does not inherit the rest (see [Skill Preloading](#skill-preloading) for discovery locations) |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
 | `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
-| `isolation` | — | Set to `worktree` to run in an isolated git worktree, or `off` to refuse one even when the caller passes `isolation: "worktree"` (frontmatter is authoritative). `none`, `no`, and `false` are accepted spellings of `off` |
+| `isolation` | — | `worktree` runs in an isolated jj workspace or Git worktree selected by `isolationBackend`; `off` refuses one even when the caller requests it. `none`, `no`, and `false` are accepted spellings of `off` |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp are interchangeable) and falls back to the same model under another provider if the named one doesn't have it |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh, max — actual availability depends on your pi version and model; pi clamps unsupported levels down |
 | `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
@@ -403,7 +403,7 @@ Launch a sub-agent.
 | `run_in_background` | boolean | no | Defaults to `true`; `false` blocks and returns the result inline |
 | `resume` | string | no | Agent ID to resume a previous session |
 | `isolated` | boolean | no | No extension/MCP tools |
-| `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
+| `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated repository workspace (`isolationBackend`: auto/jj/git); `off` (the default) does not. The field is absent when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 
 ### `get_subagent_result`
@@ -513,12 +513,14 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, isolation backend, background-by-default, scheduling, model scope, default agents, strict agent files, agent mentions, remembered agents, transcripts, worktree isolation, tool description, widget, usage reporting, and cost display) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, isolation backend `auto`, background execution and defaults enabled).
+
+**Isolation backend** (`isolationBackend`, default `"auto"`): controls the repository implementation behind `isolation: "worktree"`. `"auto"` chooses the nearest repository; at a colocated jj/Git root it prefers jj and falls back to Git only at that same root. `"jj"` and `"git"` force that backend and fail loudly instead of falling back when the target cwd is incompatible. Change it live through `/agents → Settings → Isolation backend` or set it in `subagents.json`.
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
@@ -665,7 +667,7 @@ pi.events.emit("subagents:rpc:spawn", {
 
 `options.model` accepts either a `Model` object (e.g. `ctx.model`) or a `"provider/modelId"` string — strings are resolved against `ctx.modelRegistry` at the RPC boundary, so cross-extension callers can forward serializable values without losing auth context.
 
-`options.cwd` (absolute path to an existing directory — anything else returns an error envelope; `null` means unset) runs the agent in a different working directory than the parent session. Its tools operate there and the prompt's environment block describes it, but **`.pi` config still loads from the parent session's project** — the target directory's `.pi` extensions never execute, and its agents/skills/settings are not picked up. Combined with `isolation: "worktree"`, the worktree is created *from* the target directory's repo, the agent works at the equivalent subdirectory inside the copy (a monorepo-package cwd stays scoped to that package), and the resulting `pi-agent-*` branch lands in that repo — the completion message names it. On session end, worktree registrations are pruned in every repo that received one; only a hard crash can leave a stale entry (then: `git worktree prune` in the target repo). Agents with `memory:` keep reading/writing the parent project's memory.
+`options.cwd` (absolute path to an existing directory — anything else returns an error envelope; `null` means unset) runs the agent in a different working directory than the parent session. Its tools operate there and the prompt's environment block describes it, but **`.pi` config still loads from the parent session's project** — the target directory's `.pi` extensions never execute, and its agents/skills/settings are not picked up. Combined with `isolation: "worktree"`, the workspace is created *from* the target directory's repository, the agent works at the equivalent subdirectory inside the copy (a monorepo-package cwd stays scoped to that package), and the resulting `pi-agent-*` bookmark/branch lands in that repository — the completion message names it. On session end, stale Git worktree registrations are pruned and missing plugin-created jj workspaces are forgotten in every repository that received one. Agents with `memory:` keep reading/writing the parent project's memory.
 
 ### Stop
 
@@ -706,24 +708,31 @@ The `disallowed_tools` field is respected when determining write capability — 
 
 ## Worktree Isolation
 
-Set `isolation: worktree` to run an agent in a temporary git worktree:
+Set `isolation: worktree` to run an agent in a temporary repository workspace:
 
 ```
 Agent({ subagent_type: "refactor", prompt: "...", isolation: "worktree" })
 ```
 
-The agent gets a full, isolated copy of the repository. The worktree directory is removed on completion either way — what differs is whether a branch is left behind:
-- **No changes:** worktree is cleaned up automatically, no branch
-- **Changes made:** changes are committed to a new branch (`pi-agent-<id>`), and the result names the branch and the `git merge` command for it. The branch is the only artifact — the worktree path is gone, so nothing points into it
-- **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
+`isolationBackend` selects the implementation: `auto` (default) prefers jj and then Git, while `jj` and `git` force one backend. In a colocated jj/Git repository, `auto` deliberately chooses jj; if cwd belongs to a nested repository, the nearest repository wins. Both backends start from the committed parent of the caller's working copy (`@-` for jj), so the caller's current jj change `@` and other unsaved edits are not copied into the agent workspace.
 
-The agent's system prompt names the worktree as an isolated copy and tells it to work only there, even if other instructions name the main checkout — otherwise an inherited parent prompt or a task prompt mentioning the project path walks it straight back out of the copy. This is a directive, not a sandbox: an agent with shell access can still `cd` out, so don't rely on `isolation` alone to protect the main checkout.
+The agent gets an isolated filesystem checkout. Its system prompt names that checkout and tells the agent to work only there, even if other instructions name the main checkout. This is a directive, not a sandbox: an agent with shell access can still leave the workspace, so do not rely on `isolation` alone to protect the main checkout.
 
-The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
+A jj workspace still shares its repository and operation log with the caller: history- or workspace-rewriting `jj` commands in either workspace can affect the other. In particular, rewriting the shared base (`@-`) can rebase or conflict a running agent; cleanup detects this and marks the returned bookmark with a warning. A workspace created by jj is not itself colocated, even when the source repository is, so `git` commands do not work inside it; the subagent environment identifies jj rather than falsely saying there is no repository. In a colocated repository, force `isolationBackend: "git"` when Git CLI compatibility or stronger separation is required.
 
-If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` call fails with a clear error instead of running unisolated — `isolation: "worktree"` is a strict guarantee, not a hint. The call is reported as a failed tool call, not as a subagent that ran and returned that message, so the model doesn't retry it as if the agent had merely reported a problem. Initialize git and commit at least once, or omit `isolation`.
+After a clean run or successful preservation, the temporary workspace is removed. If preservation fails, it is retained and its path is returned.
 
-A worktree is a *copy*, so the agent cannot see uncommitted or staged changes in the main checkout. Never use it to review a working-tree or staged diff: the agent finds an empty `git diff` and reports nothing wrong.
+On completion:
+- **No changes:** the workspace is forgotten/removed automatically
+- **Jujutsu changes:** ordinary working-copy changes are described and preserved on a `pi-agent-<id>` bookmark; agent-created jj commits are preserved. Integrate with `jj new @ pi-agent-<id>`
+- **Git changes:** uncommitted changes are committed to a `pi-agent-<id>` branch; agent-created commits are preserved at their HEAD. Integrate with `git merge pi-agent-<id>`
+- **Ref name already exists:** a timestamp suffix is added instead of overwriting it
+
+The Git preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply. Jujutsu has no staging or equivalent preservation hook step: its working-copy commit is described directly.
+
+If the selected backend cannot create the workspace, the `Agent` call fails with a clear error instead of running unisolated — `isolation: "worktree"` is a strict guarantee, not a hint. The call is reported as a failed tool call, not as a subagent that ran and returned that message, so the model does not retry it as if the agent had merely reported a problem. Both backends require at least one committed change; a fresh repository whose code exists only in the current working copy is rejected rather than giving the agent an empty checkout. Initialize or fix the selected backend, choose another `isolationBackend`, or omit `isolation`.
+
+An isolated workspace starts from committed history, so the agent cannot see uncommitted or staged changes in the main checkout. Never use it to review the main checkout's pending diff: it will inspect the isolated base instead.
 
 ### Turning worktrees off
 
@@ -819,7 +828,7 @@ src/
   memory.ts           # Persistent agent memory (resolve, read, build prompt blocks)
   skill-loader.ts     # Preload skills (Pi-standard + Agent Skills spec layouts)
   output-file.ts      # Streaming output file transcripts for agent sessions
-  worktree.ts         # Git worktree isolation (create, cleanup, prune)
+  worktree.ts         # Configurable jj workspace / Git worktree isolation
   prompts.ts          # Config-driven system prompt builder
   context.ts          # Parent conversation context for inherit_context
   settings.ts         # Persistent settings (~/.pi/agent/subagents.json + .pi/subagents.json)

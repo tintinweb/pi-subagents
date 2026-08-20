@@ -16,6 +16,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Install Jujutsu
+        uses: taiki-e/install-action@v2
+        with:
+          tool: jj-cli@0.44.0
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run test

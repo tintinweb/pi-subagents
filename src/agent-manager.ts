@@ -1,7 +1,7 @@
 /**
  * agent-manager.ts — Tracks agents, background execution, resume support.
  *
- * Background agents are subject to a configurable concurrency limit (default: 4).
+ * Background agents are subject to a configurable concurrency limit (default: 10).
  * Excess agents are queued and auto-started as running agents complete.
  * Foreground agents bypass the queue (they block the parent anyway), and so do
  * nested children — see `occupiesPoolSlot`.
@@ -14,9 +14,9 @@ import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
-import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationBackend, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
-import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -134,15 +134,15 @@ interface SpawnOptions {
    * scheduler so a fired job can't be deferred past its trigger window.
    */
   bypassQueue?: boolean;
-  /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
+  /** Isolation mode — "worktree" creates a temporary isolated repository workspace. */
   isolation?: IsolationMode;
   /**
    * Working directory for the agent (absolute path). Default: parent session
    * cwd. The agent's tools operate here, but .pi config (extensions, skills,
    * settings, memory) still loads from the parent session's project — the
    * target directory's `.pi` extensions never execute. With isolation:
-   * "worktree", the worktree is created FROM this directory and the result
-   * branch lands in that repo.
+   * "worktree", the workspace is created FROM this directory and the result
+   * branch/bookmark lands in that repository.
    */
   cwd?: string;
   /** Resolved invocation snapshot captured for UI display. */
@@ -238,6 +238,7 @@ export class AgentManager {
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private maxConcurrent: number;
+  private isolationBackend: IsolationBackend = "auto";
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -281,6 +282,14 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  setIsolationBackend(backend: IsolationBackend): void {
+    this.isolationBackend = backend;
+  }
+
+  getIsolationBackend(): IsolationBackend {
+    return this.isolationBackend;
   }
 
   /**
@@ -373,19 +382,24 @@ export class AgentManager {
     const customCwd = options.cwd ?? undefined; // null (RPC "unset") → undefined
     const baseCwd = customCwd ?? ctx.cwd;
 
-    // Worktree isolation: try to create a temporary git worktree. Strict —
-    // fail loud if not possible (no silent fallback to main tree). Done
-    // BEFORE state mutation so a throw doesn't leave the record half-running.
-    // The project switch is enforced here as well as at the tool boundary
-    // because cross-extension RPC forwards its options unvalidated — a schema
-    // that omits the field can't stop a caller that never saw the schema.
+    // Worktree isolation is strict: fail loud instead of silently running in
+    // the main tree. The configured backend resolves inside createWorktree;
+    // `auto` chooses the nearest repo and prefers jj at a colocated root. The
+    // project switch is enforced here too because RPC callers bypass the tool
+    // schema that omits `isolation` when worktrees are disabled.
     let worktreeCwd: string | undefined;
     if (options.isolation === "worktree" && isWorktreeIsolationEnabled()) {
-      const wt = createWorktree(baseCwd, id);
+      const wt = createWorktree(baseCwd, id, this.isolationBackend);
       if (!wt) {
+        const backend = this.isolationBackend;
+        const requirement = backend === "jj"
+          ? "a Jujutsu repository with at least one committed change and a working `jj workspace add`"
+          : backend === "git"
+            ? "a Git repository with at least one commit and a working `git worktree add`"
+            : "a Jujutsu or Git repository with at least one committed change";
         throw new Error(
-          'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
-          'Initialize git and commit at least once, or omit `isolation`.',
+          `Cannot run with isolation: "worktree" using backend "${backend}" — requires ${requirement}. ` +
+          "Initialize the selected repository backend, fix workspace creation, or omit `isolation`.",
         );
       }
       record.worktree = wt;
@@ -432,6 +446,7 @@ export class AgentManager {
       // Set iff a worktree was created (see above) — names the directory the
       // copy came from, so the prompt can tell the agent not to work there.
       worktreeBase: worktreeCwd ? baseCwd : undefined,
+      worktreeBackend: record.worktree?.backend,
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
@@ -508,12 +523,28 @@ export class AgentManager {
         if (record.worktree) {
           const wtResult = cleanupWorktree(baseCwd, record.worktree, options.description);
           record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
-            // With a caller-supplied cwd the branch lives in THAT repo, not the
-            // parent session's — say so, or the orchestrator merges in the wrong repo.
-            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
+          const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
+          const commandNote = customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : "";
+          if (wtResult.hasChanges && wtResult.ref && wtResult.refKind) {
+            const integrate = wtResult.backend === "jj"
+              ? `jj new @ ${wtResult.ref}`
+              : `git merge ${wtResult.ref}`;
+            const warnings = [
+              wtResult.baseDrifted ? "the jj base changed while the agent was running" : undefined,
+              wtResult.hasConflicts ? "the bookmark contains conflicts" : undefined,
+            ].filter(Boolean);
+            const warning = warnings.length > 0
+              ? ` Warning: ${warnings.join(" and ")}.` +
+                (wtResult.hasConflicts ? " Resolve the conflicts before integrating." : "") +
+                ` Inspect with: \`jj log -r ${wtResult.ref}\`.`
+              : "";
             record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+              `\n\n---\nChanges saved to ${wtResult.refKind} \`${wtResult.ref}\`${repoNote}.${warning} ` +
+              `Integrate with: \`${integrate}\`${commandNote}`;
+          } else if (wtResult.hasChanges && wtResult.error) {
+            record.result = (record.result ?? "") +
+              `\n\n---\nCould not preserve the isolated ${wtResult.backend} workspace as a ref: ${wtResult.error}. ` +
+              `Changes remain at \`${wtResult.path ?? record.worktree.path}\`.`;
           }
         }
 
@@ -1075,11 +1106,10 @@ export class AgentManager {
     this.queue = [];
     const sessions = [...this.agents.values()].map(record => record.session);
     this.agents.clear();
-    // Awaited, unlike the eviction path: pi awaits this extension's `session_shutdown`
-    // handler and the process exits right after it returns, so anything left unawaited
-    // here never runs at all. Bounded — each call carries its own ceiling, concurrently.
+    // Awaited on shutdown so child extensions can release session resources.
+    // Each shutdown has its own timeout, and all sessions close concurrently.
     await Promise.all(sessions.map(session => shutdownChildSession(session)));
-    // Prune any orphaned git worktrees (crash recovery)
+    // Prune orphaned Git worktrees and plugin-created jj workspaces.
     try { pruneWorktrees(process.cwd()); } catch { /* ignore */ }
     // Also prune repos that caller-supplied cwds created worktrees in — a clean
     // exit with in-flight agents would otherwise leave stale registrations there.

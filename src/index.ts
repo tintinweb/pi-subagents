@@ -36,7 +36,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type IsolationBackend, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -1281,6 +1281,7 @@ export default function (pi: ExtensionAPI) {
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
+      setIsolationBackend: (backend) => manager.setIsolationBackend(backend),
       setBackgroundByDefault,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
@@ -1333,11 +1334,11 @@ export default function (pi: ExtensionAPI) {
   // With no per-result note by design, the model would have every reason to go
   // on reporting a `pi-agent-*` branch that was never created.
   const isolationGuideline = isWorktreeIsolationEnabled()
-    ? `\n- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.`
+    ? `\n- Use isolation: "worktree" to run the agent in an isolated repository workspace (safe parallel file modifications); leave it unset, or pass "off", for none. The configured backend defaults to the nearest repository and prefers jj at a colocated root. Clean workspaces are removed; changes are preserved on a jj bookmark or Git branch named in the result.`
     : "";
 
   const isolationCompactGuideline = isWorktreeIsolationEnabled()
-    ? `\n- isolation: "worktree" gives the agent its own git worktree (removed on completion); changes land on a branch named in the result.`
+    ? `\n- isolation: "worktree" gives the agent an isolated repository workspace through the configured jj or Git backend; changes land on a bookmark or branch named in the result.`
     : "";
 
   // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
@@ -2664,12 +2665,9 @@ run_in_background: <pin this agent to background (true) or foreground (false). O
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>${
-      // Offering the field on a project that turned worktrees off would bake a
-      // request that is refused at spawn time into a file that outlives the
-      // session — the #231 pathology (models fill the fields they are shown)
-      // one layer up. Built per invocation, so this read is live.
+      // Do not offer a field that this project refuses at runtime.
       isWorktreeIsolationEnabled()
-        ? `\nisolation: <"worktree" to run in isolated git worktree; "off" to refuse one even when the caller asks. Omit for normal>`
+        ? `\nisolation: <"worktree" to run in an isolated repository workspace using the configured backend; "off" to refuse one even when the caller asks. Omit for normal>`
         : ""
     }
 ---
@@ -2800,6 +2798,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
       defaultJoinMode: getDefaultJoinMode(),
+      isolationBackend: manager.getIsolationBackend(),
       backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
@@ -2887,9 +2886,16 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["smart", "async", "group"],
         },
         {
+          id: "isolationBackend",
+          label: "Isolation backend",
+          description: "Backend for worktree isolation: auto chooses the nearest repo and prefers jj at a colocated root",
+          currentValue: manager.getIsolationBackend(),
+          values: ["auto", "jj", "git"],
+        },
+        {
           id: "backgroundByDefault",
           label: "Background by default",
-          description: "An Agent call that doesn't say runs detached (off = blocks the turn and returns inline)",
+          description: "An Agent call that does not specify a mode runs detached; off blocks and returns inline",
           currentValue: getBackgroundByDefault() ? "on" : "off",
           values: ["on", "off"],
         },
@@ -3033,6 +3039,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
         notifyApplied(ctx, `Default join mode set to ${value}`);
+      } else if (id === "isolationBackend") {
+        manager.setIsolationBackend(value as IsolationBackend);
+        notifyApplied(ctx, `Isolation backend set to ${value}`);
       } else if (id === "backgroundByDefault") {
         const enabled = value === "on";
         setBackgroundByDefault(enabled);

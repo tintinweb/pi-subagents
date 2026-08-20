@@ -260,16 +260,25 @@ describe("agent-runner final output capture", () => {
     }));
   });
 
-  it("forwards worktreeBase to the prompt builder, and omits it otherwise", async () => {
+  it("forwards worktree isolation details to the prompt builder, and omits them otherwise", async () => {
     const { buildAgentPrompt } = await import("../src/prompts.js");
     const { session } = createSession("ISOLATED");
     createAgentSession.mockResolvedValue({ session });
 
-    await runAgent(ctx, "Explore", "Say ISOLATED", { pi, cwd: "/wt/copy", worktreeBase: "/repo" });
-    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).toMatchObject({ worktreeBase: "/repo" });
+    await runAgent(ctx, "Explore", "Say ISOLATED", {
+      pi,
+      cwd: "/wt/copy",
+      worktreeBase: "/repo",
+      worktreeBackend: "jj",
+    });
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).toMatchObject({
+      worktreeBase: "/repo",
+      worktreeBackend: "jj",
+    });
 
     await runAgent(ctx, "Explore", "Say ISOLATED", { pi });
     expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("worktreeBase");
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("worktreeBackend");
   });
 
   it("passes the parent model runtime while retaining the legacy model registry", async () => {

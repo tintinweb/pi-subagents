@@ -31,6 +31,12 @@ describe("isolationParam", () => {
     expect(schema(true)?.anyOf?.[0]?.const).toBe("off");
   });
 
+  it("describes both supported repository backends", () => {
+    const described = JSON.stringify(schema(true));
+    expect(described).toMatch(/configured jj or Git backend/);
+    expect(described).not.toMatch(/temporary git worktree/i);
+  });
+
   it("warns that a worktree cannot see uncommitted work", () => {
     // The specific trap in #231: the subagent reviewed an empty `git diff
     // --cached` in a fresh copy and returned nothing, three times.
