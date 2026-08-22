@@ -75,7 +75,10 @@ function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | 
 }
 
 /**
- * Whether a record occupies one of the `maxConcurrent` background slots.
+ * Whether a record occupies one of the `maxConcurrent` slots. Every top-level
+ * agent does — foreground included: it is a running agent, and parallel
+ * foreground tool calls would otherwise sail past the limit (each caller blocks
+ * on its own call, but pi runs parallel calls concurrently).
  * Nested children don't: their parent already holds a slot, so counting (and
  * therefore queueing) them would deadlock a parent that waits on its own child.
  *
@@ -83,8 +86,8 @@ function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | 
  * goes, not how WIDE. A parent's only limit on concurrent children is that each
  * spawn costs it a turn, which is unbounded when max turns is unlimited.
  */
-function occupiesPoolSlot(record: Pick<AgentRecord, "isBackground" | "parentAgentId">): boolean {
-  return !!record.isBackground && record.parentAgentId === undefined;
+function occupiesPoolSlot(record: Pick<AgentRecord, "parentAgentId">): boolean {
+  return record.parentAgentId === undefined;
 }
 
 interface SpawnArgs {
@@ -250,10 +253,10 @@ export class AgentManager {
    */
   private tombstones = new Map<string, AgentTombstone>();
 
-  /** Queue of background agents waiting to start. */
-  private queue: { id: string; start: () => void }[] = [];
-  /** Number of currently running background agents. */
-  private runningBackground = 0;
+  /** Queue of agents waiting to start. `onDrop` resolves the record's startPromise when the entry is discarded without starting. */
+  private queue: { id: string; start: () => void; onDrop?: () => void }[] = [];
+  /** Number of currently running top-level agents (foreground + background). */
+  private runningTopLevel = 0;
 
   constructor(
     onComplete?: OnAgentComplete,
@@ -345,9 +348,13 @@ export class AgentManager {
 
     const args: SpawnArgs = { pi, ctx, type, prompt, options };
 
-    if (occupiesPoolSlot(record) && !options.bypassQueue && this.runningBackground >= this.maxConcurrent) {
-      // Queue it — will be started when a running agent completes
-      this.queue.push({ id, start: () => this.startAgent(id, record, args) });
+    if (occupiesPoolSlot(record) && !options.bypassQueue && this.runningTopLevel >= this.maxConcurrent) {
+      // Queue it — will be started when a running agent completes. Foreground
+      // spawns queue too: spawnAndWait awaits startPromise, then the run promise.
+      record.status = "queued";
+      record.startPromise = new Promise<void>((resolve) => {
+        this.queue.push({ id, start: () => { this.startAgent(id, record, args); resolve(); }, onDrop: resolve });
+      });
       return id;
     }
 
@@ -401,7 +408,7 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    if (occupiesPoolSlot(record)) this.runningTopLevel++;
     this.onStart?.(record);
 
     // Wire parent abort signal to stop the subagent when the parent is interrupted
@@ -521,14 +528,10 @@ export class AgentManager {
 
         // Fire onComplete for foreground agents too — lifecycle symmetry.
         // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
-          record.resultConsumed = true;
-          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-        } else {
-          if (occupiesPoolSlot(record)) this.runningBackground--;
-          try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-          this.drainQueue();
-        }
+        if (!options.isBackground) record.resultConsumed = true;
+        if (occupiesPoolSlot(record)) this.runningTopLevel--;
+        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        this.drainQueue();
         return responseText;
       })
       .catch((err) => {
@@ -559,14 +562,10 @@ export class AgentManager {
 
         // Fire onComplete for foreground agents too — lifecycle symmetry.
         // Mark resultConsumed so the callback skips notifications (result returned inline).
-        if (!options.isBackground) {
-          record.resultConsumed = true;
-          this.onComplete?.(record);
-        } else {
-          if (occupiesPoolSlot(record)) this.runningBackground--;
-          this.onComplete?.(record);
-          this.drainQueue();
-        }
+        if (!options.isBackground) record.resultConsumed = true;
+        if (occupiesPoolSlot(record)) this.runningTopLevel--;
+        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+        this.drainQueue();
         return "";
       });
 
@@ -592,7 +591,7 @@ export class AgentManager {
 
   /** Start queued agents up to the concurrency limit. */
   private drainQueue() {
-    while (this.queue.length > 0 && this.runningBackground < this.maxConcurrent) {
+    while (this.queue.length > 0 && this.runningTopLevel < this.maxConcurrent) {
       const next = this.queue.shift()!;
       const record = this.agents.get(next.id);
       if (!record || record.status !== "queued") continue;
@@ -618,7 +617,8 @@ export class AgentManager {
 
   /**
    * Spawn an agent and wait for completion (foreground use).
-   * Foreground agents bypass the concurrency queue.
+   * Foreground agents occupy a pool slot like background ones and queue at
+   * the limit — the wait covers queue time plus the run.
    * Returns { id, record } so callers can access the agent ID.
    *
    * @param onSpawned - Called synchronously after spawn(), before onSessionCreated fires.
@@ -645,6 +645,7 @@ export class AgentManager {
       this.onSpawned = prevOnSpawned;
     }
     const record = this.agents.get(id)!;
+    await record.startPromise; // undefined when it started immediately
     await record.promise;
     return { id, record };
   }
@@ -687,7 +688,7 @@ export class AgentManager {
       record.status = "queued";
 
       const start = () => this.startResume(id, record, prompt, signal, options);
-      if (occupiesPoolSlot(record) && this.runningBackground >= this.maxConcurrent) {
+      if (occupiesPoolSlot(record) && this.runningTopLevel >= this.maxConcurrent) {
         // At the concurrency limit — queue it, drains when a slot frees.
         this.queue.push({ id, start });
       } else {
@@ -758,7 +759,7 @@ export class AgentManager {
 
     record.status = "running";
     record.startedAt = Date.now();
-    if (occupiesPoolSlot(record)) this.runningBackground++;
+    if (occupiesPoolSlot(record)) this.runningTopLevel++;
     this.onStart?.(record);
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
@@ -790,7 +791,7 @@ export class AgentManager {
       }
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
-      if (occupiesPoolSlot(record)) this.runningBackground--;
+      if (occupiesPoolSlot(record)) this.runningTopLevel--;
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
@@ -938,9 +939,12 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record) return false;
 
-    // Remove from queue if queued
+    // Remove from queue if queued — onDrop resolves startPromise so a
+    // spawnAndWait blocked on the queue returns instead of hanging.
     if (record.status === "queued") {
+      const entry = this.queue.find(q => q.id === id);
       this.queue = this.queue.filter(q => q.id !== id);
+      entry?.onDrop?.();
       record.status = "stopped";
       record.completedAt = Date.now();
       return true;
@@ -1071,7 +1075,8 @@ export class AgentManager {
 
   async dispose(): Promise<void> {
     clearInterval(this.cleanupInterval);
-    // Clear queue
+    // Clear queue — release start gates so blocked spawnAndWait calls settle
+    for (const q of this.queue) q.onDrop?.();
     this.queue = [];
     const sessions = [...this.agents.values()].map(record => record.session);
     this.agents.clear();

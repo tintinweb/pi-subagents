@@ -1360,9 +1360,9 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
   });
 });
 
-// The pool counter is decremented when a background agent settles, but ONLY for
+// The pool counter is decremented when an agent settles, but ONLY for
 // records that took a slot in the first place. Nested children bypass the pool
-// (occupiesPoolSlot), so decrementing on their behalf drives runningBackground
+// (occupiesPoolSlot), so decrementing on their behalf drives runningTopLevel
 // negative and permanently lifts maxConcurrent. Only the START side of that rule
 // had coverage.
 describe("AgentManager — pool slot accounting on settle", () => {
@@ -1453,6 +1453,164 @@ describe("AgentManager — pool slot accounting on settle", () => {
     await manager.getRecord(parentId)?.promise;
 
     expect(manager.getRecord(siblingId)?.status).toBe("running");
+  });
+});
+
+describe("AgentManager — foreground spawns respect maxConcurrent", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  it("queues a foreground spawn at the limit and runs it when a slot frees", async () => {
+    vi.mocked(runAgent).mockClear();
+    let releaseBlocker!: (v: any) => void;
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+      prompt === "blocker"
+        ? new Promise<any>((resolve) => { releaseBlocker = resolve; })
+        : Promise.resolve({ responseText: "fg done", session: mockSession(), aborted: false, steered: false }),
+    );
+    manager = new AgentManager(undefined, 1); // maxConcurrent = 1
+    manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
+      description: "blocker", isBackground: true,
+    });
+
+    const wait = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+    });
+    const queued = manager.listAgents().find(a => a.description === "fg")!;
+    expect(queued.status).toBe("queued");
+    expect(runAgent).toHaveBeenCalledTimes(1); // only the blocker started
+
+    releaseBlocker({ responseText: "blocker done", session: mockSession(), aborted: false, steered: false });
+    const { record } = await wait;
+
+    expect(record.status).toBe("completed");
+    expect(record.result).toBe("fg done");
+    // Slot accounting stayed balanced: a fresh background spawn starts at once.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const after = manager.spawn(mockPi, mockCtx, "general-purpose", "after", {
+      description: "after", isBackground: true,
+    });
+    expect(manager.getRecord(after)!.status).toBe("running");
+  });
+
+  it("returns the stopped record when a queued foreground spawn is aborted before starting", async () => {
+    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager = new AgentManager(undefined, 1); // maxConcurrent = 1
+    manager.spawn(mockPi, mockCtx, "general-purpose", "blocker", {
+      description: "blocker", isBackground: true,
+    });
+
+    const wait = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+    });
+    const queued = manager.listAgents().find(a => a.description === "fg")!;
+    expect(manager.abort(queued.id)).toBe(true);
+
+    const { record } = await wait; // must settle, not hang on the dropped queue entry
+    expect(record.status).toBe("stopped");
+    expect(runAgent).toHaveBeenCalledTimes(1); // the fg run never started
+  });
+});
+
+describe("AgentManager — maxConcurrent > 1", () => {
+  let manager: AgentManager;
+
+  afterEach(() => manager?.dispose());
+
+  /** Runs that settle on demand, keyed by prompt. */
+  function controllableRuns() {
+    const resolvers = new Map<string, (v: any) => void>();
+    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementation((_ctx: any, _type: any, prompt: any) =>
+      new Promise<any>((resolve) => {
+        resolvers.set(prompt as string, () => resolve({
+          responseText: "done", session: mockSession(), aborted: false, steered: false,
+        }));
+      }),
+    );
+    return resolvers;
+  }
+
+  it("runs exactly maxConcurrent background agents, queues the rest, and drains FIFO", async () => {
+    const resolvers = controllableRuns();
+    manager = new AgentManager(undefined, 2); // maxConcurrent = 2
+
+    const ids = ["a", "b", "c", "d"].map((p) =>
+      manager.spawn(mockPi, mockCtx, "general-purpose", p, { description: p, isBackground: true }),
+    );
+    expect(ids.map((id) => manager.getRecord(id)!.status)).toEqual([
+      "running", "running", "queued", "queued",
+    ]);
+
+    // c is ahead of d in the queue — a LIFO drain would start d here.
+    resolvers.get("a")!(undefined);
+    await manager.getRecord(ids[0])!.promise;
+    expect(manager.getRecord(ids[2])!.status).toBe("running");
+    expect(manager.getRecord(ids[3])!.status).toBe("queued");
+
+    resolvers.get("b")!(undefined);
+    await manager.getRecord(ids[1])!.promise;
+    expect(manager.getRecord(ids[3])!.status).toBe("running");
+
+    // Both slots were held the whole time: c and d run concurrently now.
+    resolvers.get("c")!(undefined);
+    await manager.getRecord(ids[2])!.promise;
+    expect(manager.getRecord(ids[3])!.status).toBe("running");
+  });
+
+  it("a foreground fan-out runs exactly maxConcurrent at once", async () => {
+    const resolvers = controllableRuns();
+    manager = new AgentManager(undefined, 2); // maxConcurrent = 2
+
+    const waits = ["f1", "f2", "f3"].map((p) =>
+      manager.spawnAndWait(mockPi, mockCtx, "general-purpose", p, { description: p }),
+    );
+    const byDesc = (p: string) => manager.listAgents().find(a => a.description === p)!;
+    expect(byDesc("f1").status).toBe("running");
+    expect(byDesc("f2").status).toBe("running");
+    expect(byDesc("f3").status).toBe("queued");
+
+    resolvers.get("f1")!(undefined);
+    await manager.getRecord(byDesc("f1").id)!.promise; // drain runs in the settle chain
+    expect(byDesc("f3").status).toBe("running");
+
+    resolvers.get("f2")!(undefined);
+    resolvers.get("f3")!(undefined);
+    const results = await Promise.all(waits);
+    for (const { record } of results) {
+      expect(record.status).toBe("completed");
+      expect(record.result).toBe("done");
+    }
+  });
+
+  it("foreground and background spawns share the same pool", async () => {
+    const resolvers = controllableRuns();
+    manager = new AgentManager(undefined, 2); // maxConcurrent = 2
+
+    const bgId = manager.spawn(mockPi, mockCtx, "general-purpose", "bg", {
+      description: "bg", isBackground: true,
+    });
+    const fgWait = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "fg", {
+      description: "fg",
+    });
+    // Two agents now hold both slots — a third of either mode must queue.
+    const thirdId = manager.spawn(mockPi, mockCtx, "general-purpose", "third", {
+      description: "third", isBackground: true,
+    });
+    expect(manager.getRecord(bgId)!.status).toBe("running");
+    expect(manager.getRecord(thirdId)!.status).toBe("queued");
+
+    // Releasing the BACKGROUND agent frees a slot for the queued one — the pool
+    // is shared, not per-mode.
+    resolvers.get("bg")!(undefined);
+    await manager.getRecord(bgId)!.promise;
+    expect(manager.getRecord(thirdId)!.status).toBe("running");
+
+    resolvers.get("fg")!(undefined);
+    const { record } = await fgWait;
+    expect(record.status).toBe("completed");
   });
 });
 

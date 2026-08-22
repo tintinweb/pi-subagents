@@ -165,6 +165,12 @@ export interface AgentRecord {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
+  /**
+   * Resolves when a queued spawn actually starts — or is dropped while queued
+   * (abort). `spawnAndWait` awaits this before the run promise, which doesn't
+   * exist until the agent starts.
+   */
+  startPromise?: Promise<void>;
   groupId?: string;
   joinMode?: JoinMode;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */

@@ -11,9 +11,10 @@
  *   - a fan-out sized like the ones the description tells the model to send
  *     runs concurrently instead of queueing behind `maxConcurrent`.
  *
- * That last one is the reason the concurrency default moved 4 → 10: foreground
- * agents bypass the pool, so the limit only started applying to ordinary
- * parallel work once background became the default.
+ * That last one is why the concurrency default moved 4 → 10 at the time:
+ * with foreground agents bypassing the pool, the limit only started applying
+ * to ordinary parallel work once background became the default. (Foreground
+ * spawns have occupied pool slots since — see agent-manager.ts.)
  */
 import { describe, expect, it, vi } from "vitest";
 

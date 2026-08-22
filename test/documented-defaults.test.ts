@@ -39,8 +39,9 @@ describe("documented defaults (README:441)", () => {
   });
 
   // Raised from 4 when top-level spawns started defaulting to background:
-  // foreground bypasses the pool entirely, so a limit tuned for opt-in
-  // background would now queue the tail of ordinary parallel fan-outs.
+  // a limit tuned for opt-in background would now queue the tail of ordinary
+  // parallel fan-outs. Foreground spawns occupy slots too, so the cap covers
+  // both modes.
   it("background concurrency defaults to 10", async () => {
     const { AgentManager } = await import("../src/agent-manager.js");
     const manager = new AgentManager();
