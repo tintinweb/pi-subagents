@@ -69,7 +69,7 @@ export class ConversationViewer implements Component {
       return;
     }
 
-    if (matchesKey(data, "escape") || matchesKey(data, "q")) {
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
       this.closed = true;
       this.done(undefined);
       return;

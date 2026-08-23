@@ -109,6 +109,18 @@ describe("ConversationViewer cost display", () => {
 });
 
 describe("ConversationViewer", () => {
+  it("closes with Ctrl+C when not composing", () => {
+    const done = vi.fn();
+    const viewer = new ConversationViewer(
+      mockTui(), mockSession(), mockRecord(), undefined, ansiTheme(), done,
+    );
+
+    viewer.handleInput("\x03");
+
+    expect(done).toHaveBeenCalledOnce();
+    expect(done).toHaveBeenCalledWith(undefined);
+  });
+
   describe("render width safety", () => {
     const widths = [40, 80, 120, 216];
 
