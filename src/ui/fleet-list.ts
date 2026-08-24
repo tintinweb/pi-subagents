@@ -100,6 +100,12 @@ export class FleetList {
      * `showCost` setting.
      */
     private showCost: () => boolean = () => false,
+    /**
+     * Hand a live foreground run to the background, returning whether it took.
+     * Supplied by the extension, which also has to refresh the widget and this
+     * list — surfaces this component does not own. Omitted → no `b` affordance.
+     */
+    private onBackground?: (record: AgentRecord) => boolean,
   ) {}
 
   // ---- Lifecycle ----
@@ -318,6 +324,15 @@ export class FleetList {
           keybindings,
           (message: string) => this.manager.steer(record.id, message),
           this.showCost(),
+          // This list has no markdown-mode setting to read or persist; `m`
+          // still cycles viewer-locally.
+          undefined,
+          undefined,
+          () => {
+            if (this.onBackground?.(record)) {
+              this.ui?.notify(`Sent "${record.description}" to the background.`, "info");
+            }
+          },
         );
       },
       {

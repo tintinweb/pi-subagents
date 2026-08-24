@@ -64,6 +64,14 @@ function fakeManager(agents: AgentRecord[]): AgentManager {
     listAgents: () => agents,
     abort: () => true,
     steer: vi.fn(() => true),
+    // Mirrors the real guard closely enough to prove the wiring reaches it.
+    sendToBackground: vi.fn((id: string) => {
+      const record = agents.find(a => a.id === id);
+      if (!record || record.status !== "running" || record.blocking !== true) return false;
+      record.blocking = false;
+      record.isBackground = true;
+      return true;
+    }),
   } as unknown as AgentManager;
 }
 
@@ -71,6 +79,8 @@ interface Harness {
   fleet: FleetList;
   ui: FleetUICtx;
   manager: AgentManager;
+  /** Notices the fleet pushed through `ui.notify`, as `level: message`. */
+  notices: () => string[];
   /** The overlay component (a real ConversationViewer) once one is opened. */
   overlayComponent: () => { handleInput(data: string): void } | undefined;
   /** Feed a key to the registered input handler; returns the consume result. */
@@ -92,6 +102,7 @@ function harness(agents: AgentRecord[]): Harness {
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
   let widgetFactory: ((tui: any, theme: any) => { render(w: number): string[] }) | undefined;
   let editorText = "";
+  const notices: string[] = [];
   let opened = false;
   let closed = false;
   let overlayDone: ((r: undefined) => void) | undefined;
@@ -102,7 +113,7 @@ function harness(agents: AgentRecord[]): Harness {
     setWidget: (_key, content) => { widgetFactory = content as any; },
     onTerminalInput: (h) => { inputHandler = h; return () => { inputHandler = undefined; }; },
     getEditorText: () => editorText,
-    notify: () => {},
+    notify: (message, level) => { notices.push(`${level}: ${message}`); },
     custom: ((factory: any) => {
       opened = true;
       return new Promise<undefined>((resolve) => {
@@ -116,7 +127,7 @@ function harness(agents: AgentRecord[]): Harness {
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map());
+  const fleet = new FleetList(manager, new Map(), () => false, r => manager.sendToBackground(r.id));
   fleet.setUICtx(ui);
   fleet.update();
 
@@ -124,6 +135,7 @@ function harness(agents: AgentRecord[]): Harness {
     fleet,
     ui,
     manager,
+    notices: () => notices,
     overlayComponent: () => overlayComponent,
     press: (data) => inputHandler?.(data),
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
@@ -466,6 +478,34 @@ describe("FleetList overlay lifecycle", () => {
     // Selection follows a2 ("two") to its new position, not whatever is at idx 2 now.
     expect(h.render().find(l => l.includes("two"))).toContain("●");
     expect(h.render().find(l => l.includes("three"))).toContain("○");
+  });
+
+  it("wires the viewer's b key to sendToBackground and notifies on success", () => {
+    const agents = [makeRecord({ id: "live", description: "the one", blocking: true, isBackground: false })];
+    const h = harness(agents);
+    h.press(DOWN);  // activate (main)
+    h.press(DOWN);  // → the agent
+    h.press(ENTER); // open the conversation viewer
+
+    const viewer = h.overlayComponent();
+    expect(viewer).toBeDefined();
+    viewer!.handleInput("b");
+
+    expect(h.manager.sendToBackground).toHaveBeenCalledWith("live");
+    expect(agents[0].isBackground).toBe(true);
+    expect(h.notices()).toContain('info: Sent "the one" to the background.');
+  });
+
+  it("stays silent when the manager refuses the handoff", () => {
+    // A row the manager rejects must not announce a handoff that never happened.
+    const agents = [makeRecord({ id: "live", description: "the one", isBackground: true })];
+    const h = harness(agents);
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press(ENTER);
+
+    h.overlayComponent()!.handleInput("b");
+    expect(h.notices()).toEqual([]);
   });
 
   it("wires the viewer's steer composer to manager.steer with the agent id", () => {

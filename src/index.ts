@@ -1058,8 +1058,23 @@ export default function (pi: ExtensionAPI) {
   const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
+  /**
+   * Hand a live foreground run to the background, and keep the surfaces this
+   * extension owns alive for it. The widget and FleetView stop their timers when
+   * nothing is blocking; the run they were tracking is still going, so restart
+   * them rather than letting the row freeze until the next unrelated tick.
+   */
+  function sendForegroundToBackground(record: AgentRecord): boolean {
+    if (!manager.sendToBackground(record.id)) return false;
+    widget.ensureTimer();
+    widget.update();
+    fleet.ensureTimer();
+    fleet.update();
+    return true;
+  }
+
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  const fleet = new FleetList(manager, agentActivity, isShowCostEnabled);
+  const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, sendForegroundToBackground);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -2131,7 +2146,13 @@ Terse command-style prompts produce shallow, generic work.
         // the background spawn above (#179) — no longer leaves the spinner
         // ticking or a finished agent on the widget.
         clearInterval(spinnerInterval);
-        if (fgId) {
+        // The tool call can end while its agent does not: `b` in the viewer
+        // hands the run to the background, and the record keeps working under
+        // the same id. Tearing its activity down here would freeze the widget
+        // row and lose the live token counts the background completion still
+        // reports; that path does this same cleanup when the run really ends.
+        const fgRecord = fgId ? manager.getRecord(fgId) : undefined;
+        if (fgId && !(fgRecord?.isBackground && fgRecord.status === "running")) {
           agentActivity.delete(fgId);
           widget.markFinished(fgId);
           fleet.onAgentFinished(fgId);
@@ -2143,6 +2164,22 @@ Terse command-style prompts produce shallow, generic work.
       const tokenText = formatLifetimeTokens(record);
 
       const details = buildDetails(detailBaseFor(record), record, fgState, { tokens: tokenText });
+
+      // Handed to the background mid-run: report it like a background spawn,
+      // because from here on it IS one — same id, same session, and the normal
+      // completion notification still to come.
+      if (record.isBackground && record.status === "running") {
+        return textResult(
+          `${fallbackNote}Agent sent to background.\n`
+          + `Agent ID: ${record.id}\n`
+          + `Type: ${displayName}\n`
+          + `Description: ${record.description}\n`
+          + (record.outputFile ? `Output file: ${record.outputFile}\n` : "")
+          + `\nThe same run is still going — you'll be notified when it completes.\n`
+          + `Use get_subagent_result to retrieve its output, or steer_subagent to send it messages.`,
+          { ...details, status: "background" as const, agentId: record.id },
+        );
+      }
 
       if (record.status === "error") {
         // Error headline + any partial output the run produced before failing.
@@ -2536,6 +2573,10 @@ Terse command-style prompts produce shallow, generic work.
         }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => {
           setViewerMarkdown(mode);
           persistSettings(ctx, `Viewer markdown set to ${mode}`);
+        }, () => {
+          if (sendForegroundToBackground(record)) {
+            ctx.ui.notify(`Sent "${record.description}" to the background.`, "info");
+          }
         });
       },
       {

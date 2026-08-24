@@ -773,6 +773,68 @@ describe("ConversationViewer", () => {
     });
   });
 
+  describe("background key", () => {
+    const W = 80;
+
+    /** `b` is offered only for a run a caller is blocking on inline. */
+    const backgroundViewer = (record: AgentRecord, onBackground?: () => void, width = W) =>
+      new ConversationViewer(
+        mockTui(30, width), mockSession([]), record, undefined, ansiTheme(),
+        vi.fn(), vi.fn(), undefined, vi.fn(), false, undefined, undefined, onBackground,
+      );
+
+    it("offers b for a live blocking run and fires once", () => {
+      const record = mockRecord({ status: "running", isBackground: false, blocking: true });
+      // The manager clears `blocking` on a successful handoff; mirror that so
+      // the affordance's own disappearance is what stops the second press.
+      const onBackground = vi.fn(() => { record.blocking = false; record.isBackground = true; });
+      const viewer = backgroundViewer(record, onBackground);
+
+      expect(viewer.render(W).join("\n")).toContain("b bg");
+      viewer.handleInput("b");
+      expect(onBackground).toHaveBeenCalledTimes(1);
+
+      expect(viewer.render(W).join("\n")).not.toContain("b bg");
+      viewer.handleInput("b");
+      expect(onBackground).toHaveBeenCalledTimes(1);
+    });
+
+    it("hides and ignores b wherever the manager would refuse it", () => {
+      // Each of these is "running and/or foreground-looking" but not something
+      // `sendToBackground` accepts — an affordance here would be a dead key.
+      for (const overrides of [
+        { status: "running" as const, isBackground: true, blocking: false },   // already background
+        { status: "running" as const, isBackground: false },                   // resume / detached: no waiter
+        { status: "queued" as const, blocking: true },                         // no session yet
+        { status: "completed" as const, blocking: true },                      // already settled
+      ]) {
+        const onBackground = vi.fn();
+        const viewer = backgroundViewer(mockRecord(overrides), onBackground);
+        expect(viewer.render(W).join("\n")).not.toContain("b bg");
+        viewer.handleInput("b");
+        expect(onBackground).not.toHaveBeenCalled();
+      }
+    });
+
+    it("omits b entirely when no handler is supplied", () => {
+      const viewer = backgroundViewer(mockRecord({ status: "running", blocking: true }), undefined);
+      expect(viewer.render(W).join("\n")).not.toContain("b bg");
+      expect(() => viewer.handleInput("b")).not.toThrow();
+    });
+
+    it("keeps the footer within width at 80 columns with every action showing", () => {
+      const viewer = backgroundViewer(
+        mockRecord({ status: "running", blocking: true }), vi.fn(), 80,
+      );
+      const lines = viewer.render(80);
+      const footer = lines.find(l => l.includes("b bg"));
+      expect(footer).toBeDefined();
+      expect(footer).toContain("Enter steer");
+      expect(footer).toContain("x stop");
+      assertAllLinesFit(lines, 80);
+    });
+  });
+
   describe("steer composer", () => {
     const W = 80;
 

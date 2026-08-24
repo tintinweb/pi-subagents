@@ -340,6 +340,26 @@ export class AgentManager {
   /** Number of currently running foreground (blocking) agents. */
   private runningForeground = 0;
 
+  /**
+   * Parent-abort listener removers, per record. A record can hold two — one
+   * armed while it was queued, one armed when it started — and both must come
+   * off together when `sendToBackground` cuts the run loose from the caller
+   * that armed them. Cleared on settle, where the listeners are dead anyway.
+   */
+  private parentAbortCleanups = new Map<string, (() => void)[]>();
+  /**
+   * Per-run closure that moves a live run from whatever pool it was charged to
+   * into the background one. Owned by `startAgent`, since only it can reach the
+   * `pool` value that `settleRun` will later release. See its call site.
+   */
+  private repool = new Map<string, () => void>();
+  /**
+   * Wakes a caller blocked in `spawnAndWait` without waiting for the run. Its
+   * presence is also what proves a record HAS an inline caller to release —
+   * `sendToBackground` refuses without one.
+   */
+  private backgroundWaiters = new Map<string, () => void>();
+
   constructor(
     onComplete?: OnAgentComplete,
     maxConcurrent = DEFAULT_MAX_CONCURRENT,
@@ -516,10 +536,12 @@ export class AgentManager {
    * an aborted signal, so a `spawnAndWait` on it would wait forever — pi has no
    * tool-execution timeout to bail it out.
    *
-   * The listener is left in place when the agent starts. `startAgent` adds its
-   * own, so both fire on a later abort, but `abort()` on an already-stopped
-   * record is a no-op — so detaching would only be tidiness, and tidiness the
-   * `abortAll`/`dispose` paths could not offer anyway.
+   * The listener stays armed when the agent starts — `startAgent` adds its own,
+   * so both fire on a later abort, and `abort()` on an already-stopped record is
+   * a no-op. It is registered for removal rather than dropped on the floor
+   * because `sendToBackground` MUST be able to take it off: a run handed to the
+   * background outlives the tool call that armed this, and a listener left
+   * behind would let that caller's Esc kill an agent it no longer owns.
    */
   private armQueuedAbort(id: string, signal?: AbortSignal): boolean {
     if (signal === undefined) return true;
@@ -531,8 +553,24 @@ export class AgentManager {
       }
       return false;
     }
-    signal.addEventListener("abort", () => this.abort(id), { once: true });
+    const onParentAbort = () => this.abort(id);
+    signal.addEventListener("abort", onParentAbort, { once: true });
+    this.addParentAbortCleanup(id, () => signal.removeEventListener("abort", onParentAbort));
     return true;
+  }
+
+  private addParentAbortCleanup(id: string, cleanup: () => void): void {
+    const existing = this.parentAbortCleanups.get(id);
+    if (existing) existing.push(cleanup);
+    else this.parentAbortCleanups.set(id, [cleanup]);
+  }
+
+  /** Remove every parent-abort listener armed for `id`, without aborting it. */
+  private releaseParentAbort(id: string): void {
+    const cleanups = this.parentAbortCleanups.get(id);
+    if (!cleanups) return;
+    this.parentAbortCleanups.delete(id);
+    for (const cleanup of cleanups) cleanup();
   }
 
   /** Actually start an agent (called immediately or from queue drain). */
@@ -582,25 +620,35 @@ export class AgentManager {
     // at settle time would decrement a pool this run never charged (counter
     // underflow, limit silently lifted) or skip the decrement for one it did
     // (leaked slot — every later blocking spawn queues forever).
-    const pool = this.poolFor(record);
+    let pool = this.poolFor(record);
     if (pool === "background") this.runningBackground++;
     else if (pool === "foreground") this.runningForeground++;
+    // `sendToBackground` moves a LIVE run between pools, which is the one thing
+    // the paragraph above rules out — so it goes through this closure, which
+    // updates the counters and `pool` together. The settle below still releases
+    // exactly what was acquired; it just may have been re-charged once since.
+    this.repool.set(id, () => {
+      if (pool === "background") return;
+      if (pool === "foreground") this.runningForeground--;
+      pool = "background";
+      this.runningBackground++;
+    });
     this.onStart?.(record);
 
     // Wire parent abort signal to stop the subagent when the parent is interrupted
-    let detachParentSignal: (() => void) | undefined;
     if (options.signal) {
       // A queued spawn can start minutes after the caller handed us its signal,
       // by which time it may already be aborted — and `addEventListener` would
       // never fire, leaving a child the parent can no longer reach.
       if (options.signal.aborted) this.abort(id);
       else {
+        const signal = options.signal;
         const onParentAbort = () => this.abort(id);
-        options.signal.addEventListener("abort", onParentAbort, { once: true });
-        detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
+        signal.addEventListener("abort", onParentAbort, { once: true });
+        this.addParentAbortCleanup(id, () => signal.removeEventListener("abort", onParentAbort));
       }
     }
-    const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
+    const detach = () => { this.releaseParentAbort(id); this.repool.delete(id); };
 
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -911,7 +959,24 @@ export class AgentManager {
 
     // undefined when it was aborted while queued and so never ran — the record
     // is already "stopped" with a completedAt, which is what the caller renders.
-    if (record.promise) await record.promise;
+    //
+    // Raced against a `sendToBackground` wake-up rather than awaited outright:
+    // the user can hand this run to the background from `/agents` or FleetView,
+    // which returns control HERE while the same run keeps going. Only the
+    // promise path is raced — a queued record has no session, so it is not
+    // viewable and cannot be handed off.
+    if (record.promise) {
+      let wake!: () => void;
+      const sentToBackground = new Promise<void>(resolve => { wake = resolve; });
+      this.backgroundWaiters.set(id, wake);
+      try {
+        await Promise.race([record.promise, sentToBackground]);
+      } finally {
+        // Only if it is still OURS: `sendToBackground` deletes its own entry
+        // before waking us, so this can never clear a later caller's waiter.
+        if (this.backgroundWaiters.get(id) === wake) this.backgroundWaiters.delete(id);
+      }
+    }
 
     // A record that ended "error" without ever getting a promise never ran: the
     // same startup failure spawn() rethrows on the immediate path (#179). Keep
@@ -921,6 +986,63 @@ export class AgentManager {
       throw new Error(record.error ?? "Agent failed to start");
     }
     return { id, record };
+  }
+
+  /**
+   * Hand a live blocking run to the background without restarting it. The
+   * session, promise, in-flight turn, transcript and worktree all continue; the
+   * caller blocked in `spawnAndWait` gets control back with the record still
+   * "running", and the run settles later through the ordinary background path —
+   * `settleRun` reads the live `record.isBackground`, so it releases the pool
+   * slot and fires the normal completion notification with no second code path.
+   *
+   * One-way and single-use. Returns false rather than throwing or half-applying
+   * on every ineligible record, so the UI can treat it as "no affordance here".
+   *
+   * What makes a record eligible is a REGISTERED WAITER, not `isBackground ===
+   * false`. Those are different sets, and the gap is where the bugs live: a
+   * foreground resume and a detached `isBackground: false` spawn (RPC,
+   * `@handle`, the registry) are both `false` here with nobody blocked on them
+   * inline. Handing one of those "back" would charge a background slot that no
+   * settle path ever releases — a concurrency limit permanently lowered — while
+   * reporting a handoff to a caller that does not exist. The waiter also closes
+   * the window where a drained blocking spawn is already "running" but its
+   * caller has not yet re-registered after `await record.startGate`; flipping
+   * it there would park that caller on a promise nothing wakes.
+   *
+   * The `blocking` check on top of that is belt and braces, and unobservable —
+   * a waiter exists only for a blocking spawn — which is why no test pins it.
+   * It states the invariant the pool transfer below relies on.
+   */
+  sendToBackground(id: string): boolean {
+    const record = this.agents.get(id);
+    const wake = this.backgroundWaiters.get(id);
+    if (
+      !record
+      || wake === undefined
+      || record.parentAgentId !== undefined
+      || record.status !== "running"
+      || record.blocking !== true
+    ) {
+      return false;
+    }
+
+    // The caller's Esc armed these; it no longer owns this run. `/agents` → `x`
+    // is what stops it from here, through `record.abortController` (untouched).
+    this.releaseParentAbort(id);
+    // Release whichever slot the blocking run held and take a background one.
+    this.repool.get(id)?.();
+    this.repool.delete(id);
+
+    record.blocking = false;
+    record.isBackground = true;
+    record.resultConsumed = false;
+
+    this.backgroundWaiters.delete(id);
+    wake();
+    // A freed foreground slot may have unblocked a queued blocking spawn.
+    this.drainQueue();
+    return true;
   }
 
   /**
@@ -1356,6 +1478,13 @@ export class AgentManager {
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
+    // Same contract for callers blocked on a RUNNING record: their promise may
+    // never settle if the run is wedged, and a tool `execute` left hanging here
+    // outlives the manager that owned it.
+    for (const wake of this.backgroundWaiters.values()) wake();
+    this.backgroundWaiters.clear();
+    this.parentAbortCleanups.clear();
+    this.repool.clear();
     const sessions = [...this.agents.values()].map(record => record.session);
     this.agents.clear();
     // Awaited, unlike the eviction path: pi awaits this extension's `session_shutdown`

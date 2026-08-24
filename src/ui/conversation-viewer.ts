@@ -177,6 +177,11 @@ export class ConversationViewer implements Component {
      * the same thing. Omitted → `m` still cycles, viewer-locally.
      */
     private onMarkdownMode?: (mode: ViewerMarkdownMode) => void,
+    /**
+     * Hand this live foreground run to the background. Omitted → no `b`
+     * affordance (FleetView and `/agents` both supply it; history views do not).
+     */
+    private onBackground?: () => void,
   ) {
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
@@ -207,6 +212,17 @@ export class ConversationViewer implements Component {
     if (matchesKey(data, "enter") && this.canSteer()) {
       this.stopArmed = false;
       this.openComposer();
+      return;
+    }
+
+    // Hand a live foreground run to the background. Single press, unlike stop:
+    // the transition is one-way but keeps the agent working, so a stray key
+    // costs a notification rather than the run. The manager refuses anything
+    // ineligible, and `canSendToBackground` hides the affordance for it.
+    if (matchesKey(data, "b") && this.canSendToBackground()) {
+      this.stopArmed = false;
+      this.onBackground?.();
+      this.tui.requestRender();
       return;
     }
 
@@ -346,6 +362,8 @@ export class ConversationViewer implements Component {
       const sep = th.fg("dim", " · ");
       const actions: string[] = [];
       if (this.canSteer()) actions.push(th.fg("dim", "Enter steer"));
+      // Abbreviated for the same reason as the Markdown group below.
+      if (this.canSendToBackground()) actions.push(th.fg("dim", "b bg"));
       if (this.isStoppable()) {
         actions.push(this.stopArmed ? th.fg("error", "x again to STOP") : th.fg("dim", "x stop"));
       }
@@ -435,6 +453,16 @@ export class ConversationViewer implements Component {
   /** Steerable only when a steer handler exists and the agent is still active. */
   private canSteer(): boolean {
     return !!this.onSteer && (this.record.status === "running" || this.record.status === "queued");
+  }
+
+  /**
+   * Only a running run that a caller is blocking on inline can be handed off.
+   * Mirrors `AgentManager.sendToBackground`'s own guard: a background, queued,
+   * finished or resumed agent would be refused there, and an affordance that
+   * renders on a row the manager rejects is a key that does nothing.
+   */
+  private canSendToBackground(): boolean {
+    return !!this.onBackground && this.record.status === "running" && this.record.blocking === true;
   }
 
   /** Open the inline steering composer and route subsequent input to it. */

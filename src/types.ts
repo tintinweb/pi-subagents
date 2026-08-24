@@ -186,6 +186,10 @@ export interface AgentRecord {
    * which says only that the agent has an inline result surface: a detached
    * cross-extension RPC spawn is foreground by that measure and yet blocks
    * nobody, so it takes no slot.
+   *
+   * Cleared by `sendToBackground`, which is exactly the moment that inline
+   * caller stops waiting. It is also what the `b` affordance keys off, so the
+   * key disappears the instant the handoff lands.
    */
   blocking?: boolean;
   /**
@@ -228,8 +232,9 @@ export interface AgentRecord {
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /**
-   * Whether this agent was spawned to run in the background. Tri-state, set at
-   * spawn from `SpawnOptions.isBackground`: `true` = background, `false` =
+   * Whether this agent runs in the background. Tri-state, initialized at spawn
+   * from `SpawnOptions.isBackground` and flipped `false` → `true` (once, never
+   * back) by `sendToBackground`: `true` = background, `false` =
    * foreground (has an inline Agent tool-result surface), `undefined` = the
    * caller never declared it (e.g. a cross-extension RPC spawn, which is detached
    * and has no inline surface). The widget's background-only filter keys off this
