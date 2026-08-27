@@ -63,7 +63,7 @@ function makePi() {
   return { pi, lifecycle, bus };
 }
 
-function ctx() {
+function ctx(overrides: Record<string, unknown> = {}) {
   return {
     hasUI: false,
     ui: { setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn() },
@@ -72,6 +72,9 @@ function ctx() {
     modelRegistry: { find: vi.fn(), getAvailable: vi.fn(() => []) },
     sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => []) },
     getSystemPrompt: vi.fn(() => "parent"),
+    // Idle unless a test is pinning the mid-run hold.
+    isIdle: () => true,
+    ...overrides,
   } as any;
 }
 
@@ -117,10 +120,10 @@ describe("subagents:rpc:consume", () => {
   });
 
   /** Boot the real extension with its RPC handlers bound, as session_start does. */
-  async function boot() {
+  async function boot(ctxOverrides?: Record<string, unknown>) {
     const booted = makePi();
     subagentsExtension(booted.pi);
-    await booted.lifecycle.get("session_start")({}, ctx());
+    await booted.lifecycle.get("session_start")({}, ctx(ctxOverrides));
     shutdown = () => booted.lifecycle.get("session_shutdown")();
     return booted;
   }
@@ -187,5 +190,32 @@ describe("subagents:rpc:consume", () => {
 
     await vi.waitFor(() => expect(reply).toHaveBeenCalled());
     expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found or still running" });
+  });
+
+  it("holds the notification while the parent run is still in progress", async () => {
+    vi.mocked(runAgent).mockResolvedValue({ responseText: "TASK_EXECUTE_AGENT_OK" } as any);
+    let idle = false;
+    const { pi, bus, lifecycle } = await boot({ isIdle: () => idle });
+
+    await spawnOverRpc(bus, "req-spawn-hold");
+    await new Promise(r => setTimeout(r, PAST_THE_HOLD_MS));
+    expect(notifications(pi)).toEqual([]);
+
+    idle = true;
+    await lifecycle.get("agent_settled")();
+    expect(notifications(pi)).toHaveLength(1);
+  });
+
+  it("still suppresses a parked notification after consume", async () => {
+    vi.mocked(runAgent).mockResolvedValue({ responseText: "TASK_EXECUTE_AGENT_OK" } as any);
+    const { pi, bus, lifecycle } = await boot({ isIdle: () => false });
+
+    const id = await spawnOverRpc(bus, "req-spawn-parked");
+    await new Promise(r => setTimeout(r, PAST_THE_HOLD_MS));
+    expect(notifications(pi)).toEqual([]);
+
+    bus.emit("subagents:rpc:consume", { requestId: "req-consume-parked", agentId: id });
+    await lifecycle.get("agent_settled")();
+    expect(notifications(pi)).toEqual([]);
   });
 });

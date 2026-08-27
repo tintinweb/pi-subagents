@@ -31,6 +31,7 @@ import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
+import { DEFAULT_HOLD_MS, NudgeQueue } from "./nudge-queue.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
@@ -443,30 +444,27 @@ export default function (pi: ExtensionAPI) {
     persistSettings(ctx, `Viewer markdown set to ${mode}`);
   }
   const pendingUsage = new PendingUsagePool();
+  // Bound on session_start; read by notification delivery and RPC spawn.
+  let currentCtx: ExtensionContext | undefined;
 
   // ---- Cancellable pending notifications ----
-  // Holds notifications briefly so get_subagent_result can cancel them
-  // before they reach pi.sendMessage (fire-and-forget).
-  const pendingNudges = new Map<string, ReturnType<typeof setTimeout>>();
-  const NUDGE_HOLD_MS = 200;
+  // Holds notifications briefly so get_subagent_result can cancel them before
+  // they reach pi.sendMessage (fire-and-forget), and parks any that come due
+  // mid-run until the parent settles — see nudge-queue.ts for why emitting
+  // during a run is worse than holding.
+  const NUDGE_HOLD_MS = DEFAULT_HOLD_MS;
   // A queued result wait must observe completion before its held notification
   // can fire, so successful waits can still suppress that redundant nudge.
   const QUEUE_WAIT_POLL_MS = Math.floor(NUDGE_HOLD_MS / 4);
 
+  const nudges = new NudgeQueue(() => currentCtx?.isIdle?.() === false, NUDGE_HOLD_MS);
+
   function scheduleNudge(key: string, send: () => void, delay = NUDGE_HOLD_MS) {
-    cancelNudge(key);
-    pendingNudges.set(key, setTimeout(() => {
-      pendingNudges.delete(key);
-      try { send(); } catch { /* ignore stale completion side-effect errors */ }
-    }, delay));
+    nudges.schedule(key, send, delay);
   }
 
   function cancelNudge(key: string) {
-    const timer = pendingNudges.get(key);
-    if (timer != null) {
-      clearTimeout(timer);
-      pendingNudges.delete(key);
-    }
+    nudges.cancel(key);
   }
 
   // ---- Individual nudge helper (async join mode) ----
@@ -750,7 +748,6 @@ export default function (pi: ExtensionAPI) {
   }
 
   // --- Cross-extension RPC via pi.events ---
-  let currentCtx: ExtensionContext | undefined;
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
   // (a bound lifecycle event), not at factory time. pi runs every extension
   // factory before the `extensions:` filter and only fires lifecycle events for
@@ -1087,6 +1084,16 @@ export default function (pi: ExtensionAPI) {
     return { action: "handled" };
   });
 
+  // Deliver notifications parked while the parent was running. `agent_settled`
+  // rather than `agent_end` or `turn_end`: those fire with a retry, compaction,
+  // or another tool-calling turn still ahead, and a notification emitted then is
+  // parked by pi's follow-up queue exactly as before — unsuppressable and
+  // delivered after the final answer. `agent_settled` is the first point where
+  // pi will not continue on its own.
+  pi.on("agent_settled", () => {
+    nudges.flush();
+  });
+
   pi.on("session_before_switch", () => {
     manager.clearCompleted(true);
     scheduler.stop();
@@ -1112,8 +1119,7 @@ export default function (pi: ExtensionAPI) {
     for (const task of workflowTasks.values()) task.abortController.abort();
     workflowTasks.clear();
     manager.abortAll();
-    for (const timer of pendingNudges.values()) clearTimeout(timer);
-    pendingNudges.clear();
+    nudges.dispose();
     fleet.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
@@ -2374,8 +2380,9 @@ Terse command-style prompts produce shallow, generic work.
 
   /**
    * Hand a finished run back to the model through the SAME channel a background
-   * agent uses — held briefly by `scheduleNudge`, delivered as a follow-up that
-   * triggers a turn, rendered by the existing `subagent-notification` renderer.
+   * agent uses — held by `scheduleNudge` (briefly, then until the parent settles
+   * if it is still running), delivered as a follow-up that triggers a turn,
+   * rendered by the existing `subagent-notification` renderer.
    */
   function notifyWorkflowFinished(task: WorkflowTask) {
     widget.update();

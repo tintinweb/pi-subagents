@@ -582,6 +582,8 @@ When background agents complete, they notify the main agent. The **join mode** c
 
 **Timeout behavior:** When agents are grouped, a 30-second timeout starts after the first agent completes. If not all agents finish in time, a partial notification is sent with completed results and remaining agents continue with a shorter 15-second re-batch window for stragglers.
 
+Notifications that come due while the parent agent is still running stay in-process until the parent settles (`agent_settled`). Sending them mid-run would park them in pi's follow-up queue, where they can no longer be cancelled — so an agent already joined with `get_subagent_result` would still notify after the final answer, one wasted turn each. A due notification is delivered immediately when the parent is idle.
+
 **Configuration:**
 - Configure join mode in `/agents` → Settings → Join mode
 
@@ -953,6 +955,7 @@ src/
   child-context.ts    # AsyncLocalStorage flag marking work done for a child session
   abortable.ts        # Race a wait against Esc without cancelling the background child
   group-join.ts       # Group join manager: batched completion notifications with timeout
+  nudge-queue.ts      # Hold completion notifications until the parent run settles
   status-note.ts      # Honest status note + salvaged partial output for non-normal outcomes
   usage.ts            # Token usage shapes, accumulators, session-stats readers
 
