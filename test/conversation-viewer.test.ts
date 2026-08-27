@@ -504,7 +504,7 @@ describe("ConversationViewer", () => {
 
       expect(out).toContain("line 100");                       // far past the old 500-char cut
       expect(out).not.toContain("line 2999");                  // but still bounded
-      expect(out).toMatch(/\.\.\. \(truncated, \d+ more UTF-16 code units\)/);
+      expect(out).toMatch(/\.\.\. \(truncated, \d+ more characters\)/);
     });
 
     it("puts the truncation notice outside the code fence it cut into", () => {
@@ -515,15 +515,25 @@ describe("ConversationViewer", () => {
 
       // Appended into the content it lands inside the unterminated fence, where
       // it picks up the code-block indent and reads as a line of the tool's source.
-      expect(note).toMatch(/^\.\.\. \(truncated, \d+ more UTF-16 code units\)$/);
+      expect(note).toMatch(/^\.\.\. \(truncated, \d+ more characters\)$/);
     });
 
-    it("reports the exact omitted UTF-16 code-unit count", () => {
+    it("reports the exact omitted character count", () => {
+      // UTF-16 code units, so the astral character here counts as two.
       const text = `${"x".repeat(RESULT_MAX_CHARS)}😀x`;
       const viewer = viewerFor(result(text));
       const content = ((viewer as any).buildContentLines(76) as string[]).map(strip);
 
-      expect(content).toContain("... (truncated, 3 more UTF-16 code units)");
+      expect(content).toContain("... (truncated, 3 more characters)");
+    });
+
+    it("keeps the truncation notice inside a narrow frame", () => {
+      // The notice goes through truncateToWidth at innerW (width - 4), so a
+      // wording long enough to be cut there leaves the reader a bare number.
+      const text = `${"x".repeat(RESULT_MAX_CHARS)}${"y".repeat(1_100_000)}`;
+      const note = viewerFor(result(text)).render(50).map(strip).find(l => l.includes("truncated,"));
+
+      expect(note).toContain("1100000 more characters)");
     });
 
     it("falls back to literal wrapping once for an unsafe streaming prefix", () => {
@@ -590,7 +600,7 @@ describe("ConversationViewer", () => {
       const messages = [{ role: "bashExecution", command: "yes", output: "y\n".repeat(20000) }];
       const out = strip(viewerFor(messages).render(80).join("\n"));
 
-      expect(out).toMatch(/\.\.\. \(truncated, \d+ more UTF-16 code units\)/);
+      expect(out).toMatch(/\.\.\. \(truncated, \d+ more characters\)/);
     });
 
     it("keeps tool results dim even when rendering them as Markdown", () => {

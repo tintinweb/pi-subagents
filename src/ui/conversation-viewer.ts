@@ -28,8 +28,8 @@ export const VIEWPORT_HEIGHT_PCT = 70;
  * every render *and* on every scroll key (`handleInput` calls it to compute
  * `maxScroll`), so an uncapped 200 KB result costs ~6 ms per keystroke to parse
  * as Markdown, against ~0.5 ms once capped and effectively nothing on a cache
- * hit (best of 5, width 76). 16,000 code units is roughly a screenful at every
- * terminal size and still ~30x the 500 characters this replaces, which was small enough to cut
+ * hit (best of 5, width 76). 16 KB is roughly a screenful at every terminal size
+ * and still ~30x the 500 characters this replaces, which was small enough to cut
  * most real results mid-sentence.
  */
 export const RESULT_MAX_CHARS = 16_000;
@@ -121,7 +121,7 @@ function capResult(text: string): { text: string; elided: number } {
 }
 
 function truncationNote(elided: number): string {
-  return `... (truncated, ${elided} more UTF-16 code unit${elided === 1 ? "" : "s"})`;
+  return `... (truncated, ${elided} more character${elided === 1 ? "" : "s"})`;
 }
 
 export class ConversationViewer implements Component {
