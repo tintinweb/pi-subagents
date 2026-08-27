@@ -504,7 +504,7 @@ describe("ConversationViewer", () => {
 
       expect(out).toContain("line 100");                       // far past the old 500-char cut
       expect(out).not.toContain("line 2999");                  // but still bounded
-      expect(out).toMatch(/\.\.\. \(truncated, \d+ more characters\)/);
+      expect(out).toMatch(/\.\.\. \(truncated, [\d.]+[kM]? more characters\)/);
     });
 
     it("puts the truncation notice outside the code fence it cut into", () => {
@@ -515,7 +515,7 @@ describe("ConversationViewer", () => {
 
       // Appended into the content it lands inside the unterminated fence, where
       // it picks up the code-block indent and reads as a line of the tool's source.
-      expect(note).toMatch(/^\.\.\. \(truncated, \d+ more characters\)$/);
+      expect(note).toMatch(/^\.\.\. \(truncated, [\d.]+[kM]? more characters\)$/);
     });
 
     it("reports the exact omitted character count", () => {
@@ -527,13 +527,23 @@ describe("ConversationViewer", () => {
       expect(content).toContain("... (truncated, 3 more characters)");
     });
 
-    it("keeps the truncation notice inside a narrow frame", () => {
-      // The notice goes through truncateToWidth at innerW (width - 4), so a
-      // wording long enough to be cut there leaves the reader a bare number.
+    it("abbreviates a large omitted count so the notice fits a narrow frame", () => {
+      // The notice goes through truncateToWidth at innerW (width - 4). An exact
+      // count runs to seven digits on a multi-megabyte result and pushes the
+      // notice past 46, where the unit is cut off and only a number survives.
       const text = `${"x".repeat(RESULT_MAX_CHARS)}${"y".repeat(1_100_000)}`;
       const note = viewerFor(result(text)).render(50).map(strip).find(l => l.includes("truncated,"));
 
-      expect(note).toContain("1100000 more characters)");
+      expect(note).toContain("1.1M more characters)");
+    });
+
+    it("rounds into the M bracket rather than reporting 1000k", () => {
+      // 999,999 / 1000 rounds to 1000.0 — the bracket has to be picked against
+      // the rounded value, not the raw one.
+      const text = `${"x".repeat(RESULT_MAX_CHARS)}${"y".repeat(999_999)}`;
+      const note = strip(viewerFor(result(text)).render(80).join("\n")).split("\n").find(l => l.includes("truncated,"));
+
+      expect(note).toContain("1M more characters");
     });
 
     it("falls back to literal wrapping once for an unsafe streaming prefix", () => {
@@ -570,10 +580,11 @@ describe("ConversationViewer", () => {
       // but the character count being held back has to keep moving.
       const msg = { role: "toolResult", toolUseId: "t", content: [{ type: "text", text: `${"row\n".repeat(4500)}` }] };
       const viewer = viewerFor([msg]);
-      const elided = () => Number(
-        strip(((viewer as any).buildContentLines(76) as string[]).join("\n"))
-          .match(/truncated, (\d+) more/)?.[1],
-      );
+      const elided = () => {
+        const m = strip(((viewer as any).buildContentLines(76) as string[]).join("\n"))
+          .match(/truncated, ([\d.]+)([kM]?) more/);
+        return Number(m?.[1]) * (m?.[2] === "M" ? 1e6 : m?.[2] === "k" ? 1e3 : 1);
+      };
 
       const before = elided();
       msg.content[0].text += "row\n".repeat(1000);
@@ -600,7 +611,7 @@ describe("ConversationViewer", () => {
       const messages = [{ role: "bashExecution", command: "yes", output: "y\n".repeat(20000) }];
       const out = strip(viewerFor(messages).render(80).join("\n"));
 
-      expect(out).toMatch(/\.\.\. \(truncated, \d+ more characters\)/);
+      expect(out).toMatch(/\.\.\. \(truncated, [\d.]+[kM]? more characters\)/);
     });
 
     it("keeps tool results dim even when rendering them as Markdown", () => {
