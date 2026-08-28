@@ -20,6 +20,7 @@ import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -32,7 +33,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
-import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
+import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -2987,6 +2988,16 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
+  /**
+   * The package that provided an agent, for display only. Undefined for every
+   * other source, and for a package path no currently-admitted package owns —
+   * which is what a stale `sourcePath` looks like after the gate narrows.
+   */
+  function packageNameOf(cfg: AgentConfig | undefined): string | undefined {
+    if (cfg?.source !== "package" || !cfg.sourcePath) return undefined;
+    return packageNameForPath(cfg.sourcePath, process.cwd());
+  }
+
   async function showAllAgentsList(ctx: ExtensionCommandContext) {
     const allNames = getAllTypes();
     if (allNames.length === 0) {
@@ -2994,41 +3005,28 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
-    // Source indicators: defaults unmarked, custom agents get • (project),
-    // ◦ (global) or ▪ (installed pi package).
-    // Disabled agents get ✕ prefix
-    const sourceIndicator = (cfg: AgentConfig | undefined) => {
-      const disabled = cfg?.enabled === false;
-      if (cfg?.source === "project") return disabled ? "✕• " : "•  ";
-      if (cfg?.source === "global") return disabled ? "✕◦ " : "◦  ";
-      if (cfg?.source === "package") return disabled ? "✕▪ " : "▪  ";
-      if (disabled) return "✕  ";
-      return "   ";
-    };
+    const configs = allNames.map(name => getAgentConfig(name));
 
     // One row per agent (name in the left column, model on the right); the
     // full description renders below the highlighted row via SettingsList,
     // exactly like the Settings menu — so long descriptions never wrap the list.
-    const items: SettingItem[] = allNames.map(name => {
-      const cfg = getAgentConfig(name);
-      const disabled = cfg?.enabled === false;
+    // A package agent's description is prefixed with the package that provided
+    // it: the `▪` badge says a package won, not which one.
+    const items: SettingItem[] = allNames.map((name, i) => {
+      const cfg = configs[i];
       const model = getModelLabel(name, ctx.modelRegistry);
       return {
         id: name,
         label: `${sourceIndicator(cfg)}${name}`,
         currentValue: model,
-        description: disabled ? "(disabled)" : (cfg?.description ?? name),
+        description: rowDescription(name, cfg, packageNameOf(cfg)),
         // Single-value list so Enter "activates" the row (fires onChange with the
         // agent's id) without offering anything to actually cycle.
         values: [model],
       };
     });
 
-    const hasCustom = allNames.some(n => { const c = getAgentConfig(n); return c && !c.isDefault && c.enabled !== false; });
-    const hasDisabled = allNames.some(n => getAgentConfig(n)?.enabled === false);
-    const legendParts: string[] = [];
-    if (hasCustom) legendParts.push("• = project  ◦ = global");
-    if (hasDisabled) legendParts.push("✕ = disabled");
+    const legend = sourceLegend(configs);
 
     const selected = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
       const slTheme = getSettingsListTheme();
@@ -3041,7 +3039,7 @@ Terse command-style prompts produce shallow, generic work.
       );
       const container = new Container();
       container.addChild(new Text("Agent types", 0, 0));
-      if (legendParts.length) container.addChild(new Text(slTheme.hint(legendParts.join("  ")), 0, 0));
+      if (legend) container.addChild(new Text(slTheme.hint(legend), 0, 0));
       container.addChild(new Spacer(1));
       container.addChild(list);
       return {
@@ -3143,7 +3141,11 @@ Terse command-style prompts produce shallow, generic work.
       menuOptions = ["Edit", "Disable", "Delete", "Back"];
     }
 
-    const choice = await ctx.ui.select(name, menuOptions);
+    // Name the package in the title: this menu's options are the read-only set,
+    // and "which package do I have to uninstall or allowlist away" is the
+    // question they raise.
+    const pkgName = packageNameOf(cfg);
+    const choice = await ctx.ui.select(pkgName ? `${name} — ${pkgName}` : name, menuOptions);
     if (!choice || choice === "Back") return;
 
     if (choice === "Edit" && file) {

@@ -54,7 +54,7 @@
  */
 
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DefaultPackageManager, getAgentDir, ProjectTrustStore, SettingsManager } from "@earendil-works/pi-coding-agent";
 
 /** Resource kinds a package may declare. Agents are `.md`, workflows are `.js`. */
@@ -464,6 +464,13 @@ export function packageAllowed(pkg: PiPackage, gate: PackageGate): boolean {
 
 // ---- Caching ----
 
+/** An admitted package's install root and the name to show for it. */
+interface PackageOwner {
+  /** Normalized, so it compares against a normalized candidate path. */
+  root: string;
+  name: string;
+}
+
 /**
  * `loadCustomAgents` runs on activation and again on every `Agent` call, so an
  * uncached scan would re-read pi's settings and every package manifest per
@@ -479,11 +486,24 @@ export function packageAllowed(pkg: PiPackage, gate: PackageGate): boolean {
 interface CacheEntry {
   agents: ResolvedResourcePaths;
   workflows: ResolvedResourcePaths;
+  /**
+   * Every package the gate admitted, longest root first, so a path can be
+   * traced back to the package that contributed it. Recorded during the scan
+   * that already enumerated them rather than re-derived later: a second pass
+   * would re-read pi's settings and every manifest, and could disagree with
+   * this entry about which packages the gate let through.
+   */
+  owners: PackageOwner[];
 }
 
 /** A resolved-paths value with nothing in it. Fresh each call — callers get copies. */
 function emptyPaths(): ResolvedResourcePaths {
   return { dirs: [], files: [], excluded: new Set() };
+}
+
+/** A whole cache entry with nothing in it, for a gate that admits no package. */
+function emptyEntry(): CacheEntry {
+  return { agents: emptyPaths(), workflows: emptyPaths(), owners: [] };
 }
 const cache = new Map<string, CacheEntry>();
 
@@ -493,11 +513,17 @@ export function invalidatePackageCache(): void {
 }
 
 function scan(cwd: string, projectTrusted: boolean, gate: PackageGate): CacheEntry {
-  const agents = emptyPaths();
-  const workflows = emptyPaths();
-  const entry: CacheEntry = { agents, workflows };
+  const entry = emptyEntry();
   for (const pkg of listPiPackages(cwd, projectTrusted)) {
     if (!packageAllowed(pkg, gate)) continue;
+    // The root is normalized here, not at lookup time: the declared paths below
+    // go through `resolve(root, entry)`, so a root that arrived with a trailing
+    // separator would never prefix-match the very paths it produced.
+    //
+    // `name` is absent only when the manifest had no usable `name` string; the
+    // settings source (`npm:@foo/bar@1.0.0`) is the last resort, which is what
+    // pi itself falls back to when it labels a package-provided resource.
+    entry.owners.push({ root: resolve(pkg.root), name: pkg.name ?? pkg.shortName ?? pkg.source });
     for (const kind of ["agents", "workflows"] as const) {
       const resolvedPaths = resolveDeclaredPaths(pkg.root, pkg.declared[kind], kind);
       entry[kind].dirs.push(...resolvedPaths.dirs);
@@ -507,14 +533,17 @@ function scan(cwd: string, projectTrusted: boolean, gate: PackageGate): CacheEnt
       for (const path of resolvedPaths.excluded) (entry[kind].excluded as Set<string>).add(path);
     }
   }
+  // Longest root first, so a package installed inside another's `node_modules`
+  // claims its own files rather than losing them to its host.
+  entry.owners.sort((a, b) => b.root.length - a.root.length);
   return entry;
 }
 
-function resolved(cwd: string, kind: PackageResourceKind, opts: PackageDiscoveryOptions): ResolvedResourcePaths {
+function cacheEntryFor(cwd: string, kind: PackageResourceKind, opts: PackageDiscoveryOptions): CacheEntry {
   const gate = opts.gate ?? (kind === "agents" ? agentsGate : workflowsGate);
   // An empty allowlist matches nothing, like `false` — see `sanitizePackageGate`
   // in settings.ts for why an empty array is kept rather than dropped.
-  if (gate === false || (Array.isArray(gate) && gate.length === 0)) return emptyPaths();
+  if (gate === false || (Array.isArray(gate) && gate.length === 0)) return emptyEntry();
   const projectTrusted = opts.projectTrusted ?? projectTrustedState;
   // `\u0000` written as an escape, not a raw byte: a literal NUL makes this
   // whole file read as binary to grep, ripgrep and git, which silently drops
@@ -525,7 +554,38 @@ function resolved(cwd: string, kind: PackageResourceKind, opts: PackageDiscovery
     hit = scan(cwd, projectTrusted, gate);
     cache.set(key, hit);
   }
-  return hit[kind];
+  return hit;
+}
+
+function resolved(cwd: string, kind: PackageResourceKind, opts: PackageDiscoveryOptions): ResolvedResourcePaths {
+  return cacheEntryFor(cwd, kind, opts)[kind];
+}
+
+/**
+ * Name of the installed package that provided `path`, or undefined when no
+ * admitted package owns it. What `/agents` shows so a package agent can name its
+ * origin, and what a user needs in order to write a `packageAgents` allowlist.
+ *
+ * `kind` selects which gate to consult, because the two are configured
+ * separately: a package may be admitted for agents but not for workflows.
+ *
+ * A plain prefix test is enough. `resolveDeclaredPaths` builds every declared
+ * path as `resolve(root, entry)` without canonicalizing it — only the
+ * containment check and the exclusion set go through `realOrSelf` — so a
+ * `sourcePath` the loader derived from one is textually inside the root it came
+ * from. The `sep` anchor keeps `…/node_modules/foo` from claiming
+ * `…/node_modules/foo-bar`.
+ */
+export function packageNameForPath(
+  path: string,
+  cwd: string,
+  kind: PackageResourceKind = "agents",
+  opts: PackageDiscoveryOptions = {},
+): string | undefined {
+  const abs = resolve(path);
+  return cacheEntryFor(cwd, kind, opts).owners.find(
+    o => abs === o.root || abs.startsWith(o.root + sep),
+  )?.name;
 }
 
 /**

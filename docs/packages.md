@@ -142,6 +142,8 @@ One consequence worth knowing: a package agent *does* outrank a built-in. A pack
 
 A package agent is listed with a `▪` badge and is read-only: its file lives under pi's install root, where an edit is lost on the next `pi update` and a delete is undone by the next `pi install`.
 
+The badge says a package won, not which one. The declaring package's name — the full `@scope/name`, which is also what you can write into a [`packageAgents` allowlist](#turning-it-off) — is prefixed to the description line under the highlighted row, and titles the agent's action menu.
+
 - **Eject** copies it into your project or personal agent directory as an editable file that shadows the original. The copy carries the agent's full configuration, including `ext:` tool selectors and `persist_session`.
 - **Disable** writes an `enabled: false` stub at project or personal scope, which shadows the package definition without touching it. Deleting that stub restores the package agent.
 

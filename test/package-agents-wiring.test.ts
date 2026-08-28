@@ -11,8 +11,8 @@
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getAllTypes } from "../src/agent-types.js";
-import { resetPackageState } from "../src/package-resources.js";
+import { getAgentConfig, getAllTypes } from "../src/agent-types.js";
+import { packageNameForPath, resetPackageState } from "../src/package-resources.js";
 import { type BootedPi, ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
 const AGENT = "---\nname: pkg-researcher\ndescription: From a package\ntools: read, grep\n---\nYou research.\n";
@@ -109,6 +109,22 @@ describe("package-provided agents, wired through the extension", () => {
 
     await boot(false);
     expect(getAllTypes()).toContain("pkg-researcher");
+  });
+
+  it("traces the loaded agent back to the package that declared it", async () => {
+    // `/agents` names the package by mapping the loaded `sourcePath` onto a
+    // package root. Nothing in the loader guarantees that relationship, so it is
+    // asserted end to end rather than assumed: if the loader ever canonicalized
+    // or rewrote the paths it walks, the badge would lose its name silently.
+    env = hermeticDir();
+    const root = makePackage();
+    writePiSettings("user", [root]);
+
+    await boot(false);
+    const cfg = getAgentConfig("pkg-researcher");
+    expect(cfg?.source).toBe("package");
+    expect(cfg?.sourcePath).toBeDefined();
+    expect(packageNameForPath(cfg?.sourcePath ?? "", process.cwd())).toBe("demo-subagents");
   });
 
   it("offers it to the model in the Agent tool's type list", async () => {

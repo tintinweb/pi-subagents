@@ -7,6 +7,7 @@ import {
   packageAgentDirs,
   packageAgentFiles,
   packageAllowed,
+  packageNameForPath,
   packageWorkflowDirs,
   readSubagentManifest,
   resetPackageState,
@@ -366,6 +367,94 @@ describe("discovery through pi's configured packages", () => {
       expect(packageAgentDirs(projectDir)).toEqual([join(a, "agents")]);
       setPackageAgentsGate(true);
       expect(packageAgentDirs(projectDir)).toHaveLength(2);
+    });
+  });
+
+  // `/agents` badges a package agent `▪`, which says a package won but not
+  // which one. The name comes from tracing the loaded file's `sourcePath` back
+  // to the package root it lives under.
+  describe("packageNameForPath", () => {
+    it("names the package a declared directory's agent came from", () => {
+      const root = makePackage("demo", { pi: { subagents: { agents: ["./agents"] } } });
+      installGlobally(root);
+      expect(packageNameForPath(join(root, "agents", "demo-agent.md"), projectDir)).toBe("demo");
+    });
+
+    it("names it for an individually declared file too", () => {
+      const root = makePackage("filedecl", { pi: { subagents: { agents: ["./agents/filedecl-agent.md"] } } });
+      installGlobally(root);
+      expect(packageNameForPath(join(root, "agents", "filedecl-agent.md"), projectDir)).toBe("filedecl");
+    });
+
+    it("reports the scoped package name in full", () => {
+      // `/agents` shows this string verbatim, so the scope must survive — the
+      // unscoped `shortName` is for allowlist matching, not for display.
+      const root = join(tmpDir, "node_modules", "@acme", "tools");
+      mkdirSync(join(root, "agents"), { recursive: true });
+      writeFileSync(
+        join(root, "package.json"),
+        JSON.stringify({ name: "@acme/tools", version: "1.0.0", pi: { subagents: ["./agents"] } }),
+      );
+      writeFileSync(join(root, "agents", "reviewer.md"), "---\nname: reviewer\n---\nBody.\n");
+      installGlobally(root);
+      expect(packageNameForPath(join(root, "agents", "reviewer.md"), projectDir)).toBe("@acme/tools");
+    });
+
+    it("returns undefined for a path no package owns", () => {
+      installGlobally(makePackage("demo", { pi: { subagents: ["./agents"] } }));
+      expect(packageNameForPath(join(projectDir, ".pi", "agents", "local.md"), projectDir)).toBeUndefined();
+    });
+
+    it("does not let a package claim a sibling whose name it prefixes", () => {
+      // `foo` must not own `foo-bar/...` — the containment test is anchored on a
+      // path separator, not on the bare root string.
+      const root = makePackage("foo", { pi: { subagents: ["./agents"] } });
+      installGlobally(root);
+      expect(packageNameForPath(join(tmpDir, "foo-bar", "agents", "a.md"), projectDir)).toBeUndefined();
+    });
+
+    it("gives a nested package its own files rather than its host's", () => {
+      const outer = makePackage("outer", { pi: { subagents: ["./agents"] } });
+      const inner = join(outer, "node_modules", "inner");
+      mkdirSync(join(inner, "agents"), { recursive: true });
+      writeFileSync(
+        join(inner, "package.json"),
+        JSON.stringify({ name: "inner", version: "1.0.0", pi: { subagents: ["./agents"] } }),
+      );
+      writeFileSync(join(inner, "agents", "inner-agent.md"), "---\nname: inner-agent\n---\nBody.\n");
+      // Outer is configured first, so a first-match scan would hand it the win.
+      installGlobally(outer, inner);
+      expect(packageNameForPath(join(inner, "agents", "inner-agent.md"), projectDir)).toBe("inner");
+      expect(packageNameForPath(join(outer, "agents", "outer-agent.md"), projectDir)).toBe("outer");
+    });
+
+    it("falls back to the settings source when the manifest has no name", () => {
+      const root = join(tmpDir, "nameless");
+      mkdirSync(join(root, "agents"), { recursive: true });
+      writeFileSync(join(root, "package.json"), JSON.stringify({ pi: { subagents: ["./agents"] } }));
+      writeFileSync(join(root, "agents", "a.md"), "---\nname: a\n---\nBody.\n");
+      installGlobally(root);
+      expect(packageNameForPath(join(root, "agents", "a.md"), projectDir)).toBe(root);
+    });
+
+    it("returns undefined for a package the gate excludes", () => {
+      const a = makePackage("alpha", { pi: { subagents: ["./agents"] } });
+      const b = makePackage("beta", { pi: { subagents: ["./agents"] } });
+      installGlobally(a, b);
+      setPackageAgentsGate(["beta"]);
+      expect(packageNameForPath(join(a, "agents", "alpha-agent.md"), projectDir)).toBeUndefined();
+      expect(packageNameForPath(join(b, "agents", "beta-agent.md"), projectDir)).toBe("beta");
+      setPackageAgentsGate(false);
+      expect(packageNameForPath(join(b, "agents", "beta-agent.md"), projectDir)).toBeUndefined();
+    });
+
+    it("consults the gate for the kind it is asked about", () => {
+      const root = makePackage("both", { pi: { subagents: { agents: ["./agents"], workflows: ["./workflows"] } } });
+      installGlobally(root);
+      setPackageAgentsGate(false);
+      setPackageWorkflowsGate(true);
+      expect(packageNameForPath(join(root, "agents", "both-agent.md"), projectDir)).toBeUndefined();
+      expect(packageNameForPath(join(root, "workflows", "flow.js"), projectDir, "workflows")).toBe("both");
     });
   });
 
