@@ -23,7 +23,14 @@ import { normalizeMaxTurns } from "./agent-runner.js";
 import { resolveSpawnType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
-import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
+import { getScheduleOverlap } from "./settings.js";
+import type {
+  IsolationMode,
+  ScheduledSubagent,
+  ScheduleOverlapPolicy,
+  SubagentType,
+  ThinkingLevel,
+} from "./types.js";
 
 /** Event emitted on `pi.events` for cross-extension consumers. */
 export type ScheduleChangeEvent =
@@ -31,6 +38,8 @@ export type ScheduleChangeEvent =
   | { type: "removed"; jobId: string }
   | { type: "updated"; job: ScheduledSubagent }
   | { type: "fired"; jobId: string; agentId: string; name: string }
+  | { type: "skipped"; jobId: string; name: string }
+  | { type: "coalesced"; jobId: string; name: string }
   | { type: "error"; jobId: string; error: string };
 
 /** Params accepted at job creation — ID, timestamps, and state are derived. */
@@ -40,6 +49,7 @@ export interface NewJobInput {
   schedule: string;
   subagent_type: SubagentType;
   prompt: string;
+  overlapPolicy?: ScheduleOverlapPolicy;
   model?: string;
   thinking?: ThinkingLevel;
   max_turns?: number;
@@ -50,6 +60,8 @@ export interface NewJobInput {
 export class SubagentScheduler {
   private jobs = new Map<string, Cron>();
   private intervals = new Map<string, NodeJS.Timeout>();
+  private activeAgents = new Map<string, string>();
+  private pendingTriggers = new Map<string, number>();
   private store: ScheduleStore | undefined;
   private pi: ExtensionAPI | undefined;
   private ctx: ExtensionContext | undefined;
@@ -73,6 +85,8 @@ export class SubagentScheduler {
     this.jobs.clear();
     for (const t of this.intervals.values()) clearTimeout(t);
     this.intervals.clear();
+    this.activeAgents.clear();
+    this.pendingTriggers.clear();
     this.store = undefined;
     this.pi = undefined;
     this.ctx = undefined;
@@ -101,6 +115,7 @@ export class SubagentScheduler {
       schedule: detected.normalized,
       scheduleType: detected.type,
       intervalMs: detected.intervalMs,
+      overlapPolicy: input.overlapPolicy,
       subagent_type: input.subagent_type,
       prompt: input.prompt,
       model: input.model,
@@ -211,6 +226,8 @@ export class SubagentScheduler {
       clearInterval(t);
       this.intervals.delete(id);
     }
+    this.activeAgents.delete(id);
+    this.pendingTriggers.delete(id);
   }
 
   /**
@@ -226,6 +243,33 @@ export class SubagentScheduler {
     if (!store || !pi || !ctx || !manager) return;
     const job = store.get(id);
     if (!job?.enabled) return;
+
+    const policy = job.overlapPolicy ?? getScheduleOverlap();
+    const activeId = this.activeAgents.get(id);
+    const activeRecord = activeId ? manager.getRecord(activeId) : undefined;
+    const isActive =
+      activeRecord &&
+      (activeRecord.status === "queued" ||
+        activeRecord.status === "running" ||
+        activeRecord.status === "stopping");
+
+    if (isActive) {
+      if (policy === "skip") {
+        const current = store.get(id);
+        store.update(id, { skippedCount: (current?.skippedCount ?? 0) + 1 });
+        this.emit({ type: "skipped", jobId: id, name: job.name });
+        return;
+      }
+      if (policy === "queue-one") {
+        const current = store.get(id);
+        const currentPending = this.pendingTriggers.get(id) ?? 0;
+        this.pendingTriggers.set(id, currentPending + 1);
+        store.update(id, { coalescedCount: (current?.coalescedCount ?? 0) + 1 });
+        this.emit({ type: "coalesced", jobId: id, name: job.name });
+        return;
+      }
+      // "parallel": proceed to spawn
+    }
 
     store.update(id, { lastStatus: "running" });
 
@@ -272,6 +316,7 @@ export class SubagentScheduler {
           isolation: job.isolation,
         },
       });
+      this.activeAgents.set(id, agentId);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
@@ -282,6 +327,7 @@ export class SubagentScheduler {
     this.emit({ type: "fired", jobId: id, agentId, name: job.name });
 
     const finalize = (status: "success" | "error") => {
+      this.activeAgents.delete(id);
       const next = this.getNextRun(id);
       const current = store.get(id);
       store.update(id, {
@@ -290,6 +336,11 @@ export class SubagentScheduler {
         runCount: (current?.runCount ?? 0) + 1,
         nextRun: next,
       });
+
+      if (policy === "queue-one" && this.pendingTriggers.has(id)) {
+        this.pendingTriggers.delete(id);
+        this.executeJob(id);
+      }
     };
 
     // AgentManager's promise resolves either way (its .catch returns ""), so we

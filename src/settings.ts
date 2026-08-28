@@ -6,7 +6,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
-import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
+import type { NotificationDelivery } from "./notification-coordinator.js";
+import type {
+  AgentMentionMode,
+  JoinMode,
+  ScheduleOverlapPolicy,
+  ViewerMarkdownMode,
+  WidgetMode,
+} from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -302,6 +309,46 @@ export interface SubagentsSettings {
    * `ViewerMarkdownMode` for the specific rewrites — so `all` is opt-in.
    */
   viewerMarkdown?: ViewerMarkdownMode;
+  /**
+   * Grace period granted to a stopping attempt before the manager settles it
+   * as forced. Defaults to `30_000` (30s); valid `1_000`..`600_000`. The value
+   * is captured when an attempt starts — changing it does not retime an attempt
+   * already in its grace window.
+   */
+  stopGraceMs?: number;
+  /**
+   * Timeout in ms for get_subagent_result wait: true calls.
+   * Defaults to `30_000` (30s); valid `1_000`..`600_000`.
+   */
+  resultWaitTimeoutMs?: number;
+  /**
+   * Inactivity warning threshold in ms.
+   * Defaults to `300_000` (5m); valid `1_000`..`86_400_000`.
+   */
+  stalledWarningMs?: number;
+  /**
+   * Execution timeout for individual tool calls in ms. `0` = disabled.
+   * Defaults to `0`; valid `0` or `1_000`..`86_400_000`.
+   */
+  toolCallTimeoutMs?: number;
+  /**
+   * Inactivity timeout for subagent runs in ms. `0` = disabled.
+   * Defaults to `0`; valid `0` or `1_000`..`86_400_000`.
+   */
+  inactivityTimeoutMs?: number;
+  /**
+   * Completion notification delivery strategy:
+   * - `steer` (default): delivered via steer + triggerTurn at atomic boundaries.
+   * - `settled`: held until parent settlement boundary.
+   */
+  notificationDelivery?: NotificationDelivery;
+  /**
+   * Overlap policy for scheduled runs:
+   * - `skip` (default): skip trigger if previous run is still active.
+   * - `queue-one`: hold at most 1 pending trigger and run after completion.
+   * - `parallel`: allow overlapping runs.
+   */
+  scheduleOverlap?: ScheduleOverlapPolicy;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -332,6 +379,13 @@ export interface SettingsAppliers {
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
   setViewerMarkdown: (mode: ViewerMarkdownMode) => void;
+  setStopGraceMs: (n: number) => void;
+  setResultWaitTimeoutMs: (n: number) => void;
+  setStalledWarningMs: (n: number) => void;
+  setToolCallTimeoutMs: (n: number) => void;
+  setInactivityTimeoutMs: (n: number) => void;
+  setNotificationDelivery: (mode: NotificationDelivery) => void;
+  setScheduleOverlap: (mode: ScheduleOverlapPolicy) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -342,6 +396,8 @@ const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptio
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 const VALID_VIEWER_MARKDOWN_MODES: ReadonlySet<string> = new Set<ViewerMarkdownMode>(["off", "assistant", "all"]);
 const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
+const VALID_NOTIFICATION_DELIVERY_MODES: ReadonlySet<string> = new Set<NotificationDelivery>(["steer", "settled"]);
+const VALID_SCHEDULE_OVERLAP_MODES: ReadonlySet<string> = new Set<ScheduleOverlapPolicy>(["skip", "queue-one", "parallel"]);
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
@@ -350,6 +406,46 @@ const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
 const SUBAGENT_DEPTH_CEILING = 16;
+const STOP_GRACE_MS_CEILING = 600_000;
+const RESULT_WAIT_TIMEOUT_MS_CEILING = 600_000;
+const STALLED_WARNING_MS_CEILING = 86_400_000;
+const DEADLINE_TIMEOUT_MS_CEILING = 86_400_000;
+
+let resultWaitTimeoutMs = 30_000;
+export function getResultWaitTimeoutMs(): number { return resultWaitTimeoutMs; }
+export function setResultWaitTimeoutMs(n: number): void {
+  resultWaitTimeoutMs = Math.max(1_000, Math.min(RESULT_WAIT_TIMEOUT_MS_CEILING, n));
+}
+
+let stalledWarningMs = 300_000;
+export function getStalledWarningMs(): number { return stalledWarningMs; }
+export function setStalledWarningMs(n: number): void {
+  stalledWarningMs = Math.max(1_000, Math.min(STALLED_WARNING_MS_CEILING, n));
+}
+
+let toolCallTimeoutMs = 0;
+export function getToolCallTimeoutMs(): number { return toolCallTimeoutMs; }
+export function setToolCallTimeoutMs(n: number): void {
+  toolCallTimeoutMs = n <= 0 ? 0 : Math.max(1_000, Math.min(DEADLINE_TIMEOUT_MS_CEILING, n));
+}
+
+let inactivityTimeoutMs = 0;
+export function getInactivityTimeoutMs(): number { return inactivityTimeoutMs; }
+export function setInactivityTimeoutMs(n: number): void {
+  inactivityTimeoutMs = n <= 0 ? 0 : Math.max(1_000, Math.min(DEADLINE_TIMEOUT_MS_CEILING, n));
+}
+
+let notificationDelivery: NotificationDelivery = "steer";
+export function getNotificationDelivery(): NotificationDelivery { return notificationDelivery; }
+export function setNotificationDelivery(mode: NotificationDelivery): void {
+  if (VALID_NOTIFICATION_DELIVERY_MODES.has(mode)) notificationDelivery = mode;
+}
+
+let scheduleOverlap: ScheduleOverlapPolicy = "skip";
+export function getScheduleOverlap(): ScheduleOverlapPolicy { return scheduleOverlap; }
+export function setScheduleOverlap(mode: ScheduleOverlapPolicy): void {
+  if (VALID_SCHEDULE_OVERLAP_MODES.has(mode)) scheduleOverlap = mode;
+}
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
 function sanitize(raw: unknown): SubagentsSettings {
@@ -385,6 +481,53 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.graceTurns as number) <= GRACE_TURNS_CEILING
   ) {
     out.graceTurns = r.graceTurns as number;
+  }
+  if (
+    Number.isInteger(r.stopGraceMs) &&
+    (r.stopGraceMs as number) >= 1_000 &&
+    (r.stopGraceMs as number) <= STOP_GRACE_MS_CEILING
+  ) {
+    out.stopGraceMs = r.stopGraceMs as number;
+  }
+  if (
+    Number.isInteger(r.resultWaitTimeoutMs) &&
+    (r.resultWaitTimeoutMs as number) >= 1_000 &&
+    (r.resultWaitTimeoutMs as number) <= RESULT_WAIT_TIMEOUT_MS_CEILING
+  ) {
+    out.resultWaitTimeoutMs = r.resultWaitTimeoutMs as number;
+  }
+  if (
+    Number.isInteger(r.stalledWarningMs) &&
+    (r.stalledWarningMs as number) >= 1_000 &&
+    (r.stalledWarningMs as number) <= STALLED_WARNING_MS_CEILING
+  ) {
+    out.stalledWarningMs = r.stalledWarningMs as number;
+  }
+  if (
+    Number.isInteger(r.toolCallTimeoutMs) &&
+    (r.toolCallTimeoutMs as number) >= 0 &&
+    (r.toolCallTimeoutMs as number) <= DEADLINE_TIMEOUT_MS_CEILING
+  ) {
+    out.toolCallTimeoutMs = r.toolCallTimeoutMs as number;
+  }
+  if (
+    Number.isInteger(r.inactivityTimeoutMs) &&
+    (r.inactivityTimeoutMs as number) >= 0 &&
+    (r.inactivityTimeoutMs as number) <= DEADLINE_TIMEOUT_MS_CEILING
+  ) {
+    out.inactivityTimeoutMs = r.inactivityTimeoutMs as number;
+  }
+  if (
+    typeof r.notificationDelivery === "string" &&
+    VALID_NOTIFICATION_DELIVERY_MODES.has(r.notificationDelivery)
+  ) {
+    out.notificationDelivery = r.notificationDelivery as NotificationDelivery;
+  }
+  if (
+    typeof r.scheduleOverlap === "string" &&
+    VALID_SCHEDULE_OVERLAP_MODES.has(r.scheduleOverlap)
+  ) {
+    out.scheduleOverlap = r.scheduleOverlap as ScheduleOverlapPolicy;
   }
   if (
     Number.isInteger(r.maxSubagentDepth) &&
@@ -517,6 +660,13 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   }
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
+  if (typeof s.stopGraceMs === "number") appliers.setStopGraceMs(s.stopGraceMs);
+  if (typeof s.resultWaitTimeoutMs === "number") appliers.setResultWaitTimeoutMs(s.resultWaitTimeoutMs);
+  if (typeof s.stalledWarningMs === "number") appliers.setStalledWarningMs(s.stalledWarningMs);
+  if (typeof s.toolCallTimeoutMs === "number") appliers.setToolCallTimeoutMs(s.toolCallTimeoutMs);
+  if (typeof s.inactivityTimeoutMs === "number") appliers.setInactivityTimeoutMs(s.inactivityTimeoutMs);
+  if (s.notificationDelivery) appliers.setNotificationDelivery(s.notificationDelivery);
+  if (s.scheduleOverlap) appliers.setScheduleOverlap(s.scheduleOverlap);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
   if (typeof s.fallbackSubagent === "string") appliers.setFallbackSubagent(s.fallbackSubagent);
   if (s.defaultJoinMode) appliers.setDefaultJoinMode(s.defaultJoinMode);

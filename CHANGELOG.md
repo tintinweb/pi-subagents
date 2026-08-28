@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A per-execution `RunSupervisor` owns stop, grace, and exactly-once settlement state.** Each spawn and each resume gets one supervisor bound to the pool slot it charged, created before asynchronous startup, so lifecycle correctness no longer lives scattered across `AgentManager`'s promise handlers.
+- **Canonical subagent execution activity tracking (`ActivitySnapshot`).** Tracks phases (`initializing`, `model-inference`, `tool-execution`, `compacting`, `retrying`, `waiting-for-child`, `idle`), progress timestamps, and tool/compaction details. Emitted via the additive `subagents:activity` event and rendered uniformly across widget, FleetView, viewer, and transcripts.
+- **Bounded result waits and opt-in execution deadlines.** `get_subagent_result` and nested result tools now default to a bounded 30s wait (`resultWaitTimeoutMs`, overrideable via `timeout_ms`). Timing out returns `{ timed_out: true }` without mutating or cancelling the background child. Opt-in tool timeouts (`toolCallTimeoutMs`) and inactivity timeouts (`inactivityTimeoutMs`) cancel stuck runs cleanly, and a 5-minute stalled warning (`stalledWarningMs`) marks stalled activity without cancelling work.
+- **Session-scoped `NotificationCoordinator` prevents stale completion notifications.** Completion delivery defaults to `steer` mode with a 200ms local consumption hold, suppressing notifications for consumed results and cleanly disposing pending timers upon session switch or shutdown.
+- **Configurable scheduled job overlap policies (`scheduleOverlap`).** Supports `skip` (default, skips trigger if a previous run is active), `queue-one` (coalesces pending triggers to run one after completion), and `parallel` (allows overlap). Overrideable per job via `schedule_overlap`.
+
+### Changed
+- **`stopping` is now a visible record status.** A running attempt that receives a stop passes through `stopping` before settling (gracefully within the grace window, or forced at expiry); a queued abort still stops immediately. The persistent `stopGraceMs` setting (default `30000`, valid `1000`–`600000`) governs that window and is captured when an attempt starts, so changing it never retimes an attempt already stopping.
+- **Resumed subagents enforce execution limits consistently.** Each resume receives a fresh execution supervisor with reset turn counts and deadlines, applying `maxTurns` soft-limit steering and grace turns hard-limit aborts while preserving cumulative lifetime usage and conversation history.
+
+### Fixed
+- **Stopped runs now settle exactly once, independent of the run promise.** Forced settlement at grace expiry disposes the session, releases the pool slot, aborts owned children, and makes a late promise resolution a no-op — so a wedged child can no longer leak a slot, double-notify, or resurrect a disposed session.
+- **Startup cancellation is now reliable.** An already-aborted parent signal aborts the child before `session.prompt()`, each asynchronous startup phase races the manager signal, and a session created after a stop is disposed immediately rather than reaching the model.
+
 ## [0.19.0] - 2026-08-25
 
 > **⚠️ Breaking — this release requires pi 0.84.0 or newer** (`peerDependencies` moves from `>=0.81.0`). `SubagentWorkflow` needs two host APIs that do not exist below it, and both fail the typecheck rather than degrading quietly — see the `Changed` entry below for which, and why neither was worth reimplementing to hold the old floor. npm flags an older pi at install time.

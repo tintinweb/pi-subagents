@@ -322,6 +322,39 @@ describe("settings persistence", () => {
       expect(loadSettings(projectDir)).toEqual({});
     });
 
+    it("round-trips stopGraceMs; drops below-min, over-ceiling, and non-integer values", () => {
+      writeProject({ stopGraceMs: 120_000 });
+      expect(loadSettings(projectDir)).toEqual({ stopGraceMs: 120_000 });
+      for (const bad of [999, 600_001, 1.5, "huge", null, -1]) {
+        writeProject({ stopGraceMs: bad });
+        expect(loadSettings(projectDir).stopGraceMs).toBeUndefined();
+      }
+    });
+
+    it("round-trips resultWaitTimeoutMs, stalledWarningMs, toolCallTimeoutMs, inactivityTimeoutMs, notificationDelivery, scheduleOverlap", () => {
+      const valid = {
+        resultWaitTimeoutMs: 25_000,
+        stalledWarningMs: 120_000,
+        toolCallTimeoutMs: 30_000,
+        inactivityTimeoutMs: 60_000,
+        notificationDelivery: "settled" as const,
+        scheduleOverlap: "queue-one" as const,
+      };
+      writeProject(valid);
+      expect(loadSettings(projectDir)).toEqual(valid);
+
+      // Dropping invalid values
+      writeProject({
+        resultWaitTimeoutMs: 500,
+        stalledWarningMs: "bad",
+        toolCallTimeoutMs: -1,
+        inactivityTimeoutMs: -5,
+        notificationDelivery: "immediate",
+        scheduleOverlap: "drop",
+      } as any);
+      expect(loadSettings(projectDir)).toEqual({});
+    });
+
     it("keeps maxSubagentDepth 0 (nesting off) but drops negative, fractional, and over-ceiling values", () => {
       writeProject({ maxSubagentDepth: 0 });
       expect(loadSettings(projectDir)).toEqual({ maxSubagentDepth: 0 });
@@ -555,6 +588,13 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
+        setStopGraceMs: vi.fn(),
+        setResultWaitTimeoutMs: vi.fn(),
+        setStalledWarningMs: vi.fn(),
+        setToolCallTimeoutMs: vi.fn(),
+        setInactivityTimeoutMs: vi.fn(),
+        setNotificationDelivery: vi.fn(),
+        setScheduleOverlap: vi.fn(),
       };
     });
 
@@ -806,6 +846,13 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
+        setStopGraceMs: vi.fn(),
+        setResultWaitTimeoutMs: vi.fn(),
+        setStalledWarningMs: vi.fn(),
+        setToolCallTimeoutMs: vi.fn(),
+        setInactivityTimeoutMs: vi.fn(),
+        setNotificationDelivery: vi.fn(),
+        setScheduleOverlap: vi.fn(),
       };
     });
 

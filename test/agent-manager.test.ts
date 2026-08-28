@@ -9,6 +9,7 @@ import type { AgentRecord } from "../src/types.js";
 vi.mock("../src/agent-runner.js", () => ({
   runAgent: vi.fn(),
   resumeAgent: vi.fn(),
+  getGraceTurns: vi.fn(() => 2),
 }));
 
 vi.mock("../src/worktree.js", () => ({
@@ -394,7 +395,10 @@ describe("AgentManager — nested runtime propagation", () => {
     finishParent?.({ responseText: "done", session: mockSession(), aborted: false, steered: false });
     await manager.getRecord(parentId)!.promise;
 
-    expect(manager.getRecord(runningChild)?.status).toBe("stopped");
+    // The child was aborted as the parent settled: it passes through
+    // "stopping" and its signal-fired run settles "stopped" — not
+    // "completed" — through the shared exactly-once settlement.
+    await vi.waitFor(() => expect(manager.getRecord(runningChild)?.status).toBe("stopped"));
     // The child's own settle path stops the generation below it.
     await manager.getRecord(runningChild)!.promise;
     expect(manager.getRecord(grandchild)?.status).toBe("stopped");
@@ -431,7 +435,7 @@ describe("AgentManager — nested runtime propagation", () => {
 
     await manager.resume(parentId, "keep going");
 
-    expect(manager.getRecord(childId)?.status).toBe("stopped");
+    expect(manager.getRecord(childId)?.status).toBe("stopping");
   });
 });
 
@@ -937,6 +941,106 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(cleanupWorktree).toHaveBeenCalledWith(mockPi, "/tmp", wt, "stopped");
     expect(manager.getRecord(id)!.status).toBe("stopped");
   });
+
+  it("a grace expiry during the copy settles forced and releases the slot exactly once", async () => {
+    // If the 30s grace expires while the copy is still in flight, the forced
+    // path releases the slot and terminalizes the record; the discard site at
+    // copy end must NOT release again — a double decrement would permanently
+    // lift the concurrency limit.
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    let releaseCopy!: () => void;
+    const wt = { path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy" };
+    vi.mocked(createWorktree).mockImplementationOnce(
+      () => new Promise<typeof wt>(resolve => { releaseCopy = () => resolve(wt); }),
+    );
+    vi.mocked(cleanupWorktree).mockClear();
+    vi.mocked(runAgent).mockClear();
+    resolvedRun();
+
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager(undefined, 1);
+      const id = manager.spawn(mockPi, mockCtx, "X", "slow", {
+        description: "slow", isBackground: true, isolation: "worktree",
+      });
+      expect(manager.abort(id)).toBe(true);
+      expect(manager.getRecord(id)!.status).toBe("stopping");
+
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(manager.getRecord(id)!.status).toBe("stopped");
+
+      releaseCopy();
+      await manager.awaitStartup(id);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(runAgent).not.toHaveBeenCalled();
+    expect(cleanupWorktree).toHaveBeenCalledWith(mockPi, "/tmp", wt, "slow");
+
+    // Slot freed once, not twice: at maxConcurrent 1 the first fresh spawn
+    // runs and the second still queues. A double release would start both.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const first = manager.spawn(mockPi, mockCtx, "X", "one", { description: "one", isBackground: true });
+    const second = manager.spawn(mockPi, mockCtx, "X", "two", { description: "two", isBackground: true });
+    expect(manager.getRecord(first)!.status).toBe("running");
+    expect(manager.getRecord(second)!.status).toBe("queued");
+  });
+
+  it("a stop during the copy followed by copy failure drops the grace timer and releases the slot once", async () => {
+    // Startup exits that can never reach a promise tail must dispose the
+    // attempt's supervisor along with the entry: an orphaned 30s grace timer
+    // would fire later, "settle" the already-failed attempt, fire onComplete
+    // again, and double-release the slot it just gave back.
+    const { createWorktree } = await import("../src/worktree.js");
+    let releaseCopy!: () => void;
+    vi.mocked(createWorktree).mockImplementationOnce(
+      () => new Promise<undefined>(resolve => { releaseCopy = () => resolve(undefined); }),
+    );
+    vi.mocked(runAgent).mockClear();
+    const completions: string[] = [];
+
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager((record) => completions.push(record.status), 1);
+      // Blocker holds the only slot; the worktree spawn queues behind it.
+      let releaseBlocker!: (v: unknown) => void;
+      vi.mocked(runAgent).mockImplementationOnce(
+        () => new Promise(resolve => { releaseBlocker = resolve; }),
+      );
+      manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "blocker", isBackground: true });
+      const id = manager.spawn(mockPi, mockCtx, "X", "slow", {
+        description: "slow", isBackground: true, isolation: "worktree",
+      });
+      expect(manager.getRecord(id)!.status).toBe("queued");
+
+      // Free the slot: the worktree spawn starts and its copy is in flight.
+      releaseBlocker({ responseText: "done", session: mockSession(), aborted: false, steered: false });
+      await vi.waitFor(() => expect(manager.getRecord(id)!.status).toBe("running"));
+      expect(manager.abort(id)).toBe(true);
+      const record = manager.getRecord(id)!;
+
+      // The copy then fails: the strict worktree error lands on the record and
+      // onComplete fires once; the attempt's grace timer is dropped with it.
+      releaseCopy();
+      await expect(manager.awaitStartup(id)).rejects.toThrow(/isolation: "worktree"/);
+      expect(completions).toEqual(["completed", "error"]);
+
+      // No grace timer may outlive the dropped attempt.
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(completions).toEqual(["completed", "error"]);
+      expect(record.status).toBe("error"); // failure, not a forced "stopped"
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Slot freed once, not twice: first fresh spawn runs, second queues.
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const first = manager.spawn(mockPi, mockCtx, "X", "one", { description: "one", isBackground: true });
+    const second = manager.spawn(mockPi, mockCtx, "X", "two", { description: "two", isBackground: true });
+    expect(manager.getRecord(first)!.status).toBe("running");
+    expect(manager.getRecord(second)!.status).toBe("queued");
+  });
 });
 
 // The worktree is committed to a branch and deleted inside the settle path, so
@@ -1317,7 +1421,7 @@ describe("AgentManager — abort() state machine", () => {
     expect(manager.abort(queuedId)).toBe(false);
   });
 
-  it("aborts a running agent by firing its AbortController and setting status='stopped'", () => {
+  it("a running abort transitions to 'stopping' and aborts the run signal", () => {
     manager = new AgentManager();
     let receivedSignal: AbortSignal | undefined;
     vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, opts) => {
@@ -1334,8 +1438,8 @@ describe("AgentManager — abort() state machine", () => {
     expect(receivedSignal?.aborted).toBe(false);
 
     expect(manager.abort(id)).toBe(true);
-    expect(record.status).toBe("stopped");
-    expect(record.completedAt).toBeGreaterThan(0);
+    expect(record.status).toBe("stopping");
+    expect(record.completedAt).toBeUndefined();
     expect(receivedSignal?.aborted).toBe(true);
   });
 
@@ -1368,7 +1472,7 @@ describe("AgentManager — abort() state machine", () => {
     expect(record.status).toBe("running");
 
     expect(manager.abort(id)).toBe(true);
-    expect(record.status).toBe("stopped");
+    expect(record.status).toBe("stopping");
 
     // The agent loop ends and the promise settles "normally".
     resolveRun({ responseText: "partial output", session: mockSession(), aborted: false, steered: false });
@@ -1376,6 +1480,92 @@ describe("AgentManager — abort() state machine", () => {
 
     expect(record.status).toBe("stopped");        // not overwritten to "completed"
     expect(record.result).toBe("partial output"); // partial result still captured
+  });
+
+  it("a second stop request on a stopping record returns false and keeps the transition single", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    expect(manager.abort(id)).toBe(true);
+
+    expect(manager.abort(id)).toBe(false);
+    expect(manager.getRecord(id)?.status).toBe("stopping");
+  });
+
+  it("accepts an explicit stop reason and preserves the stop through terminal settlement", async () => {
+    manager = new AgentManager();
+    let resolveRun!: (v: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((res) => { resolveRun = res as (v: unknown) => void; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+
+    expect(manager.abort(id, "owner")).toBe(true);
+    expect(record.status).toBe("stopping");
+
+    resolveRun({ responseText: "partial output", session: mockSession(), aborted: false, steered: false });
+    await record.promise;
+
+    expect(record.status).toBe("stopped");
+    expect(record.result).toBe("partial output");
+    expect(record.completedAt).toBeGreaterThan(0);
+  });
+
+  it("clearCompleted() does not evict a stopping record", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    manager.abort(id);
+
+    manager.clearCompleted();
+    expect(manager.getRecord(id)?.status).toBe("stopping");
+  });
+
+  it("hasRunning() is true while a record is stopping", () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    manager.abort(id);
+
+    expect(manager.hasRunning()).toBe(true);
+  });
+
+  it("waitForAll() still waits while a record is stopping", async () => {
+    manager = new AgentManager();
+    let resolveRun!: (v: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise((res) => { resolveRun = res as (v: unknown) => void; }));
+
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    manager.abort(id);
+
+    let waited = false;
+    const wait = manager.waitForAll().then(() => { waited = true; });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(waited).toBe(false);
+
+    resolveRun({ responseText: "late", session: mockSession(), aborted: false, steered: false });
+    await wait;
+    expect(waited).toBe(true);
+    expect(manager.getRecord(id)?.status).toBe("stopped");
+  });
+
+  it("a queued record still stops immediately, releasing its start gate without touching pool counters", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+
+    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "block", isBackground: true });
+    const queuedId = manager.spawn(mockPi, mockCtx, "Y", "q", { description: "q", isBackground: true });
+    const queued = manager.getRecord(queuedId)!;
+    expect(queued.status).toBe("queued");
+
+    expect(manager.abort(queuedId)).toBe(true);
+    expect(queued.status).toBe("stopped");
+    expect(queued.completedAt).toBeGreaterThan(0);
+    // Resolves (never rejects) — the waiting caller must not hang or throw.
+    await queued.startGate;
   });
 });
 
@@ -1447,8 +1637,8 @@ describe("AgentManager — parent abort signal forwarding (#44)", () => {
     expect(record.status).toBe("running");
 
     parent.abort();
-    expect(record.status).toBe("stopped");
-    expect(record.completedAt).toBeGreaterThan(0);
+    expect(record.status).toBe("stopping");
+    expect(record.completedAt).toBeUndefined();
   });
 });
 
@@ -1493,14 +1683,228 @@ describe("AgentManager — abortAll", () => {
     expect(manager.getRecord(queued)?.status).toBe("queued");
 
     expect(manager.abortAll()).toBe(2);
-    expect(manager.getRecord(running)?.status).toBe("stopped");
+    expect(manager.getRecord(running)?.status).toBe("stopping");
     expect(manager.getRecord(queued)?.status).toBe("stopped");
-    expect(manager.hasRunning()).toBe(false);
+    // The stopping record is still live: it occupies its pool slot until it settles.
+    expect(manager.hasRunning()).toBe(true);
   });
 
   it("returns 0 when there are no running or queued agents", () => {
     manager = new AgentManager();
     expect(manager.abortAll()).toBe(0);
+  });
+});
+
+// The forced half of the stop contract: when a stopping attempt's promise
+// never settles, the grace expiry must settle it anyway — releasing the pool
+// slot exactly once, disposing the session, draining the queue, and leaving
+// the late promise settlement a no-op.
+describe("AgentManager — forced settlement at grace expiry", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  /** Spawn one background agent whose run never settles; abort it. */
+  function spawnAndStop() {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+    const record = manager.getRecord(id)!;
+    expect(manager.abort(id)).toBe(true);
+    expect(record.status).toBe("stopping");
+    return { id, record };
+  }
+
+  it("releases the slot, disposes the session, and drains the queue at grace expiry", async () => {
+    const completions: string[] = [];
+    const session = { dispose: vi.fn() } as any;
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager((record) => completions.push(record.status), 1);
+      // A run that exposes its session (like a real one does via onSessionCreated)
+      // but never settles; only the forced path will dispose it.
+      vi.mocked(runAgent).mockImplementation((_c, _t, _p, opts) => {
+        (opts as any)?.onSessionCreated?.(session);
+        return new Promise(() => {});
+      });
+      const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+      const record = manager.getRecord(id)!;
+      expect(manager.abort(id)).toBe(true);
+      expect(record.status).toBe("stopping");
+      expect(record.abortController?.signal.aborted).toBe(true);
+
+      // A fresh spawn queues behind the still-held slot while stopping.
+      vi.mocked(runAgent).mockClear();
+      const waiting = manager.spawn(mockPi, mockCtx, "X", "q", { description: "q", isBackground: true });
+      expect(manager.getRecord(waiting)!.status).toBe("queued");
+      expect(runAgent).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(30_001);
+
+      // Forced settlement: terminal as stopped with forced metadata, session disposed once.
+      expect(record.status).toBe("stopped");
+      expect(record.stopMetadata).toEqual({ reason: "user", mode: "forced" });
+      expect(session.dispose).toHaveBeenCalledTimes(1);
+      expect(record.session).toBeUndefined();
+      expect(completions).toEqual(["stopped"]);
+
+      // The queue drained into the freed slot — exactly once.
+      expect(manager.getRecord(waiting)!.status).toBe("running");
+      expect(runAgent).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resolving the deferred promise after forced settlement changes nothing", async () => {
+    let resolveRun!: (v: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(
+      () => new Promise(resolve => { resolveRun = resolve; }),
+    );
+    const completions: string[] = [];
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager((record) => completions.push(record.status));
+      const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+      const record = manager.getRecord(id)!;
+      manager.abort(id);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(record.status).toBe("stopped");
+      expect(completions).toEqual(["stopped"]);
+
+      // The old promise resolves late with a normal completion: it must not
+      // overwrite the forced stop or fire a second completion.
+      resolveRun({ responseText: "late answer", session: mockSession(), aborted: false, steered: false });
+      await record.promise;
+      expect(record.status).toBe("stopped");
+      expect(completions).toEqual(["stopped"]);
+      // The late text is salvageable — the forced stop preserved it.
+      expect(record.result).toBe("late answer");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejecting the deferred promise after forced settlement changes nothing", async () => {
+    let rejectRun!: (e: unknown) => void;
+    vi.mocked(runAgent).mockImplementation(
+      () => new Promise((_resolve, reject) => { rejectRun = reject; }),
+    );
+    const completions: string[] = [];
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager((record) => completions.push(record.status));
+      const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+      const record = manager.getRecord(id)!;
+      manager.abort(id);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(record.status).toBe("stopped");
+
+      rejectRun(new Error("late crash"));
+      await expect(record.promise).resolves.toBe("");
+      expect(record.status).toBe("stopped");
+      expect(record.error).toBeUndefined();
+      expect(completions).toEqual(["stopped"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("releases a bounded-foreground slot exactly once at grace expiry, and late settlement cannot re-release", async () => {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager(undefined, 1);
+      manager.setMaxConcurrentForeground(1);
+      void manager.spawnAndWait(mockPi, mockCtx, "X", "p", { description: "fg" });
+      const record = manager.listAgents()[0]!;
+      expect(record.status).toBe("running");
+      expect(manager.abort(record.id)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(record.status).toBe("stopped");
+      expect(record.stopMetadata).toEqual({ reason: "user", mode: "forced" });
+
+      // The foreground slot is free: a fresh blocking spawn starts. A second
+      // release (the late tail has no promise to run here, so a stale drain
+      // would be the only double-free vector) would lift the limit entirely.
+      const first = manager.spawn(mockPi, mockCtx, "X", "one", { description: "one", isBackground: true });
+      expect(manager.getRecord(first)!.status).toBe("running");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("the 60s cleanup interval never evicts a stopping record and the grace still settles once", async () => {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      const { id } = spawnAndStop();
+
+      // Still stopping just before grace.
+      await vi.advanceTimersByTimeAsync(29_000);
+      expect(manager.getRecord(id)!.status).toBe("stopping");
+      expect(manager.hasRunning()).toBe(true);
+
+      // Cross the 30s grace (forced settle) and the 60s cleanup cadence in one
+      // sweep: the record was never evicted while stopping and settles once.
+      await vi.advanceTimersByTimeAsync(31_000);
+      expect(manager.getRecord(id)!.status).toBe("stopped");
+      expect(manager.getRecord(id)).toBeDefined(); // terminal, retained for the 10-min window
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("force-stopping a parent aborts its owned children", async () => {
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+        description: "parent", isBackground: true,
+      });
+      const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+        description: "child", isBackground: true, depth: 2, parentAgentId: parentId,
+      });
+      expect(manager.getRecord(childId)!.status).toBe("running");
+
+      manager.abort(parentId, "shutdown");
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(manager.getRecord(parentId)!.status).toBe("stopped");
+      // The forced path aborts the parent's own children (the tail never runs).
+      expect(manager.getRecord(childId)!.status).toBe("stopping");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a late success tail does not resurrect the disposed session", async () => {
+    let resolveRun!: (v: unknown) => void;
+    const session = { dispose: vi.fn() } as any;
+    vi.mocked(runAgent).mockImplementation((_c, _t, _p, opts) => {
+      (opts as any)?.onSessionCreated?.(session);
+      return new Promise(resolve => { resolveRun = resolve; });
+    });
+    vi.useFakeTimers();
+    try {
+      manager = new AgentManager();
+      const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "r", isBackground: true });
+      const record = manager.getRecord(id)!;
+      expect(record.session).toBe(session);
+
+      manager.abort(id);
+      await vi.advanceTimersByTimeAsync(30_001);
+      expect(record.session).toBeUndefined();
+      expect(session.dispose).toHaveBeenCalledTimes(1);
+
+      // The runner resolves with the same (now-disposed) session object.
+      resolveRun({ responseText: "late", session, aborted: false, steered: false });
+      await record.promise;
+      expect(record.status).toBe("stopped");
+      expect(record.session).toBeUndefined(); // not resurrected
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1613,7 +2017,7 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
     const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
     const record = manager.getRecord(id)!;
-    record.status = "stopped"; // external abort() path
+    expect(manager.abort(id)).toBe(true); // external abort() path
     resolveRun!({ responseText: "", session, aborted: false, steered: false, failure: "late error" });
     await record.promise;
 
@@ -1661,6 +2065,32 @@ describe("AgentManager — resolved runs with a failed final turn map to error (
 
     expect(record.status).toBe("error");
     expect(record.result).toBe("new partial progress"); // salvageable, this-run text
+  });
+
+  it("resume(): a stop during the inline turn is preserved with the first reason", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    // Deferred resume so the stop can land mid-turn.
+    let releaseResume!: (v: unknown) => void;
+    const { resumeAgent: resumeMock } = await import("../src/agent-runner.js");
+    vi.mocked(resumeMock).mockImplementation(
+      () => new Promise(resolve => { releaseResume = resolve; }),
+    );
+
+    const resumed = manager.resume(id, "more");
+    expect(record.status).toBe("running");
+    expect(manager.abort(id, "owner")).toBe(true);
+    expect(record.status).toBe("stopping");
+
+    releaseResume({ text: "partial", failure: undefined });
+    await resumed;
+
+    expect(record.status).toBe("stopped");
+    expect(record.stopMetadata).toEqual({ reason: "owner", mode: "graceful" });
   });
 });
 

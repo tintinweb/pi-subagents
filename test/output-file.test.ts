@@ -2,7 +2,12 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { encodeCwd, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
+import {
+  encodeCwd,
+  streamToOutputFile,
+  writeActivityEntry,
+  writeInitialEntry,
+} from "../src/output-file.js";
 
 describe("encodeCwd", () => {
   it("encodes a POSIX absolute path by stripping the leading slash and replacing separators", () => {
@@ -292,5 +297,30 @@ describe("streamToOutputFile", () => {
     expect(body).toContain("third answer");
     expect(body).not.toContain("first answer");
     expect(body).not.toContain("second answer");
+  });
+
+  it("writes activity transition entries", () => {
+    writeActivityEntry(
+      outPath,
+      "agent-1",
+      {
+        phase: "tool-execution",
+        phaseStartedAt: 10_000,
+        lastProgressAt: 10_000,
+        turnCount: 1,
+        activeTool: {
+          callId: "call_1",
+          name: "bash",
+          startedAt: 10_000,
+          lastUpdateAt: 10_000,
+        },
+      },
+      "/work",
+    );
+
+    const entries = readEntries();
+    expect(entries.length).toBe(2);
+    expect(entries[1].type).toBe("subagent_activity");
+    expect((entries[1] as any).activity.phase).toBe("tool-execution");
   });
 });

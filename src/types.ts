@@ -4,9 +4,25 @@
 
 import type { ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type {
+  ActiveToolActivity,
+  ActivityPhase,
+  ActivitySnapshot,
+  AgentActivityEvent,
+  CompactionActivity,
+  RetryActivity,
+} from "./agent-activity.js";
 import type { LifetimeUsage } from "./usage.js";
 
-export type { ThinkingLevel };
+export type {
+  ActiveToolActivity,
+  ActivityPhase,
+  ActivitySnapshot,
+  AgentActivityEvent,
+  CompactionActivity,
+  RetryActivity,
+  ThinkingLevel,
+};
 
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
@@ -80,6 +96,10 @@ export interface AgentConfig {
    * "off" refuses one even when the caller asks (frontmatter outranks params).
    */
   isolation?: IsolationMode;
+  /** Per-tool execution timeout in ms (0 = disabled). */
+  toolCallTimeoutMs?: number;
+  /** Inactivity timeout in ms (0 = disabled). */
+  inactivityTimeoutMs?: number;
   /** true = this is an embedded default agent (informational) */
   isDefault?: boolean;
   /** false = agent is hidden from the registry */
@@ -153,6 +173,80 @@ export type MentionResolution =
   | { kind: "live"; record: AgentRecord }
   | { kind: "tombstone"; entry: AgentTombstone };
 
+/**
+ * Lifecycle status of an agent record. Public lifecycle:
+ * `queued -> running -> stopping -> terminal` (`completed`, `steered`,
+ * `aborted`, `stopped`, `error`). `stopping` is transient — entered when an
+ * explicit stop request is issued, before the attempt settles.
+ */
+export type AgentStatus =
+  | "queued"
+  | "running"
+  | "stopping"
+  | "completed"
+  | "steered"
+  | "aborted"
+  | "stopped"
+  | "error";
+
+/** Who asked for a stop. `owner` is the spawning extension; `shutdown` is quit/eviction. */
+export type StopReason = "user" | "owner" | "shutdown";
+
+/** Execution timeout reason. */
+export type TimeoutReason = "tool_timeout" | "inactivity_timeout";
+
+/** Attempt termination reason: user/owner/shutdown stop or deadline timeout. */
+export type AttemptTerminationReason = StopReason | TimeoutReason;
+
+/**
+ * How a stop attempt ended: `graceful` — child work wound down within the
+ * grace period; `forced` — the grace expired and force disposal ran.
+ */
+export type StopMode = "graceful" | "forced";
+
+/** Execution deadline configuration. */
+export interface DeadlineSettings {
+  stopGraceMs: number;
+  stalledWarningMs: number;
+  toolCallTimeoutMs: number;
+  inactivityTimeoutMs: number;
+}
+
+/** Construction options for the per-attempt {@link RunSupervisor}. */
+export interface RunSupervisorOptions {
+  /**
+   * The manager-owned signal the supervisor composes into its own. Aborting it
+   * aborts the derived signal; the supervisor never creates a competing
+   * manager-facing AbortController.
+   */
+  signal: AbortSignal;
+  /**
+   * Grace period granted to child work after a stop request, before force
+   * disposal runs. A deadline timer, never a poll.
+   */
+  stopGraceMs: number;
+  stalledWarningMs?: number;
+  toolCallTimeoutMs?: number;
+  inactivityTimeoutMs?: number;
+  /** Clock for deadline computation; defaults to `Date.now`. */
+  now?: () => number;
+  initialActivity?: ActivitySnapshot;
+  model?: string;
+  provider?: string;
+  /** Invoked exactly once when the grace period expires and the attempt is forced. */
+  onForceDispose: () => void;
+  /** Invoked when a tool or inactivity deadline expires. */
+  onTimeout?: (reason: TimeoutReason) => void;
+}
+
+/** Result of {@link RunSupervisor.settle}. */
+export interface SettleOutcome {
+  /** True for the first settlement; false for every later one. */
+  first: boolean;
+  /** Mode recorded by the first settlement, if any. */
+  mode?: StopMode;
+}
+
 export interface AgentRecord {
   id: string;
   type: SubagentType;
@@ -171,7 +265,9 @@ export interface AgentRecord {
    */
   alias?: string;
   description: string;
-  status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
+  status: AgentStatus;
+  /** Latest execution activity snapshot. */
+  activity?: ActivitySnapshot;
   result?: string;
   error?: string;
   toolUses: number;
@@ -219,6 +315,14 @@ export interface AgentRecord {
   sessionFile?: string;
   /** Cleanup function for the output file stream subscription. */
   outputCleanup?: () => void;
+  /**
+   * Cancellation metadata for a terminal "stopped" record: who requested the
+   * stop and how the attempt settled (gracefully within the stop grace, or
+   * forced at grace expiry). Present only on records that entered "stopping" —
+   * a queued abort never acquires a slot or a supervisor, so it carries none.
+   * Absent on every other terminal status.
+   */
+  stopMetadata?: { reason: StopReason; mode: StopMode };
   /**
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately
@@ -333,6 +437,8 @@ export interface EnvInfo {
   platform: string;
 }
 
+export type ScheduleOverlapPolicy = "skip" | "queue-one" | "parallel";
+
 /**
  * A subagent spawn registered to fire on a schedule.
  *
@@ -349,6 +455,12 @@ export interface ScheduledSubagent {
   scheduleType: "cron" | "once" | "interval";
   /** Computed at create time for interval/once. */
   intervalMs?: number;
+  /** Overlap policy when recurring triggers fire while a prior run is active. */
+  overlapPolicy?: ScheduleOverlapPolicy;
+  /** Counter of triggers skipped due to active overlap. */
+  skippedCount?: number;
+  /** Counter of triggers coalesced into pending execution. */
+  coalescedCount?: number;
 
   // spawn params (subset of Agent tool params; no inherit_context, no resume)
   subagent_type: SubagentType;

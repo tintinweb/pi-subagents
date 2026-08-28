@@ -181,6 +181,7 @@ function createSession(finalText: string) {
     },
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
+    dispose: vi.fn(),
   };
   lastSession = session;
   return { session, listeners };
@@ -353,6 +354,27 @@ describe("agent-runner final output capture", () => {
 
     expect(result.text).toBe("RESUMED");
     expect(result.failure).toBeUndefined();
+  });
+
+  it("resumeAgent enforces maxTurns soft limit steering and hard limit abort", async () => {
+    const { session, listeners } = createSession("RESUMED");
+    session.prompt = vi.fn(async () => {
+      for (const l of listeners) l({ type: "turn_end" }); // turn 1 -> steer
+      for (const l of listeners) l({ type: "turn_end" }); // turn 2
+      for (const l of listeners) l({ type: "turn_end" }); // turn 3 -> abort
+    }) as any;
+
+    const result = await resumeAgent(session as any, "Continue", {
+      maxTurns: 1,
+      graceTurns: 2,
+    });
+
+    expect(session.steer).toHaveBeenCalledWith(
+      expect.stringContaining("reached your turn limit"),
+    );
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(result.aborted).toBe(true);
+    expect(result.steered).toBe(true);
   });
 
   it("sets the agent name as session name before binding extensions", async () => {
@@ -2732,5 +2754,50 @@ describe("resolveDefaultModel", () => {
 
   it("returns undefined when neither a config model nor a parent model exists", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
+  });
+});
+
+describe("startup cancellation and already-aborted signals", () => {
+  it("resumeAgent aborts an already-aborted run without prompting", async () => {
+    const { session } = createSession("done");
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      resumeAgent(session, "go", { signal: controller.signal }),
+    ).rejects.toThrow();
+
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(session.prompt).not.toHaveBeenCalled();
+  });
+
+  it("an already-aborted signal never creates a session", async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      runAgent(ctx, "Explore", "go", { pi, signal: controller.signal }),
+    ).rejects.toThrow();
+
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("a stop during session creation prevents prompt and disposes the late session", async () => {
+    const { session } = createSession("done");
+    let release!: () => void;
+    createAgentSession.mockReturnValue(
+      new Promise((resolve) => { release = () => resolve({ session }); }),
+    );
+
+    const controller = new AbortController();
+    const run = runAgent(ctx, "Explore", "go", { pi, signal: controller.signal });
+    await vi.waitFor(() => expect(createAgentSession).toHaveBeenCalled());
+
+    controller.abort();
+    release();
+    await expect(run).rejects.toThrow();
+    await vi.waitFor(() => expect(session.dispose).toHaveBeenCalledTimes(1));
+
+    expect(session.prompt).not.toHaveBeenCalled();
   });
 });

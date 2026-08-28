@@ -17,6 +17,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { abortable } from "./abortable.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
@@ -27,8 +28,8 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
-import type { LifetimeUsage } from "./usage.js";
+import type { AgentActivityEvent, SubagentType, ThinkingLevel } from "./types.js";
+import { getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
 /**
@@ -454,6 +455,8 @@ export interface RunOptions {
   configCwd?: string;
   /** Called on tool start/end with activity info. */
   onToolActivity?: (activity: ToolActivity) => void;
+  /** Called on canonical activity events across the lifecycle. */
+  onActivity?: (event: AgentActivityEvent) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
@@ -591,13 +594,33 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
 
 /**
  * Wire an AbortSignal to abort a session.
- * Returns a cleanup function to remove the listener.
+ *
+ * Handles an already-aborted signal synchronously: `addEventListener` never
+ * fires on a signal that aborted before the listener was attached, so without
+ * the upfront check a stop that landed during startup would leave the child to
+ * reach `session.prompt()` unreachable-by-abort.
+ *
+ * Returns a cleanup function to remove the listener (idempotent).
  */
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
-  const onAbort = () => session.abort();
+  if (signal.aborted) {
+    session.abort();
+    return () => {};
+  }
+  const onAbort = () => { session.abort(); };
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
+}
+
+/**
+ * Reject with the abort reason when a signal is already aborted, else resolve.
+ * The runner checks this BEFORE each asynchronous startup phase and before
+ * `session.prompt()`, so a stop that arrived earlier stops the phase that
+ * would otherwise let the child reach the model.
+ */
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw signal.reason;
 }
 
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
@@ -622,7 +645,8 @@ export async function runAgent(
   // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
   const configCwd = options.configCwd ?? effectiveCwd;
 
-  const env = await detectEnv(options.pi, effectiveCwd);
+  options.onActivity?.({ type: "initializing", stage: "environment", at: Date.now() });
+  const env = await abortable(detectEnv(options.pi, effectiveCwd), options.signal);
 
   // Get parent system prompt for append-mode agents
   const parentSystemPrompt = ctx.getSystemPrompt();
@@ -757,7 +781,8 @@ export async function runAgent(
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });
-  await runInChildSessionContext(() => loader.reload());
+  options.onActivity?.({ type: "initializing", stage: "loader", at: Date.now() });
+  await abortable(runInChildSessionContext(() => loader.reload()), options.signal);
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
   // go through `ext:`), so an unknown name there is unambiguously a typo. Previously
@@ -1005,7 +1030,24 @@ export async function runAgent(
     sessionOpts.thinkingLevel = thinkingLevel;
   }
 
-  const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  // A session created after a stop has already landed is orphaned by the
+  // abortable race below — it rejects first and the creation promise's value
+  // never reaches us. Attach a once-listener so the late session is disposed
+  // the moment it materializes.
+  options.onActivity?.({ type: "initializing", stage: "session", at: Date.now() });
+  const creation = runInChildSessionContext(() => createAgentSession(sessionOpts));
+  let detachLateDispose: (() => void) | undefined;
+  if (options.signal) {
+    const onLateDispose = () => {
+      creation
+        .then(({ session: lateSession }) => { lateSession.dispose(); })
+        .catch(() => {});
+    };
+    options.signal.addEventListener("abort", onLateDispose, { once: true });
+    detachLateDispose = () => options.signal?.removeEventListener("abort", onLateDispose);
+  }
+  const { session } = await abortable(creation, options.signal);
+  detachLateDispose?.();
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -1016,14 +1058,16 @@ export async function runAgent(
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
-  await session.bindExtensions({
+  options.onActivity?.({ type: "initializing", stage: "extensions", at: Date.now() });
+  await abortable(session.bindExtensions({
     onError: (err) => {
       options.onToolActivity?.({
         type: "end",
         toolName: `extension-error:${err.extensionPath}`,
       });
     },
-  });
+  }), options.signal);
+  throwIfAborted(options.signal);
 
   // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
   // the ACTIVE set still needs managing: pi activates only its four default
@@ -1055,6 +1099,12 @@ export async function runAgent(
     if (event.type === "turn_end") {
       turnCount++;
       options.onTurnEnd?.(turnCount);
+      options.onActivity?.({
+        type: "turn-end",
+        at: Date.now(),
+        turnCount,
+        contextPercent: getSessionContextPercent(session) ?? undefined,
+      });
       if (maxTurns != null) {
         if (!softLimitReached && turnCount >= maxTurns) {
           softLimitReached = true;
@@ -1065,18 +1115,60 @@ export async function runAgent(
         }
       }
     }
-    if (event.type === "message_start") {
+    if (event.type === "message_start" && event.message.role === "assistant") {
       currentMessageText = "";
+      options.onActivity?.({ type: "model-inference", at: Date.now() });
     }
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      currentMessageText += event.assistantMessageEvent.delta;
-      options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+    if (event.type === "message_update") {
+      if (event.assistantMessageEvent.type === "text_delta") {
+        currentMessageText += event.assistantMessageEvent.delta;
+        options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+      }
+      options.onActivity?.({ type: "model-progress", at: Date.now() });
     }
     if (event.type === "tool_execution_start") {
       options.onToolActivity?.({ type: "start", toolName: event.toolName });
+      options.onActivity?.({
+        type: "tool-start",
+        at: Date.now(),
+        tool: {
+          callId: event.toolCallId,
+          name: event.toolName,
+          startedAt: Date.now(),
+          lastUpdateAt: Date.now(),
+        },
+      });
+    }
+    if (event.type === "tool_execution_update") {
+      options.onActivity?.({
+        type: "tool-update",
+        at: Date.now(),
+        callId: event.toolCallId,
+      });
     }
     if (event.type === "tool_execution_end") {
       options.onToolActivity?.({ type: "end", toolName: event.toolName });
+      options.onActivity?.({
+        type: "tool-end",
+        at: Date.now(),
+        callId: event.toolCallId,
+      });
+    }
+    if (event.type === "compaction_start") {
+      options.onActivity?.({
+        type: "compaction-start",
+        at: Date.now(),
+        compaction: { startedAt: Date.now(), reason: event.reason },
+      });
+    }
+    if (event.type === "compaction_end") {
+      options.onActivity?.({ type: "compaction-end", at: Date.now() });
+      if (!event.aborted && event.result) {
+        options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+      }
+    }
+    if (event.type === "agent_settled") {
+      options.onActivity?.({ type: "idle", at: Date.now() });
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
@@ -1087,9 +1179,6 @@ export async function runAgent(
         cacheRead: u.cacheRead ?? 0,
         cost: u.cost?.total ?? 0,
       });
-    }
-    if (event.type === "compaction_end" && !event.aborted && event.result) {
-      options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
     }
   });
 
@@ -1110,6 +1199,10 @@ export async function runAgent(
   const startLen = session.messages.length;
   let structuredRetried = false;
   try {
+    // A stop that landed before we got here must not let the child reach the
+    // model; the manager's catch tail turns this throw into a graceful "stopped".
+    throwIfAborted(options.signal);
+    options.onActivity?.({ type: "model-inference", at: Date.now() });
     await session.prompt(effectivePrompt);
 
     // One more prompt when a schema was asked for and nothing usable came back
@@ -1148,19 +1241,31 @@ export async function runAgent(
   };
 }
 
+export interface ResumeRunOptions {
+  maxTurns?: number;
+  graceTurns?: number;
+  onToolActivity?: (activity: ToolActivity) => void;
+  onAssistantUsage?: (usage: LifetimeUsage) => void;
+  onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+  onActivity?: (event: AgentActivityEvent) => void;
+  signal?: AbortSignal;
+}
+
+export interface ResumeRunResult {
+  text: string;
+  aborted: boolean;
+  steered: boolean;
+  failure?: string;
+}
+
 /**
  * Send a new prompt to an existing session (resume).
  */
 export async function resumeAgent(
   session: AgentSession,
   prompt: string,
-  options: {
-    onToolActivity?: (activity: ToolActivity) => void;
-    onAssistantUsage?: (usage: LifetimeUsage) => void;
-    onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
-    signal?: AbortSignal;
-  } = {},
-): Promise<{ text: string; failure?: string }> {
+  options: ResumeRunOptions = {},
+): Promise<ResumeRunResult> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
@@ -1168,27 +1273,105 @@ export async function resumeAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
-    ? session.subscribe((event: AgentSessionEvent) => {
-        if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
-        if (event.type === "message_end" && event.message.role === "assistant") {
-          const u = (event.message as any).usage;
-          if (u) options.onAssistantUsage?.({
-            input: u.input ?? 0,
-            output: u.output ?? 0,
-            cacheWrite: u.cacheWrite ?? 0,
-            cacheRead: u.cacheRead ?? 0,
-            cost: u.cost?.total ?? 0,
-          });
+  let turnCount = 0;
+  const maxTurns = options.maxTurns != null && options.maxTurns > 0 ? options.maxTurns : undefined;
+  const graceTurnsCount = options.graceTurns ?? getGraceTurns();
+  let softLimitReached = false;
+  let aborted = false;
+
+  const unsubEvents = session.subscribe((event: AgentSessionEvent) => {
+    if (event.type === "turn_end") {
+      turnCount++;
+      options.onActivity?.({
+        type: "turn-end",
+        at: Date.now(),
+        turnCount,
+        contextPercent: getSessionContextPercent(session) ?? undefined,
+      });
+      if (maxTurns != null) {
+        if (!softLimitReached && turnCount >= maxTurns) {
+          softLimitReached = true;
+          session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+        } else if (softLimitReached && turnCount >= maxTurns + graceTurnsCount) {
+          aborted = true;
+          session.abort();
         }
-        if (event.type === "compaction_end" && !event.aborted && event.result) {
-          options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
-        }
-      })
-    : () => {};
+      }
+    }
+    if (event.type === "tool_execution_start") {
+      options.onToolActivity?.({ type: "start", toolName: event.toolName });
+      options.onActivity?.({
+        type: "tool-start",
+        at: Date.now(),
+        tool: {
+          callId: event.toolCallId,
+          name: event.toolName,
+          startedAt: Date.now(),
+          lastUpdateAt: Date.now(),
+        },
+      });
+    }
+    if (event.type === "tool_execution_update") {
+      options.onActivity?.({
+        type: "tool-update",
+        at: Date.now(),
+        callId: event.toolCallId,
+      });
+    }
+    if (event.type === "tool_execution_end") {
+      options.onToolActivity?.({ type: "end", toolName: event.toolName });
+      options.onActivity?.({
+        type: "tool-end",
+        at: Date.now(),
+        callId: event.toolCallId,
+      });
+    }
+    if (event.type === "message_start" && event.message.role === "assistant") {
+      options.onActivity?.({ type: "model-inference", at: Date.now() });
+    }
+    if (event.type === "message_update") {
+      options.onActivity?.({ type: "model-progress", at: Date.now() });
+    }
+    if (event.type === "compaction_start") {
+      options.onActivity?.({
+        type: "compaction-start",
+        at: Date.now(),
+        compaction: { startedAt: Date.now(), reason: event.reason },
+      });
+    }
+    if (event.type === "compaction_end") {
+      options.onActivity?.({ type: "compaction-end", at: Date.now() });
+      if (!event.aborted && event.result) {
+        options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+      }
+    }
+    if (event.type === "turn_end") {
+      options.onActivity?.({
+        type: "turn-end",
+        at: Date.now(),
+        contextPercent: getSessionContextPercent(session) ?? undefined,
+      });
+    }
+    if (event.type === "agent_settled") {
+      options.onActivity?.({ type: "idle", at: Date.now() });
+    }
+    if (event.type === "message_end" && event.message.role === "assistant") {
+      const u = (event.message as any).usage;
+      if (u) {
+        options.onAssistantUsage?.({
+          input: u.input ?? 0,
+          output: u.output ?? 0,
+          cacheWrite: u.cacheWrite ?? 0,
+          cacheRead: u.cacheRead ?? 0,
+          cost: u.cost?.total ?? 0,
+        });
+      }
+    }
+  });
 
   try {
+    throwIfAborted(options.signal);
+    options.onActivity?.({ type: "model-inference", at: Date.now() });
     await session.prompt(prompt);
   } finally {
     collector.unsubscribe();
@@ -1198,6 +1381,8 @@ export async function resumeAgent(
 
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
+    aborted,
+    steered: softLimitReached,
     failure: finalTurnError(session, startLen),
   };
 }
