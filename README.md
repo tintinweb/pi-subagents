@@ -859,14 +859,15 @@ Set `isolation: worktree` to run an agent in a temporary git worktree:
 Agent({ subagent_type: "refactor", prompt: "...", isolation: "worktree" })
 ```
 
-The agent gets a full, isolated copy of the repository. The worktree directory is removed on completion either way — what differs is whether a branch is left behind:
+The agent gets a full, isolated copy of the repository. The worktree is normally removed on completion:
 - **No changes:** worktree is cleaned up automatically, no branch
 - **Changes made:** changes are committed to a new branch (`pi-agent-<id>`), and the result names the branch and the `git merge` command for it. The branch is the only artifact — the worktree path is gone, so nothing points into it
 - **Agent committed its own work:** the branch is created at the agent's HEAD, preserving its commits (uncommitted leftovers are committed on top first)
+- **Preservation failed:** the run reports an error and keeps the worktree. Its path is included in the result so the changes can be recovered manually
 
 The agent's system prompt names the worktree as an isolated copy and tells it to work only there, even if other instructions name the main checkout — otherwise an inherited parent prompt or a task prompt mentioning the project path walks it straight back out of the copy. This is a directive, not a sandbox: an agent with shell access can still `cd` out, so don't rely on `isolation` alone to protect the main checkout.
 
-The automatic preservation commit uses `--no-verify`, so local pre-commit hooks can't block it — the commit is local-only and never pushed, and pre-push/server-side hooks still apply.
+The automatic preservation commit uses `--no-verify` and `--no-gpg-sign`, so local pre-commit hooks and interactive signing configuration can't block it. The commit is local-only and never pushed; pre-push and server-side hooks still apply. Other Git failures keep the worktree intact and report its recovery path instead of deleting the only copy.
 
 If the worktree cannot be created (not a git repo, no commits, or `git worktree add` fails), the `Agent` call fails with a clear error instead of running unisolated — `isolation: "worktree"` is a strict guarantee, not a hint. The call is reported as a failed tool call, not as a subagent that ran and returned that message, so the model doesn't retry it as if the agent had merely reported a problem. Initialize git and commit at least once, or omit `isolation`.
 

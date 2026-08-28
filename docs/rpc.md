@@ -8,7 +8,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 ## Spawn options
 
-`subagents:rpc:spawn` forwards `options` to `AgentManager.spawn` — but not verbatim. The manager's `spawn` behind the RPC is `spawnTopLevel` (`src/index.ts:698-721`), which deletes internal-only fields first, and then `spawnResolved` (`src/index.ts:666-696`) overwrites the activity-tracker callbacks with its own. The full interface is `SpawnOptions` at `src/agent-manager.ts:169-303`; what a bus caller actually gets is three different things.
+`subagents:rpc:spawn` forwards `options` to `AgentManager.spawn` — but not verbatim. The manager's `spawn` behind the RPC is `spawnTopLevel` (`src/index.ts:698-721`), which deletes internal-only fields first, and then `spawnResolved` (`src/index.ts:666-696`) overwrites the activity-tracker callbacks with its own. The full interface is `SpawnOptions` at `src/agent-manager.ts:177-313`; what a bus caller actually gets is three different things.
 
 **Honoured** — set these and they take effect:
 
@@ -49,7 +49,7 @@ Four things that are not obvious from the tables:
 
 - **Nothing is required at runtime.** `description` is non-optional in TypeScript and never validated. A spawn with no `options` at all is legal and is what `test/cross-extension-rpc.test.ts:81-94` pins.
 - **`bypassQueue` is not stripped.** Its own doc comment scopes it to the scheduler and the `/agents` generator, but a bus caller can set it and skip the `maxConcurrent` check.
-- **`structuredOutput` is documented "set only by the workflow host"** (`src/agent-manager.ts:231-234`) and is also not stripped.
+- **`structuredOutput` is documented "set only by the workflow host"** (`src/agent-manager.ts:239-242`) and is also not stripped.
 - **`signal` and the `on*` callbacks are function values.** They work only because the bus is in-process. A caller that genuinely serializes its payload cannot use them, and they arrive as `undefined` rather than failing.
 
 ### Names that look right and are not
@@ -80,11 +80,12 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `Unknown or disabled agent type: "<raw>". Available: <list>.` | `src/agent-types.ts:187` — only under `fallbackSubagent: none` |
 | `No agent type given. Available: <list>.` | `src/agent-types.ts:187-194` — same condition |
 | `<reason> The configured fallbackSubagent "<x>" is itself unknown or disabled. Available: <list>.` | `src/agent-types.ts:205-207` |
-| `SpawnOptions.cwd must be an absolute path: "<value>"` | `src/agent-manager.ts:85` |
-| `SpawnOptions.cwd does not exist: "<cwd>"` | `src/agent-manager.ts:91` |
-| `SpawnOptions.cwd is not a directory: "<cwd>"` | `src/agent-manager.ts:94` |
-| `Cannot run with isolation: "worktree" — not a git repo, no commits yet, or 'git worktree add' failed.` | `src/agent-manager.ts:716-719`, surfaced through `awaitStartup` |
-| git plumbing failures | `src/worktree.ts:76` |
+| `SpawnOptions.cwd must be an absolute path: "<value>"` | `src/agent-manager.ts:93` |
+| `SpawnOptions.cwd does not exist: "<cwd>"` | `src/agent-manager.ts:99` |
+| `SpawnOptions.cwd is not a directory: "<cwd>"` | `src/agent-manager.ts:102` |
+| `Cannot run with isolation: "worktree" — not a git repo, no commits yet, or 'git worktree add' failed.` | `src/agent-manager.ts:724-727`, surfaced through `awaitStartup` |
+| `Worktree cleanup failed: <reason>` + retained recovery path | `src/agent-manager.ts:76-81`; the agent becomes an error instead of losing the worktree |
+| git plumbing failures | `src/worktree.ts:78` |
 | `Agent not found` | stop — `src/cross-extension-rpc.ts:170` |
 | `Agent is owned by another agent or workflow` | stop — `:178` |
 | `Agent is not running` | stop — `:182`. The record exists, so it has already settled |
@@ -92,13 +93,13 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 
 Three things the table cannot show:
 
-- **The failure that is not an error.** With `worktreeIsolation` off project-wide, `isolation: "worktree"` is dropped at `src/agent-manager.ts:712` with no error, no note on the record, and a success envelope on the wire. Your agent runs in the main tree. If you asked for isolation because two agents were going to write the same files, they now collide and nothing told you.
+- **The failure that is not an error.** With `worktreeIsolation` off project-wide, `isolation: "worktree"` is dropped at `src/agent-manager.ts:720` with no error, no note on the record, and a success envelope on the wire. Your agent runs in the main tree. If you asked for isolation because two agents were going to write the same files, they now collide and nothing told you.
 - **`data` is omitted** when a handler returns nothing, so a successful stop or consume reply is a bare `{ success: true }` and `reply.data.anything` throws.
 - **`requestId` is not validated.** It is interpolated straight into the reply channel, so a caller that omits it gets its reply on the literal channel `subagents:rpc:spawn:reply:undefined` — where every other caller that omitted it is also listening. Send one, and send a unique one.
 
 ## Ownership
 
-`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts:122-126`). `subagents:rpc:stop` enforces it (`src/cross-extension-rpc.ts:178`): a nested child or a workflow's agent is owned by something that is *waiting on it*, and aborting it out from under that owner turns another extension's stop into a failed step. It is defence in depth rather than a live hole — no RPC hands out agent ids, so a caller has no ordinary way to name one it does not own.
+`isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts:130-134`). `subagents:rpc:stop` enforces it (`src/cross-extension-rpc.ts:178`): a nested child or a workflow's agent is owned by something that is *waiting on it*, and aborting it out from under that owner turns another extension's stop into a failed step. It is defence in depth rather than a live hole — no RPC hands out agent ids, so a caller has no ordinary way to name one it does not own.
 
 Two asymmetries to know about, stated as they are:
 
@@ -125,7 +126,7 @@ When a background agent finishes, pi-subagents sends the user a completion notif
 
 Fire-and-forget is the intended use: the reply carries nothing to act on, and the channel sits outside the `subagents:rpc:ping` version handshake on purpose (`src/cross-extension-rpc.ts:190`), so you can send it unconditionally and an older pi-subagents with no handler simply keeps notifying.
 
-Consumption is not terminal. An `@handle` steer un-consumes the record (`src/index.ts:920`) because the agent's reply to that message still needs relaying, and so does a background resume (`src/agent-manager.ts:1135`) because the record is starting a new run.
+Consumption is not terminal. An `@handle` steer un-consumes the record (`src/index.ts:920`) because the agent's reply to that message still needs relaying, and so does a background resume (`src/agent-manager.ts:1148`) because the record is starting a new run.
 
 One related thing that lives nowhere else: on every top-level settle, pi-subagents writes a session entry — not an event — via `pi.appendEntry("subagents:record", …)` (`src/index.ts:585`), carrying `id`, `type`, `description`, `status`, `result`, `error`, `startedAt` and `completedAt`. It exists for cross-extension history reconstruction. It is append-only history, not something to react to.
 
