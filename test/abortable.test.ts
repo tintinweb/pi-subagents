@@ -22,7 +22,7 @@
 // is why they are asserted directly rather than through a consumer.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { abortable } from "../src/abortable.js";
+import { abortable, abortableWithTimeout } from "../src/abortable.js";
 
 /**
  * Collect unhandled rejections for the duration of a block.
@@ -160,5 +160,56 @@ describe("abortable", () => {
     }
 
     expect(remove).toHaveBeenCalledTimes(20);
+  });
+});
+
+describe("abortableWithTimeout", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("resolves value when promise completes before timeout", async () => {
+    const res = await abortableWithTimeout(Promise.resolve("hello"), {
+      timeoutMs: 1_000,
+    });
+    expect(res).toEqual({ timedOut: false, value: "hello" });
+  });
+
+  it("returns timedOut: true when deadline expires", async () => {
+    vi.useFakeTimers();
+    let resolveChild: (v: string) => void;
+    const child = new Promise<string>((r) => {
+      resolveChild = r;
+    });
+
+    const waitPromise = abortableWithTimeout(child, { timeoutMs: 500 });
+    vi.advanceTimersByTime(500);
+
+    const res = await waitPromise;
+    expect(res).toEqual({ timedOut: true });
+
+    // Late resolution is absorbed
+    resolveChild!("late value");
+  });
+
+  it("rejects when caller signal aborts before timeout", async () => {
+    const controller = new AbortController();
+    const waitPromise = abortableWithTimeout(new Promise(() => {}), {
+      signal: controller.signal,
+      timeoutMs: 5_000,
+    });
+
+    controller.abort(new Error("caller aborted"));
+    await expect(waitPromise).rejects.toThrow("caller aborted");
+  });
+
+  it("rejects immediately on already-aborted signal", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("already aborted"));
+
+    await expect(
+      abortableWithTimeout(Promise.resolve("nope"), {
+        signal: controller.signal,
+        timeoutMs: 5_000,
+      }),
+    ).rejects.toThrow("already aborted");
   });
 });

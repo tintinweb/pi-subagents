@@ -7,7 +7,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { abortable } from "./abortable.js";
+import { abortableWithTimeout } from "./abortable.js";
 import {
   buildAgentRegistry,
   getAgentConfigIn,
@@ -25,6 +25,7 @@ import {
   streamToOutputFile,
   writeInitialEntry,
 } from "./output-file.js";
+import { getResultWaitTimeoutMs } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import type {
   AgentConfig,
@@ -369,6 +370,13 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     parameters: Type.Object({
       agent_id: Type.String(),
       wait: Type.Optional(Type.Boolean()),
+      timeout_ms: Type.Optional(
+        Type.Number({
+          description: "Maximum duration in ms to wait (1000-600000). Defaults to resultWaitTimeoutMs (30s).",
+          minimum: 1_000,
+          maximum: 600_000,
+        }),
+      ),
     }),
     execute: async (_toolCallId, params, signal) => {
       const record = context.manager.getRecord(params.agent_id);
@@ -379,11 +387,45 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // call is aborted) stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
+      let timedOut = false;
       if (params.wait && (record.status === "queued" || record.status === "running")) {
+        const timeoutMs = params.timeout_ms ?? getResultWaitTimeoutMs();
+        const deadline = Date.now() + timeoutMs;
         while (record.status === "queued") {
-          await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            timedOut = true;
+            break;
+          }
+          const outcome = await abortableWithTimeout(
+            new Promise<void>((resolve) => setTimeout(resolve, Math.min(remaining, 250))),
+            { signal, timeoutMs: remaining },
+          );
+          if (outcome.timedOut) {
+            timedOut = true;
+            break;
+          }
         }
-        if (record.promise) await abortable(record.promise, signal);
+        if (!timedOut && record.promise) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            timedOut = true;
+          } else {
+            const outcome = await abortableWithTimeout(record.promise, {
+              signal,
+              timeoutMs: remaining,
+            });
+            if (outcome.timedOut) {
+              timedOut = true;
+            }
+          }
+        }
+      }
+      if (timedOut) {
+        return textResult(
+          `Nested agent "${params.agent_id}" is still running (wait timed out). You can query its result again.`,
+          false,
+        );
       }
       return textResult(formatRecord(record, "fetched"), record.status === "error");
     },

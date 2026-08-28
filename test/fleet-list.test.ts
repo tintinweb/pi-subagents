@@ -214,6 +214,12 @@ describe("FleetList navigation", () => {
     expect(output).not.toContain("nested-child");
   });
 
+  it("keeps a stopping agent in the roster", () => {
+    const h = harness([makeRecord({ id: "slow", description: "winding down", status: "stopping" })]);
+    const output = h.render().join("\n");
+    expect(output).toContain("winding down");
+  });
+
   it("activates on ↓ at an empty prompt, consuming the key", () => {
     const h = harness([makeRecord()]);
     const res = h.press(DOWN);

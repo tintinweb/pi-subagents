@@ -132,6 +132,8 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       isolated: fm.isolated != null ? fm.isolated === true : undefined,
       memory: parseMemory(fm.memory),
       isolation: parseIsolation(fm.isolation),
+      toolCallTimeoutMs: nonNegativeInt(fm.tool_call_timeout_ms),
+      inactivityTimeoutMs: nonNegativeInt(fm.inactivity_timeout_ms),
       enabled: fm.enabled !== false,  // default true; explicitly false disables
       source,
       sourcePath: path,
