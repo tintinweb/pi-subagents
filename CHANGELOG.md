@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`pi.extensions` now points at the compiled `./dist/index.js` instead of `./src/index.ts`**, removing the per-boot TypeScript transform (~0.6–1.1 s per session, [#252](https://github.com/tintinweb/pi-subagents/issues/252)). A `prepare` script builds `dist/` on git installs, falling back to `npx -p typescript` since pi installs those without devDependencies.
+
 ## [0.19.0] - 2026-08-25
 
 > **⚠️ Breaking — this release requires pi 0.84.0 or newer** (`peerDependencies` moves from `>=0.81.0`). `SubagentWorkflow` needs two host APIs that do not exist below it, and both fail the typecheck rather than degrading quietly — see the `Changed` entry below for which, and why neither was worth reimplementing to hold the old floor. npm flags an older pi at install time.
