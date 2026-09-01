@@ -44,6 +44,34 @@ export const SUBAGENT_TOOL_NAMES = {
   STEER: "steer_subagent",
 } as const;
 
+/**
+ * Subagent adapter convention (ADR 0012) — the channel names and payload
+ * shapes MUST match @gotgenes/pi-permission-system's
+ * `subagent-lifecycle-events.ts` (v29+). Announcing each child lets an
+ * installed permission system detect our in-process children and forward
+ * their `ask` gates to the interactive parent session instead of failing
+ * closed (`confirmationUnavailable`). Emitting with no listener is a no-op,
+ * so these broadcasts are safe whether or not a permission system is present.
+ */
+export const CHILD_SESSION_CREATED = "subagents:child:session-created";
+export const CHILD_SESSION_BOUND = "subagents:child:bound";
+export const CHILD_SESSION_DISPOSED = "subagents:child:disposed";
+
+/** Payload carried by the child lifecycle broadcasts. */
+export interface ChildLifecyclePayload {
+  /** Child session id — the registry key. */
+  sessionId: string;
+  /**
+   * Session that spawned the child. Root-targeted for nested spawns so every
+   * ask forwards to the interactive top-level session, not a headless parent.
+   */
+  parentSessionId?: string;
+}
+
+function emitChildLifecycle(pi: ExtensionAPI | undefined, channel: string, payload: ChildLifecyclePayload): void {
+  pi?.events?.emit(channel, payload);
+}
+
 /** Names of tools registered by this extension that subagents must NOT inherit. */
 const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
@@ -430,6 +458,13 @@ export interface RunOptions {
    * "this is how you return your answer" instructions is worse than one.
    */
   workflow?: boolean;
+  /**
+   * Session id of the top-level session that spawned this run. Root-targeted:
+   * every child, nested or not, announces this as its parent so permission
+   * asks always reach the interactive session that can serve them. Falls back
+   * to `ctx`'s own session id when unset (direct programmatic callers).
+   */
+  parentSessionId?: string;
   /** Override working directory (e.g. for worktree isolation). */
   cwd?: string;
   /**
@@ -978,6 +1013,10 @@ export async function runAgent(
   // Pi 0.80.8 replaced createAgentSession's modelRegistry option with
   // modelRuntime, but ExtensionContext still exposes only the registry facade.
   // Pass both so the full supported Pi range retains the parent's providers.
+  // SAFETY: ExtensionContext.modelRegistry is typed as a registry facade whose
+  // private `.runtime` field carries the resolved ModelRuntime; the double
+  // assertion is deliberate so pre-0.80.8 pi (no modelRuntime option) and newer
+  // pi (typed ModelRuntime) both satisfy `Parameters<typeof createAgentSession>[0]`.
   const parentModelRuntime = (ctx.modelRegistry as unknown as { runtime?: unknown }).runtime;
   const sessionOpts: Parameters<typeof createAgentSession>[0] & {
     modelRegistry: ExtensionContext["modelRegistry"];
@@ -1007,6 +1046,20 @@ export async function runAgent(
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
 
+  // Subagent adapter convention: announce the child synchronously, before
+  // `bindExtensions()`, so a permission system's registration lands before the
+  // child's own extensions load (the contract's pre-bind ordering). The id is
+  // the session manager's — the same manager the child's own ctx reports, so
+  // its permission instance detects itself via the process-global registry.
+  // Root-targeted: `parentSessionId` is the top-level session (threaded by the
+  // manager), never the immediate spawner, so nested grandchildren forward to
+  // the interactive session that can actually serve.
+  const childSessionId = sessionManager.getSessionId?.();
+  const parentSessionId = options.parentSessionId ?? ctx.sessionManager?.getSessionId?.();
+  if (childSessionId !== undefined) {
+    emitChildLifecycle(options.pi, CHILD_SESSION_CREATED, { sessionId: childSessionId, parentSessionId });
+  }
+
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
     options.agentId ? `${baseSessionName}#${options.agentId.slice(0, 8)}` : baseSessionName,
@@ -1016,14 +1069,29 @@ export async function runAgent(
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
-  await session.bindExtensions({
-    onError: (err) => {
-      options.onToolActivity?.({
-        type: "end",
-        toolName: `extension-error:${err.extensionPath}`,
-      });
-    },
-  });
+  try {
+    await session.bindExtensions({
+      onError: (err) => {
+        options.onToolActivity?.({
+          type: "end",
+          toolName: `extension-error:${err.extensionPath}`,
+        });
+      },
+    });
+  } catch (err) {
+    // A bind failure means the session never ran; still unregister it so the
+    // parent's registry does not keep a dead child entry.
+    if (childSessionId !== undefined) {
+      emitChildLifecycle(options.pi, CHILD_SESSION_DISPOSED, { sessionId: childSessionId });
+    }
+    throw err;
+  }
+  // Optional `bound` broadcast — success path only. Buys the permission
+  // system's unguarded-child alarm: a child that finished binding without a
+  // permission node is announced so the operator hears about it.
+  if (childSessionId !== undefined) {
+    emitChildLifecycle(options.pi, CHILD_SESSION_BOUND, { sessionId: childSessionId, parentSessionId });
+  }
 
   // With `allowedToolNames` unset, the registry is scoped by `excludeTools` but
   // the ACTIVE set still needs managing: pi activates only its four default
@@ -1126,6 +1194,15 @@ export async function runAgent(
     unsubTurns();
     collector.unsubscribe();
     cleanupAbort();
+    // The run has settled (success or error) — unregister the child. The only
+    // remaining body after this is synchronous string work that cannot throw,
+    // so this finally is the run's true end. ponytail: a throw in the few
+    // synchronous setup lines between bind and this finally (installExtensionToolScope,
+    // onSessionCreated) would leak the registry entry — harmless, since session ids
+    // are unique per process and never matched again.
+    if (childSessionId !== undefined) {
+      emitChildLifecycle(options.pi, CHILD_SESSION_DISPOSED, { sessionId: childSessionId });
+    }
   }
 
   const responseText = collector.getText().trim() || getLastAssistantText(session, startLen);
