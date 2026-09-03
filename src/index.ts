@@ -1629,7 +1629,7 @@ Terse command-style prompts produce shallow, generic work.
       const parentModelId = ctx.model?.id;
       const effectiveModelId = model?.id;
       const modelName = effectiveModelId && effectiveModelId !== parentModelId
-        ? (model?.name ?? effectiveModelId).replace(/^Claude\s+/i, "").toLowerCase()
+        ? effectiveModelId
         : undefined;
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
