@@ -1050,6 +1050,39 @@ describe("resuming an evicted agent by name", () => {
     expect(uiCtx.ui.notify).toHaveBeenCalledWith("Resuming @explore", "info");
   });
 
+  it("lets the Agent tool resume the persisted conversation by its old id", async () => {
+    const { tools } = boot();
+    finishedRun(fakeSession());
+    const id = await spawnBackground(tools);
+    await flush();
+    await evict(id);
+    vi.mocked(runAgent).mockClear();
+    finishedRun(fakeSession());
+
+    const result = await tools.get("Agent").execute(
+      "tc-resume",
+      {
+        prompt: "anything else?",
+        description: "Continue review",
+        subagent_type: "Explore",
+        resume: id,
+        run_in_background: true,
+      },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    await flush();
+
+    expect(textOf(result)).toContain("resumed from its persisted session");
+    expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
+      expect.anything(),
+      "Explore",
+      "anything else?",
+      expect.objectContaining({ resumeSessionFile: sessionPath() }),
+    );
+  });
+
   it("hands the resumed agent the handle back instead of numbering it", async () => {
     // Otherwise the resume lands on `@explore-2` and the tombstone keeps
     // `@explore`, so the name the user just typed still points at the corpse.
