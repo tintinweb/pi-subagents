@@ -84,8 +84,12 @@ export interface AgentConfig {
   isDefault?: boolean;
   /** false = agent is hidden from the registry */
   enabled?: boolean;
-  /** Where this agent was loaded from */
-  source?: "default" | "project" | "global";
+  /**
+   * Where this agent was loaded from. `"package"` means an installed pi package
+   * declared it (see package-resources.ts) — those files live under pi's install
+   * root, so `/agents` treats them as read-only and offers Eject instead of Edit.
+   */
+  source?: "default" | "project" | "global" | "package";
   /** Path of the .md it was loaded from. Unset for embedded defaults. */
   sourcePath?: string;
 }

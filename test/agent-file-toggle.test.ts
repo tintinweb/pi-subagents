@@ -349,6 +349,35 @@ describe("findAgentFile", () => {
     it("finds nothing when neither the source path nor the probe resolves", () => {
       expect(locateAgentFile("nope", join(tmpDir, ".pi", "agents", "gone.md"), tmpDir)).toBeUndefined();
     });
+
+    // A package agent's file sits under pi's install root. Handing it back would
+    // let `/agents → Edit` write somewhere `pi update` overwrites and `Delete`
+    // remove a file `pi install` puts straight back.
+    it("refuses a package agent's own file even though it exists", () => {
+      const pkgAgents = join(tmpDir, "node_modules", "demo", "agents");
+      write(pkgAgents, "researcher");
+
+      expect(locateAgentFile("researcher", join(pkgAgents, "researcher.md"), tmpDir, "package"))
+        .toBeUndefined();
+    });
+
+    it("returns the local stub shadowing a package agent, not the package file", () => {
+      const pkgAgents = join(tmpDir, "node_modules", "demo", "agents");
+      write(pkgAgents, "researcher");
+      write(join(tmpDir, ".pi", "agents"), "researcher");
+
+      expect(locateAgentFile("researcher", join(pkgAgents, "researcher.md"), tmpDir, "package"))
+        .toEqual({ path: join(tmpDir, ".pi", "agents", "researcher.md"), location: "project" });
+    });
+
+    it("still honours a source path for every non-package source", () => {
+      write(join(tmpDir, ".pi", "agents"), "reviewer");
+      const sourcePath = join(tmpDir, ".pi", "agents", "reviewer.md");
+      for (const source of ["project", "global", "default", undefined] as const) {
+        expect(locateAgentFile("code-reviewer", sourcePath, tmpDir, source))
+          .toEqual({ path: sourcePath, location: "project" });
+      }
+    });
   });
 });
 

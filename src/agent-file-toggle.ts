@@ -57,7 +57,7 @@ export function findAgentFile(
 }
 
 /**
- * Find the file behind a *loaded* agent, preferring the path the loader
+ * Find the *editable* file behind a loaded agent, preferring the path the loader
  * actually read (`AgentConfig.sourcePath`) over the `<type>.md` guess.
  *
  * An agent's type comes from its frontmatter `name:` now, so the two can
@@ -69,13 +69,22 @@ export function findAgentFile(
  *
  * The probe stays as the fallback: a built-in that was never ejected has no
  * `sourcePath`, and a path can go stale between a load and this call.
+ *
+ * **A package agent has no editable file.** Its `sourcePath` points inside pi's
+ * install root, where an edit is lost on the next `pi update` and a delete is
+ * undone by the next `pi install`. Passing `source` lets that rule live here
+ * rather than at each `/agents` call site: the package path is ignored, and the
+ * name probe runs instead — which finds the local stub shadowing it, if one
+ * exists, and otherwise nothing. Callers then take their no-file branch, which
+ * is the Eject-or-shadow behaviour a not-yet-ejected builtin already gets.
  */
 export function locateAgentFile(
   name: string,
   sourcePath: string | undefined,
   cwd: string = process.cwd(),
+  source?: AgentConfig["source"],
 ): { path: string; location: AgentFileLocation } | undefined {
-  if (sourcePath && existsSync(sourcePath)) {
+  if (source !== "package" && sourcePath && existsSync(sourcePath)) {
     return { path: sourcePath, location: classifyAgentDir(sourcePath, cwd) };
   }
   return findAgentFile(name, cwd);
@@ -83,9 +92,11 @@ export function locateAgentFile(
 
 /**
  * Which discovery location a loaded agent's file came from. Only ever names
- * a directory in a confirmation prompt, so an unrecognized parent — which
- * loadCustomAgents cannot currently produce — reports as personal rather than
- * widening the type for a case that has no better answer.
+ * a directory in a confirmation prompt, so an unrecognized parent reports as
+ * personal rather than widening the type for a case that has no better answer.
+ *
+ * Package-provided paths never reach here: `locateAgentFile` drops them above,
+ * because none of the three locations this classifies is where they live.
  */
 function classifyAgentDir(path: string, cwd: string): AgentFileLocation {
   if (path.startsWith(projectAgentsDir(cwd) + sep)) return "project";
@@ -224,10 +235,24 @@ ${input.systemPrompt}
 }
 
 /** Render a built-in tool list as a `tools:` frontmatter value. */
-function formatToolsField(tools: string[] | undefined): string {
-  if (tools === undefined) return "all";
-  if (tools.length === 0) return "none";
-  return tools.join(", ");
+/**
+ * Rebuild the `tools:` CSV from the two halves the loader split it into.
+ *
+ * `extSelectors` has to come back with the built-ins: `parseToolsField` splits
+ * `tools: read, ext:mcp/github` into `["read"]` and `["ext:mcp/github"]`, so
+ * writing only the first half hands the ejected copy a *narrower* toolset than
+ * the file it came from. That was invisible while Eject only ever ran on
+ * built-in defaults, which carry no selectors; a package agent can.
+ *
+ * Zero built-ins with selectors present is not `none` — `none` means no tools at
+ * all, while `ext:` entries alone mean "extension tools only", which the loader
+ * reads back from a `tools:` line carrying just those entries.
+ */
+function formatToolsField(tools: string[] | undefined, extSelectors?: string[]): string {
+  const selectors = extSelectors ?? [];
+  if (tools === undefined) return selectors.length > 0 ? ["*", ...selectors].join(", ") : "all";
+  if (tools.length === 0) return selectors.length > 0 ? selectors.join(", ") : "none";
+  return [...tools, ...selectors].join(", ");
 }
 
 /** Serialize an AgentConfig to a full .md file (frontmatter + system prompt) for eject. */
@@ -239,7 +264,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   // Absent means "all built-ins"; an EMPTY list means explicitly zero. Writing
   // `all` for both would hand a deliberately tool-less agent the whole toolbox
   // the first time it is ejected.
-  fmFields.push(`tools: ${formatToolsField(cfg.builtinToolNames)}`);
+  fmFields.push(`tools: ${formatToolsField(cfg.builtinToolNames, cfg.extSelectors)}`);
   if (cfg.model) fmFields.push(`model: ${cfg.model}`);
   if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
   if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);
@@ -256,14 +281,18 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   if (cfg.inheritContext) fmFields.push("inherit_context: true");
   // Both cases, not just `true`: with `backgroundByDefault` on, omitting the
   // field means background, so `false` is the only way to pin an agent file to
-  // foreground and is no longer interchangeable with absence. No caller can
-  // reach it yet — Eject only handles built-in defaults, which omit the field —
-  // so this keeps the writer symmetric with the loader, nothing more.
+  // foreground and is no longer interchangeable with absence. Reachable since
+  // package agents became ejectable — a built-in default omits the field.
   if (cfg.runInBackground !== undefined) fmFields.push(`run_in_background: ${cfg.runInBackground}`);
   if (cfg.outputTranscript === false) fmFields.push("output_transcript: false");
   if (cfg.isolated) fmFields.push("isolated: true");
   if (cfg.memory) fmFields.push(`memory: ${cfg.memory}`);
   if (cfg.isolation) fmFields.push(`isolation: ${cfg.isolation}`);
+  // Also only reachable through a package agent: no built-in default sets
+  // either. Omitting them would have the ejected copy silently stop persisting
+  // its session, or write it somewhere else.
+  if (cfg.persistSession !== undefined) fmFields.push(`persist_session: ${cfg.persistSession}`);
+  if (cfg.sessionDir) fmFields.push(`session_dir: ${JSON.stringify(cfg.sessionDir)}`);
 
   return `---\n${fmFields.join("\n")}\n---\n\n${cfg.systemPrompt}\n`;
 }
