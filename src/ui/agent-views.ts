@@ -217,7 +217,7 @@ export class RunningAgentPicker {
     const hrMid = row(th.fg("dim", "─".repeat(innerW)));
 
     const lines: string[] = [hrTop];
-    lines.push(row(th.bold("Running agents")));
+    lines.push(row(`${th.bold("Running agents")}${th.fg("dim", " · t/i/p/o")}`));
     lines.push(hrMid);
     const numW = String(this.agents.length).length;
     for (let i = 0; i < this.agents.length; i++) {
@@ -231,7 +231,7 @@ export class RunningAgentPicker {
       lines.push(row(`${bullet} ${text}`));
     }
     lines.push(hrMid);
-    lines.push(row(th.fg("dim", "t/i/p/o · ↑↓ · Enter view · Esc back")));
+    lines.push(row(th.fg("dim", "↑↓ select · enter view · t/i/p/o · esc back")));
     lines.push(hrBot);
     return lines;
   }
