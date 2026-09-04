@@ -409,7 +409,7 @@ export class FleetList {
   }
 
   /**
-   * Open an agent's overlay. `view` skips the picker (FleetView `s/p/i/o`).
+   * Open an agent's overlay. `view` skips the picker (FleetView `t/i/p/o`).
    * Enter goes through the picker first. `viewerClose` is set during the
    * picker so the list does not treat the dialog as "user left" and reset.
    */
@@ -426,7 +426,7 @@ export class FleetList {
       this.update();
       return;
     }
-    if (chosen === "session" && !record.session) {
+    if (chosen === "transcript" && !record.session) {
       this.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
     }
@@ -492,7 +492,7 @@ export class FleetList {
     const sel = Math.min(this.selectedIndex, rows.length);
 
     const hint = this.active
-      ? "↑↓ select · enter view · s/p/i/o · esc back"
+      ? "↑↓ select · enter view · t/i/p/o · esc back"
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));

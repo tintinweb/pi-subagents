@@ -1,9 +1,9 @@
 /**
  * conversation-viewer.ts — Overlay for viewing one agent.
  *
- * Four views (Session / Prompt / Info / Output), switched with s/p/i/o.
- * Session is the live transcript; the others are static bodies from the record.
- * Subscribes to session events so Session auto-updates while the agent runs.
+ * Four views (Transcript / Info / Prompt / Output), switched with t/i/p/o.
+ * Transcript is the live conversation; the others are static bodies from the record.
+ * Subscribes to session events so Transcript auto-updates while the agent runs.
  */
 
 import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -194,15 +194,15 @@ export class ConversationViewer implements Component {
      * the same thing. Omitted → `m` still cycles, viewer-locally.
      */
     private onMarkdownMode?: (mode: ViewerMarkdownMode) => void,
-    /** Which of the four views to show first. Omitted → Session. */
-    initialView: AgentViewerView = "session",
+    /** Which of the four views to show first. Omitted → Transcript. */
+    initialView: AgentViewerView = "transcript",
   ) {
     this.view = initialView;
-    this.autoScroll = initialView === "session";
+    this.autoScroll = initialView === "transcript";
     this.scrollByView = {
-      session: { offset: 0, auto: true },
-      prompt: { offset: 0, auto: false },
+      transcript: { offset: 0, auto: true },
       info: { offset: 0, auto: false },
+      prompt: { offset: 0, auto: false },
       output: { offset: 0, auto: false },
     };
     this.markdownTheme = resolveMarkdownTheme(theme);
@@ -255,8 +255,8 @@ export class ConversationViewer implements Component {
     // Cycle raw → assistant-only → everything. The escape hatch that makes
     // Markdown rendering safe to default on: a result the renderer reshapes
     // (a diff, an indented log, a `#`-commented script) is one key from verbatim.
-    // Session-only: Prompt/Info/Output are not Markdown transcripts.
-    if (matchesKey(data, "m") && this.view === "session") {
+    // Transcript-only: Info/Prompt/Output are not Markdown transcripts.
+    if (matchesKey(data, "m") && this.view === "transcript") {
       this.stopArmed = false;
       const next = MARKDOWN_MODES[(MARKDOWN_MODES.indexOf(this.markdownMode()) + 1) % MARKDOWN_MODES.length];
       this.markdownModeOverride = next;
@@ -386,10 +386,10 @@ export class ConversationViewer implements Component {
       // Abbreviated (`raw`/`md`/`md+`) because the idle footer is already full
       // at 80 columns with steer + stop present, and this group has no
       // degradation step below "drop the line-count readout".
-      if (this.view === "session") {
+      if (this.view === "transcript") {
         actions.push(th.fg("dim", `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`));
       }
-      const viewKeys = th.fg("dim", "s/p/i/o");
+      const viewKeys = th.fg("dim", "t/i/p/o");
       const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
 
       // Prepend the line-count/scroll-% readout only when there's spare width —
@@ -551,10 +551,10 @@ export class ConversationViewer implements Component {
 
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
-    if (this.view === "prompt") return this.buildPromptLines(width);
     if (this.view === "info") return this.buildInfoViewLines(width);
+    if (this.view === "prompt") return this.buildPromptLines(width);
     if (this.view === "output") return this.buildOutputLines(width);
-    return this.buildSessionLines(width);
+    return this.buildTranscriptLines(width);
   }
 
   private buildPromptLines(width: number): string[] {
@@ -585,7 +585,7 @@ export class ConversationViewer implements Component {
     return lines.map(l => truncateToWidth(l, width));
   }
 
-  private buildSessionLines(width: number): string[] {
+  private buildTranscriptLines(width: number): string[] {
     const th = this.theme;
     if (!this.session) {
       return [th.fg("dim", "No session available.")];

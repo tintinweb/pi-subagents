@@ -3062,8 +3062,8 @@ Terse command-style prompts produce shallow, generic work.
     await showRunningAgents(ctx);
   }
 
-  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord, view: AgentViewerView = "session") {
-    if (view === "session" && !record.session) {
+  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord, view: AgentViewerView = "transcript") {
+    if (view === "transcript" && !record.session) {
       ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
     }

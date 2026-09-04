@@ -16,11 +16,12 @@ function mockTui() {
 }
 
 describe("viewFromKey", () => {
-  it("maps s/p/i/o and nothing else", () => {
-    expect(viewFromKey("s")).toBe("session");
-    expect(viewFromKey("p")).toBe("prompt");
+  it("maps t/i/p/o and nothing else", () => {
+    expect(viewFromKey("t")).toBe("transcript");
     expect(viewFromKey("i")).toBe("info");
+    expect(viewFromKey("p")).toBe("prompt");
     expect(viewFromKey("o")).toBe("output");
+    expect(viewFromKey("s")).toBeUndefined();
     expect(viewFromKey("m")).toBeUndefined();
     expect(viewFromKey("x")).toBeUndefined();
     expect(viewFromKey("\r")).toBeUndefined();
@@ -28,30 +29,30 @@ describe("viewFromKey", () => {
 });
 
 describe("ViewPicker", () => {
-  it("lists Session, Prompt, Info, Output in that order", () => {
+  it("lists Transcript, Info, Prompt, Output in that order", () => {
     const picker = new ViewPicker(mockTui(), theme, undefined, vi.fn());
     const body = picker.render(40).join("\n");
     expect(AGENT_VIEWS.map(v => VIEW_LABELS[v]).every(label => body.includes(label))).toBe(true);
-    const sessionAt = body.indexOf("Session");
-    const promptAt = body.indexOf("Prompt");
+    const transcriptAt = body.indexOf("Transcript");
     const infoAt = body.indexOf("Info");
+    const promptAt = body.indexOf("Prompt");
     const outputAt = body.indexOf("Output");
-    expect(sessionAt).toBeLessThan(promptAt);
-    expect(promptAt).toBeLessThan(infoAt);
-    expect(infoAt).toBeLessThan(outputAt);
+    expect(transcriptAt).toBeLessThan(infoAt);
+    expect(infoAt).toBeLessThan(promptAt);
+    expect(promptAt).toBeLessThan(outputAt);
   });
 
-  it("Enter selects the highlighted view, s/p/i/o select immediately, Esc cancels", () => {
+  it("Enter selects the highlighted view, t/i/p/o select immediately, Esc cancels", () => {
     const done = vi.fn();
     const picker = new ViewPicker(mockTui(), theme, undefined, done);
-    picker.handleInput("\x1b[B"); // down → Prompt
+    picker.handleInput("\x1b[B"); // down → Info
     picker.handleInput("\r");
-    expect(done).toHaveBeenCalledWith("prompt");
+    expect(done).toHaveBeenCalledWith("info");
 
     done.mockReset();
     const picker2 = new ViewPicker(mockTui(), theme, undefined, done);
-    picker2.handleInput("i");
-    expect(done).toHaveBeenCalledWith("info");
+    picker2.handleInput("p");
+    expect(done).toHaveBeenCalledWith("prompt");
 
     done.mockReset();
     const picker3 = new ViewPicker(mockTui(), theme, undefined, done);

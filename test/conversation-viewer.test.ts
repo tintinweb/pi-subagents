@@ -915,7 +915,7 @@ describe("ConversationViewer views", () => {
   const strip = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
   const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
 
-  function viewer(over: Partial<AgentRecord> = {}, initialView: "session" | "prompt" | "info" | "output" = "session") {
+  function viewer(over: Partial<AgentRecord> = {}, initialView: "transcript" | "info" | "prompt" | "output" = "transcript") {
     const session = mockSession([
       { role: "user", content: "PARENT CONTEXT\n\nspawn prompt" },
       { role: "assistant", content: [{ type: "text", text: "final answer" }] },
@@ -933,7 +933,7 @@ describe("ConversationViewer views", () => {
   }
 
   it("names the active view in the header", () => {
-    expect(strip(viewer().render(80).join("\n"))).toContain("Session");
+    expect(strip(viewer().render(80).join("\n"))).toContain("Transcript");
     expect(strip(viewer({}, "prompt").render(80).join("\n"))).toContain("Prompt");
   });
 
@@ -977,11 +977,11 @@ describe("ConversationViewer views", () => {
     expect(out).toContain("No output yet.");
   });
 
-  it("s/p/i/o switch views without closing", () => {
+  it("t/i/p/o switch views without closing", () => {
     const done = vi.fn();
     const v = new ConversationViewer(
       mockTui(30, 80), mockSession([]), mockRecord({ prompt: "hello", result: "bye" }),
-      undefined, theme, done, undefined, undefined, undefined, false, undefined, undefined, "session",
+      undefined, theme, done, undefined, undefined, undefined, false, undefined, undefined, "transcript",
     );
     v.handleInput("p");
     expect(strip(v.render(80).join("\n"))).toContain("Prompt");
@@ -990,8 +990,8 @@ describe("ConversationViewer views", () => {
     expect(strip(v.render(80).join("\n"))).toContain("Info");
     v.handleInput("o");
     expect(strip(v.render(80).join("\n"))).toContain("Output");
-    v.handleInput("s");
-    expect(strip(v.render(80).join("\n"))).toContain("Session");
+    v.handleInput("t");
+    expect(strip(v.render(80).join("\n"))).toContain("Transcript");
     expect(done).not.toHaveBeenCalled();
   });
 
@@ -1003,7 +1003,7 @@ describe("ConversationViewer views", () => {
     v.handleInput("\r");
     v.handleInput("p");
     const out = strip(v.render(80).join("\n"));
-    expect(out).toContain("Session");
+    expect(out).toContain("Transcript");
     expect(out).not.toContain("hello");
     expect(out).toContain("Enter send");
   });

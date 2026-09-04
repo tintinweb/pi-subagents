@@ -1,9 +1,11 @@
 /**
- * agent-views.ts — Session / Prompt / Info / Output picker and info-line builder.
+ * agent-views.ts — Transcript / Info / Prompt / Output picker and info-line builder.
  *
  * One overlay has four views. This module owns the names, the letter keys, the
  * picker that chooses a view before the overlay opens, and the Info body so
  * ConversationViewer does not have to know how the picker is spelled.
+ * Keys are t/i/p/o so they do not collide with workflow-dialog s (skip) / p (pause)
+ * while that dialog has focus; overlay and dialog never share a key stream.
  */
 
 import { isKeyRelease, Key, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -18,21 +20,21 @@ import {
 } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
 
-export const AGENT_VIEWS = ["session", "prompt", "info", "output"] as const;
+export const AGENT_VIEWS = ["transcript", "info", "prompt", "output"] as const;
 export type AgentViewerView = (typeof AGENT_VIEWS)[number];
 
 export const VIEW_LABELS: Record<AgentViewerView, string> = {
-  session: "Session",
-  prompt: "Prompt",
+  transcript: "Transcript",
   info: "Info",
+  prompt: "Prompt",
   output: "Output",
 };
 
-const VIEW_KEYS = ["s", "p", "i", "o"] as const;
+const VIEW_KEYS = ["t", "i", "p", "o"] as const;
 const VIEW_BY_KEY: Record<(typeof VIEW_KEYS)[number], AgentViewerView> = {
-  s: "session",
-  p: "prompt",
+  t: "transcript",
   i: "info",
+  p: "prompt",
   o: "output",
 };
 
@@ -53,7 +55,7 @@ export function formatWallClock(ms: number): string {
 
 /**
  * Info-view body. No turn count — that is the one stat this surface refuses.
- * Cost follows the same `showCost` gate as the Session header.
+ * Cost follows the same `showCost` gate as the Transcript header.
  */
 export function buildInfoLines(record: AgentRecord, showCost: boolean): string[] {
   const lines: string[] = [];
@@ -81,7 +83,7 @@ export function buildInfoLines(record: AgentRecord, showCost: boolean): string[]
   return lines;
 }
 
-/** Four-row view picker: arrows + Enter, or s/p/i/o. */
+/** Four-row view picker: arrows + Enter, or t/i/p/o. */
 export class ViewPicker {
   private index = 0;
   private keys: ViewerKeys;
@@ -148,7 +150,7 @@ export class ViewPicker {
       lines.push(row(left + " ".repeat(gap) + hint));
     }
     lines.push(hrMid);
-    lines.push(row(th.fg("dim", "s/p/i/o · ↑↓ · Enter open · Esc back")));
+    lines.push(row(th.fg("dim", "t/i/p/o · ↑↓ · Enter open · Esc back")));
     lines.push(hrBot);
     return lines;
   }

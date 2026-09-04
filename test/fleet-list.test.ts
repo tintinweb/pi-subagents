@@ -502,7 +502,7 @@ describe("FleetList overlay lifecycle", () => {
     h.press(DOWN); // activate (main, idx 0)
     h.press(DOWN); // a1 (idx 1)
     h.press(DOWN); // a2 (idx 2)
-    h.press("s"); // open a2 (Session, skip picker)
+    h.press("t"); // open a2 (Transcript, skip picker)
     // a1 finishes and drops out while viewing → a2 shifts from idx 2 to idx 1.
     agents.splice(0, 1);
     await h.closeOverlay();
@@ -516,7 +516,7 @@ describe("FleetList overlay lifecycle", () => {
     const h = harness(agents);
     h.press(DOWN);  // activate (main)
     h.press(DOWN);  // → the agent
-    h.press("s"); // open Session (skip picker)
+    h.press("t"); // open Transcript (skip picker)
 
     const viewer = h.overlayComponent();
     expect(viewer).toBeDefined();
@@ -535,7 +535,7 @@ describe("FleetList overlay lifecycle", () => {
     });
     h.press(DOWN);  // activate (main)
     h.press(DOWN);  // → the agent
-    h.press("s"); // open Session (skip picker)
+    h.press("t"); // open Transcript (skip picker)
 
     h.overlayComponent()!.handleInput("m");
 
@@ -550,7 +550,7 @@ describe("FleetList overlay lifecycle", () => {
     const h = harness(agents);
     h.press(DOWN); // active (main)
     h.press(DOWN); // → the agent
-    h.press("s"); // opens Session overlay
+    h.press("t"); // opens Transcript overlay
     expect(h.overlayOpened()).toBe(true);
     // The agent finishes, well past the linger window...
     agents[0] = makeRecord({ id: "live", description: "the one", status: "completed", completedAt: Date.now() - 60_000 });
@@ -559,20 +559,20 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().some(l => l.includes("the one"))).toBe(true); // and stays listed while viewed
   });
 
-  it("Enter on an agent opens the view picker, not Session", () => {
+  it("Enter on an agent opens the view picker, not Transcript", () => {
     const h = harness([makeRecord({ id: "live", description: "the one" })]);
     h.press(DOWN);
     h.press(DOWN);
     h.press(ENTER);
     expect(h.overlayOpened()).toBe(true);
     const body = h.overlayComponent()!.render(60).join("\n");
-    expect(body).toContain("Session");
-    expect(body).toContain("Prompt");
+    expect(body).toContain("Transcript");
     expect(body).toContain("Info");
+    expect(body).toContain("Prompt");
     expect(body).toContain("Output");
   });
 
-  it("s/p/i/o on an agent row open that view and do not reach the editor", () => {
+  it("t/i/p/o on an agent row open that view and do not reach the editor", () => {
     const h = harness([makeRecord({ id: "live", description: "the one", prompt: "do the thing" })]);
     h.press(DOWN);
     h.press(DOWN);
@@ -583,7 +583,7 @@ describe("FleetList overlay lifecycle", () => {
     expect(body).toContain("do the thing");
   });
 
-  it("s/p/i/o on main do not open an overlay", () => {
+  it("t/i/p/o on main do not open an overlay", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN); // main
     expect(h.press("p")).toEqual({ consume: true });
