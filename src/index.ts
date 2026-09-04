@@ -36,7 +36,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type AgentTombstone, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -584,6 +584,7 @@ export default function (pi: ExtensionAPI) {
     // Persist final record for cross-extension history reconstruction
     pi.appendEntry("subagents:record", {
       id: record.id, type: record.type, description: record.description,
+      handle: record.handle, alias: record.alias, sessionFile: record.sessionFile,
       status: record.status, result: record.result, error: record.error,
       startedAt: record.startedAt, completedAt: record.completedAt,
     });
@@ -793,6 +794,24 @@ export default function (pi: ExtensionAPI) {
       fleet.setUICtx(ctx.ui as any);
     }
     manager.clearCompleted(true);
+    for (const entry of ctx.sessionManager.getEntries?.() ?? []) {
+      if (entry.type !== "custom" || entry.customType !== "subagents:record") continue;
+      const data = entry.data as Partial<AgentTombstone>;
+      if (
+        typeof data.id !== "string" || typeof data.type !== "string"
+        || typeof data.description !== "string" || typeof data.handle !== "string"
+        || typeof data.sessionFile !== "string" || typeof data.completedAt !== "number"
+      ) continue;
+      manager.restoreTombstone({
+        id: data.id,
+        type: data.type,
+        description: data.description,
+        handle: data.handle,
+        alias: typeof data.alias === "string" ? data.alias : undefined,
+        sessionFile: data.sessionFile,
+        completedAt: data.completedAt,
+      });
+    }
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
     if (!rpcHandle) {
@@ -986,7 +1005,7 @@ export default function (pi: ExtensionAPI) {
         // exception — both come from a tombstone this extension wrote.
         const id = spawnResolved(pi, ctx, dispatch.type, mention.message, {
           description: entry.description,
-          reclaim: { handle: entry.handle, alias: entry.alias },
+          reclaim: { id: entry.id, handle: entry.handle, alias: entry.alias },
           resumeSessionFile: entry.sessionFile,
           isBackground: true,
         });
@@ -1482,7 +1501,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls — they run concurrently.
 - Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
+- resume continues a previous agent by ID or handle, reopening its persisted session after cleanup or reload; steer_subagent messages a running one.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1506,7 +1525,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
 - **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
-- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
+- Use resume with an agent ID or handle to continue a previous agent's work. Persisted sessions reopen after cleanup or reload. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
@@ -1629,7 +1648,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description: "Optional agent ID or handle to resume from. Continues from previous context, reopening a persisted session after cleanup or reload. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
       isolated: Type.Optional(
@@ -1771,7 +1790,12 @@ Terse command-style prompts produce shallow, generic work.
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
 
-      const rawType = params.subagent_type as SubagentType;
+      const resumeTarget = params.resume ? manager.resolveMention(params.resume) : undefined;
+      const rawType = (
+        resumeTarget?.kind === "live" ? resumeTarget.record.type
+        : resumeTarget?.kind === "tombstone" ? resumeTarget.entry.type
+        : params.subagent_type
+      ) as SubagentType;
       // Single decision point for dispatch (#183): unknown, disabled and
       // case-ambiguous types are refused here, BEFORE anything spawns, so a
       // background or scheduled call can't start running the wrong agent while
@@ -1969,7 +1993,100 @@ Terse command-style prompts produce shallow, generic work.
 
       // Resume existing agent
       if (params.resume) {
-        const existing = manager.getRecord(params.resume);
+        if (resumeTarget?.kind === "tombstone") {
+          const entry = resumeTarget.entry;
+          if (!existsSync(entry.sessionFile)) {
+            manager.dropTombstone(entry.handle);
+            return textResult(`Agent "${params.resume}" cannot be resumed because its persisted session is gone.`);
+          }
+          if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
+            return textResult(`Agent "${params.resume}" cannot be resumed because the ${entry.type} agent is no longer available.`);
+          }
+
+          const { state, callbacks } = createActivityTracker(effectiveMaxTurns);
+          let id = "";
+          const originalOnSessionCreated = callbacks.onSessionCreated;
+          callbacks.onSessionCreated = (session: any) => {
+            originalOnSessionCreated(session);
+            const record = manager.getRecord(id);
+            if (record?.outputFile) {
+              record.outputCleanup = streamToOutputFile(session, record.outputFile, id, ctx.cwd, session.messages.length);
+            }
+          };
+          const options = {
+            description: entry.description,
+            reclaim: { id: entry.id, handle: entry.handle, alias: entry.alias },
+            resumeSessionFile: entry.sessionFile,
+            model,
+            maxTurns: effectiveMaxTurns,
+            isolated,
+            thinkingLevel: thinking,
+            invocation: agentInvocation,
+            rootSessionId: ctx.sessionManager.getSessionId(),
+            ...callbacks,
+          };
+          const onSpawned = (agentId: string) => {
+            id = agentId;
+            if (!outputTranscript) return;
+            const record = manager.getRecord(id);
+            if (!record) return;
+            record.outputFile = createOutputFilePath(ctx.cwd, id, ctx.sessionManager.getSessionId());
+            ensureOutputFile(record.outputFile);
+          };
+
+          if (runInBackground) {
+            id = manager.spawn(pi, ctx, dispatch.type, params.prompt, { ...options, isBackground: true });
+            onSpawned(id);
+            await manager.awaitStartup(id);
+            const record = manager.getRecord(id);
+            if (!record) return textResult(`Failed to resume agent "${params.resume}".`);
+            record.toolCallId = toolCallId;
+            const joinMode = resolveJoinMode(defaultJoinMode, true);
+            if (joinMode) record.joinMode = joinMode;
+            agentActivity.set(id, state);
+            widget.ensureTimer();
+            widget.update();
+            fleet.ensureTimer();
+            fleet.update();
+            pi.events.emit("subagents:created", {
+              id,
+              type: entry.type,
+              description: entry.description,
+              isBackground: true,
+            });
+            return textResult(
+              `Agent resumed from its persisted session in background.\n` +
+              `Agent ID: ${id}\n` +
+              `Type: ${entry.type}\n` +
+              (record.outputFile ? `Output file: ${record.outputFile}\n` : "") +
+              `\nYou will be notified when this agent completes.\n` +
+              `Use get_subagent_result to retrieve full results, or steer_subagent to send it messages.`,
+              { ...detailBaseFor(record), toolUses: record.toolUses, tokens: "", durationMs: 0, status: "background" as const, agentId: id },
+            );
+          }
+
+          const reopened = await manager.spawnAndWait(
+            pi,
+            ctx,
+            dispatch.type,
+            params.prompt,
+            { ...options, signal },
+            onSpawned,
+          );
+          agentActivity.set(reopened.id, state);
+          if (reopened.record.status === "error") {
+            return textResult(
+              `Agent failed: ${reopened.record.error}${partialOutputSuffix(reopened.record)}`,
+              buildDetails(detailBaseFor(reopened.record), reopened.record),
+            );
+          }
+          return textResult(
+            reopened.record.result?.trim() || "No output.",
+            buildDetails(detailBaseFor(reopened.record), reopened.record),
+          );
+        }
+
+        const existing = resumeTarget?.kind === "live" ? resumeTarget.record : undefined;
         if (!existing || !isTopLevelAgent(existing)) {
           return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
         }

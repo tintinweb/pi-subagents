@@ -182,17 +182,15 @@ interface SpawnOptions {
    */
   resumeSessionFile?: string;
   /**
-   * Take an evicted agent's names back verbatim instead of allocating fresh
-   * ones, so a resumed conversation keeps the handle the user just typed —
-   * `handleBase(type)` cannot reproduce a numbered `explore-2`. Safe without an
-   * `assignHandle` pass because tombstoned names are excluded from allocation
-   * (`takenHandles`), so nothing live can be holding them.
+   * Take an evicted agent's id and names back verbatim instead of allocating
+   * fresh ones, so every reference to the resumed conversation stays valid.
+   * Safe without an `assignHandle` pass because tombstoned names and ids belong
+   * to records that are no longer live.
    *
-   * Internal capability, like `resumeSessionFile`: a forged handle would
-   * duplicate a live agent's name and make `resolveMention` ambiguous, so
-   * `spawnTopLevel` strips it from anything a caller sends.
+   * Internal capability, like `resumeSessionFile`: forged values could collide
+   * with a live agent, so `spawnTopLevel` strips it from anything a caller sends.
    */
-  reclaim?: { handle: string; alias?: string };
+  reclaim?: { id?: string; handle: string; alias?: string };
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
@@ -498,7 +496,7 @@ export class AgentManager {
     // can fix and retry; the RPC layer converts throws into error envelopes.
     assertValidSpawnCwd(options.cwd);
 
-    const id = randomUUID().slice(0, 17);
+    const id = options.reclaim?.id ?? randomUUID().slice(0, 17);
     const abortController = new AbortController();
     const record: AgentRecord = {
       id,
@@ -1393,6 +1391,15 @@ export class AgentManager {
     this.tombstones.delete(handle);
   }
 
+  /** Restore an evicted persisted agent recorded in the parent session. */
+  restoreTombstone(entry: AgentTombstone): void {
+    this.tombstones.set(entry.handle, entry);
+    while (this.tombstones.size > MAX_TOMBSTONES) {
+      const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));
+      this.tombstones.delete(oldest.handle);
+    }
+  }
+
   /** Evicted agents whose conversation can still be reopened, newest first. */
   listTombstones(): AgentTombstone[] {
     return [...this.tombstones.values()].sort((a, b) => b.completedAt - a.completedAt);
@@ -1450,7 +1457,7 @@ export class AgentManager {
    */
   private tombstone(record: AgentRecord): void {
     if (!record.handle || !record.sessionFile) return;
-    this.tombstones.set(record.handle, {
+    this.restoreTombstone({
       handle: record.handle,
       alias: record.alias,
       id: record.id,
@@ -1459,12 +1466,6 @@ export class AgentManager {
       sessionFile: record.sessionFile,
       completedAt: record.completedAt ?? Date.now(),
     });
-    // Bound the memory a long session can accumulate. Oldest first, since the
-    // agent someone still wants to reach is the one they used most recently.
-    while (this.tombstones.size > MAX_TOMBSTONES) {
-      const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));
-      this.tombstones.delete(oldest.handle);
-    }
   }
 
   private cleanup() {
