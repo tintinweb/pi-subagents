@@ -136,6 +136,7 @@ function harness(
     notify: () => {},
     custom: ((factory: any) => {
       opened = true;
+      closed = false;
       return new Promise<undefined>((resolve) => {
         const done = (r: undefined) => { closed = true; overlayDone = undefined; resolve(r); };
         overlayDone = done;
@@ -176,6 +177,15 @@ function harness(
     closeOverlay: async () => { overlayDone?.(undefined); await Promise.resolve(); },
     widgetTui: fakeTui,
   };
+}
+
+/** Enter on a selected agent opens the picker; Enter again picks Transcript. */
+async function openTranscript(h: Harness) {
+  h.press(ENTER);
+  h.overlayComponent()!.handleInput("\r");
+  // pickAgentView is async around ui.custom, so the viewer factory runs two ticks later.
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 describe("formatFleetElapsed", () => {
@@ -502,7 +512,7 @@ describe("FleetList overlay lifecycle", () => {
     h.press(DOWN); // activate (main, idx 0)
     h.press(DOWN); // a1 (idx 1)
     h.press(DOWN); // a2 (idx 2)
-    h.press("t"); // open a2 (Transcript, skip picker)
+    await openTranscript(h);
     // a1 finishes and drops out while viewing → a2 shifts from idx 2 to idx 1.
     agents.splice(0, 1);
     await h.closeOverlay();
@@ -511,12 +521,12 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.render().find(l => l.includes("three"))).toContain("○");
   });
 
-  it("wires the viewer's steer composer to manager.steer with the agent id", () => {
+  it("wires the viewer's steer composer to manager.steer with the agent id", async () => {
     const agents = [makeRecord({ id: "live", description: "the one" })];
     const h = harness(agents);
     h.press(DOWN);  // activate (main)
     h.press(DOWN);  // → the agent
-    h.press("t"); // open Transcript (skip picker)
+    await openTranscript(h);
 
     const viewer = h.overlayComponent();
     expect(viewer).toBeDefined();
@@ -527,7 +537,7 @@ describe("FleetList overlay lifecycle", () => {
     expect(h.manager.steer).toHaveBeenCalledWith("live", "go left");
   });
 
-  it("hands the viewer the user's markdown setting, and persists a mode chosen with m", () => {
+  it("hands the viewer the user's markdown setting, and persists a mode chosen with m", async () => {
     const persisted: ViewerMarkdownMode[] = [];
     const h = harness([makeRecord({ id: "live", description: "the one" })], {
       viewerMarkdown: () => "all",
@@ -535,7 +545,7 @@ describe("FleetList overlay lifecycle", () => {
     });
     h.press(DOWN);  // activate (main)
     h.press(DOWN);  // → the agent
-    h.press("t"); // open Transcript (skip picker)
+    await openTranscript(h);
 
     h.overlayComponent()!.handleInput("m");
 
@@ -545,12 +555,12 @@ describe("FleetList overlay lifecycle", () => {
     expect(persisted).toEqual(["off"]);
   });
 
-  it("does NOT auto-close when the viewed agent finishes (final output stays readable)", () => {
+  it("does NOT auto-close when the viewed agent finishes (final output stays readable)", async () => {
     const agents = [makeRecord({ id: "live", description: "the one" })];
     const h = harness(agents);
     h.press(DOWN); // active (main)
     h.press(DOWN); // → the agent
-    h.press("t"); // opens Transcript overlay
+    await openTranscript(h);
     expect(h.overlayOpened()).toBe(true);
     // The agent finishes, well past the linger window...
     agents[0] = makeRecord({ id: "live", description: "the one", status: "completed", completedAt: Date.now() - 60_000 });
@@ -572,23 +582,13 @@ describe("FleetList overlay lifecycle", () => {
     expect(body).toContain("Output");
   });
 
-  it("t/i/p/o on an agent row open that view and do not reach the editor", () => {
-    const h = harness([makeRecord({ id: "live", description: "the one", prompt: "do the thing" })]);
-    h.press(DOWN);
-    h.press(DOWN);
-    expect(h.press("p")).toEqual({ consume: true });
-    expect(h.overlayOpened()).toBe(true);
-    const body = h.overlayComponent()!.render(80).join("\n");
-    expect(body).toContain("Prompt");
-    expect(body).toContain("do the thing");
-  });
-
-  it("t/i/p/o on main do not open an overlay", () => {
-    const h = harness([makeRecord()]);
+  it("letter keys leave the list and do not open an overlay", () => {
+    const h = harness([makeRecord({ id: "live", description: "the one" })]);
     h.press(DOWN); // main
-    expect(h.press("p")).toEqual({ consume: true });
+    h.press(DOWN); // agent
+    expect(h.press("p")).toBeUndefined();
     expect(h.overlayOpened()).toBe(false);
-    expect(h.render().some(l => l.includes("enter view"))).toBe(true);
+    expect(h.render().some(l => l.includes("← for agents"))).toBe(true);
   });
 
   it("lingers a finished agent in the list, then drops it after the window", () => {

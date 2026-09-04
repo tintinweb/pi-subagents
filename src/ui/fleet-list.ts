@@ -16,7 +16,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentViewerView, pickAgentView, viewFromKey } from "./agent-views.js";
+import { pickAgentView } from "./agent-views.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
@@ -356,13 +356,6 @@ export class FleetList {
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
 
-    const view = viewFromKey(data);
-    if (view) {
-      const entry = this.roster()[this.selectedIndex];
-      if (entry?.kind === "agent") this.openSelected(view);
-      return { consume: true };
-    }
-
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
     return undefined;
@@ -387,7 +380,7 @@ export class FleetList {
     this.update();
   }
 
-  private openSelected(view?: AgentViewerView): void {
+  private openSelected(): void {
     const entry = this.roster()[this.selectedIndex];
     if (!entry || entry.kind === "main") {
       // `main` = return to the prompt; the native transcript is already shown.
@@ -405,20 +398,19 @@ export class FleetList {
       );
       return;
     }
-    void this.openAgent(entry.record, view);
+    void this.openAgent(entry.record);
   }
 
   /**
-   * Open an agent's overlay. `view` skips the picker (FleetView `t/i/p/o`).
-   * Enter goes through the picker first. `viewerClose` is set during the
-   * picker so the list does not treat the dialog as "user left" and reset.
+   * Open an agent's overlay via the view picker. `viewerClose` is set during
+   * the picker so the list does not treat the dialog as "user left" and reset.
    */
-  private async openAgent(record: AgentRecord, view?: AgentViewerView): Promise<void> {
+  private async openAgent(record: AgentRecord): Promise<void> {
     if (!this.ui) return;
     this.viewerClose = () => {};
-    let chosen: AgentViewerView | undefined;
+    let chosen: Awaited<ReturnType<typeof pickAgentView>>;
     try {
-      chosen = view ?? await pickAgentView(this.ui);
+      chosen = await pickAgentView(this.ui);
     } finally {
       this.viewerClose = undefined;
     }
@@ -492,7 +484,7 @@ export class FleetList {
     const sel = Math.min(this.selectedIndex, rows.length);
 
     const hint = this.active
-      ? "↑↓ select · enter view · t/i/p/o · esc back"
+      ? "↑↓ select · enter view · esc back"
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));

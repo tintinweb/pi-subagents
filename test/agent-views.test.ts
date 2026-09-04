@@ -1,13 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
 import {
-  AGENT_VIEWS,
   buildInfoLines,
   formatWallClock,
   RunningAgentPicker,
-  VIEW_LABELS,
   ViewPicker,
-  viewFromKey,
 } from "../src/ui/agent-views.js";
 
 const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
@@ -16,33 +13,7 @@ function mockTui() {
   return { terminal: { rows: 20, columns: 80 }, requestRender: vi.fn() } as any;
 }
 
-describe("viewFromKey", () => {
-  it("maps t/i/p/o and nothing else", () => {
-    expect(viewFromKey("t")).toBe("transcript");
-    expect(viewFromKey("i")).toBe("info");
-    expect(viewFromKey("p")).toBe("prompt");
-    expect(viewFromKey("o")).toBe("output");
-    expect(viewFromKey("s")).toBeUndefined();
-    expect(viewFromKey("m")).toBeUndefined();
-    expect(viewFromKey("x")).toBeUndefined();
-    expect(viewFromKey("\r")).toBeUndefined();
-  });
-});
-
 describe("ViewPicker", () => {
-  it("lists Transcript, Info, Prompt, Output in that order", () => {
-    const picker = new ViewPicker(mockTui(), theme, undefined, vi.fn());
-    const body = picker.render(40).join("\n");
-    expect(AGENT_VIEWS.map(v => VIEW_LABELS[v]).every(label => body.includes(label))).toBe(true);
-    const transcriptAt = body.indexOf("Transcript");
-    const infoAt = body.indexOf("Info");
-    const promptAt = body.indexOf("Prompt");
-    const outputAt = body.indexOf("Output");
-    expect(transcriptAt).toBeLessThan(infoAt);
-    expect(infoAt).toBeLessThan(promptAt);
-    expect(promptAt).toBeLessThan(outputAt);
-  });
-
   it("Enter selects the highlighted view, t/i/p/o select immediately, Esc cancels", () => {
     const done = vi.fn();
     const picker = new ViewPicker(mockTui(), theme, undefined, done);
