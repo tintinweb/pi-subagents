@@ -516,6 +516,7 @@ export class AgentManager {
       // see the handle this record just took, since both come out of the same
       // namespace.
       alias: isTopLevelAgent(options) ? options.reclaim?.alias : undefined,
+      prompt,
       // Overwritten below when the spawn is actually queued; a foreground spawn
       // that queues flips to "queued" there rather than being guessed at here,
       // since the pool decision needs the finished record.
