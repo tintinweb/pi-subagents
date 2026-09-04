@@ -986,7 +986,7 @@ export default function (pi: ExtensionAPI) {
         // exception — both come from a tombstone this extension wrote.
         const id = spawnResolved(pi, ctx, dispatch.type, mention.message, {
           description: entry.description,
-          reclaim: { handle: entry.handle, alias: entry.alias },
+          reclaim: { id: entry.id, handle: entry.handle, alias: entry.alias },
           resumeSessionFile: entry.sessionFile,
           isBackground: true,
         });
@@ -1996,7 +1996,7 @@ Terse command-style prompts produce shallow, generic work.
           };
           const options = {
             description: entry.description,
-            reclaim: { handle: entry.handle, alias: entry.alias },
+            reclaim: { id: entry.id, handle: entry.handle, alias: entry.alias },
             resumeSessionFile: entry.sessionFile,
             model,
             maxTurns: effectiveMaxTurns,
