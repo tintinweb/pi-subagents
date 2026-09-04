@@ -38,7 +38,7 @@ import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitCh
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
-import { type AgentViewerView, pickAgentView } from "./ui/agent-views.js";
+import { type AgentViewerView, pickAgentView, pickRunningAgent } from "./ui/agent-views.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -59,7 +59,6 @@ import {
 } from "./ui/agent-widget.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
-import { selectItem } from "./ui/select-item.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
@@ -3042,22 +3041,17 @@ Terse command-style prompts produce shallow, generic work.
       return;
     }
 
-    // Numbered + item-paired. Two same-type agents spawned together with the
-    // same description render identically here, and resolving the choice by
-    // string match would open whichever came first.
-    const record = await selectItem(ctx.ui, "Running agents", agents, a => {
-      const dn = getDisplayName(a.type);
-      const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
-    });
-    if (!record) return;
+    // Custom list, not ctx.ui.select: t/i/p/o must open a view without a second
+    // menu, the same shortcut FleetView offers on an agent row.
+    const picked = await pickRunningAgent(ctx.ui, agents);
+    if (!picked) return;
 
-    const view = await pickAgentView(ctx.ui);
+    const view = picked.view ?? await pickAgentView(ctx.ui);
     if (!view) {
       await showRunningAgents(ctx);
       return;
     }
-    await viewAgentConversation(ctx, record, view);
+    await viewAgentConversation(ctx, picked.record, view);
     // Back-navigation: re-show the list
     await showRunningAgents(ctx);
   }

@@ -4,6 +4,7 @@ import {
   AGENT_VIEWS,
   buildInfoLines,
   formatWallClock,
+  RunningAgentPicker,
   VIEW_LABELS,
   ViewPicker,
   viewFromKey,
@@ -58,6 +59,53 @@ describe("ViewPicker", () => {
     const picker3 = new ViewPicker(mockTui(), theme, undefined, done);
     picker3.handleInput("\x1b");
     expect(done).toHaveBeenCalledWith(undefined);
+  });
+});
+
+describe("RunningAgentPicker", () => {
+  function agent(over: Partial<AgentRecord> = {}): AgentRecord {
+    return {
+      id: "a1",
+      type: "general-purpose",
+      description: "do the thing",
+      status: "running",
+      toolUses: 2,
+      startedAt: Date.now(),
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
+      compactionCount: 0,
+      ...over,
+    } as AgentRecord;
+  }
+
+  it("shows t/i/p/o in the footer", () => {
+    const picker = new RunningAgentPicker(mockTui(), theme, undefined, [agent()], vi.fn());
+    expect(picker.render(80).join("\n")).toContain("t/i/p/o");
+  });
+
+  it("Enter returns the highlighted agent without a view", () => {
+    const done = vi.fn();
+    const a = agent();
+    const picker = new RunningAgentPicker(mockTui(), theme, undefined, [a], done);
+    picker.handleInput("\r");
+    expect(done).toHaveBeenCalledWith({ record: a });
+  });
+
+  it("t/i/p/o return the highlighted agent and that view", () => {
+    const done = vi.fn();
+    const a = agent({ id: "live" });
+    const picker = new RunningAgentPicker(mockTui(), theme, undefined, [a], done);
+    picker.handleInput("p");
+    expect(done).toHaveBeenCalledWith({ record: a, view: "prompt" });
+  });
+
+  it("arrows move the highlight before t/i/p/o", () => {
+    const done = vi.fn();
+    const a1 = agent({ id: "one", description: "first" });
+    const a2 = agent({ id: "two", description: "second" });
+    const picker = new RunningAgentPicker(mockTui(), theme, undefined, [a1, a2], done);
+    picker.handleInput("\x1b[B");
+    picker.handleInput("t");
+    expect(done).toHaveBeenCalledWith({ record: a2, view: "transcript" });
   });
 });
 

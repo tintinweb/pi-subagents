@@ -81,7 +81,7 @@ Terms:
 MUST:
 
 1. The system must store the spawn prompt on `AgentRecord` at spawn time and keep it for the life of the record.
-2. After the user picks an agent in `/agents` → Running agents, the system must open the view picker.
+2. After the user picks an agent in `/agents` → Running agents, the system must open the view picker. The running-agent list must accept `t` `i` `p` `o` on the highlighted row and skip the picker, the same shortcut FleetView offers. The list footer must show `t/i/p/o`.
 3. FleetView Enter on an **agent** row must open the same view picker. `main` still returns to the prompt. A workflow row still opens the workflow inspector.
 4. The view picker must list Transcript, Info, Prompt, Output in that order.
 5. In the view picker, Up/Down must move the highlight. Enter must open the overlay on the highlighted view.

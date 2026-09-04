@@ -16,6 +16,7 @@ import {
   formatCost,
   formatDuration,
   formatTokens,
+  getDisplayName,
   type Theme,
 } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
@@ -158,6 +159,86 @@ export class ViewPicker {
   invalidate(): void { /* no cached state */ }
 }
 
+/** Result of the running-agent list: a record, plus a view when t/i/p/o skipped the picker. */
+export type RunningAgentChoice = { record: AgentRecord; view?: AgentViewerView };
+
+/** Numbered agent list. Enter opens the view picker; t/i/p/o open that view at once. */
+export class RunningAgentPicker {
+  private index = 0;
+  private keys: ViewerKeys;
+
+  constructor(
+    private tui: TUI,
+    private theme: Theme,
+    keybindings: ViewerKeybindings | undefined,
+    private agents: readonly AgentRecord[],
+    private done: (choice: RunningAgentChoice | undefined) => void,
+  ) {
+    this.keys = createViewerKeys(keybindings);
+  }
+
+  handleInput(data: string): void {
+    if (isKeyRelease(data)) return;
+    if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "q")) {
+      this.done(undefined);
+      return;
+    }
+    const record = this.agents[this.index];
+    if (!record) return;
+    const byKey = viewFromKey(data);
+    if (byKey) {
+      this.done({ record, view: byKey });
+      return;
+    }
+    if (matchesKey(data, "enter") || matchesKey(data, Key.enter)) {
+      this.done({ record });
+      return;
+    }
+    if (this.keys.scrollUp(data)) {
+      this.index = Math.max(0, this.index - 1);
+      this.tui.requestRender();
+      return;
+    }
+    if (this.keys.scrollDown(data)) {
+      this.index = Math.min(this.agents.length - 1, this.index + 1);
+      this.tui.requestRender();
+    }
+  }
+
+  render(width: number): string[] {
+    if (width < 6) return [];
+    const th = this.theme;
+    const innerW = width - 4;
+    const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - visibleWidth(s)));
+    const row = (content: string) =>
+      th.fg("border", "│") + " " + truncateToWidth(pad(content, innerW), innerW, "...", true) + " " + th.fg("border", "│");
+    const hrTop = th.fg("border", `╭${"─".repeat(width - 2)}╮`);
+    const hrBot = th.fg("border", `╰${"─".repeat(width - 2)}╯`);
+    const hrMid = row(th.fg("dim", "─".repeat(innerW)));
+
+    const lines: string[] = [hrTop];
+    lines.push(row(th.bold("Running agents")));
+    lines.push(hrMid);
+    const numW = String(this.agents.length).length;
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      const selected = i === this.index;
+      const bullet = selected ? th.fg("accent", "●") : th.fg("dim", "○");
+      const n = String(i + 1).padStart(numW);
+      const dur = formatDuration(a.startedAt, a.completedAt);
+      const label = `${n}. ${getDisplayName(a.type)} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      const text = selected ? th.bold(label) : th.fg("muted", label);
+      lines.push(row(`${bullet} ${text}`));
+    }
+    lines.push(hrMid);
+    lines.push(row(th.fg("dim", "t/i/p/o · ↑↓ · Enter view · Esc back")));
+    lines.push(hrBot);
+    return lines;
+  }
+
+  invalidate(): void { /* no cached state */ }
+}
+
 /** Minimal UI surface the picker needs from `ctx.ui` / FleetView. */
 export type ViewPickerUI = {
   custom<T>(
@@ -178,6 +259,20 @@ export async function pickAgentView(ui: ViewPickerUI): Promise<AgentViewerView |
     {
       overlay: true,
       overlayOptions: { anchor: "center", width: "50%", minWidth: 36, maxHeight: "50%" },
+    },
+  );
+}
+
+/** Open the running-agent list. Enter then picks a view; t/i/p/o skip that picker. */
+export async function pickRunningAgent(
+  ui: ViewPickerUI,
+  agents: readonly AgentRecord[],
+): Promise<RunningAgentChoice | undefined> {
+  return ui.custom<RunningAgentChoice | undefined>(
+    (tui, theme, keybindings, done) => new RunningAgentPicker(tui, theme, keybindings, agents, done),
+    {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "80%", minWidth: 48, maxHeight: "70%" },
     },
   );
 }
