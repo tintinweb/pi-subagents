@@ -77,11 +77,11 @@ describe("RunningAgentPicker", () => {
     } as AgentRecord;
   }
 
-  it("shows t/i/p/o in the title and the fleet-style footer", () => {
-    const body = new RunningAgentPicker(mockTui(), theme, undefined, [agent()], vi.fn()).render(80).join("\n");
-    expect(body).toContain("Running agents");
-    expect(body).toContain(" · t/i/p/o");
-    expect(body).toContain("↑↓ select · enter view · t/i/p/o · esc back");
+  it("shows the fleet-style t/i/p/o hint in the footer only", () => {
+    const lines = new RunningAgentPicker(mockTui(), theme, undefined, [agent()], vi.fn()).render(80);
+    const title = lines.find(l => l.includes("Running agents")) ?? "";
+    expect(title).not.toContain("t/i/p/o");
+    expect(lines.join("\n")).toContain("↑↓ select · enter view · t/i/p/o · esc back");
   });
 
   it("Enter returns the highlighted agent without a view", () => {

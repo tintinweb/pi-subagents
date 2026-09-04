@@ -217,7 +217,7 @@ export class RunningAgentPicker {
     const hrMid = row(th.fg("dim", "─".repeat(innerW)));
 
     const lines: string[] = [hrTop];
-    lines.push(row(`${th.bold("Running agents")}${th.fg("dim", " · t/i/p/o")}`));
+    lines.push(row(th.bold("Running agents")));
     lines.push(hrMid);
     const numW = String(this.agents.length).length;
     for (let i = 0; i < this.agents.length; i++) {
