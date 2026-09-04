@@ -788,6 +788,9 @@ export default function (pi: ExtensionAPI) {
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
     currentCtx = ctx;
+    // Root-target: every child this session spawns announces this id as its
+    // parent, so permission asks forward to THIS session (the one with UI).
+    manager.rootSessionId = ctx.sessionManager?.getSessionId?.();
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
@@ -1135,6 +1138,9 @@ export default function (pi: ExtensionAPI) {
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
   // The last two arguments keep a conversation overlay opened here identical to
   // one opened from `/agents`: same setting on the way in, same persist out.
+  // SAFETY: currentCtx (ExtensionContext) and ExtensionCommandContext share the
+  // surface the viewer-menu callback needs (sessionManager/cwd); the cast narrows
+  // the declared type to the exact TUI-command shape, not the runtime shape.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined));
   let fleetViewEnabled = true;
@@ -1360,6 +1366,8 @@ export default function (pi: ExtensionAPI) {
   // Grab UI context from first tool execution + clear lingering widget on new turn
   pi.on("tool_execution_start", async (_event, ctx) => {
     widget.setUICtx(ctx.ui as UICtx);
+    // SAFETY: FleetUICtx is a superset of the ui shapes pi exposes on tool ctx;
+    // the casts bridge the two extension APIs' independently-declared ui types.
     fleet.setUICtx(ctx.ui as unknown as FleetUICtx);
     widget.onTurnStart();
   });
@@ -3981,6 +3989,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
     viewAgentConversation,
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.
+    // SAFETY: currentCtx carries a superset of the ExtensionCommandContext surface
+    // the fleet menu needs; the cast narrows the declared type, not the runtime.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
   };
 

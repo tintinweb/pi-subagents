@@ -369,6 +369,14 @@ export class AgentManager {
   private onUsage?: OnAgentUsage;
   private maxConcurrent: number;
   private maxConcurrentForeground = DEFAULT_MAX_CONCURRENT_FOREGROUND;
+  /**
+   * Session id of the top-level session owning this manager, stamped at each
+   * `session_start`. Every spawn — top-level, nested, workflow, scheduler,
+   * RPC — announces this as its parent session id (root-targeted), so a
+   * permission system forwards a child's `ask` to the interactive session that
+   * can serve it rather than a headless intermediate.
+   */
+  rootSessionId: string | undefined;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -761,6 +769,7 @@ export class AgentManager {
     const promise = runAgent(ctx, type, prompt, {
       pi,
       agentId: id,
+      parentSessionId: this.rootSessionId,
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,

@@ -736,8 +736,13 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:ready` | RPC handlers registered and armed — fired on session start; not emitted in a session that excludes pi-subagents | `{}` (empty object) |
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
 | `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
+| `subagents:child:session-created` | A child session was created, emitted synchronously before its extensions bind — the subagent adapter convention (ADR 0012) a permission system subscribes to in order to detect in-process children | `sessionId`, `parentSessionId` |
+| `subagents:child:bound` | A child's extensions bound successfully — the optional convention event; emits only on success, and buys the permission system's unguarded-child alarm | `sessionId`, `parentSessionId` |
+| `subagents:child:disposed` | A child's run settled — success or error — unregistering it from any listener's registry | `sessionId` |
 
 The four agent-lifecycle events — `subagents:started`, `:completed`, `:failed`, `:compacted` — are emitted for **top-level agents only**. Nested subagents and a workflow's children emit nothing at all; they report through the parent or workflow that owns them.
+
+The `subagents:child:*` events are different in kind: they fire for **every** in-process child, nested and workflow children included, and carry the child's **session id** rather than the extension's agent id. They are the subagent adapter convention a permission system (`@gotgenes/pi-permission-system`) uses to detect a child and forward its `ask` gates to the interactive parent — without such a listener they are inert (a `pi.events.emit` with no subscriber). `parentSessionId` is always the top-level session that spawned the chain, so permission asks reach the session that can actually serve them at any nesting depth. A child resumed via `resume` is not re-announced (its run continues without a fresh bind), so its asks fall back to fail-closed for the resumed turn.
 
 `tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it as a measure of work done. Use `contextUsage.percent` (surfaced as `(NN%)` in the widget) for current context size.
 
