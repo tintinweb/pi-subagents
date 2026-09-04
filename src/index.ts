@@ -2017,6 +2017,16 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
+        // Same guard as the background path above: the manager refuses to
+        // resume a live run (it would corrupt the abort controller), so say
+        // why here instead of a generic failure.
+        if (existing.status === "running" || existing.status === "queued") {
+          return textResult(
+            `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+            `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
+          );
+        }
+
         const record = await manager.resume(params.resume, params.prompt, signal);
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
@@ -2027,7 +2037,7 @@ Terse command-style prompts produce shallow, generic work.
           return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record));
         }
         return textResult(
-          record.result?.trim() || "No output.",
+          `${record.result?.trim() || "No output."}${getForegroundOutcomeNote(record.status)}`,
           buildDetails(detailBaseFor(record), record),
         );
       }

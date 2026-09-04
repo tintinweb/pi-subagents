@@ -1339,6 +1339,188 @@ describe("AgentManager — abort() state machine", () => {
     expect(receivedSignal?.aborted).toBe(true);
   });
 
+  it("abort drops queued steers so a late session cannot flush them", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    // No session yet — the steer parks on the record.
+    expect(manager.steer(id, "change course")).toBe(true);
+    expect(manager.getRecord(id)!.pendingSteers).toEqual(["change course"]);
+
+    expect(manager.abort(id)).toBe(true);
+    expect(manager.getRecord(id)!.pendingSteers).toBeUndefined();
+  });
+
+  it("refuses a foreground resume while the previous run is still in flight", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("running");
+    record.session = mockSession();
+
+    // A second foreground resume over a live run is refused, not interleaved:
+    // interleaving would overwrite the abort controller and race on result.
+    await expect(manager.resume(id, "again")).resolves.toBeUndefined();
+    expect(manager.getRecord(id)!.status).toBe("running");
+  });
+
+  it("foreground resume replaces the previous run's settled promise", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    const settledPromise = record.promise;
+    record.session = mockSession();
+
+    let releaseResume!: (v: { text: string }) => void;
+    vi.mocked(resumeAgent).mockImplementationOnce(() => new Promise((res) => { releaseResume = res as any; }));
+    const resumePromise = manager.resume(id, "more");
+    // Waiters must observe the live run, not the settled one.
+    expect(record.promise).toBeDefined();
+    expect(record.promise).not.toBe(settledPromise);
+    let settled = false;
+    void record.promise!.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    releaseResume({ text: "more" });
+    await resumePromise;
+    expect(settled).toBe(true);
+  });
+
+  it("a stop during the worktree copy survives the copy failing", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    let rejectCopy!: (err: Error) => void;
+    vi.mocked(createWorktree).mockImplementationOnce(
+      () => new Promise((_, reject) => { rejectCopy = reject; }),
+    );
+    const completed: AgentRecord[] = [];
+    manager = new AgentManager((r) => { completed.push(r); });
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      isolation: "worktree",
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("running");
+
+    // Stop lands while the repo copy is still in flight.
+    expect(manager.abort(id)).toBe(true);
+
+    // The copy then fails: the stopped record must not be relabeled "error",
+    // deleted, or completed a second time. (The stopped event itself is
+    // pinned by the onStop tests — this one covers only the record outcome.)
+    rejectCopy(new Error("git worktree add failed"));
+    await manager.awaitStartup(id).catch(() => {});
+    expect(record.status).toBe("stopped");
+    expect(manager.getRecord(id)).toBe(record);
+    expect(completed).toEqual([]);
+  });
+
+  it("spawn with a pre-aborted caller signal stops without enqueueing", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    manager.spawn(mockPi, mockCtx, "X", "blocker", { description: "b", isBackground: true });
+
+    const caller = new AbortController();
+    caller.abort();
+    const id = manager.spawn(mockPi, mockCtx, "Y", "q", {
+      description: "q",
+      isBackground: true,
+      signal: caller.signal,
+    });
+    const record = manager.getRecord(id)!;
+    expect(record.status).toBe("stopped");
+    expect(record.completedAt).toBeGreaterThan(0);
+    expect(record.pendingSteers).toBeUndefined();
+    // The slot was never taken: the next spawn still queues behind the blocker.
+    const next = manager.spawn(mockPi, mockCtx, "Z", "n", { description: "n", isBackground: true });
+    expect(manager.getRecord(next)?.status).toBe("queued");
+  });
+
+  it("a rejection after a mid-resume stop stays stopped", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    await manager.getRecord(id)!.promise;
+    manager.getRecord(id)!.session = mockSession();
+
+    let rejectResume!: (err: Error) => void;
+    vi.mocked(resumeAgent).mockImplementationOnce(
+      () => new Promise((_, reject) => { rejectResume = reject as (err: Error) => void; }),
+    );
+    const resumePromise = manager.resume(id, "more");
+    expect(manager.abort(id)).toBe(true);
+
+    rejectResume(new Error("provider died"));
+    const record = await resumePromise;
+    expect(record!.status).toBe("stopped");
+    expect(record!.error).toBeUndefined();
+    expect(record!.completedAt).toBeGreaterThan(0);
+  });
+
+  it("a pre-aborted caller signal stops the resume instead of running it clean", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    await manager.getRecord(id)!.promise;
+    manager.getRecord(id)!.session = mockSession();
+
+    const caller = new AbortController();
+    caller.abort();
+    const steer = vi.mocked(resumeAgent).mockImplementationOnce(async () => ({ text: "late" }) as any);
+    const record = await manager.resume(id, "more", caller.signal);
+    // The pre-aborted entry marks the run stopped; the settle guard keeps it
+    // there even though the session still ran (mirrors the spawn path).
+    expect(record!.status).toBe("stopped");
+    expect(steer).toHaveBeenCalled();
+  });
+
+  it("detaches the caller signal once the resume settles", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    await manager.getRecord(id)!.promise;
+    manager.getRecord(id)!.session = mockSession();
+
+    const caller = new AbortController();
+    const removeSpy = vi.spyOn(caller.signal, "removeEventListener");
+    vi.mocked(resumeAgent).mockImplementationOnce(async () => ({ text: "done" }) as any);
+    await manager.resume(id, "more", caller.signal);
+    expect(removeSpy).toHaveBeenCalledWith("abort", expect.any(Function));
+    // A later abort of the caller must not touch the settled record.
+    caller.abort();
+    expect(manager.getRecord(id)!.status).toBe("completed");
+  });
+
+  it("refuses a resume while a previous resume is still queued", async () => {
+    manager = new AgentManager(undefined, 1);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    // A finished, session-backed agent plus a full pool: its background
+    // resume queues instead of starting.
+    vi.mocked(runAgent).mockResolvedValueOnce({
+      responseText: "done",
+      session: mockSession(),
+      aborted: false,
+      steered: false,
+    });
+    const a = manager.spawn(mockPi, mockCtx, "X", "p", { description: "x", isBackground: true });
+    await manager.getRecord(a)!.promise;
+    manager.getRecord(a)!.session = mockSession();
+    manager.spawn(mockPi, mockCtx, "Y", "blocker", { description: "b", isBackground: true });
+
+    const bg = await manager.resume(a, "bg", undefined, { isBackground: true });
+    expect(bg?.status).toBe("queued");
+    const resumeCalls = vi.mocked(resumeAgent).mock.calls.length;
+    const fg = await manager.resume(a, "fg");
+    expect(fg).toBeUndefined();
+    expect(manager.getRecord(a)!.status).toBe("queued");
+    expect(vi.mocked(resumeAgent).mock.calls.length).toBe(resumeCalls);
+  });
+
   it("returns false (and does not change status) for an already-completed agent", async () => {
     manager = new AgentManager();
     resolvedRun();
@@ -1496,6 +1678,32 @@ describe("AgentManager — abortAll", () => {
     expect(manager.getRecord(running)?.status).toBe("stopped");
     expect(manager.getRecord(queued)?.status).toBe("stopped");
     expect(manager.hasRunning()).toBe(false);
+  });
+
+  it("spawnAndWait renders a record stopped mid-startup instead of throwing", async () => {
+    // Companion to the launch-guard test above: the same interleaving through
+    // the blocking path. Without the stopped-guard in spawnAndWait, the
+    // startup rejection would escape as a throw even though the stop already
+    // reported and owned the record.
+    const { createWorktree } = await import("../src/worktree.js");
+    let rejectCopy!: (err: Error) => void;
+    vi.mocked(createWorktree).mockImplementationOnce(
+      () => new Promise((_, reject) => { rejectCopy = reject; }),
+    );
+    manager = new AgentManager();
+
+    const pending = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+    const id = manager.listAgents()[0].id;
+    expect(manager.getRecord(id)?.status).toBe("running");
+    expect(manager.abort(id)).toBe(true);
+
+    rejectCopy(new Error("git worktree add failed"));
+    const { record } = await pending;
+    expect(record.status).toBe("stopped");
+    expect(manager.getRecord(id)).toBe(record);
   });
 
   it("returns 0 when there are no running or queued agents", () => {
