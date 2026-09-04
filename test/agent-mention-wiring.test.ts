@@ -1084,6 +1084,82 @@ describe("resuming an evicted agent by name", () => {
     );
   });
 
+  it("records the references needed to restore a persisted agent", async () => {
+    const { pi, tools } = boot();
+    const session = fakeSession({
+      sessionManager: { getSessionFile: vi.fn(() => sessionPath()) },
+    });
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, options: any) => {
+      options.onSessionCreated?.(session);
+      return {
+        responseText: "first answer",
+        session,
+        aborted: false,
+        steered: false,
+        failure: undefined,
+      } as any;
+    });
+
+    const id = await spawnBackground(tools);
+    await flush();
+
+    expect(pi.appendEntry).toHaveBeenCalledWith(
+      "subagents:record",
+      expect.objectContaining({
+        id,
+        handle: "explore",
+        sessionFile: sessionPath(),
+      }),
+    );
+  });
+
+  it("restores persisted agent references when the parent session resumes", async () => {
+    const { tools, lifecycle } = boot({ schedulingEnabled: false });
+    writeFileSync(sessionPath(), "");
+    await lifecycle.get("session_start")({}, ctx({
+      sessionManager: {
+        getSessionId: vi.fn(() => "s1"),
+        getEntries: vi.fn(() => [{
+          type: "custom",
+          customType: "subagents:record",
+          data: {
+            id: "persisted-agent-id",
+            type: "Explore",
+            description: "find flaky tests",
+            handle: "explore",
+            alias: "auth-audit",
+            sessionFile: sessionPath(),
+            completedAt: Date.now(),
+          },
+        }]),
+      },
+    }));
+    finishedRun(fakeSession());
+
+    const result = await tools.get("Agent").execute(
+      "tc-resume",
+      {
+        prompt: "anything else?",
+        description: "Continue review",
+        subagent_type: "Explore",
+        resume: "auth-audit",
+        run_in_background: true,
+      },
+      undefined,
+      undefined,
+      ctx(),
+    );
+    await flush();
+
+    expect(textOf(result)).toContain("Agent ID: persisted-agent-id");
+    expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
+      expect.anything(),
+      "Explore",
+      "anything else?",
+      expect.objectContaining({ resumeSessionFile: sessionPath() }),
+    );
+  });
+
   it("hands the resumed agent the handle back instead of numbering it", async () => {
     // Otherwise the resume lands on `@explore-2` and the tombstone keeps
     // `@explore`, so the name the user just typed still points at the corpse.

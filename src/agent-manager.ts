@@ -1391,6 +1391,15 @@ export class AgentManager {
     this.tombstones.delete(handle);
   }
 
+  /** Restore an evicted persisted agent recorded in the parent session. */
+  restoreTombstone(entry: AgentTombstone): void {
+    this.tombstones.set(entry.handle, entry);
+    while (this.tombstones.size > MAX_TOMBSTONES) {
+      const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));
+      this.tombstones.delete(oldest.handle);
+    }
+  }
+
   /** Evicted agents whose conversation can still be reopened, newest first. */
   listTombstones(): AgentTombstone[] {
     return [...this.tombstones.values()].sort((a, b) => b.completedAt - a.completedAt);
@@ -1448,7 +1457,7 @@ export class AgentManager {
    */
   private tombstone(record: AgentRecord): void {
     if (!record.handle || !record.sessionFile) return;
-    this.tombstones.set(record.handle, {
+    this.restoreTombstone({
       handle: record.handle,
       alias: record.alias,
       id: record.id,
@@ -1457,12 +1466,6 @@ export class AgentManager {
       sessionFile: record.sessionFile,
       completedAt: record.completedAt ?? Date.now(),
     });
-    // Bound the memory a long session can accumulate. Oldest first, since the
-    // agent someone still wants to reach is the one they used most recently.
-    while (this.tombstones.size > MAX_TOMBSTONES) {
-      const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));
-      this.tombstones.delete(oldest.handle);
-    }
   }
 
   private cleanup() {
