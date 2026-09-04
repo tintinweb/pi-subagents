@@ -1075,6 +1075,7 @@ describe("resuming an evicted agent by name", () => {
     await flush();
 
     expect(textOf(result)).toContain("resumed from its persisted session");
+    expect(textOf(result)).toContain(`Agent ID: ${id}`);
     expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
       expect.anything(),
       "Explore",
