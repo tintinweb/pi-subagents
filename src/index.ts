@@ -38,6 +38,7 @@ import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitCh
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
+import { type AgentViewerView, pickAgentView } from "./ui/agent-views.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -3051,28 +3052,32 @@ Terse command-style prompts produce shallow, generic work.
     });
     if (!record) return;
 
-    await viewAgentConversation(ctx, record);
+    const view = await pickAgentView(ctx.ui);
+    if (!view) {
+      await showRunningAgents(ctx);
+      return;
+    }
+    await viewAgentConversation(ctx, record, view);
     // Back-navigation: re-show the list
     await showRunningAgents(ctx);
   }
 
-  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
-    if (!record.session) {
+  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord, view: AgentViewerView = "session") {
+    if (view === "session" && !record.session) {
       ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
       return;
     }
 
     const { ConversationViewer, VIEWPORT_HEIGHT_PCT } = await import("./ui/conversation-viewer.js");
-    const session = record.session;
     const activity = agentActivity.get(record.id);
 
     await ctx.ui.custom<undefined>(
       (tui, theme, keybindings, done) => {
-        return new ConversationViewer(tui, session, record, activity, theme, done, () => {
+        return new ConversationViewer(tui, record.session, record, activity, theme, done, () => {
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx));
+        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), view);
       },
       {
         overlay: true,

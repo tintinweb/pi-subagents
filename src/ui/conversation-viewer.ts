@@ -1,8 +1,9 @@
 /**
- * conversation-viewer.ts — Live conversation overlay for viewing agent sessions.
+ * conversation-viewer.ts — Overlay for viewing one agent.
  *
- * Displays a scrollable, live-updating view of an agent's conversation.
- * Subscribes to session events for real-time streaming updates.
+ * Four views (Session / Prompt / Info / Output), switched with s/p/i/o.
+ * Session is the live transcript; the others are static bodies from the record.
+ * Subscribes to session events so Session auto-updates while the agent runs.
  */
 
 import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -11,6 +12,7 @@ import { renderAgentName } from "../agent-color.js";
 import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import { type AgentViewerView, buildInfoLines, VIEW_LABELS, viewFromKey } from "./agent-views.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatDuration, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
@@ -140,6 +142,8 @@ function truncationNote(elided: number): string {
 export class ConversationViewer implements Component {
   private scrollOffset = 0;
   private autoScroll = true;
+  private view: AgentViewerView;
+  private scrollByView: Record<AgentViewerView, { offset: number; auto: boolean }>;
   private unsubscribe: (() => void) | undefined;
   private lastInnerW = 0;
   private closed = false;
@@ -162,7 +166,7 @@ export class ConversationViewer implements Component {
 
   constructor(
     private tui: TUI,
-    private session: AgentSession,
+    private session: AgentSession | undefined,
     private record: AgentRecord,
     private activity: AgentActivity | undefined,
     private theme: Theme,
@@ -190,10 +194,20 @@ export class ConversationViewer implements Component {
      * the same thing. Omitted → `m` still cycles, viewer-locally.
      */
     private onMarkdownMode?: (mode: ViewerMarkdownMode) => void,
+    /** Which of the four views to show first. Omitted → Session. */
+    initialView: AgentViewerView = "session",
   ) {
+    this.view = initialView;
+    this.autoScroll = initialView === "session";
+    this.scrollByView = {
+      session: { offset: 0, auto: true },
+      prompt: { offset: 0, auto: false },
+      info: { offset: 0, auto: false },
+      output: { offset: 0, auto: false },
+    };
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
-    this.unsubscribe = session.subscribe(() => {
+    this.unsubscribe = session?.subscribe(() => {
       if (this.closed) return;
       this.tui.requestRender();
     });
@@ -241,12 +255,19 @@ export class ConversationViewer implements Component {
     // Cycle raw → assistant-only → everything. The escape hatch that makes
     // Markdown rendering safe to default on: a result the renderer reshapes
     // (a diff, an indented log, a `#`-commented script) is one key from verbatim.
-    if (matchesKey(data, "m")) {
+    // Session-only: Prompt/Info/Output are not Markdown transcripts.
+    if (matchesKey(data, "m") && this.view === "session") {
       this.stopArmed = false;
       const next = MARKDOWN_MODES[(MARKDOWN_MODES.indexOf(this.markdownMode()) + 1) % MARKDOWN_MODES.length];
       this.markdownModeOverride = next;
       this.onMarkdownMode?.(next);
       this.tui.requestRender();
+      return;
+    }
+
+    const nextView = viewFromKey(data);
+    if (nextView) {
+      this.setView(nextView);
       return;
     }
     if (this.stopArmed) this.stopArmed = false;
@@ -321,7 +342,7 @@ export class ConversationViewer implements Component {
     if (cost) headerParts.push(cost);
 
     lines.push(row(
-      `${statusIcon} ${renderAgentName(this.record.type, th, { bold: true })}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${renderAgentName(this.record.type, th, { bold: true })}${modeTag}  ${th.fg("accent", VIEW_LABELS[this.view])}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));
@@ -365,19 +386,27 @@ export class ConversationViewer implements Component {
       // Abbreviated (`raw`/`md`/`md+`) because the idle footer is already full
       // at 80 columns with steer + stop present, and this group has no
       // degradation step below "drop the line-count readout".
-      actions.push(th.fg("dim", `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`));
+      if (this.view === "session") {
+        actions.push(th.fg("dim", `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`));
+      }
+      const viewKeys = th.fg("dim", "s/p/i/o");
       const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
 
       // Prepend the line-count/scroll-% readout only when there's spare width —
-      // it's the first thing dropped so it never crowds out the hints.
+      // it's the first thing dropped so it never crowds out the hints. View
+      // keys come next: they are in the header as the view name, so they can
+      // leave the footer when 80 columns is already full.
       const scrollPct = contentLines.length <= viewportHeight
         ? "100%"
         : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
       const count = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-      const withCount = [count, ...actions].join(sep);
+      const withViews = [...actions, viewKeys].join(sep);
+      const withCount = [count, ...actions, viewKeys].join(sep);
       const footerLeft = visibleWidth(withCount) + visibleWidth(footerRight) + 1 <= innerW
         ? withCount
-        : actions.join(sep);
+        : visibleWidth(withViews) + visibleWidth(footerRight) + 1 <= innerW
+          ? withViews
+          : actions.join(sep);
 
       const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
       lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
@@ -483,6 +512,20 @@ export class ConversationViewer implements Component {
 
   // ---- Private ----
 
+  private setView(next: AgentViewerView): void {
+    this.stopArmed = false;
+    if (next === this.view) {
+      this.tui.requestRender();
+      return;
+    }
+    this.scrollByView[this.view] = { offset: this.scrollOffset, auto: this.autoScroll };
+    this.view = next;
+    const saved = this.scrollByView[next];
+    this.scrollOffset = saved.offset;
+    this.autoScroll = saved.auto;
+    this.tui.requestRender();
+  }
+
   private viewportHeight(): number {
     // Cap mirrors the overlay's maxHeight — otherwise the viewer would render
     // more lines than the overlay shows and clip the footer.
@@ -508,8 +551,45 @@ export class ConversationViewer implements Component {
 
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
+    if (this.view === "prompt") return this.buildPromptLines(width);
+    if (this.view === "info") return this.buildInfoViewLines(width);
+    if (this.view === "output") return this.buildOutputLines(width);
+    return this.buildSessionLines(width);
+  }
 
+  private buildPromptLines(width: number): string[] {
     const th = this.theme;
+    const prompt = this.record.prompt;
+    if (!prompt) return [th.fg("dim", "No prompt stored.")];
+    const { text, elided } = capResult(prompt);
+    const lines = this.rawLines(text, width, false);
+    if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
+    return lines.map(l => truncateToWidth(l, width));
+  }
+
+  private buildInfoViewLines(width: number): string[] {
+    const lines: string[] = [];
+    for (const line of buildInfoLines(this.record, this.showCost)) {
+      lines.push(...this.rawLines(line, width, false));
+    }
+    return lines.map(l => truncateToWidth(l, width));
+  }
+
+  private buildOutputLines(width: number): string[] {
+    const th = this.theme;
+    const result = this.record.result;
+    if (!result) return [th.fg("dim", "No output yet.")];
+    const { text, elided } = capResult(result);
+    const lines = this.rawLines(text, width, false);
+    if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
+    return lines.map(l => truncateToWidth(l, width));
+  }
+
+  private buildSessionLines(width: number): string[] {
+    const th = this.theme;
+    if (!this.session) {
+      return [th.fg("dim", "No session available.")];
+    }
     const messages = this.session.messages;
     const lines: string[] = [];
 

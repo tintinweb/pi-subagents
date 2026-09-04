@@ -16,6 +16,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
+import { type AgentViewerView, pickAgentView, viewFromKey } from "./agent-views.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
 
@@ -355,6 +356,13 @@ export class FleetList {
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
 
+    const view = viewFromKey(data);
+    if (view) {
+      const entry = this.roster()[this.selectedIndex];
+      if (entry?.kind === "agent") this.openSelected(view);
+      return { consume: true };
+    }
+
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
     return undefined;
@@ -379,7 +387,7 @@ export class FleetList {
     this.update();
   }
 
-  private openSelected(): void {
+  private openSelected(view?: AgentViewerView): void {
     const entry = this.roster()[this.selectedIndex];
     if (!entry || entry.kind === "main") {
       // `main` = return to the prompt; the native transcript is already shown.
@@ -397,13 +405,31 @@ export class FleetList {
       );
       return;
     }
-    const record = entry.record;
+    void this.openAgent(entry.record, view);
+  }
+
+  /**
+   * Open an agent's overlay. `view` skips the picker (FleetView `s/p/i/o`).
+   * Enter goes through the picker first. `viewerClose` is set during the
+   * picker so the list does not treat the dialog as "user left" and reset.
+   */
+  private async openAgent(record: AgentRecord, view?: AgentViewerView): Promise<void> {
     if (!this.ui) return;
-    if (!record.session) {
-      this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
+    this.viewerClose = () => {};
+    let chosen: AgentViewerView | undefined;
+    try {
+      chosen = view ?? await pickAgentView(this.ui);
+    } finally {
+      this.viewerClose = undefined;
+    }
+    if (!chosen) {
+      this.update();
       return;
     }
-    const session = record.session;
+    if (chosen === "session" && !record.session) {
+      this.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
+      return;
+    }
     const activity = this.agentActivity.get(record.id);
     this.viewingAgentId = record.id;
 
@@ -412,7 +438,7 @@ export class FleetList {
         this.viewerClose = () => done(undefined);
         return new ConversationViewer(
           tui,
-          session,
+          record.session,
           record,
           activity,
           theme,
@@ -425,6 +451,7 @@ export class FleetList {
           this.showCost(),
           this.viewerMarkdown,
           this.onViewerMarkdown,
+          chosen,
         );
       },
       {
@@ -465,7 +492,7 @@ export class FleetList {
     const sel = Math.min(this.selectedIndex, rows.length);
 
     const hint = this.active
-      ? "↑↓ select · enter view · esc back"
+      ? "↑↓ select · enter view · s/p/i/o · esc back"
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
