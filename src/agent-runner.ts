@@ -593,9 +593,20 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
  * Wire an AbortSignal to abort a session.
  * Returns a cleanup function to remove the listener.
  */
+function tryAbortSession(session: AgentSession): void {
+  // A torn-down session can throw here; swallowing keeps abort() total — the
+  // worst case is a run that keeps going with status "stopped", which every
+  // settle guard already handles.
+  try { session.abort(); } catch { /* teardown already in progress */ }
+}
+
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
-  const onAbort = () => session.abort();
+  // A stop that landed before the session was wired would otherwise attach a
+  // listener to an already-aborted signal that never fires, and the run would
+  // execute in full despite status "stopped".
+  if (signal.aborted) { tryAbortSession(session); return () => {}; }
+  const onAbort = () => tryAbortSession(session);
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
 }

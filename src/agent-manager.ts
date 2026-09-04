@@ -599,6 +599,7 @@ export class AgentManager {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        record.pendingSteers = undefined;
       }
       return false;
     }
@@ -624,17 +625,23 @@ export class AgentManager {
       () => { this.startups.delete(id); },
       (err) => {
         this.startups.delete(id);
-        if (queuedPool !== undefined) {
-          // Mirrors settleRun: an inline caller gets this failure as a throw
-          // out of spawnAndWait, so an unconsumed record would ALSO nudge the
-          // session about it — the same failure reported twice.
-          if (queuedPool === "foreground") record.resultConsumed = true;
-          record.status = "error";
-          record.error = err instanceof Error ? err.message : String(err);
-          record.completedAt = Date.now();
-          this.onComplete?.(record);
-        } else {
-          this.agents.delete(id);
+        // A stop that landed mid-startup owns the record now: don't relabel it
+        // "error" (queued path) or delete it (immediate path) — the stop was
+        // already reported, and get_subagent_result must still find it.
+        // The slot is freed and the queue drains either way.
+        if (record.status !== "stopped") {
+          if (queuedPool !== undefined) {
+            // Mirrors settleRun: an inline caller gets this failure as a throw
+            // out of spawnAndWait, so an unconsumed record would ALSO nudge the
+            // session about it — the same failure reported twice.
+            if (queuedPool === "foreground") record.resultConsumed = true;
+            record.status = "error";
+            record.error = err instanceof Error ? err.message : String(err);
+            record.completedAt = Date.now();
+            this.onComplete?.(record);
+          } else {
+            this.agents.delete(id);
+          }
         }
         // The agent never kept its slot (startAgent gives it back on failure),
         // so anything queued behind it can go now.
@@ -1083,8 +1090,14 @@ export class AgentManager {
     // the immediate path owes its caller: pi only marks a tool result failed
     // when `execute` throws. A queued spawn's failure landed on the record
     // instead (nobody was awaiting `startups` at drain time) and is rethrown
-    // below, so the contract is the same either way.
-    await this.awaitStartup(id);
+    // below, so the contract is the same either way. A stop that landed
+    // mid-startup owns the record instead: the failure is moot, swallow it
+    // and let the caller render the stopped record below.
+    try {
+      await this.awaitStartup(id);
+    } catch (err) {
+      if (record.status !== "stopped") throw err;
+    }
 
     // undefined when it was aborted while queued, or stopped mid-copy, and so
     // never ran — the record is already terminal with a completedAt, which is
@@ -1113,6 +1126,14 @@ export class AgentManager {
     const record = this.agents.get(id);
     if (!record?.session) return undefined;
 
+    // Never re-enter a run that is still in flight — foreground or background.
+    // A second run would overwrite record.abortController (orphaning the live
+    // run beyond stop's reach) and race on result/status/completedAt. The
+    // background caller pre-checks this for a better message; the foreground
+    // path relies on this guard (pi dispatches one message's tool calls via
+    // Promise.all, so two resumes can overlap).
+    if (record.status === "running" || record.status === "queued") return undefined;
+
     // Background resume: settle asynchronously and notify on completion exactly
     // like a background spawn, returning immediately with the record still
     // "running" — or "queued" when at the concurrency limit. Previously
@@ -1120,17 +1141,16 @@ export class AgentManager {
     // returned before its background branch, and resume() only ever awaited
     // inline), so a resumed agent always blocked the caller until it finished.
     if (options?.isBackground) {
-      // Never re-enter a run that is still in flight. Detaching means the caller
-      // gets control back while the record stays "running", so nothing stops the
-      // model from resuming the same agent again. Starting a second run would
-      // overwrite record.abortController — orphaning the live run beyond the
-      // reach of `/agents` stop and abortAll() — double-count the pool slot, and
-      // then reject from session.prompt() with "Agent is already processing",
-      // whose settle path would abort the LIVE run's children and report a
-      // failure for a run that is still going. Refuse instead, leaving the
-      // record untouched; the caller decides whether to wait or steer.
-      if (record.status === "running" || record.status === "queued") return undefined;
-
+      // (Re-entry is already refused above, for foreground and background
+      // alike. The background-specific reason stands: detaching means the
+      // caller gets control back while the record stays "running", so
+      // nothing stops the model from resuming the same agent again. Starting
+      // a second run would overwrite record.abortController — orphaning the
+      // live run beyond the reach of `/agents` stop and abortAll() —
+      // double-count the pool slot, and then reject from session.prompt()
+      // with "Agent is already processing", whose settle path would abort
+      // the LIVE run's children and report a failure for a run that is
+      // still going.)
       record.isBackground = true;
       record.resultConsumed = false;
       record.result = undefined;
@@ -1173,35 +1193,75 @@ export class AgentManager {
     record.result = undefined;
     record.error = undefined;
 
-    try {
-      const { text, failure } = await resumeAgent(record.session, prompt, {
-        onToolActivity: (activity) => {
-          if (activity.type === "end") record.toolUses++;
-          options?.onToolActivity?.(activity);
-        },
-        onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
-          this.onUsage?.(record, usage);
-          options?.onAssistantUsage?.(usage);
-        },
-        onCompaction: (info) => {
-          record.compactionCount++;
-          this.onCompact?.(record, info);
-          options?.onCompaction?.(info);
-        },
-        signal,
-      });
-      // Same contract as the spawn path (#144): a failed final turn is an
-      // error, not a completion — but the resumed text stays available.
-      record.status = failure ? "error" : "completed";
-      if (failure) record.error = failure;
-      record.result = text;
-      record.completedAt = Date.now();
-    } catch (err) {
-      record.status = "error";
-      record.error = err instanceof Error ? err.message : String(err);
-      record.completedAt = Date.now();
+    // Fresh abort controller so stop reaches THIS run (mirrors startAgent and
+    // startResume): the previous run's controller is settled and detached, so
+    // without this abort() would mark "stopped" while the session kept going.
+    // (Closure: the "running" assignment above narrows the field in straight-
+    // line scope, so the settle guards read through a function boundary
+    // exactly like the .then() guards elsewhere in this file.)
+    const isExternallyStopped = () => record.status === "stopped";
+    const abortController = new AbortController();
+    record.abortController = abortController;
+    // A foreground caller awaiting inline still owns Esc: route the caller's
+    // interrupt through abort() exactly like the spawn path, so it reads as
+    // "stopped" rather than a provider-style "error".
+    let detachCallerSignal: (() => void) | undefined;
+    if (signal) {
+      if (signal.aborted) this.abort(id);
+      else {
+        const onCallerAbort = () => this.abort(id);
+        signal.addEventListener("abort", onCallerAbort, { once: true });
+        detachCallerSignal = () => signal.removeEventListener("abort", onCallerAbort);
+      }
     }
+
+    // Capture the session for the run below: property narrowing does not
+    // cross the async-closure boundary.
+    const session = record.session;
+    // The run's promise, so waiters (get_subagent_result wait:true, waitForAll)
+    // observe THIS run instead of the previous run's settled promise. Resolves
+    // to "" like the spawn path's promise; callers only await it.
+    record.promise = (async (): Promise<string> => {
+      try {
+        const { text, failure } = await resumeAgent(session, prompt, {
+          onToolActivity: (activity) => {
+            if (activity.type === "end") record.toolUses++;
+            options?.onToolActivity?.(activity);
+          },
+          onAssistantUsage: (usage) => {
+            addUsage(record.lifetimeUsage, usage);
+            this.onUsage?.(record, usage);
+            options?.onAssistantUsage?.(usage);
+          },
+          onCompaction: (info) => {
+            record.compactionCount++;
+            this.onCompact?.(record, info);
+            options?.onCompaction?.(info);
+          },
+          signal: abortController.signal,
+        });
+        // Don't overwrite an external stop — mirrors every other settle path.
+        // Without this a stop landing mid-run would be relabeled "completed".
+        if (!isExternallyStopped()) {
+          // Same contract as the spawn path (#144): a failed final turn is an
+          // error, not a completion — but the resumed text stays available.
+          record.status = failure ? "error" : "completed";
+          if (failure) record.error = failure;
+        }
+        record.result = text;
+        record.completedAt = Date.now();
+      } catch (err) {
+        if (!isExternallyStopped()) {
+          record.status = "error";
+          record.error = err instanceof Error ? err.message : String(err);
+        }
+        record.completedAt = Date.now();
+      } finally {
+        detachCallerSignal?.();
+      }
+      return "";
+    })();
+    await record.promise;
 
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
@@ -1415,6 +1475,10 @@ export class AgentManager {
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      // A steer can never land here — the tool refuses non-running agents —
+      // but drop the queue anyway so a late session creation cannot flush
+      // guidance into an agent that was stopped before it started.
+      record.pendingSteers = undefined;
       return true;
     }
 
@@ -1422,12 +1486,22 @@ export class AgentManager {
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();
+    // Same guard as above, for the wider window: steering a stopped agent is
+    // meaningless, and without this a session created after the stop would
+    // still flush queued steers into it via onSessionCreated.
+    record.pendingSteers = undefined;
     return true;
   }
 
   /** Dispose a record's session and remove it from the map. */
   private removeRecord(id: string, record: AgentRecord): void {
     this.tombstone(record);
+    // Last chance to finalize the output transcript: eviction skips every
+    // settle path, and without this the file handle pins until process end.
+    if (record.outputCleanup) {
+      try { record.outputCleanup(); } catch { /* ignore */ }
+      record.outputCleanup = undefined;
+    }
     const session = record.session;
     // Detached before the shutdown starts, so the record leaves the map at once and
     // nothing can observe a session that is half torn down.

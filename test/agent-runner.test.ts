@@ -355,6 +355,18 @@ describe("agent-runner final output capture", () => {
     expect(result.failure).toBeUndefined();
   });
 
+  it("resumeAgent aborts up front on a pre-aborted signal", async () => {
+    // A stop that landed before the session was wired must reach it
+    // immediately, not hang a listener on a signal that never fires again.
+    const { session } = createSession("ABORTED");
+    const controller = new AbortController();
+    controller.abort();
+
+    await resumeAgent(session as any, "Continue", { signal: controller.signal });
+
+    expect(session.abort).toHaveBeenCalled();
+  });
+
   it("sets the agent name as session name before binding extensions", async () => {
     const { session } = createSession("NAMED");
     createAgentSession.mockResolvedValue({ session });
