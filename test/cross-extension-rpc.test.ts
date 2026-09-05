@@ -34,6 +34,7 @@ describe("cross-extension RPC", () => {
       abort: vi.fn().mockReturnValue(true),
       getRecord: vi.fn().mockReturnValue({}),
       consumeResult: vi.fn().mockReturnValue(true),
+      steer: vi.fn().mockReturnValue(true),
     };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
@@ -326,6 +327,81 @@ describe("cross-extension RPC", () => {
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();
       expect(manager.consumeResult).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- steer ---
+
+  describe("steer RPC", () => {
+    it("delivers a message to a running top-level agent", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-m1", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-m1", agentId: "agent-42", message: "also failing: check_suite on 839ab295" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true });
+      expect(manager.steer).toHaveBeenCalledWith("agent-42", "also failing: check_suite on 839ab295");
+    });
+
+    it("returns error when the agent is unknown to the manager", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-m2", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-m2", agentId: "nonexistent", message: "x" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+      expect(manager.steer).not.toHaveBeenCalled();
+    });
+
+    // Same ownership stance as stop: an agent another agent or a workflow is
+    // waiting on is not this RPC's to redirect.
+    it("refuses to steer another agent's nested child or a workflow's agent", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({ workflowId: "wf-1" });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-m3", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-m3", agentId: "agent-42", message: "x" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is owned by another agent or workflow" });
+      expect(manager.steer).not.toHaveBeenCalled();
+    });
+
+    it("says so when the agent has already finished", async () => {
+      (manager.steer as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-m4", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-m4", agentId: "agent-42", message: "x" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is not running" });
+    });
+
+    it("rejects an empty or non-string message before touching the manager", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-m5", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-m5", agentId: "agent-42", message: "   " });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Steer message must be a non-empty string" });
+      expect(manager.steer).not.toHaveBeenCalled();
+    });
+
+    it("unsub stops responding to steer requests", async () => {
+      const { unsubSteer } = registerRpcHandlers(deps);
+      unsubSteer();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:steer:reply:req-m6", reply);
+      events.emit("subagents:rpc:steer", { requestId: "req-m6", agentId: "agent-42", message: "x" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
     });
   });
 

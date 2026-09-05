@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`subagents:rpc:steer` — a cross-extension caller can deliver a message to an agent it spawned.** An extension that spawns over the bus and then learns something the agent needs mid-run (a second CI failure on the head it is already fixing, a review that landed while it works) had to choose between spawning a duplicate agent for the same work and dropping the fact. The new channel is the bus-side half of `steer_subagent`: id only, the same top-level ownership guard as stop, `Agent is not running` once the record has settled, and a message sent before the session exists is flushed when it is created. Outside the `ping` handshake like `consume`; older builds simply do not answer.
+
 ### Fixed
 - **The workflow stand-down now recognises a lowercase `workflow` tool** ([#283](https://github.com/tintinweb/pi-subagents/issues/283) — thanks [@zampierilucas](https://github.com/zampierilucas)). The match is exact on purpose, and the set held `Workflow` and `SubagentWorkflow` only, so `@quintinshaw/pi-dynamic-workflows` — which registers lowercase `workflow` — never tripped it: with `workflowsEnabled` unset, both orchestrators reached the model and nothing warned. Adding the third name is the whole fix; exactness is kept, so a `list_workflows` still cannot take the feature down.
 
