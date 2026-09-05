@@ -819,6 +819,7 @@ export default function (pi: ExtensionAPI) {
             cancelNudge(record.id);
             return true;
           },
+          steer: (id, message) => manager.steer(id, message),
         },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
@@ -1099,6 +1100,7 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
+    rpcHandle?.unsubSteer();
     rpcHandle = undefined;
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child

@@ -50,6 +50,11 @@ export interface SpawnCapable {
    * one. False when there is no such agent, or it has not settled yet.
    */
   consumeResult(id: string): boolean;
+  /**
+   * Deliver a message to a running or queued agent's conversation — what
+   * `steer_subagent` does. False when the agent is unknown or has settled.
+   */
+  steer(id: string, message: string): boolean;
 }
 
 export interface RpcDeps {
@@ -64,6 +69,7 @@ export interface RpcHandle {
   unsubSpawn: () => void;
   unsubStop: () => void;
   unsubConsume: () => void;
+  unsubSteer: () => void;
 }
 
 /**
@@ -194,5 +200,21 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
-  return { unsubPing, unsubSpawn, unsubStop, unsubConsume };
+  // An extension that spawned an agent over the bus and then learns something
+  // that agent needs — a second CI failure on the head it is already fixing, a
+  // review that landed mid-run — can hand it over instead of spawning a second
+  // agent for the same work or dropping the fact. Same ownership guard as stop:
+  // an agent something else is waiting on is not this caller's to redirect.
+  // Outside the ping version handshake, like consume: additive and best-effort.
+  const unsubSteer = handleRpc<{ requestId: string; agentId: string; message: unknown }>(
+    events, "subagents:rpc:steer", ({ agentId, message }) => {
+      if (typeof message !== "string" || message.trim().length === 0) throw new Error("Steer message must be a non-empty string");
+      const record = manager.getRecord(agentId);
+      if (!record) throw new Error("Agent not found");
+      if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
+      if (!manager.steer(agentId, message)) throw new Error("Agent is not running");
+    },
+  );
+
+  return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer };
 }
