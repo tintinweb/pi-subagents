@@ -18,6 +18,7 @@ import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { FleetMouse } from "./fleet-mouse.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -122,6 +123,13 @@ export class FleetList {
    * minus the close handle, because that overlay belongs to the extension.
    */
   private viewingWorkflowId: string | undefined;
+  private mouse = new FleetMouse(id => {
+    const index = this.roster().findIndex(entry => entry.kind === "workflow" && entry.workflow.id === id);
+    if (index < 0 || !this.editorHasFocus() || this.viewerClose || this.viewingWorkflowId) return;
+    this.active = true;
+    this.selectedIndex = index;
+    this.openSelected();
+  });
 
   constructor(
     private manager: AgentManager,
@@ -158,6 +166,7 @@ export class FleetList {
   /** Capture the UI context and (re)register the global input handler. */
   setUICtx(ui: FleetUICtx): void {
     if (ui === this.ui) return;
+    this.mouse.dispose();
     this.inputUnsub?.();
     this.ui = ui;
     this.widgetRegistered = false;
@@ -179,6 +188,7 @@ export class FleetList {
   }
 
   dispose(): void {
+    this.mouse.dispose();
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.inputUnsub?.();
     this.inputUnsub = undefined;
@@ -205,6 +215,7 @@ export class FleetList {
     const hasRows = this.enabled && this.roster().length > 1;
 
     if (!hasRows) {
+      this.mouse.dispose();
       if (this.widgetRegistered) {
         this.ui.setWidget(FLEET_KEY, undefined);
         this.widgetRegistered = false;
@@ -222,6 +233,7 @@ export class FleetList {
     if (!this.widgetRegistered) {
       this.ui.setWidget(FLEET_KEY, (tui, theme) => {
         this.tui = tui;
+        this.mouse.attach(tui);
         return {
           render: (w: number) => this.renderBar(w, theme),
           invalidate: () => { this.widgetRegistered = false; this.tui = undefined; },
@@ -307,6 +319,8 @@ export class FleetList {
   /** Returns `{consume:true}` to swallow a key, or undefined to let it through. */
   handleKey(data: string): { consume?: boolean; data?: string } | undefined {
     if (!this.enabled || !this.ui) return undefined;
+    const mouse = this.mouse.handleInput(data);
+    if (mouse) return mouse;
     // Input listeners receive BOTH key-press and key-release (the kitty protocol
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.
@@ -326,14 +340,17 @@ export class FleetList {
 
     if (!this.active) {
       // Activate: ↓ or ← at an empty prompt moves focus into the list.
-      const isActivator = matchesKey(data, "down") || matchesKey(data, "left");
+      const workflowIndex = this.roster().findIndex(entry => entry.kind === "workflow");
+      const enterWorkflow = workflowIndex >= 0 && matchesKey(data, Key.enter);
+      const isActivator = matchesKey(data, "down") || matchesKey(data, "left") || enterWorkflow;
       // Gated on the roster, not the agents: a session whose only row is a
       // workflow run still has somewhere to go, and requiring an agent would
       // render the row but refuse to move into it.
       if (isActivator && this.roster().length > 1 && this.ui.getEditorText() === "") {
         this.active = true;
-        this.selectedIndex = 0;
+        this.selectedIndex = workflowIndex >= 0 ? workflowIndex : 0;
         this.update();
+        if (enterWorkflow) this.openSelected();
         return { consume: true };
       }
       return undefined;
@@ -391,10 +408,13 @@ export class FleetList {
       // `viewerClose` to hold — but the list still has to know one is up, and
       // still has to put the cursor back on the run when it comes down.
       this.viewingWorkflowId = entry.workflow.id;
-      void Promise.resolve(this.openWorkflow?.(entry.workflow.id)).then(
-        () => this.clearViewer(),
-        () => this.clearViewer(),
-      );
+      const failed = (error: unknown) => {
+        this.ui?.notify(`Could not open workflow: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        this.clearViewer();
+      };
+      try {
+        void Promise.resolve(this.openWorkflow?.(entry.workflow.id)).then(() => this.clearViewer(), failed);
+      } catch (error) { failed(error); }
       return;
     }
     const record = entry.record;
@@ -466,8 +486,10 @@ export class FleetList {
 
     const hint = this.active
       ? "↑↓ select · enter view · esc back"
+      : this.workflows().length > 0 ? "click / enter workflow · ↓ to manage · esc to interrupt"
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
+    const clickTargets = new Map<number, string>();
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");
     lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} main`, width));
@@ -481,6 +503,7 @@ export class FleetList {
     if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
     for (let a = start; a < start + visible; a++) {
       const row = rows[a];
+      if (row.kind === "workflow") clickTargets.set(lines.length, row.workflow.id);
       lines.push(
         row.kind === "workflow" ?
           this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
@@ -489,6 +512,7 @@ export class FleetList {
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
 
+    this.mouse.rendered(lines, clickTargets);
     return lines;
   }
 

@@ -127,6 +127,20 @@ The token field is annotated with two optional signals inside parens:
 
 ### FleetView
 
+When workflows are present, `↓` or `←` at an empty prompt selects the first
+workflow immediately. `Enter` at an empty prompt opens that workflow directly;
+otherwise `Enter` opens the selected row. A nonempty draft keeps its normal
+Enter behavior. In Pi's regular terminal mode, clicking a workflow row also
+opens its inspector. Hold Shift for native terminal text selection. Fullscreen
+mode retains its own mouse handling; use the keyboard there.
+
+Running workflows and agents survive `/reload` in the same Pi process. The
+replacement runtime reattaches their UI and completion notifications without
+restarting their work. Quit and session changes still stop them. If the plugin
+is removed or cannot reattach within 30 seconds, its retained runs are stopped.
+An active runtime retains its executing code until work settles; reload while
+idle (or start a new session) to apply plugin code updates.
+
 While subagents are running, a Claude Code-style navigable list renders **below** the editor:
 
 ```
