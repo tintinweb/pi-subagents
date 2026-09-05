@@ -40,6 +40,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 | `configCwd` | Config-discovery root; only nested launches may set it |
 | `rootSessionId` | Names a transcript directory, so a forged value is a path-traversal primitive |
 | `resumeSessionFile` | Worse: it names a file to **open and replay** as a conversation. Dispatcher only, and only from a path this extension itself recorded |
+| `sessionFile` | Names a file to open and append as a conversation. Use the `Agent` tool's `session_file` parameter or agent frontmatter instead |
 | `reclaim` | Bypasses handle allocation, so a forged value would duplicate a live agent's name and make `@handle` ambiguous |
 | `blocking` | Every spawn through here is detached. A forged `blocking` would charge it to the foreground pool and defer it behind a queue whose gate nobody is holding |
 

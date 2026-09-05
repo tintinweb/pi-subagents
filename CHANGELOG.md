@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`session_file` for persistent subagent session lanes.** Custom agent frontmatter and the `Agent` tool can now point a subagent at an explicit JSONL session file, e.g. `.agents/sessions/KEY.dev.jsonl`, instead of only choosing a `session_dir` and accepting a generated filename. `session_file` implies persistence, resolves relative paths from the requested agent cwd before worktree isolation is applied, supports `~` and absolute paths, opens existing valid session files for append/resume, and creates missing files at the requested path. One active run may use a file at a time; concurrent writers are unsupported. This builds on `persist_session` / `session_dir` while making long-running issue-keyed plan/dev/review lanes stable enough for humans and orchestration tools to inspect or continue later.
+
 ### Fixed
 - **The workflow stand-down now recognises a lowercase `workflow` tool** ([#283](https://github.com/tintinweb/pi-subagents/issues/283) — thanks [@zampierilucas](https://github.com/zampierilucas)). The match is exact on purpose, and the set held `Workflow` and `SubagentWorkflow` only, so `@quintinshaw/pi-dynamic-workflows` — which registers lowercase `workflow` — never tripped it: with `workflowsEnabled` unset, both orchestrators reached the model and nothing warned. Adding the third name is the whole fix; exactness is kept, so a `list_workflows` still cannot take the feature down.
 
