@@ -618,6 +618,44 @@ describe("FleetList cost display", () => {
  * ------------------------------------------------------------------------- */
 
 describe("FleetList workflow rows", () => {
+  it("opens the painted workflow row on a mouse click while preserving a draft", () => {
+    const h = harness([]);
+    h.setWorkflows([makeWorkflow({ id: "wf_click" })]);
+    h.setEditorText("unfinished prompt");
+    const state = { previousLines: [] as string[], hardwareCursorRow: 0, previousWidth: 120 };
+    const write = vi.fn();
+    Object.assign(h.widgetTui, { captureRenderState: () => state,
+      terminal: { columns: 120, rows: 40, write } });
+    const rows = h.render();
+    state.previousLines = ["before", ...rows, "footer"];
+    expect(h.press("\x1b[<0;8;6M")?.consume).toBe(true);
+    expect(write).toHaveBeenLastCalledWith("\x1b[6n");
+    h.press("\x1b[2;1R");
+    expect(h.openedWorkflows()).toEqual(["wf_click"]);
+    expect(h.ui.getEditorText()).toBe("unfinished prompt");
+    h.fleet.dispose();
+    expect(write).toHaveBeenLastCalledWith("\x1b[?1000;1006r");
+  });
+
+  it("opens the first running workflow directly with Enter at an empty prompt", () => {
+    const h = harness([]);
+    h.setWorkflows([makeWorkflow({ id: "wf_enter" })]);
+    expect(h.press(ENTER)?.consume).toBe(true);
+    expect(h.openedWorkflows()).toEqual(["wf_enter"]);
+  });
+
+  it("does not take Enter from a nonempty draft or another focused component", () => {
+    const h = harness([]);
+    h.setWorkflows([makeWorkflow()]);
+    h.setEditorText("keep this draft");
+    expect(h.press(ENTER)?.consume).toBeFalsy();
+    h.setEditorText("");
+    h.widgetTui.focusedComponent = { kind: "selector" };
+    h.render();
+    expect(h.press(ENTER)?.consume).toBeFalsy();
+    expect(h.openedWorkflows()).toEqual([]);
+  });
+
   it("renders identically with no workflow source and an empty one", () => {
     // The contract: a session without workflows behaves exactly as it did
     // before they existed. Asserted as an equality rather than an absence, so
@@ -699,10 +737,8 @@ describe("FleetList workflow rows", () => {
     const h = harness([]);
     h.setWorkflows([makeWorkflow({ id: "wf_only" })]);
 
-    // The first ↓ moves focus into the list and lands on `main`, as it always
-    // has; the second reaches the only other row.
+    // A workflow is selected immediately, instead of landing on `main`.
     expect(h.press(DOWN)?.consume, "↓ at an empty prompt has somewhere to go").toBe(true);
-    h.press(DOWN);
     h.press(ENTER);
 
     expect(h.openedWorkflows()).toEqual(["wf_only"]);
@@ -718,7 +754,6 @@ describe("FleetList workflow rows", () => {
     h.setWorkflows([makeWorkflow({ id: "wf_pick" })]);
 
     h.press(LEFT);
-    h.press(DOWN);
     h.press(ENTER);
 
     expect(h.openedWorkflows()).toEqual(["wf_pick"]);
@@ -737,7 +772,6 @@ describe("FleetList workflow rows", () => {
     ]);
     h.render();
     h.press(LEFT);
-    h.press(DOWN);
     h.press(DOWN);
     expect(h.openedWorkflows()).toEqual([]);
     h.press(ENTER);
@@ -780,7 +814,6 @@ describe("FleetList workflow rows", () => {
     h.setWorkflows([makeWorkflow()]);
 
     h.press(LEFT);
-    h.press(DOWN);
     h.press(DOWN);
     h.press(ENTER);
 

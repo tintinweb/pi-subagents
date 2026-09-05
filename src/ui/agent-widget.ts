@@ -655,5 +655,6 @@ export class AgentWidget {
     this.widgetRegistered = false;
     this.tui = undefined;
     this.lastStatusText = undefined;
+    this.uiCtx = undefined;
   }
 }
