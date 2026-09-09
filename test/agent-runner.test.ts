@@ -2468,6 +2468,58 @@ describe("agent-runner ext: tool selectors", () => {
 // The limit a run will enforce, resolved before the run starts. The widget's
 // turn counter has to predict it for agents spawned outside the Agent tool
 // (mentions, cross-extension RPC), and a second copy of the expression there
+// Subagent thinking levels inherit the spawning session's level unless the
+// caller or the agent file pins one — otherwise an unset level falls through
+// to pi's defaultThinkingLevel (e.g. "max") instead of matching the parent.
+describe("agent-runner thinking level inheritance", () => {
+  it("inherits the parent session level when neither option nor agent config sets one", async () => {
+    const { session } = createSession("INHERITED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent({ ...ctx, thinkingLevel: "medium" } as any, "Explore", "Say INHERITED", { pi });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      thinkingLevel: "medium",
+    }));
+  });
+
+  it("prefers an explicit option over the parent session level", async () => {
+    const { session } = createSession("EXPLICIT");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent({ ...ctx, thinkingLevel: "medium" } as any, "Explore", "Say EXPLICIT", {
+      pi,
+      thinkingLevel: "high",
+    });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      thinkingLevel: "high",
+    }));
+  });
+
+  it("prefers the agent config over the parent session level", async () => {
+    const { session } = createSession("CONFIG");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ thinking: "low" }) as any);
+
+    await runAgent({ ...ctx, thinkingLevel: "medium" } as any, "Explore", "Say CONFIG", { pi });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      thinkingLevel: "low",
+    }));
+  });
+
+  it("omits thinkingLevel when nothing sets it, so pi applies its own default", async () => {
+    const { session } = createSession("DEFAULT");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Say DEFAULT", { pi });
+
+    const opts = createAgentSession.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts).not.toHaveProperty("thinkingLevel");
+  });
+});
+
 // would drift from the one runAgent enforces — so both call this.
 describe("resolveEffectiveMaxTurns", () => {
   let prevDefault: number | undefined;
