@@ -15,7 +15,8 @@
  * - idle parent → immediate delivery, behavior unchanged
  * - consumption inside the 200ms hold window on the idle path → still
  *   suppressed by the fire-time re-check
- * - session shutdown → parked batches are dropped, never delivered stale
+ * - real teardown order (before_switch → abort's agent_settled → shutdown) →
+ *   parked batches never deliver, even though agent_settled fires first
  */
 import { describe, expect, it, vi } from "vitest";
 
@@ -139,7 +140,7 @@ describe("group completion notifications: settle-time flush (#273)", () => {
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
     lifecycle.get("agent_settled")?.();
-    await flush();
+    await sleep(10); // deferred flush fires and finds nothing to send
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
     await lifecycle.get("session_shutdown")?.();
@@ -161,7 +162,7 @@ describe("group completion notifications: settle-time flush (#273)", () => {
     await tools.get("get_subagent_result").execute("tc-a", { agent_id: alpha }, undefined, undefined, ctx());
 
     lifecycle.get("agent_settled")?.();
-    await flush();
+    await sleep(10); // deferred flush delivers the remaining members
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     const body = sentBodies(pi)[0];
@@ -190,7 +191,7 @@ describe("group completion notifications: settle-time flush (#273)", () => {
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
     lifecycle.get("agent_settled")?.();
-    await flush();
+    await sleep(10); // deferred flush delivers the parked batches
 
     expect(pi.sendMessage).toHaveBeenCalledTimes(1);
     const [message, options] = pi.sendMessage.mock.calls[0];
@@ -243,7 +244,7 @@ describe("group completion notifications: settle-time flush (#273)", () => {
     await lifecycle.get("session_shutdown")?.();
   }, 15_000);
 
-  it("drops parked notifications at session shutdown instead of delivering them stale", async () => {
+  it("never delivers parked batches through the real teardown order (agent_settled fires before session_shutdown)", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
 
@@ -257,10 +258,44 @@ describe("group completion notifications: settle-time flush (#273)", () => {
     await sleep(300); // parked
     expect(pi.sendMessage).not.toHaveBeenCalled();
 
-    await lifecycle.get("session_shutdown")?.();
-
+    // Real pi teardown order on replacement paths (verified against
+    // agent-session-runtime.js `teardownCurrent`): session_before_switch →
+    // the in-flight run is aborted — whose settle we fire here →
+    // session_shutdown. The parked batch must not deliver even though
+    // agent_settled fires BEFORE the shutdown event; a synchronous flush
+    // there would start a new agent turn mid-teardown.
+    lifecycle.get("session_before_switch")?.({ type: "session_before_switch" });
     lifecycle.get("agent_settled")?.();
+    await sleep(10); // let the deferred flush fire if it were going to
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    await lifecycle.get("session_shutdown")?.();
     await flush();
     expect(pi.sendMessage).not.toHaveBeenCalled();
+  }, 15_000);
+
+  it("skips delivery when a session switch begins but never completes (vetoed switch)", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    const resolvers = deferredRuns();
+    await spawnGroup(tools);
+
+    lifecycle.get("agent_start")?.();
+    resolvers[0]();
+    resolvers[1]();
+    await flush();
+    await sleep(300); // parked
+
+    // Switch initiated (teardown marker set) but vetoed — no shutdown ever
+    // fires and the run just continues to its settle. Batches parked during
+    // that run are dropped; the next agent_start clears the marker.
+    lifecycle.get("session_before_switch")?.({ type: "session_before_switch" });
+    lifecycle.get("agent_settled")?.();
+    await sleep(10);
+
+    expect(pi.sendMessage).not.toHaveBeenCalled();
+
+    await lifecycle.get("session_shutdown")?.();
   }, 15_000);
 });

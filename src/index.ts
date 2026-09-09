@@ -515,6 +515,26 @@ export default function (pi: ExtensionAPI) {
   // queue. The settled boundary is the first point where a send takes
   // effect immediately.
   let parentRunning = false;
+  // Set when the host starts steering away from this session.
+  // `session_before_switch` fires BEFORE `teardownCurrent()` on every
+  // replacement path (new/resume/fork), and teardown aborts any in-flight
+  // run first — so the abort's `agent_settled` arrives while teardown is
+  // already underway, and delivering there (non-streaming + `triggerTurn`)
+  // would start a new agent turn mid-teardown.
+  let teardownStarted = false;
+  // The settled flush is deferred by one macrotask and cancellable: on
+  // replacement paths `session_shutdown` is emitted right after the
+  // abort's `agent_settled`, and the cancel below must win against
+  // delivery. On the normal path this costs one macrotask tick —
+  // imperceptible next to the multi-second notification latency.
+  let settledFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function cancelSettledFlush(): void {
+    if (settledFlushTimer != null) {
+      clearTimeout(settledFlushTimer);
+      settledFlushTimer = undefined;
+    }
+  }
 
   function buildGroupNotification(unconsumed: AgentRecord[], partial: boolean) {
     const notifications = unconsumed.map(r => formatTaskNotification(r, 300, showCost)).join('\n\n');
@@ -588,10 +608,21 @@ export default function (pi: ExtensionAPI) {
   // parked in pi's follow-up queue.
   pi.on("agent_start", () => {
     parentRunning = true;
+    // A run beginning means the session survived — clear a switch marker
+    // left behind by a vetoed navigation.
+    teardownStarted = false;
   });
   pi.on("agent_settled", () => {
     parentRunning = false;
-    flushParkedGroupNotifications();
+    if (teardownStarted || parkedGroupNotifications.length === 0) return;
+    // Deferred: see `settledFlushTimer`. The fire-time `teardownStarted`
+    // re-check also covers a switch that begins between scheduling and
+    // firing; cancelled batches are dropped by `session_shutdown`.
+    settledFlushTimer = setTimeout(() => {
+      settledFlushTimer = undefined;
+      if (teardownStarted) return;
+      flushParkedGroupNotifications();
+    }, 0);
   });
 
   /** Helper: build event data for lifecycle events from an AgentRecord. */
@@ -1156,6 +1187,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_switch", () => {
+    // Teardown marker: on replacement paths `teardownCurrent` aborts the
+    // in-flight run right after this, and the abort's `agent_settled` must
+    // not deliver parked batches. If the switch is vetoed the run simply
+    // continues; the marker is re-cleared by the next `agent_start` (the
+    // batches parked during that in-flight run are dropped — defensible,
+    // since the user was mid-navigation away).
+    teardownStarted = true;
     manager.clearCompleted(true);
     scheduler.stop();
   });
@@ -1185,8 +1223,10 @@ export default function (pi: ExtensionAPI) {
     // Parked group notifications are dropped rather than delivered: a
     // turn cannot usefully be started during teardown, and after a
     // session replacement they would be stale for the new session.
+    cancelSettledFlush();
     parkedGroupNotifications.length = 0;
     parentRunning = false;
+    teardownStarted = false;
     fleet.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
