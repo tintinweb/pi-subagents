@@ -492,39 +492,107 @@ export default function (pi: ExtensionAPI) {
     widget.update();
   }
 
+  // ---- Settle-time flush for grouped notifications (#273) ----
+  // pi offers no per-message withdrawal once a custom message is enqueued
+  // (`sendCustomMessage` hands it straight to the agent's queue; the only
+  // related API is the all-or-nothing `clearQueue()`), so a mid-run
+  // delivery decision is final. While the parent is running, grouped
+  // batches are parked here instead of being handed over, and the
+  // delivery decision is deferred to `agent_settled`, where
+  // `resultConsumed` is re-checked per record. Arrival time matches the
+  // old followUp queue (both land at run end); the difference is that
+  // results consumed in the meantime no longer produce a stale
+  // notification turn.
+  interface ParkedGroupNotification {
+    groupKey: string;
+    records: AgentRecord[];
+    partial: boolean;
+  }
+  const parkedGroupNotifications: ParkedGroupNotification[] = [];
+  // Tracked via agent_start / agent_settled rather than agent_end: the
+  // latter still precedes auto-retry, auto-compaction, and queued
+  // follow-ups, so a send made there can still end up parked in pi's
+  // queue. The settled boundary is the first point where a send takes
+  // effect immediately.
+  let parentRunning = false;
+
+  function buildGroupNotification(unconsumed: AgentRecord[], partial: boolean) {
+    const notifications = unconsumed.map(r => formatTaskNotification(r, 300, showCost)).join('\n\n');
+    const label = partial
+      ? `${unconsumed.length} agent(s) finished (partial — others still running)`
+      : `${unconsumed.length} agent(s) finished`;
+
+    const [first, ...rest] = unconsumed;
+    const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
+    if (rest.length > 0) {
+      details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
+    }
+
+    return {
+      content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
+      details,
+    };
+  }
+
+  // Single delivery path for group batches: re-filter at the moment of
+  // the decision, park while the parent is mid-run, send immediately
+  // otherwise.
+  function dispatchGroupNotification(records: AgentRecord[], partial: boolean, groupKey: string): void {
+    const unconsumed = records.filter(r => !r.resultConsumed);
+    if (unconsumed.length === 0) { widget.update(); return; }
+
+    if (parentRunning) {
+      // Park — the flush at agent_settled re-filters per record, so
+      // results consumed in the meantime are dropped there.
+      parkedGroupNotifications.push({ groupKey, records, partial });
+      widget.update();
+      return;
+    }
+
+    const { content, details } = buildGroupNotification(unconsumed, partial);
+    pi.sendMessage<NotificationDetails>({
+      customType: "subagent-notification",
+      content,
+      display: true,
+      details,
+    }, { deliverAs: "followUp", triggerTurn: true });
+  }
+
+  // Re-dispatch parked batches. parentRunning is already false when this
+  // runs, so dispatch delivers immediately; fully-consumed batches drop
+  // out, partially-consumed ones report only their remaining members
+  // with a recomputed count.
+  function flushParkedGroupNotifications(): void {
+    if (parkedGroupNotifications.length === 0) return;
+    const parked = parkedGroupNotifications.splice(0);
+    for (const entry of parked) {
+      dispatchGroupNotification(entry.records, entry.partial, entry.groupKey);
+    }
+  }
+
   // ---- Group join manager ----
   const groupJoin = new GroupJoinManager(
     (records, partial) => {
       for (const r of records) { agentActivity.delete(r.id); widget.markFinished(r.id); fleet.onAgentFinished(r.id); }
 
       const groupKey = `group:${records.map(r => r.id).join(",")}`;
-      scheduleNudge(groupKey, () => {
-        // Re-check at send time
-        const unconsumed = records.filter(r => !r.resultConsumed);
-        if (unconsumed.length === 0) { widget.update(); return; }
-
-        const notifications = unconsumed.map(r => formatTaskNotification(r, 300, showCost)).join('\n\n');
-        const label = partial
-          ? `${unconsumed.length} agent(s) finished (partial — others still running)`
-          : `${unconsumed.length} agent(s) finished`;
-
-        const [first, ...rest] = unconsumed;
-        const details = buildNotificationDetails(first, 300, agentActivity.get(first.id));
-        if (rest.length > 0) {
-          details.others = rest.map(r => buildNotificationDetails(r, 300, agentActivity.get(r.id)));
-        }
-
-        pi.sendMessage<NotificationDetails>({
-          customType: "subagent-notification",
-          content: `Background agent group completed: ${label}\n\n${notifications}\n\nUse get_subagent_result for full output.`,
-          display: true,
-          details,
-        }, { deliverAs: "followUp", triggerTurn: true });
-      });
+      scheduleNudge(groupKey, () => dispatchGroupNotification(records, partial, groupKey));
       widget.update();
     },
     30_000,
   );
+
+  // Parent run boundaries. `agent_settled` (not `agent_end`) is the flush
+  // point: retries, auto-compaction, and queued follow-ups keep the run
+  // alive past `agent_end`, and a delivery made there can still end up
+  // parked in pi's follow-up queue.
+  pi.on("agent_start", () => {
+    parentRunning = true;
+  });
+  pi.on("agent_settled", () => {
+    parentRunning = false;
+    flushParkedGroupNotifications();
+  });
 
   /** Helper: build event data for lifecycle events from an AgentRecord. */
   function buildEventData(record: AgentRecord) {
@@ -1114,6 +1182,11 @@ export default function (pi: ExtensionAPI) {
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    // Parked group notifications are dropped rather than delivered: a
+    // turn cannot usefully be started during teardown, and after a
+    // session replacement they would be stale for the new session.
+    parkedGroupNotifications.length = 0;
+    parentRunning = false;
     fleet.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
