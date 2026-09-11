@@ -89,6 +89,38 @@ export interface SubagentsSettings {
    */
   scopeModels?: boolean;
   /**
+   * When true, a subagent's effective model must come from the same provider as
+   * the session spawning it. Off by default.
+   *
+   * Where `scopeModels` is an explicit allowlist the user has to enumerate,
+   * this is a structural constraint that follows the current session — the
+   * useful default for keeping a fan-out inside one billing/quota domain, one
+   * credential set, and one provider's prompt cache. The two are independent
+   * switches and compose as an AND.
+   *
+   * The reference is the SPAWNING session's provider, not the root main
+   * session's (see checkModelProvider in model-scope.ts). Enforcing at each
+   * level is equivalent to enforcing against the root, and needs no state
+   * threaded through the agent records: a nested child's parent was already
+   * checked when it was created.
+   *
+   * Out-of-provider handling follows scopeModels' source split:
+   *   - Caller-supplied via `Agent({ model })`, a workflow script's
+   *     `agent({ model })`, or a `subagents:rpc:spawn` payload: hard error, so
+   *     the orchestrator learns the constraint and picks again.
+   *   - Pinned in agent frontmatter: warning toast + the pinned model runs.
+   *     Refusing it would break every pinned agent file the moment someone
+   *     enables the setting.
+   *   - Parent-inherited: always same-provider by construction, so it passes
+   *     silently — this policy deliberately has no warn-on-inherit case.
+   *
+   * No-op when the spawning session's provider is unknown — an unknown
+   * reference disables the check rather than refusing every spawn (the same
+   * stance an empty `enabledModels` list takes for scopeModels). A resumed
+   * agent is not checked at all; it reuses a session that already exists.
+   */
+  providerModels?: boolean;
+  /**
    * When true, an unreadable or unparseable agent `.md` aborts extension load
    * instead of being skipped with a warning — pi exits, naming the file.
    *
@@ -316,6 +348,7 @@ export interface SettingsAppliers {
   setBackgroundByDefault: (b: boolean) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setProviderModels: (enabled: boolean) => void;
   setStrictAgentFiles: (b: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
@@ -404,6 +437,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
+  }
+  if (typeof r.providerModels === "boolean") {
+    out.providerModels = r.providerModels;
   }
   if (typeof r.strictAgentFiles === "boolean") {
     out.strictAgentFiles = r.strictAgentFiles;
@@ -523,6 +559,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (typeof s.providerModels === "boolean") appliers.setProviderModels(s.providerModels);
   if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);

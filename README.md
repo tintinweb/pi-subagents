@@ -36,6 +36,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Cross-extension RPC** — other pi extensions can spawn, stop, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` followUp path as manual background completions; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
+- **Same-provider enforcement** — opt-in validation that a subagent runs on the same provider as the session that spawned it, so a fan-out stays inside one billing/quota domain, one credential set, and one prompt cache. Same source split as model scope. Toggle via `/agents → Settings → Provider models`
 
 ## Install
 
@@ -587,9 +588,16 @@ When background agents complete, they notify the main agent. The **join mode** c
 
 ## Model Scope
 
-**Opt-in:** off by default. Enable via `/agents → Settings → Scope models`.
+Two independent, opt-in policies constrain which model a subagent may run on. When both are on they compose as an AND:
 
-When on, each subagent spawn's effective model is validated against pi's own `enabledModels` list (configured via pi's `/scoped-models` UI). pi-subagents reads that list; it doesn't manage it. Both of pi's settings files are honored: global `~/.pi/agent/settings.json` and project-local `<cwd>/.pi/settings.json`. **Project overrides global** — mirrors pi's `SettingsManager` deep-merge, so a tighter per-project scope (hand-edited into the project settings) is respected.
+| Policy | Setting | Question it answers |
+|---|---|---|
+| Allowlist | `scopeModels` | Did the user enumerate this model in pi's `enabledModels`? |
+| Same provider | `providerModels` | Is this model from the same provider as the spawning session? |
+
+**Opt-in:** both off by default. Enable via `/agents → Settings → Scope models` and `/agents → Settings → Provider models`.
+
+**Allowlist policy.** When on, each subagent spawn's effective model is validated against pi's own `enabledModels` list (configured via pi's `/scoped-models` UI). pi-subagents reads that list; it doesn't manage it. Both of pi's settings files are honored: global `~/.pi/agent/settings.json` and project-local `<cwd>/.pi/settings.json`. **Project overrides global** — mirrors pi's `SettingsManager` deep-merge, so a tighter per-project scope (hand-edited into the project settings) is respected.
 
 **Out-of-scope handling depends on source:**
 
@@ -608,9 +616,31 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 **No-op safety:** if `enabledModels` is missing or empty in pi's settings, scope check skips entirely — no false positives, no spurious errors.
 
+### Same-provider enforcement
+
+`providerModels` (opt-in) requires a subagent's effective model to come from the same provider as the session spawning it. Where `scopeModels` is an explicit list you have to maintain, this one is structural and follows the session, whatever the orchestrator, a workflow script, or an agent file asks for.
+
+**The reference is the spawning session's provider.** Enforcing at each level is equivalent to enforcing against the root main session — a top-level spawn's parent *is* the main session, and a nested child's parent was already checked when it was created — so nesting cannot drift to another provider without any state threaded through the agent records.
+
+**Handling depends on source**, the same split `scopeModels` uses:
+
+| Model source | Out-of-provider behavior |
+|---|---|
+| Caller-supplied via `Agent({ model: "..." })` | Hard error returned to the orchestrator, naming the session's provider |
+| Caller-supplied via a workflow script's `agent({ model })` | `agent()` returns an error; the script sees `null` and its siblings carry on |
+| Caller-supplied via cross-extension RPC (`subagents:rpc:spawn`) | Error thrown to the calling extension |
+| Pinned in agent frontmatter | Warning toast + the pinned model runs (frontmatter is authoritative) |
+| Parent-inherited (neither set) | Passes silently — an inherited model is the session's own, so it cannot be cross-provider |
+
+Two consequences of that table are worth knowing. A pinned agent file keeps working when the setting is enabled — it warns instead of failing, so turning this on cannot break a project's existing `.pi/agents/` — and unlike `scopeModels`, this policy never warns about the default behaviour, since inheritance is always legal by construction.
+
+**No-op safety:** an unknown session provider disables the check rather than refusing every spawn, mirroring the empty-allowlist case above. A resumed agent (`resume_task`, `@handle`) is never checked — it reuses an existing session — so a session created before the setting was enabled keeps its own provider, and so do its children, which are validated against *it*.
+
+**Deliberately not covered:** scheduled jobs (`src/schedule.ts`) resolve their model at fire time and bypass both policies — a pre-existing gap this setting shares with `scopeModels`, left alone so one change does one thing.
+
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, provider models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -620,6 +650,8 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, max foreg
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
 **Fallback agent** (`fallbackSubagent`, default `general-purpose`): the agent used when a caller-supplied `subagent_type` doesn't resolve to exactly one enabled agent — unknown, disabled, or ambiguous because two agents differ only by case. Name any enabled agent to route those calls there instead, or set `none` for **strict**, fail-closed dispatch: the call is refused with an error listing the available types, and nothing spawns. Strict mode matters most for background and scheduled calls, which would otherwise start executing a substituted agent before the caller learns anything. Also settable from `/agents → Settings → Fallback agent`. The boolean `false` is accepted as a spelling of `none`, because it would otherwise be dropped as the wrong type and silently leave the permissive default in place. Every other value is read as an agent name, so a mistaken `off` fails loudly at dispatch rather than meaning one thing in the settings file and another in the resolver. A fallback agent that is itself unknown or disabled is a misconfiguration and is reported rather than quietly replaced. Note the default is unchanged and stays permissive by design: with `disableDefaultAgents` and no `general-purpose` of your own, an unresolvable type still resolves to a built-in config carrying *all* tools — set `none` (or name one of your own agents) to close that.
+
+**Provider models** (`providerModels`, default `false`): whether a subagent must run on the same provider as the session spawning it. See [Same-provider enforcement](#same-provider-enforcement) for the source-dependent handling, the spawning-session reference, and what it deliberately does not cover. Also settable from `/agents → Settings → Provider models`; applied live.
 
 **Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable [agent file](#custom-agents) aborts extension load at startup and names the file, instead of being skipped with a warning — so a checked-in `.pi/agents/` can't silently fall through to a same-named agent from another location. Startup only: the mid-session reload that runs on each `Agent` call keeps warning either way, since a bad edit shouldn't kill a session on an unrelated spawn. Also settable from `/agents → Settings → Strict agent files`.
 
@@ -960,7 +992,7 @@ src/
   invocation-config.ts # Shared tool-parameter schemas (isolation, join, thinking, ...)
   model-resolver.ts   # Model resolution: exact provider/modelId with fuzzy fallback
   enabled-models.ts   # Read pi's enabledModels settings (project over global)
-  model-scope.ts      # scopeModels allowlist policy, shared by top-level and nested tools
+  model-scope.ts      # The scopeModels + providerModels policies, shared by every spawn path
   mention.ts          # `@handle message` grammar: suggestion triggers and send parsing
   mention-clone.ts    # Run a mention's turn in a cloned conversation, off the main chat
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events

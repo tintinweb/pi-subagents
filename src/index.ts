@@ -29,7 +29,13 @@ import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from ".
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
 import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
-import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
+import {
+  checkModelScope,
+  isProviderModelsEnabled,
+  isScopeModelsEnabled,
+  setProviderModelsEnabled,
+  setScopeModelsEnabled,
+} from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
 import { SubagentScheduler } from "./schedule.js";
@@ -1410,6 +1416,7 @@ export default function (pi: ExtensionAPI) {
       setBackgroundByDefault,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
+      setProviderModels: setProviderModelsEnabled,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
@@ -1819,9 +1826,10 @@ Terse command-style prompts produce shallow, generic work.
         }
       }
 
-      // Scope validation: the effective resolved model is checked against the
-      // user's enabledModels list. Policy (hard error vs warn-and-proceed) lives
-      // in model-scope.ts so the nested delegation tools apply the same rule.
+      // Model policy: the effective resolved model is checked against the
+      // user's enabledModels list and, when the policy is on, the session's own
+      // provider. Policy (hard error vs warn-and-proceed) lives in model-scope.ts
+      // so every other spawn path applies the same rules.
       const scopeVerdict = checkModelScope({
         model,
         cwd: ctx.cwd,
@@ -1829,6 +1837,7 @@ Terse command-style prompts produce shallow, generic work.
         callerSupplied: resolvedConfig.modelFromParams,
         agentLabel: customConfig?.displayName ?? subagentType,
         modelInput: resolvedConfig.modelInput,
+        sessionProvider: ctx.model?.provider,
       });
       if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
       if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
@@ -3448,6 +3457,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      providerModels: isProviderModelsEnabled(),
       strictAgentFiles,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
@@ -3579,6 +3589,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           label: "Scope models",
           description: "Validate subagent models against scoped models (/scoped-models)",
           currentValue: isScopeModelsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "providerModels",
+          label: "Provider models",
+          description: "Only allow subagent models from the current session's provider",
+          currentValue: isProviderModelsEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -3771,6 +3788,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
         notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "providerModels") {
+        const enabled = value === "on";
+        setProviderModelsEnabled(enabled);
+        notifyApplied(ctx, `Provider models ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "strictAgentFiles") {
         const enabled = value === "on";
         strictAgentFiles = enabled;
