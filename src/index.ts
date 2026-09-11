@@ -1629,7 +1629,7 @@ Terse command-style prompts produce shallow, generic work.
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description: "Optional agent ID to resume from, as reported on the `Agent ID:` line of any spawn or resume result. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
       isolated: Type.Optional(
@@ -2024,10 +2024,13 @@ Terse command-style prompts produce shallow, generic work.
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record));
+          return textResult(
+            `Agent failed: ${record.error}\nAgent ID: ${record.id}${partialOutputSuffix(record)}`,
+            buildDetails(detailBaseFor(record), record),
+          );
         }
         return textResult(
-          record.result?.trim() || "No output.",
+          `Agent ID: ${record.id}\n\n${record.result?.trim() || "No output."}`,
           buildDetails(detailBaseFor(record), record),
         );
       }
@@ -2250,7 +2253,10 @@ Terse command-style prompts produce shallow, generic work.
 
       if (record.status === "error") {
         // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+        return textResult(
+          `${fallbackNote}Agent failed: ${record.error}\nAgent ID: ${record.id}${partialOutputSuffix(record)}`,
+          details,
+        );
       }
 
       const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
@@ -2261,7 +2267,8 @@ Terse command-style prompts produce shallow, generic work.
         if (costText) statsParts.push(costText);
       }
       return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
+        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n` +
+        `Agent ID: ${record.id}\n\n` +
         (record.result?.trim() || "No output."),
         details,
       );

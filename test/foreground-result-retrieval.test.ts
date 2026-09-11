@@ -12,10 +12,12 @@
  *   1. The record is NOT cleaned up. Foreground completion mutates the record
  *      in place (agent-manager.ts startAgent's .then) — nothing deletes it. So
  *      a lookup with the REAL id succeeds.
- *   2. The model never HAD the real id. Foreground returns the result text
- *      only; the id travels in `details`, which is renderer metadata and never
- *      reaches the API (only `content` is serialized). The background path is
- *      the one that puts `Agent ID: ...` in the text.
+ *   2. The model never HAD the real id. Foreground returned the result text
+ *      only; the id travelled in `details`, which is renderer metadata and
+ *      never reaches the API (only `content` is serialized), so only the
+ *      background path put `Agent ID: ...` in the text. #160 closed that: the
+ *      id is reported now, so test 2 pins both halves — an id IS available,
+ *      and an invented one is still rejected.
  *
  * Together: whatever id the reporter's model passed, it wasn't one we issued,
  * and "not found" was the correct answer. Test 3 pins the eviction rule that
@@ -75,8 +77,8 @@ const textOf = (r: any): string => r.content[0].text;
  * which is what produces the reporter's "(wrapped up at the turn limit —
  * output may be partial)" note.
  *
- * Returns the tool result plus the id read out of `details` — the only place
- * a foreground id exists, which is the point of test 2.
+ * Returns the tool result plus the id read out of `details`, which is the
+ * authority test 2 compares the model-visible text against.
  */
 async function runForegroundSteeredAgent(tools: Map<string, any>) {
   vi.mocked(runAgent).mockResolvedValue({
@@ -154,18 +156,18 @@ describe("issue #174: foreground agent that hits max_turns", () => {
     await lifecycle.get("session_shutdown")?.({}, ctx());
   });
 
-  it("never hands the model an agent id — the id lives only in renderer details", async () => {
+  it("hands the model the real agent id, and still rejects an invented one", async () => {
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     const { res, id } = await runForegroundSteeredAgent(tools);
 
-    // `content` is the only thing serialized to the API. If the id isn't here,
-    // the model cannot have obtained it — any id it passes is invented.
-    expect(textOf(res)).not.toContain(id);
-    expect(textOf(res)).not.toMatch(/Agent ID:/);
+    // `content` is the only thing serialized to the API, so the id has to be
+    // here for the model to have it at all (#160) — `details` is not enough.
+    expect(/Agent ID: (\S+)/.exec(textOf(res))?.[1]).toBe(id);
 
-    // An invented id is correctly rejected — this is the reporter's error,
-    // reproduced WITHOUT any record having been cleaned up.
+    // Reporting an id does not make every string one. An invented id is still
+    // rejected — the reporter's error, reproduced WITHOUT any record having
+    // been cleaned up.
     const bogus = await tools.get("get_subagent_result").execute(
       "tc-bogus",
       { agent_id: "3f1320a7-74ec-422" },
@@ -203,6 +205,36 @@ describe("issue #174: foreground agent that hits max_turns", () => {
     expect(out).toContain("THE-RESULT-PAYLOAD");
 
     await parent.lifecycle.get("session_shutdown")?.({}, ctx());
+  });
+
+  // `Agent failed:` used to be the whole string, so a failed run was the one
+  // outcome with no handle of any kind. Note the id is not always resumable
+  // here: a run that failed BEFORE its session existed (mocked below) is
+  // refused by `resume` with "has no active session to resume". The id still
+  // addresses the record for get_subagent_result and the fleet view, and a
+  // failure after the session was created does resume.
+  it("reports the id on a failed run too, not only a completed one", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    vi.mocked(runAgent).mockRejectedValue(new Error("provider exploded"));
+
+    const res = await tools.get("Agent").execute(
+      "tc-fg-err",
+      {
+        prompt: "Do the thing.",
+        description: "Do the thing",
+        subagent_type: "Explore",
+        run_in_background: false,
+      },
+      undefined,
+      undefined,
+      ctx(),
+    );
+
+    expect(textOf(res)).toContain("provider exploded");
+    expect(/Agent ID: (\S+)/.exec(textOf(res))?.[1]).toBe((res as any).details?.agentId);
+
+    await lifecycle.get("session_shutdown")?.({}, ctx());
   });
 
   it("IS evicted by a session switch — its result was already delivered inline", async () => {

@@ -285,6 +285,98 @@ describe("Agent tool — background resume wiring", () => {
     expect(resultText(res)).toContain("inline answer");
     expect(resultText(res)).not.toContain("You will be notified");
 
+    // It still reports the id, so the round after this one can resume again
+    // (#160). A foreground resume that answered inline and dropped the id used
+    // to end the chain at whatever round first blocked.
+    expect(agentIdOf(res)).toBe(id);
+
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
+
+  // The id has to survive the whole chain, not just the first hop: a review
+  // loop resumes the agent it resumed. Both hops here are foreground, the
+  // combination that reported no id at all before #160.
+  it("can be resumed again from the id a foreground resume reported", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    const id = await spawnSettled(tools, ctx);
+
+    const params = { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", run_in_background: false };
+    const first = await tools.get("Agent").execute("resume-1", { ...params, resume: id }, undefined, undefined, ctx);
+
+    // Round 2 uses only what round 1 put in the model-visible text.
+    const second = await tools.get("Agent").execute(
+      "resume-2",
+      { ...params, resume: agentIdOf(first) },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(resultText(second)).not.toContain("Agent not found");
+    expect(agentIdOf(second)).toBe(id);
+
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
+
+  // The #160 case in full: spawn BLOCKING, take the id from nothing but the
+  // model-visible text, and resume it. Every other resume test here starts from
+  // a background spawn, which always reported an id — so none of them can fail
+  // if the foreground line regresses.
+  it("resumes a foreground spawn using only the id printed in its result text", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+
+    const spawned = await tools.get("Agent").execute(
+      "spawn-call",
+      { prompt: "first task", description: "First task", subagent_type: "general-purpose", run_in_background: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+    // Not `spawned.details.agentId` — `details` is renderer metadata the model
+    // never sees, so reading it here would pin nothing.
+    const id = agentIdOf(spawned);
+
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "second round answer" } as any);
+    const resumed = await tools.get("Agent").execute(
+      "resume-call",
+      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(resultText(resumed)).not.toContain("Agent not found");
+    expect(resultText(resumed)).not.toContain("no active session");
+    expect(resultText(resumed)).toContain("second round answer");
+    expect(agentIdOf(resumed)).toBe(id);
+
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
+
+  // A resume that failed is still resumable, so the failure surface owes the
+  // caller the id as much as the success one does.
+  it("reports the id when a foreground resume fails", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    const id = await spawnSettled(tools, ctx);
+
+    vi.mocked(resumeAgent).mockRejectedValue(new Error("provider exploded"));
+    const res = await tools.get("Agent").execute(
+      "resume-call",
+      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(resultText(res)).toContain("provider exploded");
+    expect(agentIdOf(res)).toBe(id);
+
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });
 });
