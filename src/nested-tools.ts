@@ -116,18 +116,27 @@ function ownsRecord(record: AgentRecord | undefined, parentAgentId: string): rec
  * How the caller received this record, which decides the outcome wording.
  *
  *   - "inline": a foreground spawn or a resume. The full output is in this very
- *     result and no agent id was handed back, so the note must say there is
- *     nothing left to fetch — otherwise the parent invents an id, calls
- *     `get_subagent_result`, and hits "not owned by this parent" (#174, the same
- *     trap the top-level foreground path fell into).
+ *     result, so the note must say there is nothing left to fetch — otherwise
+ *     the parent spends a `get_subagent_result` learning that. Before #160 it
+ *     could not even spend it correctly: no id was handed back, so the parent
+ *     invented one and hit "not owned by this parent" (#174). The id is
+ *     reported now, which is what makes this tool's own `resume` reachable.
  *   - "fetched": `get_subagent_result` on a background child. The parent holds a
- *     valid id and can poll again, so the background wording applies.
+ *     valid id and can poll again, so the background wording applies — and the
+ *     id line below is skipped: a poll result is transient, and the parent is
+ *     holding the id it polled with. The split is about which result the parent
+ *     keeps, NOT about whether it already knows the id: an inline *resume*
+ *     names the child too, and still gets the line, because that result is the
+ *     only durable record of an id the next round has to pass again.
  */
 type ResultPosition = "inline" | "fetched";
 
 function formatRecord(record: AgentRecord, position: ResultPosition): string {
+  // Matches the top-level format so one `Agent ID: (\S+)` reads either surface.
+  const idLine = position === "inline" ? `Agent ID: ${record.id}` : "";
   if (record.status === "error") {
-    return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
+    const failure = [`Agent failed: ${record.error ?? "unknown error"}`, idLine].filter(Boolean).join("\n");
+    return `${failure}${partialOutputSuffix(record)}`;
   }
   if (record.status === "queued" || record.status === "running") {
     return `Agent ${record.id} is ${record.status}.`;
@@ -139,7 +148,8 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   const note = position === "inline"
     ? getForegroundOutcomeNote(record.status)
     : getStatusNote(record.status);
-  return note ? `Nested agent${note}.\n\n${text}` : text;
+  const header = [note ? `Nested agent${note}.` : "", idLine].filter(Boolean).join("\n");
+  return header ? `${header}\n\n${text}` : text;
 }
 
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
@@ -175,7 +185,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true only for work you will collect later with get_subagent_result; a detached child is stopped when you finish.",
         }),
       ),
-      resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
+      resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent, by the id reported on the `Agent ID:` line of its result." })),
       isolated: Type.Optional(Type.Boolean()),
       inherit_context: Type.Optional(Type.Boolean()),
       ...isolationParam(isWorktreeIsolationEnabled()),

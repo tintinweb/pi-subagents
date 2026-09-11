@@ -408,12 +408,15 @@ describe("child-safe nested Agent tools", () => {
     });
 
     expect(result.isError).toBe(false);
-    // Foreground: the whole output is inline and no id came back, so the note
-    // must not invite a get_subagent_result call the parent cannot make (#174).
+    // Foreground: the whole output is inline, so the note must not invite a
+    // get_subagent_result that would only re-fetch what is already here (#174).
     expect(result.content[0].text).toContain("everything the agent produced is above");
     expect(result.content[0].text).not.toContain("output is partial");
     // The warning leads, so it can't read as part of the child's own answer.
     expect(result.content[0].text.indexOf("half an answer")).toBeGreaterThan(0);
+    // The id comes back even so — the note discourages a fetch, it does not
+    // deny the parent a name for the child it may still want to resume (#160).
+    expect(/Agent ID: (\S+)/.exec(result.content[0].text)?.[1]).toBe("child-1");
   });
 
   it("uses the fetchable wording when the parent polls a background child by id", async () => {
@@ -426,6 +429,8 @@ describe("child-safe nested Agent tools", () => {
     // Here the parent does hold a valid id, so the background wording applies.
     expect(result.content[0].text).toContain("output may be incomplete");
     expect(result.content[0].text).not.toContain("everything the agent produced is above");
+    // And no id line: it would echo the argument this very call was made with.
+    expect(result.content[0].text).not.toContain("Agent ID:");
   });
 
   it("keeps a failed child's partial output alongside the error", async () => {
@@ -446,6 +451,38 @@ describe("child-safe nested Agent tools", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("provider exploded");
     expect(result.content[0].text).toContain("got this far");
+    expect(/Agent ID: (\S+)/.exec(result.content[0].text)?.[1]).toBe("child-1");
+  });
+
+  // The nested tool has its own `resume`, resolved by id like the top-level
+  // one. A background spawn always reported an id; its FOREGROUND default did
+  // not, so before #160 the parameter was out of reach of the common path.
+  it("prints an id on a clean inline result, so its own resume is reachable", async () => {
+    const [agent] = tools();
+    const spawned = await execute(agent, {
+      subagent_type: "scout",
+      description: "find files",
+      prompt: "Find them",
+    });
+
+    expect(spawned.content[0].text).toContain("done");
+    const id = /Agent ID: (\S+)/.exec(spawned.content[0].text)?.[1];
+    expect(id).toBe("child-1");
+
+    // Round two addresses the child with nothing but what round one printed.
+    vi.mocked(manager.resume).mockResolvedValue({
+      id, status: "completed", result: "second round", parentAgentId: "parent-1",
+    } as any);
+    const resumed = await execute(agent, {
+      resume: id as string,
+      subagent_type: "scout",
+      description: "keep going",
+      prompt: "Continue",
+    });
+
+    expect(resumed.isError).toBe(false);
+    expect(resumed.content[0].text).not.toContain("not found or not owned");
+    expect(resumed.content[0].text).toContain("second round");
   });
 
   it("attributes a nested child's token spend to the owning parent", async () => {
