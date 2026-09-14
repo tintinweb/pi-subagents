@@ -24,6 +24,7 @@ test/
 tests/
 *.test.ts
 *.spec.ts
+vitest.config.ts
 
 .pi
 .claude

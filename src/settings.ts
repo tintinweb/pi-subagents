@@ -6,10 +6,32 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
-import type { AgentMentionMode, IsolationBackend, JoinMode, WidgetMode } from "./types.js";
+import type { AgentMentionMode, IsolationBackend, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
+  /**
+   * Max concurrent FOREGROUND (blocking) agents — `0` = unlimited, the default,
+   * which preserves the behaviour that has always applied: nothing bounded
+   * foreground work, and pi dispatches a message's tool calls through
+   * `Promise.all`, so an unqualified fan-out of blocking `Agent` calls runs all
+   * at once. Set it to bound that (#253 — on local models, parallel agents
+   * thrash the prompt cache).
+   *
+   * Deliberately independent of `maxConcurrent` rather than folded into it: a
+   * foreground agent blocks the parent anyway, so charging it to the background
+   * pool would let a saturated pool starve the main session of work it could
+   * have done itself.
+   *
+   * Bounds only spawns a caller is blocking on inline. Nested children are
+   * exempt — their parent is blocked awaiting them, so queueing a child behind
+   * its own parent would deadlock — and so are detached spawns from
+   * cross-extension RPC or `@handle` mentions, which block nobody and are
+   * documented to start immediately. Foreground `resume` is also outside the
+   * pool: it reuses an existing session and never reaches the spawn path, so
+   * several blocking resumes in one message can still exceed the limit.
+   */
+  maxConcurrentForeground?: number;
   /**
    * 0 = unlimited — the extension's single source of truth for that convention:
    * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
@@ -170,6 +192,27 @@ export interface SubagentsSettings {
    */
   worktreeIsolation?: boolean;
   /**
+   * Master switch for scripted workflows. Defaults to `true`.
+   *
+   * Off is not a soft hide: the `SubagentWorkflow` tool is never registered, so
+   * the model is not told it exists and cannot call it, the `/agents`
+   * Workflows entry is hidden, and `--subagents-workflow-file` is refused.
+   *
+   * Absent is not the same as `true`. Unset means *auto*: on, but yielding to
+   * another extension that already offers a workflow tool, because two
+   * orchestrators in one tool spec is a worse default than none — the model
+   * has to guess which to call, and pays for both descriptions to find out.
+   * Setting it explicitly pins the answer in both directions: `true` keeps
+   * ours whatever else is loaded, `false` is off regardless. See
+   * `resolveWorkflowCollisions` in index.ts.
+   *
+   * Read once at extension init, before registration, so flipping it in
+   * `/agents → Settings` takes effect on the next pi session — the same
+   * contract `schedulingEnabled` has, and for the same reason: a tool spec is
+   * fixed once pi has it.
+   */
+  workflowsEnabled?: boolean;
+  /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
    * disables nesting project-wide. Read when a subagent session is built, so a
@@ -228,6 +271,31 @@ export interface SubagentsSettings {
    * what the parent session counts.
    */
   showCost?: boolean;
+
+  /**
+   * Whether the widget's running rows name the model driving each agent and the
+   * thinking level it is running at.
+   *
+   * Off by default, unlike the tool result and the conversation viewer, which
+   * show the pair unconditionally: those have a line to themselves, while the
+   * widget row already carries the description, turns, tool uses, tokens and
+   * elapsed time, and every character it gains is one the description loses on a
+   * narrow terminal.
+   */
+  showModel?: boolean;
+  /**
+   * How much of the conversation viewer's transcript renders as Markdown.
+   * Defaults to `assistant`. Applied live — the viewer's `m` key cycles this
+   * same setting, so a choice made in the overlay persists like one made in
+   * `/agents → Settings`.
+   *
+   * Scoped rather than all-or-nothing because the two kinds of content have
+   * different contracts: assistant text is authored as Markdown, while a tool
+   * result is whatever bytes the tool produced. Rendering the latter as
+   * Markdown is lossy in ways that look like the tool misbehaved — see
+   * `ViewerMarkdownMode` for the specific rewrites — so `all` is opt-in.
+   */
+  viewerMarkdown?: ViewerMarkdownMode;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -235,6 +303,7 @@ export type ToolDescriptionMode = "full" | "compact" | "custom";
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
+  setMaxConcurrentForeground: (n: number) => void;
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
@@ -251,10 +320,13 @@ export interface SettingsAppliers {
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setWorktreeIsolation: (b: boolean) => void;
+  setWorkflowsEnabled: (b: boolean) => void;
   setMaxSubagentDepth: (n: number) => void;
   setFallbackSubagent: (v: string | undefined) => void;
   setReportUsage: (b: boolean) => void;
   setShowCost: (b: boolean) => void;
+  setShowModel: (b: boolean) => void;
+  setViewerMarkdown: (mode: ViewerMarkdownMode) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -264,6 +336,7 @@ const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group
 const VALID_ISOLATION_BACKENDS: ReadonlySet<string> = new Set<IsolationBackend>(["auto", "jj", "git"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
+const VALID_VIEWER_MARKDOWN_MODES: ReadonlySet<string> = new Set<ViewerMarkdownMode>(["off", "assistant", "all"]);
 const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
@@ -285,6 +358,15 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.maxConcurrent as number) <= MAX_CONCURRENT_CEILING
   ) {
     out.maxConcurrent = r.maxConcurrent as number;
+  }
+  // Floor 0, not 1 like maxConcurrent above: 0 is the documented "unlimited"
+  // value and the default, so dropping it would silently be unrepresentable.
+  if (
+    Number.isInteger(r.maxConcurrentForeground) &&
+    (r.maxConcurrentForeground as number) >= 0 &&
+    (r.maxConcurrentForeground as number) <= MAX_CONCURRENT_CEILING
+  ) {
+    out.maxConcurrentForeground = r.maxConcurrentForeground as number;
   }
   if (
     Number.isInteger(r.defaultMaxTurns) &&
@@ -359,6 +441,15 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.showCost === "boolean") {
     out.showCost = r.showCost;
   }
+  if (typeof r.showModel === "boolean") {
+    out.showModel = r.showModel;
+  }
+  if (typeof r.viewerMarkdown === "string" && VALID_VIEWER_MARKDOWN_MODES.has(r.viewerMarkdown)) {
+    out.viewerMarkdown = r.viewerMarkdown as ViewerMarkdownMode;
+  }
+  if (typeof r.workflowsEnabled === "boolean") {
+    out.workflowsEnabled = r.workflowsEnabled;
+  }
   if (r.fallbackSubagent === false) {
     // The only non-string spelling worth accepting: a boolean would otherwise be
     // dropped, silently leaving the PERMISSIVE default in place. Every string is
@@ -420,6 +511,9 @@ export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()):
 /** Apply persisted settings to the in-memory state via caller-supplied setters. */
 export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers): void {
   if (typeof s.maxConcurrent === "number") appliers.setMaxConcurrent(s.maxConcurrent);
+  if (typeof s.maxConcurrentForeground === "number") {
+    appliers.setMaxConcurrentForeground(s.maxConcurrentForeground);
+  }
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
@@ -440,6 +534,9 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.worktreeIsolation === "boolean") appliers.setWorktreeIsolation(s.worktreeIsolation);
   if (typeof s.reportUsage === "boolean") appliers.setReportUsage(s.reportUsage);
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
+  if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
+  if (s.viewerMarkdown) appliers.setViewerMarkdown(s.viewerMarkdown);
+  if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
 }
 
 /**

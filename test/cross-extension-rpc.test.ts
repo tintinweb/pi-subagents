@@ -1,5 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
+import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 
 /** Simple in-process event bus for testing. */
 function createEventBus(): EventBus {
@@ -24,7 +28,13 @@ describe("cross-extension RPC", () => {
 
   beforeEach(() => {
     events = createEventBus();
-    manager = { spawn: vi.fn().mockReturnValue("agent-42"), abort: vi.fn().mockReturnValue(true) };
+    manager = {
+      spawn: vi.fn().mockReturnValue("agent-42"),
+      awaitStartup: vi.fn().mockResolvedValue(undefined),
+      abort: vi.fn().mockReturnValue(true),
+      getRecord: vi.fn().mockReturnValue({}),
+      consumeResult: vi.fn().mockReturnValue(true),
+    };
     ctx = { session: true };
     deps = { events, pi: { events }, getCtx: () => ctx, manager };
   });
@@ -128,6 +138,28 @@ describe("cross-extension RPC", () => {
       expect(reply).toHaveBeenCalledWith({ success: false, error: "unknown agent type" });
     });
 
+    it("returns error when the agent fails to start after spawn returns", async () => {
+      // With isolation: "worktree" the agent is not running when spawn() hands
+      // back an id — the repo copy is an awaited git call. A failure there has
+      // to be an error envelope, not an id for an agent that never ran.
+      (manager.awaitStartup as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('Cannot run with isolation: "worktree"'),
+      );
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-s4b", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-s4b", type: "general-purpose", prompt: "x",
+        options: { isolation: "worktree" },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false, error: 'Cannot run with isolation: "worktree"',
+      });
+      expect(manager.awaitStartup).toHaveBeenCalledWith("agent-42");
+    });
+
     it("scopes replies — other requestIds do not receive it", async () => {
       registerRpcHandlers(deps);
       const wrongReply = vi.fn();
@@ -161,6 +193,8 @@ describe("cross-extension RPC", () => {
   // --- stop ---
 
   describe("stop RPC", () => {
+    // The default double reports a record with neither owner field, i.e. one of
+    // the session's own agents — the case the ownership guard must let through.
     it("returns success when agent is aborted", async () => {
       registerRpcHandlers(deps);
       const reply = vi.fn();
@@ -172,15 +206,63 @@ describe("cross-extension RPC", () => {
       expect(manager.abort).toHaveBeenCalledWith("agent-42");
     });
 
-    it("returns error when agent not found", async () => {
+    // `abort` returning false no longer means "no such agent" — the handler's
+    // own lookup covers that, and the only case left is a record that is neither
+    // running nor queued, i.e. one that has already finished.
+    it("says so when the agent exists but has already finished", async () => {
       (manager.abort as ReturnType<typeof vi.fn>).mockReturnValue(false);
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:stop:reply:req-st2", reply);
-      events.emit("subagents:rpc:stop", { requestId: "req-st2", agentId: "nonexistent" });
+      events.emit("subagents:rpc:stop", { requestId: "req-st2", agentId: "settled" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is not running" });
+    });
+
+    it("returns error when the agent is unknown to the manager", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st5", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st5", agentId: "nonexistent" });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+      expect(manager.abort).not.toHaveBeenCalled();
+    });
+
+    // A nested child and a workflow's agent both have an owner that is waiting
+    // on them, so an id that leaked to another extension must not let it abort
+    // one out from under that owner.
+    it("refuses to stop another agent's nested child", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({ parentAgentId: "agent-1" });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st6", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st6", agentId: "agent-child" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error: "Agent is owned by another agent or workflow",
+      });
+      expect(manager.abort).not.toHaveBeenCalled();
+    });
+
+    it("refuses to stop a workflow's agent", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue({ workflowId: "wf-1" });
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st7", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st7", agentId: "agent-wf" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({
+        success: false,
+        error: "Agent is owned by another agent or workflow",
+      });
+      expect(manager.abort).not.toHaveBeenCalled();
     });
 
     it("scopes replies — other requestIds do not receive it", async () => {
@@ -205,6 +287,45 @@ describe("cross-extension RPC", () => {
 
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- consume ---
+
+  describe("consume RPC", () => {
+    it("returns success when the result is consumed", async () => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:consume:reply:req-c1", reply);
+      events.emit("subagents:rpc:consume", { requestId: "req-c1", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true });
+      expect(manager.consumeResult).toHaveBeenCalledWith("agent-42");
+    });
+
+    it("returns an error when the agent is unknown or still running", async () => {
+      (manager.consumeResult as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:consume:reply:req-c2", reply);
+      events.emit("subagents:rpc:consume", { requestId: "req-c2", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found or still running" });
+    });
+
+    it("unsub stops responding to consume requests", async () => {
+      const { unsubConsume } = registerRpcHandlers(deps);
+      unsubConsume();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:consume:reply:req-c3", reply);
+      events.emit("subagents:rpc:consume", { requestId: "req-c3", agentId: "agent-42" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+      expect(manager.consumeResult).not.toHaveBeenCalled();
     });
   });
 
@@ -300,6 +421,25 @@ describe("cross-extension RPC", () => {
       expect(manager.spawn).not.toHaveBeenCalled();
     });
 
+    it("treats an explicit null model as no override at all", async () => {
+      // A JSON-forwarding caller can serialize an unset field as null. The
+      // runner reads `options.model ?? default`, so null means "inherit" —
+      // it must not be resolved, scope-checked, or dereferenced.
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:spawn:reply:req-m5", reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId: "req-m5", type: "general-purpose", prompt: "x",
+        options: { model: null },
+      });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "x", { model: null },
+      );
+    });
+
     it("errors when ctx has no modelRegistry but a string model is given", async () => {
       ctx = { session: true }; // no modelRegistry
       registerRpcHandlers(deps);
@@ -315,6 +455,100 @@ describe("cross-extension RPC", () => {
       expect(call.success).toBe(false);
       expect(call.error).toMatch(/modelRegistry is unavailable/);
       expect(manager.spawn).not.toHaveBeenCalled();
+    });
+  });
+  // --- scopeModels on the RPC spawn path (#240): an override on the RPC
+  //     payload is an orchestrator-level choice, so it gets the Agent tool's
+  //     hard error rather than reaching the spawn on an out-of-scope model. ---
+
+  describe("spawn RPC model scope", () => {
+    const ALLOWED = { id: "gpt-5.5", provider: "openai-codex", name: "GPT 5.5" };
+    const BLOCKED = { id: "claude-sonnet-4", provider: "anthropic", name: "Claude Sonnet 4" };
+    const MODELS = [ALLOWED, BLOCKED];
+    const registry = {
+      find: (provider: string, id: string) =>
+        MODELS.find(m => m.provider === provider && m.id === id) ?? null,
+      getAll: () => MODELS,
+      getAvailable: () => MODELS,
+    };
+
+    let projectDir: string;
+    let agentDir: string;
+    let prevAgentDir: string | undefined;
+    let prevEnabled: boolean;
+
+    beforeEach(() => {
+      // resolveEnabledModels memoizes on (patterns, mtime+size of both settings
+      // files) — a fresh project dir per test keeps one case's allowlist from
+      // being served to the next. Same harness as test/model-scope.test.ts.
+      projectDir = mkdtempSync(join(tmpdir(), "pi-rpc-scope-project-"));
+      agentDir = mkdtempSync(join(tmpdir(), "pi-rpc-scope-global-"));
+      prevAgentDir = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      prevEnabled = isScopeModelsEnabled();
+      mkdirSync(join(projectDir, ".pi"), { recursive: true });
+      writeFileSync(
+        join(projectDir, ".pi", "settings.json"),
+        JSON.stringify({ enabledModels: ["openai-codex/gpt-5.5"] }),
+      );
+      setScopeModelsEnabled(true);
+      ctx = { session: true, cwd: projectDir, modelRegistry: registry };
+      deps = { events, pi: { events }, getCtx: () => ctx, manager };
+    });
+
+    afterEach(() => {
+      setScopeModelsEnabled(prevEnabled); // module-global — restore for other suites
+      if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
+      rmSync(projectDir, { recursive: true, force: true });
+      rmSync(agentDir, { recursive: true, force: true });
+    });
+
+    async function spawn(requestId: string, model: unknown) {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on(`subagents:rpc:spawn:reply:${requestId}`, reply);
+      events.emit("subagents:rpc:spawn", {
+        requestId, type: "general-purpose", prompt: "x", options: { model },
+      });
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      return (reply as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    }
+
+    it("refuses an out-of-scope string override, listing what is allowed", async () => {
+      // The reported case: a bare "sonnet" fuzzy-resolves across providers, so
+      // only the RESOLVED model can be compared against enabledModels.
+      const call = await spawn("req-sc1", "sonnet");
+      expect(call.success).toBe(false);
+      expect(call.error).toMatch(/Model not in scope/);
+      expect(call.error).toContain('"sonnet"');
+      expect(call.error).toContain("  openai-codex/gpt-5.5");
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("refuses an out-of-scope Model object override too", async () => {
+      const call = await spawn("req-sc2", BLOCKED);
+      expect(call.success).toBe(false);
+      expect(call.error).toMatch(/Model not in scope/);
+      expect(call.error).toContain('"anthropic/claude-sonnet-4"');
+      expect(manager.spawn).not.toHaveBeenCalled();
+    });
+
+    it("spawns normally when the override is in scope", async () => {
+      const call = await spawn("req-sc3", "openai-codex/gpt-5.5");
+      expect(call).toEqual({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "x", { model: ALLOWED },
+      );
+    });
+
+    it("does not check scope while the setting is off", async () => {
+      setScopeModelsEnabled(false);
+      const call = await spawn("req-sc4", "sonnet");
+      expect(call).toEqual({ success: true, data: { id: "agent-42" } });
+      expect(manager.spawn).toHaveBeenCalledWith(
+        deps.pi, ctx, "general-purpose", "x", { model: BLOCKED },
+      );
     });
   });
 });

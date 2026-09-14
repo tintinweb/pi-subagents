@@ -22,6 +22,7 @@ import {
   isEmptyStub,
   locateAgentFile,
 } from "../src/agent-file-toggle.js";
+import { parseAgentFrontmatter } from "../src/custom-agents.js";
 
 /** What the loader concludes about a file, via the same parser it really uses. */
 function loaderSeesDisabled(content: string): boolean {
@@ -124,15 +125,42 @@ describe("disableInContent", () => {
     expect(loaderSeesDisabled(content)).toBe(true);
   });
 
-  it("reports no-frontmatter for a BOM-prefixed file, matching what the loader sees", () => {
-    // The parser doesn't accept a BOM either — it reports an empty frontmatter
-    // and treats the whole file as body. So refusing here is agreement with the
-    // read side, not a gap: inserting the key would have no effect on loading.
-    const src = "﻿---\ndescription: Scout\n---\n\nBody.\n";
-    expect(parseFrontmatter<Record<string, unknown>>(src).frontmatter).toEqual({});
+  it("toggles a BOM-prefixed file, and leaves the BOM where it found it", () => {
+    // Editors across the Windows/CJK world emit UTF-8 with a BOM by default, so
+    // an agent file written in one is ordinary input, not a curiosity. The read
+    // side normalises the BOM away (see parseAgentFrontmatter), so the write
+    // side must edit the block rather than refuse it — and must not strip the
+    // BOM from the user's file while doing so.
+    const src = "﻿---\ndescription: 侦察\n---\n\n本文。\n";
+
     const { content, outcome } = disableInContent(src);
-    expect(outcome).toBe("no-frontmatter");
-    expect(content).toBe(src);
+
+    expect(outcome).toBe("disabled");
+    expect(isDisabledContent(content)).toBe(true);
+    expect(content.startsWith("﻿")).toBe(true);
+    expect(enableInContent(content).content).toBe(src);
+  });
+});
+
+describe("parseAgentFrontmatter", () => {
+  it("reads a BOM-prefixed file's fields instead of dropping them", () => {
+    // The bug this guards: an unnormalised BOM made the fence miss, so the
+    // frontmatter came back empty and the *whole file* became the body. `tools`
+    // going missing is the sharp edge — the agent then registers with the
+    // default toolset, a wider grant than its author wrote.
+    const src = "﻿---\ndescription: 侦察\ntools: none\n---\n\n本文。\n";
+
+    const { frontmatter, body } = parseAgentFrontmatter<Record<string, unknown>>(src);
+
+    expect(frontmatter).toEqual({ description: "侦察", tools: "none" });
+    expect(body).toBe("本文。");
+  });
+
+  it("leaves a file without a BOM exactly as the parser reads it", () => {
+    const src = "---\ndescription: Scout\n---\n\nBody.\n";
+
+    expect(parseAgentFrontmatter<Record<string, unknown>>(src))
+      .toEqual(parseFrontmatter<Record<string, unknown>>(src));
   });
 });
 
@@ -203,6 +231,13 @@ describe("read and write paths agree", () => {
 });
 
 describe("isEmptyStub", () => {
+  it("recognises the stub behind a BOM", () => {
+    // Correct today only because String.trim() counts U+FEFF as whitespace —
+    // true, but nowhere stated, and this function eyeballs raw content instead
+    // of going through parseAgentFrontmatter like every other reader.
+    expect(isEmptyStub("\uFEFF---\n---")).toBe(true);
+  });
+
   it("recognizes the stub /agents writes to disable a built-in default", () => {
     expect(isEmptyStub("---\n---\n")).toBe(true);
     expect(isEmptyStub(enableInContent("---\nenabled: false\n---\n").content)).toBe(true);

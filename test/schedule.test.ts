@@ -22,6 +22,7 @@ function makeMockManager() {
   const spawnFn = vi.fn(() => "agent-" + Math.random().toString(36).slice(2, 10));
   return {
     spawn: spawnFn,
+    awaitStartup: vi.fn(async () => {}),
     getRecord: vi.fn(() => ({ promise: Promise.resolve("done") })),
   } as any;
 }
@@ -325,6 +326,39 @@ describe("SubagentScheduler — fire path", () => {
     expect(optsArg.isBackground).toBe(true);
   });
 
+  it("fire passes the job's configuration as the invocation snapshot", () => {
+    // A scheduled run has no tool call to build one, so without this the
+    // conversation viewer can say nothing about how the job was configured.
+    // The model is left out on purpose: agent-manager fills in the effective one
+    // once the session reports it.
+    scheduler.addJob({
+      name: "every-1s", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x",
+      thinking: "high", max_turns: 12, isolated: true,
+    });
+
+    vi.advanceTimersByTime(1_000);
+    const optsArg = manager.spawn.mock.calls[0][4];
+    expect(optsArg.invocation).toEqual({
+      thinking: "high",
+      maxTurns: 12,
+      isolated: true,
+      runInBackground: true,
+      isolation: undefined,
+    });
+  });
+
+  it("fire normalizes an unlimited turn budget out of the snapshot", () => {
+    // 0 means unlimited; "max turns: 0" would read as a limit of none.
+    scheduler.addJob({
+      name: "unlimited", description: "x", schedule: "1s",
+      subagent_type: "general-purpose", prompt: "x", max_turns: 0,
+    });
+
+    vi.advanceTimersByTime(1_000);
+    expect(manager.spawn.mock.calls[0][4].invocation.maxTurns).toBeUndefined();
+  });
+
   it("disabled jobs do not fire", () => {
     const job = scheduler.addJob({
       name: "off", description: "x", schedule: "1s",
@@ -359,6 +393,21 @@ describe("SubagentScheduler — fire path", () => {
     expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
       type: "error", jobId: job.id, error: "no slots",
     }));
+  });
+
+  it("records lastStatus error when the agent fails to start after spawn returns", async () => {
+    // Under isolation: "worktree" the agent is not running when spawn() returns
+    // — the repo copy is awaited. A failure there must be recorded as a failed
+    // run, not as the success the missing run promise would otherwise imply.
+    manager.awaitStartup.mockRejectedValueOnce(new Error('Cannot run with isolation: "worktree"'));
+    const job = scheduler.addJob({
+      name: "no-worktree", description: "x", schedule: "+1s",
+      subagent_type: "general-purpose", prompt: "x", isolation: "worktree",
+    });
+    vi.advanceTimersByTime(2_000);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(scheduler.list().find(j => j.id === job.id)?.lastStatus).toBe("error");
   });
 
   // ── Status reflection from record.status (regression for bug #1) ────

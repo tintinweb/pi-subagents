@@ -106,6 +106,21 @@ export type JoinMode = 'async' | 'group' | 'smart';
 export type WidgetMode = 'all' | 'background' | 'off';
 
 /**
+ * How much of the conversation viewer's transcript is rendered as Markdown.
+ * - `off`: every line wraps as literal text, as it did before the mode existed.
+ * - `assistant`: assistant text renders as Markdown; tool results stay verbatim
+ *   and dim. The default, because assistant text *is* Markdown by contract
+ *   while a tool result is arbitrary bytes — a Markdown pass over a log or a
+ *   diff eats `#` from shell comments, swallows a `---` line into a setext
+ *   heading, re-fences indented output and redraws `| a | b |` as a table.
+ *   (Ordered-list renumbering is the one such rewrite actively suppressed —
+ *   see `MARKDOWN_OPTIONS` — because it silently changes data, not layout.)
+ * - `all`: tool results render as Markdown too, for tools that genuinely emit
+ *   it (#210's `ctx_execute`), accepting the rewrites above on ones that don't.
+ */
+export type ViewerMarkdownMode = 'off' | 'assistant' | 'all';
+
+/**
  * How `@handle message` starts an agent that is not already running.
  * - `model`: inject Claude Code's `agent_mention` reminder and let the main
  *   model spawn it with the `Agent` tool, which is what Claude Code does.
@@ -169,6 +184,22 @@ export interface AgentRecord {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
+  /**
+   * A caller is awaiting this agent inline (`spawnAndWait`) — what
+   * `maxConcurrentForeground` bounds. Distinct from `isBackground === false`,
+   * which says only that the agent has an inline result surface: a detached
+   * cross-extension RPC spawn is foreground by that measure and yet blocks
+   * nobody, so it takes no slot.
+   */
+  blocking?: boolean;
+  /**
+   * Present only while the record is "queued": resolves when it leaves the
+   * queue, started or aborted. `spawnAndWait` waits on this because a queued
+   * record has no `promise` yet. Always resolves, never rejects — a rejection
+   * would escape into the caller's tool `execute` and take down pi's whole
+   * Promise.all tool batch.
+   */
+  startGate?: Promise<void>;
   groupId?: string;
   joinMode?: JoinMode;
   /** Set when result was already consumed via get_subagent_result — suppresses completion notification. */
@@ -215,8 +246,27 @@ export interface AgentRecord {
   invocation?: AgentInvocation;
   /** Nesting depth: top-level subagent = 1. */
   depth?: number;
+  /**
+   * The validated `StructuredOutput` payload, as canonical JSON.
+   *
+   * Set only when the spawn asked for a schema. Separate from `result` because
+   * `result` is prose for a reader — previewed in the widget, written to the
+   * transcript, and appended to with the worktree branch note — and JSON that
+   * has been appended to no longer parses.
+   */
+  structuredJson?: string;
+  /** Whether the child needed the extra structured-output prompt. */
+  structuredRetried?: boolean;
   /** Parent agent ID for ownership-scoped nested controls. */
   parentAgentId?: string;
+  /**
+   * The workflow run that owns this child, when a workflow spawned it.
+   *
+   * Owned the same way a nested child is owned by its parent: filtered out of
+   * every top-level surface, and outside the `maxConcurrent` pool. See
+   * `isTopLevelAgent`.
+   */
+  workflowId?: string;
   /** Effective inherited nesting cap for this branch. */
   maxSubagentDepth?: number;
   /**
@@ -227,10 +277,30 @@ export interface AgentRecord {
   rootSessionId?: string;
 }
 
+/**
+ * What a session reports as its level: pi's `ThinkingLevel` plus the `"off"` a
+ * model with thinking disabled reports. Display-only — spawning still takes a
+ * `ThinkingLevel`, so this widening cannot leak into an invocation.
+ */
+export type EffectiveThinkingLevel = ThinkingLevel | "off";
+
 export interface AgentInvocation {
-  /** Short display name, e.g. "haiku" — only set when different from parent. */
+  /** Short display name for tight rows, e.g. "haiku 4.5". Always set once known. */
   modelName?: string;
-  thinking?: ThinkingLevel;
+  /** Canonical `provider/id`, for surfaces with room to disambiguate providers. */
+  modelId?: string;
+  /** The level actually in effect, once a session exists to report one. */
+  thinking?: EffectiveThinkingLevel;
+  /**
+   * What the caller asked for, kept only when they did not get it — pi clamped
+   * the level to the model's capabilities, or an agent file's frontmatter
+   * outranked the parameter (#182). The snapshot exists to answer "did the spawn
+   * honor my instructions?" (#62), which it cannot do if the request is lost, so
+   * neither `requested*` field is overwritten once set.
+   */
+  requestedThinking?: EffectiveThinkingLevel;
+  /** The caller's `model` parameter, as written, when an agent file's pin won. */
+  requestedModel?: string;
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;

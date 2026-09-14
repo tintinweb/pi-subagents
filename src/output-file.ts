@@ -37,9 +37,14 @@ export function encodeCwd(cwd: string): string {
     .replace(/^-+/, "");           // strip leading dashes (POSIX root, UNC)
 }
 
-/** Create the output file path, ensuring the directory exists.
- *  Mirrors Claude Code's layout: /tmp/{prefix}-{uid}/{encoded-cwd}/{sessionId}/tasks/{agentId}.output */
-export function createOutputFilePath(cwd: string, agentId: string, sessionId: string): string {
+/**
+ * The per-session scratch directory, created if missing.
+ * Mirrors Claude Code's layout: /tmp/{prefix}-{uid}/{encoded-cwd}/{sessionId}/tasks
+ *
+ * Shared with the workflow tool, which persists each invocation's script here so
+ * iterating on one is edit-file-then-rerun — the same convention, one directory.
+ */
+export function sessionTaskDir(cwd: string, sessionId: string): string {
   const encoded = encodeCwd(cwd);
   const root = join(tmpdir(), `pi-subagents-${process.getuid?.() ?? 0}`);
   mkdirSync(root, { recursive: true, mode: 0o700 });
@@ -52,7 +57,12 @@ export function createOutputFilePath(cwd: string, agentId: string, sessionId: st
   }
   const dir = join(root, encoded, sessionId, "tasks");
   mkdirSync(dir, { recursive: true });
-  return join(dir, `${agentId}.output`);
+  return dir;
+}
+
+/** Create the output file path, ensuring the directory exists. */
+export function createOutputFilePath(cwd: string, agentId: string, sessionId: string): string {
+  return join(sessionTaskDir(cwd, sessionId), `${agentId}.output`);
 }
 
 /**

@@ -151,9 +151,28 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
  * Under `strict` the same failure rethrows, still naming the path, so callers
  * that opted into failing closed stop rather than run a substituted agent.
  */
+/**
+ * Parse an agent file's frontmatter, tolerating a leading UTF-8 BOM.
+ *
+ * Editors across the Windows/CJK world write UTF-8 with a BOM by default, and
+ * pi's parser did not look past one before 0.84.3: the fence never matched, so
+ * the frontmatter came back empty and the *whole file* — YAML and all — became
+ * the body. An agent authored that way silently lost every field. `tools: none`
+ * going missing is the sharp edge: the agent registers with the default
+ * toolset rather than none, which is a wider grant than its author wrote.
+ *
+ * Stripped here rather than detected per pi version, because this is the only
+ * place agent files are read and the BOM is a file-encoding artifact, not
+ * content — normalising it at the boundary keeps one behaviour across the whole
+ * supported peer range instead of forking on what happens to be installed.
+ */
+export function parseAgentFrontmatter<T extends Record<string, unknown>>(content: string): { frontmatter: T; body: string } {
+  return parseFrontmatter<T>(content.startsWith("\uFEFF") ? content.slice(1) : content);
+}
+
 function readAgentFile(path: string, strict: boolean): { frontmatter: Record<string, unknown>; body: string } | undefined {
   try {
-    return parseFrontmatter<Record<string, unknown>>(readFileSync(path, "utf-8"));
+    return parseAgentFrontmatter<Record<string, unknown>>(readFileSync(path, "utf-8"));
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     if (strict) throw new Error(`${path}: ${reason}`);

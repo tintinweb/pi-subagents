@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type ModelRegistry, resolveModel } from "../src/model-resolver.js";
+import { describeModel, type ModelRegistry, resolveModel } from "../src/model-resolver.js";
 
 // Mock model entries matching typical pi model registry shape
 const MODELS = [
@@ -255,5 +255,17 @@ describe("resolveModel", () => {
       expect(typeof result).toBe("string");
       expect(result).toContain("Model not found");
     });
+  });
+});
+
+describe("describeModel", () => {
+  it("gives a short label and a canonical id", () => {
+    expect(describeModel({ provider: "anthropic", id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" }))
+      .toEqual({ modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6" });
+  });
+
+  it("falls back to the id when the model has no display name", () => {
+    expect(describeModel({ provider: "openai-codex", id: "gpt-5.6-sol" }))
+      .toEqual({ modelName: "gpt-5.6-sol", modelId: "openai-codex/gpt-5.6-sol" });
   });
 });

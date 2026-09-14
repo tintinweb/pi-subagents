@@ -29,12 +29,17 @@ jobs:
   # isolated-provider test (test/e2e/isolated-provider.e2e.test.ts) skips itself on
   # pre-migration Pi and now actually runs there.
   #
-  # This job covers the other end: the earliest Pi the peerDependencies claim (`>=0.81.0`).
+  # This job covers the other end: the earliest Pi the peerDependencies claim (`>=0.84.0`).
   # It is NOT continue-on-error — a green run here is the only evidence behind that range,
   # and if the floor genuinely can't be supported any more, the peer range is what should
-  # change. That is exactly what moved it from 0.80.0: pi only began folding
+  # change. That is what moved it twice. 0.80.0 -> 0.81.0: pi only began folding
   # `toolResult.usage` into `getSessionStats()` in 0.81.0, and the `reportUsage` setting is
   # built on that, so every 0.80.x would have carried a setting that silently did nothing.
+  # 0.81.0 -> 0.84.0: the Workflow tool needs two APIs that did not exist at the old floor —
+  # `constrainedSampling` on `ToolDefinition` (0.82.0), which is how a schema-bearing agent
+  # is forced to call `StructuredOutput`, and pi-tui's `stripTerminalSequences` (0.84.0),
+  # which the workflow card and inspector use to strip the resets `truncateToWidth` injects.
+  # Both are typecheck failures at 0.81.0, not soft degradations, so the range had to move.
   compat-floor-pi:
     runs-on: ubuntu-latest
     steps:
@@ -45,7 +50,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Install floor Pi
-        run: npm install --no-save @earendil-works/pi-coding-agent@0.81.0 @earendil-works/pi-ai@0.81.0 @earendil-works/pi-tui@0.81.0
+        run: npm install --no-save @earendil-works/pi-coding-agent@0.84.0 @earendil-works/pi-ai@0.84.0 @earendil-works/pi-tui@0.84.0
       - name: Typecheck against floor Pi
         run: npm run typecheck
       - name: Test suite against floor Pi

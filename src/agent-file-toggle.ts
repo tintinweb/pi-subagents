@@ -27,7 +27,8 @@
 
 import { existsSync } from "node:fs";
 import { join, sep } from "node:path";
-import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { parseAgentFrontmatter } from "./custom-agents.js";
 import type { AgentConfig } from "./types.js";
 
 export type AgentFileLocation = "project" | "workspace" | "personal";
@@ -101,18 +102,25 @@ const FENCE = /^---[ \t]*$/;
 
 /**
  * Split a file into its frontmatter lines and everything else, agreeing with
- * what `parseFrontmatter` (the load side) considers a frontmatter block.
+ * what `parseAgentFrontmatter` (the load side) considers a frontmatter block —
+ * including its BOM normalisation, which is why the fence test looks past one.
+ * The BOM itself stays in `lines[0]`: it belongs to the file's encoding, not to
+ * the block, and an edit must not strip it from the user's file.
  *
  * Lines keep their terminators, so an edit preserves the file's existing line
  * endings instead of rewriting CRLF to LF. Returns undefined when there is no
- * usable block — notably for a BOM-prefixed file, which the parser also reads
- * as having none, so writing a key into it would change nothing on load.
+ * usable block.
  */
 function splitFrontmatter(content: string):
   | { lines: string[]; openIdx: number; closeIdx: number; eol: string }
   | undefined {
   const lines = content.split(/(?<=\n)/);
-  if (lines.length === 0 || !FENCE.test(lines[0].replace(/\r?\n$/, ""))) return undefined;
+  if (lines.length === 0) return undefined;
+  // The BOM stays where it is — it belongs to the file, not the block — so the
+  // fence test looks past it and every index below is unaffected.
+  const bom = content.startsWith("\uFEFF");
+  const first = (bom ? lines[0].slice(1) : lines[0]).replace(/\r?\n$/, "");
+  if (!FENCE.test(first)) return undefined;
   const closeIdx = lines.findIndex((l, i) => i > 0 && FENCE.test(l.replace(/\r?\n$/, "")));
   if (closeIdx === -1) return undefined;
   return { lines, openIdx: 0, closeIdx, eol: lines[0].endsWith("\r\n") ? "\r\n" : "\n" };
@@ -131,7 +139,7 @@ function splitFrontmatter(content: string):
  */
 export function isDisabledContent(content: string): boolean {
   try {
-    return parseFrontmatter<Record<string, unknown>>(content).frontmatter.enabled === false;
+    return parseAgentFrontmatter<Record<string, unknown>>(content).frontmatter.enabled === false;
   } catch {
     return false;
   }

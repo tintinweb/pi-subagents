@@ -22,7 +22,7 @@ vi.mock("../src/agent-runner.js", () => ({
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
   cleanupWorktree: vi.fn(() => ({ hasChanges: false })),
-  pruneWorktrees: vi.fn(),
+  pruneWorktrees: vi.fn(async () => {}),
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
 
@@ -114,7 +114,9 @@ describe("child session shutdown (#242)", () => {
     await spawnCompleted(manager, session);
 
     vi.useFakeTimers();
-    const disposed = manager.dispose();
+    // `pi` is what reaches `pruneWorktrees` now that it shells out through
+    // `pi.exec`; without it dispose skips the prune and proves nothing here.
+    const disposed = manager.dispose(mockPi);
     // Past the internal ceiling. Without it the TUI is already torn down and the
     // user is left at a dead terminal with only Ctrl-C.
     await vi.advanceTimersByTimeAsync(5_000);

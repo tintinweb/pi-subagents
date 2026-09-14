@@ -106,12 +106,31 @@ export function resolveAgentInvocationConfig(
   runInBackground: boolean;
   isolated: boolean;
   isolation?: IsolationMode;
+  /**
+   * Caller parameters an agent file's frontmatter outranked, so the surfaces can
+   * say "(asked X)" instead of presenting the effective value as the requested
+   * one (#182). Populated only where both sides named something and they
+   * disagree — a caller who asked for what they got was still honored.
+   *
+   * `max_turns` is deliberately absent: no surface renders a requested-vs-
+   * effective turn limit, so recording one would be dead data.
+   */
+  overridden?: { thinking?: ThinkingLevel; model?: string };
 } {
   // Precedence first, collapse second — reversing these loses the veto, since
   // an agent file's "off" only outranks a caller's "worktree" while it is still
   // a value. Everything downstream then sees "worktree" or nothing at all.
   const requested = agentConfig?.isolation ?? params.isolation;
   const isolation = requested === "worktree" && opts?.worktreeAllowed !== false ? "worktree" : undefined;
+
+  const overriddenThinking = agentConfig?.thinking != null && params.thinking != null
+    && agentConfig.thinking !== params.thinking
+    ? params.thinking as ThinkingLevel
+    : undefined;
+  const overriddenModel = agentConfig?.model != null && params.model != null
+    && agentConfig.model !== params.model
+    ? params.model
+    : undefined;
 
   return {
     modelInput: agentConfig?.model ?? params.model,
@@ -122,6 +141,12 @@ export function resolveAgentInvocationConfig(
     runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? opts?.defaultRunInBackground ?? false,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,
     isolation,
+    // Undefined rather than an empty object when nothing was overridden: callers
+    // spread this into the invocation snapshot, and an always-present key would
+    // put `requestedThinking: undefined` on every record.
+    overridden: overriddenThinking || overriddenModel
+      ? { thinking: overriddenThinking, model: overriddenModel }
+      : undefined,
   };
 }
 

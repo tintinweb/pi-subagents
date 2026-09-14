@@ -527,10 +527,19 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
  * own output; for a background spawn it's the "started in background" envelope.
  */
 export function agentToolResults(session: AgentSession): string[] {
+  return toolResultsNamed(session, "Agent");
+}
+
+/**
+ * The same, for any tool by name — `SubagentWorkflow`'s launch envelope is read
+ * exactly the way an `Agent` spawn's is, and duplicating the walk to say so
+ * would leave two copies to keep in step with pi's message shape.
+ */
+export function toolResultsNamed(session: AgentSession, toolName: string): string[] {
   const out: string[] = [];
   for (const msg of session.messages) {
     if (msg.role !== "toolResult") continue;
-    if ((msg as { toolName?: string }).toolName !== "Agent") continue;
+    if ((msg as { toolName?: string }).toolName !== toolName) continue;
     const text = (msg.content as Array<{ type?: string; text?: string }>)
       .map((b) => (b.type === "text" ? (b.text ?? "") : ""))
       .join("");
@@ -575,11 +584,24 @@ export function invokedToolNames(session: AgentSession): string[] {
  * `subagent_type`) rather than just that *some* spawn happened.
  */
 export function agentToolCalls(session: AgentSession): Array<Record<string, unknown>> {
+  return toolCallsNamed(session, "Agent");
+}
+
+/**
+ * The same, for any tool by name. A live workflow smoke has to read the
+ * `SubagentWorkflow` call's own arguments — whether it carried `script` or
+ * `name` is the difference between two different code paths, and a model that
+ * merely *narrates* running a workflow leaves no call here at all.
+ */
+export function toolCallsNamed(
+  session: AgentSession,
+  toolName: string,
+): Array<Record<string, unknown>> {
   const out: Array<Record<string, unknown>> = [];
   for (const msg of session.messages) {
     if (msg.role !== "assistant") continue;
     for (const block of msg.content as Array<{ type?: string; name?: string; arguments?: unknown }>) {
-      if (block.type === "toolCall" && block.name === "Agent") {
+      if (block.type === "toolCall" && block.name === toolName) {
         out.push((block.arguments ?? {}) as Record<string, unknown>);
       }
     }

@@ -7,7 +7,7 @@
 
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { renderAgentName } from "../agent-color.js";
-import type { AgentManager } from "../agent-manager.js";
+import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import { getConfig } from "../agent-types.js";
 import type { AgentInvocation, SubagentType, WidgetMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, type SessionLike } from "../usage.js";
@@ -75,7 +75,7 @@ export interface AgentDetails {
   activity?: string;
   /** Current spinner frame index (for animated running indicator). */
   spinnerFrame?: number;
-  /** Short model name if different from parent (e.g. "haiku", "sonnet"). */
+  /** Short label for the model the run used, e.g. "haiku 4.5". */
   modelName?: string;
   /** Notable config tags (e.g. ["thinking: high", "isolated"]). */
   tags?: string[];
@@ -186,19 +186,32 @@ export function getPromptModeLabel(type: SubagentType): string | undefined {
   return config.promptMode === "append" ? "twin" : undefined;
 }
 
-/** Mode label is not included — callers add it where they want it. */
+/**
+ * Mode label is not included — callers add it where they want it.
+ *
+ * Both model forms come back so each surface can pick by width; the
+ * "(asked X)" annotation is applied here rather than by callers, so a value the
+ * spawn did not honor cannot be rendered as though it had been (#182).
+ */
 export function buildInvocationTags(
   invocation: AgentInvocation | undefined,
-): { modelName?: string; tags: string[] } {
+): { modelName?: string; modelId?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
-  if (invocation.thinking) tags.push(`thinking: ${invocation.thinking}`);
+  const asked = (value: string | undefined, requested: string | undefined): string | undefined =>
+    value && requested && requested !== value ? `${value} (asked ${requested})` : value;
+  const thinking = asked(invocation.thinking, invocation.requestedThinking);
+  if (thinking) tags.push(`thinking: ${thinking}`);
   if (invocation.isolated) tags.push("isolated");
   if (invocation.isolation === "worktree") tags.push("worktree");
   if (invocation.inheritContext) tags.push("inherit context");
   if (invocation.runInBackground) tags.push("background");
   if (invocation.maxTurns != null) tags.push(`max turns: ${invocation.maxTurns}`);
-  return { modelName: invocation.modelName, tags };
+  return {
+    modelName: asked(invocation.modelName, invocation.requestedModel),
+    modelId: asked(invocation.modelId, invocation.requestedModel),
+    tags,
+  };
 }
 
 /** Truncate text to a single line, max `len` chars. */
@@ -269,6 +282,14 @@ export class AgentWidget {
      * supplies the user's `showCost` setting.
      */
     private showCost: () => boolean = () => false,
+    /**
+     * Read live at render time, like `mode`. Whether running agents name the
+     * model driving them and the thinking level it is running at. Defaults to
+     * off — the extension supplies the user's `showModel` setting — because the
+     * row is already dense and the same pair is on the tool result and in the
+     * conversation viewer unconditionally.
+     */
+    private showModel: () => boolean = () => false,
   ) {}
 
   /**
@@ -283,7 +304,7 @@ export class AgentWidget {
    *   - `all`: every agent.
    */
   private widgetAgents() {
-    const all = this.manager.listAgents().filter(a => !a.parentAgentId);
+    const all = this.manager.listAgents().filter(isTopLevelAgent);
     switch (this.mode()) {
       case "off": return [];
       case "background": return all.filter(a => a.isBackground !== false);
@@ -440,6 +461,15 @@ export class AgentWidget {
       const costText = this.showCost() ? formatCost(getLifetimeCost(a.lifetimeUsage)) : "";
 
       const parts: string[] = [];
+      if (this.showModel()) {
+        // Leading, and paired: a thinking level means nothing without the model
+        // it applies to. The tag is taken from buildInvocationTags rather than
+        // rebuilt so the "(asked X)" annotation survives.
+        const { modelName, tags } = buildInvocationTags(a.invocation);
+        if (modelName) parts.push(modelName);
+        const thinkingTag = tags.find(tag => tag.startsWith("thinking: "));
+        if (thinkingTag) parts.push(thinkingTag);
+      }
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);

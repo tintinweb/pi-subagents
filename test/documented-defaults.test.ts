@@ -51,6 +51,19 @@ describe("documented defaults (README:441)", () => {
     }
   });
 
+  // Off, not a number: nothing here ever bounded foreground work, and pi runs a
+  // message's tool calls through Promise.all, so any default above 0 would be a
+  // behaviour change for everyone rather than an opt-in for #253's reporter.
+  it("foreground concurrency is unlimited by default", async () => {
+    const { AgentManager } = await import("../src/agent-manager.js");
+    const manager = new AgentManager();
+    try {
+      expect(manager.getMaxConcurrentForeground()).toBe(0);
+    } finally {
+      manager.dispose();
+    }
+  });
+
   it("top-level spawns default to background, nested spawns to foreground", async () => {
     const { resolveAgentInvocationConfig } = await import("../src/invocation-config.js");
     // The setting's default (true) is what index.ts passes for top-level calls.

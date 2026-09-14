@@ -19,6 +19,23 @@ export interface PromptExtras {
   worktreeBase?: string;
   /** Resolved repository backend for the isolated workspace. */
   worktreeBackend?: ResolvedIsolationBackend;
+  /**
+   * Set only for a workflow's own children, and only when they have no
+   * `StructuredOutput` tool to answer through.
+   *
+   * A workflow child's final text is not read by a human — it is the value
+   * `agent()` resolves to, and the script interpolates it straight into the
+   * next stage's prompt. Without this, children answer the way every other
+   * subagent does (a report addressed to a reader), and the padding becomes
+   * input tokens for the stage downstream. Claude Code's `Workflow` tool
+   * documents this contract to the script-writing model; this is the end of it
+   * that makes the documentation true.
+   *
+   * Deliberately NOT applied to every subagent. In pi an ordinary agent's
+   * output IS read by a human — through FleetView, the conversation viewer and
+   * `get_subagent_result` — so terse raw data would be the wrong answer there.
+   */
+  workflowChild?: boolean;
 }
 
 /**
@@ -77,6 +94,15 @@ Work only inside it — never in ${extras.worktreeBase}, even if other instructi
 </worktree_isolation>`
     : "";
 
+  // The script, not a person, reads what this child returns — see
+  // `PromptExtras.workflowChild` for why only workflow children get this.
+  const workflowBlock = extras?.workflowChild
+    ? `\n\n<workflow_child>
+Your final message IS the return value of this task. A workflow script captures it and passes it to the next stage; no person reads it.
+Return only the answer, in exactly the shape the prompt asks for — no preamble, no summary of what you did, no offer to continue.
+</workflow_child>`
+    : "";
+
   // Build optional extras suffix
   const extraSections: string[] = [];
   if (extras?.memoryBlock) {
@@ -114,7 +140,7 @@ You are operating as a sub-agent invoked to handle a specific task.
     // placed verbatim (no wrapper tag) so it forms an identical byte prefix
     // with the parent session, maximising KV cache hits. The <active_agent>
     // tag and env block vary per call and are placed after the cached prefix.
-    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + customSection + extrasSuffix;
+    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + workflowBlock + customSection + extrasSuffix;
   }
 
   // "replace" mode — env header + the config's full system prompt
@@ -123,7 +149,7 @@ You have been invoked to handle a specific task autonomously.
 
 ${envBlock}`;
 
-  return activeAgentTag + replaceHeader + worktreeBlock + "\n\n" + config.systemPrompt + extrasSuffix;
+  return activeAgentTag + replaceHeader + worktreeBlock + workflowBlock + "\n\n" + config.systemPrompt + extrasSuffix;
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */

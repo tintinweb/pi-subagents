@@ -66,7 +66,10 @@ describe("AgentWidget", () => {
     };
   }
 
-  function makeRecord(id: string, opts: { isBackground?: boolean; parentAgentId?: string } = {}) {
+  function makeRecord(
+    id: string,
+    opts: { isBackground?: boolean; parentAgentId?: string; workflowId?: string } = {},
+  ) {
     return {
       id,
       type: "general-purpose",
@@ -76,17 +79,21 @@ describe("AgentWidget", () => {
       startedAt: Date.now(),
       lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       compactionCount: 0,
+      invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" },
       isBackground: opts.isBackground,
       parentAgentId: opts.parentAgentId,
+      workflowId: opts.workflowId,
     };
   }
 
   /** Render the widget for a manager and return the produced lines ("" if nothing rendered). */
-  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode): string {
+  function renderLines(manager: unknown, activityId: string, mode?: () => WidgetMode, showModel = false): string {
     const widget = new AgentWidget(
       manager as any,
       new Map([[activityId, makeActivity()]]),
       mode,
+      () => false,
+      () => showModel,
     );
     let factory: any;
     widget.setUICtx({
@@ -115,6 +122,16 @@ describe("AgentWidget", () => {
     expect(renderLines(manager, "nested", () => "background")).toBe("");
   });
 
+  it("hides a workflow's agents in every coordinator widget mode", () => {
+    // They belong to the run, which reports for them through its own card and
+    // its own row in the fleet list.
+    const manager = {
+      listAgents: () => [makeRecord("child", { isBackground: true, workflowId: "wf_abc" })],
+    };
+    expect(renderLines(manager, "child", () => "all")).toBe("");
+    expect(renderLines(manager, "child", () => "background")).toBe("");
+  });
+
   it("excludes foreground agents in 'background' mode", () => {
     const manager = { listAgents: () => [makeRecord("foreground", { isBackground: false })] };
     expect(renderLines(manager, "foreground", () => "background")).toBe("");
@@ -135,6 +152,71 @@ describe("AgentWidget", () => {
   it("keeps agents with no isBackground flag in 'background' mode", () => {
     const manager = { listAgents: () => [makeRecord("unflagged", {})] };
     expect(renderLines(manager, "unflagged", () => "background")).toContain("unflagged description");
+  });
+
+  // The model is opt-in: the row is already dense, and the same pair is on the
+  // tool result and in the conversation viewer either way.
+  it("names the model and thinking on a running row under showModel", () => {
+    const manager = { listAgents: () => [makeRecord("bg", { isBackground: true })] };
+
+    expect(renderLines(manager, "bg", () => "background", true))
+      .toContain("sonnet 4.6 · thinking: high");
+  });
+
+  it("renders the row exactly as before when showModel is off", () => {
+    const manager = { listAgents: () => [makeRecord("bg", { isBackground: true })] };
+
+    const off = renderLines(manager, "bg", () => "background");
+    expect(off).toContain("bg description");
+    expect(off).not.toContain("sonnet 4.6");
+    expect(off).not.toContain("thinking:");
+  });
+
+  it("carries the short label, never the canonical id, onto the row", () => {
+    const manager = { listAgents: () => [makeRecord("bg", { isBackground: true })] };
+
+    expect(renderLines(manager, "bg", () => "background", true))
+      .not.toContain("anthropic/claude-sonnet-4-6");
+  });
+
+  it("discloses a level the run did not honor", () => {
+    const record = makeRecord("bg", { isBackground: true });
+    record.invocation = { modelName: "haiku 4.5", thinking: "high", requestedThinking: "max" };
+    const manager = { listAgents: () => [record] };
+
+    expect(renderLines(manager, "bg", () => "background", true))
+      .toContain("haiku 4.5 · thinking: high (asked max)");
+  });
+
+  // Queued agents stay a one-line count. A fan-out of ten would otherwise eat
+  // the whole widget and push every finished agent out of it.
+  it("keeps queued agents on one summary line and finished agents visible", () => {
+    const records = [
+      ...[1, 2, 3].map(i => ({ ...makeRecord(`run${i}`, { isBackground: true }), status: "running" })),
+      ...[1, 2, 3, 4, 5, 6, 7].map(i => ({ ...makeRecord(`q${i}`, { isBackground: true }), status: "queued" })),
+      ...[1, 2, 3].map(i => ({
+        ...makeRecord(`fin${i}`, { isBackground: true }),
+        status: "completed",
+        completedAt: Date.now(),
+      })),
+    ];
+    const widget = new AgentWidget(
+      { listAgents: () => records } as any,
+      new Map(),
+      () => "background",
+      () => false,
+      () => true,
+    );
+    let factory: any;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_key, content) => { factory = content; } });
+    for (const r of records) if (r.status === "completed") widget.markFinished(r.id);
+    widget.update();
+    const lines = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
+
+    expect(lines).toContain("7 queued");
+    expect(lines).not.toContain("q1 description");
+    for (const i of [1, 2, 3]) expect(lines).toContain(`fin${i} description`);
+    expect(lines).not.toContain("more (");
   });
 
   // "off" hides the widget entirely — even a background agent renders nothing.

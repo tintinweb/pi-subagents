@@ -4,13 +4,17 @@
  * Creates a temporary repository workspace so an agent works on an isolated
  * copy. Clean workspaces are removed; changed work is preserved on a Git branch
  * or Jujutsu bookmark before removal.
+ *
+ * Repository commands run through `pi.exec` so copying several isolated
+ * workspaces does not block or serialize work on the TUI event loop.
  */
 
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { IsolationBackend } from "./types.js";
 
 export type ResolvedIsolationBackend = Exclude<IsolationBackend, "auto">;
@@ -35,10 +39,8 @@ export interface GitWorktreeInfo extends BaseWorktreeInfo {
 
 export interface JjWorktreeInfo extends BaseWorktreeInfo {
   backend: "jj";
-  /** Commit used as the workspace's original parent. */
-  baseRevision: string;
-  /** Change id of the workspace's original parent. */
-  baseChangeId: string;
+  /** Parent revisions shared with the caller's working copy at creation. */
+  baseParents: { revision: string; changeId: string }[];
   /** Initial isolated working-copy change id. */
   initialChangeId: string;
   /** Name registered in the Jujutsu repository. */
@@ -77,22 +79,33 @@ export interface WorktreeCleanupResult {
   error?: string;
 }
 
-function run(command: string, args: string[], cwd: string, timeout = 10_000): string {
-  return execFileSync(command, args, { cwd, stdio: "pipe", timeout }).toString().trim();
+/** Run a repository command and throw unless it exits cleanly. */
+async function run(
+  pi: ExtensionAPI,
+  command: ResolvedIsolationBackend,
+  cwd: string,
+  args: string[],
+  timeout = 10_000,
+): Promise<string> {
+  const result = await pi.exec(command, args, { cwd, timeout });
+  if (result.killed || result.code !== 0) {
+    throw new Error(result.stderr.trim() || `${command} ${args.join(" ")} failed (exit ${result.code})`);
+  }
+  return result.stdout.trim();
 }
 
-function jjRoot(cwd: string): string | undefined {
+async function jjRoot(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
   try {
-    return run("jj", ["root", "--ignore-working-copy"], cwd, 5000);
+    return await run(pi, "jj", cwd, ["root", "--ignore-working-copy"], 5000);
   } catch {
     return undefined;
   }
 }
 
-function gitRoot(cwd: string): string | undefined {
+async function gitRoot(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
   try {
-    run("git", ["rev-parse", "--is-inside-work-tree"], cwd, 5000);
-    return run("git", ["rev-parse", "--show-toplevel"], cwd, 5000);
+    await run(pi, "git", cwd, ["rev-parse", "--is-inside-work-tree"], 5000);
+    return await run(pi, "git", cwd, ["rev-parse", "--show-toplevel"], 5000);
   } catch {
     return undefined;
   }
@@ -103,59 +116,74 @@ function isWithin(parent: string, child: string): boolean {
   return path === "" || (!path.startsWith("..") && !isAbsolute(path));
 }
 
-function backendOrder(cwd: string, requested: IsolationBackend): ResolvedIsolationBackend[] {
+async function backendOrder(
+  pi: ExtensionAPI,
+  cwd: string,
+  requested: IsolationBackend,
+): Promise<ResolvedIsolationBackend[]> {
   if (requested !== "auto") {
-    const detected = requested === "jj" ? jjRoot(cwd) : gitRoot(cwd);
+    const detected = requested === "jj" ? await jjRoot(pi, cwd) : await gitRoot(pi, cwd);
     return detected ? [requested] : [];
   }
 
-  const detectedJjRoot = jjRoot(cwd);
-  const detectedGitRoot = gitRoot(cwd);
+  const [detectedJjRoot, detectedGitRoot] = await Promise.all([jjRoot(pi, cwd), gitRoot(pi, cwd)]);
   if (!detectedJjRoot) return detectedGitRoot ? ["git"] : [];
   if (!detectedGitRoot) return ["jj"];
 
   // A nested repository is the repository that owns cwd. At the same root,
   // prefer jj as requested; otherwise do not let an ancestor jj repository
   // mask a nearer nested Git checkout (or vice versa).
-  const realJjRoot = realpathSync(detectedJjRoot);
-  const realGitRoot = realpathSync(detectedGitRoot);
-  if (realJjRoot === realGitRoot) return ["jj", "git"];
-  return isWithin(realJjRoot, realGitRoot) ? ["git"] : ["jj"];
+  try {
+    const realJjRoot = realpathSync(detectedJjRoot);
+    const realGitRoot = realpathSync(detectedGitRoot);
+    if (realJjRoot === realGitRoot) return ["jj", "git"];
+    return isWithin(realJjRoot, realGitRoot) ? ["git"] : ["jj"];
+  } catch {
+    // A detected root disappeared or its symlink broke between the command and
+    // filesystem check. Let strict isolation report the usual curated failure.
+    return [];
+  }
 }
 
 /**
  * Create a temporary isolated workspace. `auto` chooses the nearest repository;
  * at a colocated root it prefers Jujutsu, then Git.
  */
-export function createWorktree(
+export async function createWorktree(
+  pi: ExtensionAPI,
   cwd: string,
   agentId: string,
   requestedBackend: IsolationBackend = "auto",
-): WorktreeInfo | undefined {
+): Promise<WorktreeInfo | undefined> {
   const suffix = randomUUID().slice(0, 8);
   const workspaceName = `pi-agent-${agentId}-${suffix}`;
   const workspacePath = join(tmpdir(), workspaceName);
   const ref = `pi-agent-${agentId}`;
 
-  for (const backend of backendOrder(cwd, requestedBackend)) {
+  for (const backend of await backendOrder(pi, cwd, requestedBackend)) {
     const worktree = backend === "jj"
-      ? createJjWorkspace(cwd, workspacePath, workspaceName, ref)
-      : createGitWorktree(cwd, workspacePath, ref);
+      ? await createJjWorkspace(pi, cwd, workspacePath, workspaceName, ref)
+      : await createGitWorktree(pi, cwd, workspacePath, ref);
     if (worktree) return worktree;
   }
   return undefined;
 }
 
-function createGitWorktree(cwd: string, path: string, ref: string): WorktreeInfo | undefined {
+async function createGitWorktree(
+  pi: ExtensionAPI,
+  cwd: string,
+  path: string,
+  ref: string,
+): Promise<GitWorktreeInfo | undefined> {
   try {
-    const baseRevision = run("git", ["rev-parse", "HEAD"], cwd, 5000);
-    const root = run("git", ["rev-parse", "--show-toplevel"], cwd, 5000);
+    const baseRevision = await run(pi, "git", cwd, ["rev-parse", "HEAD"], 5000);
+    const root = await run(pi, "git", cwd, ["rev-parse", "--show-toplevel"], 5000);
     const subdir = relative(realpathSync(root), realpathSync(cwd));
 
-    run("git", ["worktree", "add", "--detach", path, "HEAD"], cwd, 30_000);
+    await run(pi, "git", cwd, ["worktree", "add", "--detach", path, "HEAD"], 30_000);
     const workPath = subdir ? join(path, subdir) : path;
     if (!existsSync(workPath)) {
-      removeGitWorktree(cwd, path);
+      await removeGitWorktree(pi, cwd, path);
       return undefined;
     }
     return {
@@ -170,53 +198,44 @@ function createGitWorktree(cwd: string, path: string, ref: string): WorktreeInfo
   }
 }
 
-function createJjWorkspace(
+async function createJjWorkspace(
+  pi: ExtensionAPI,
   cwd: string,
   path: string,
   workspaceName: string,
   ref: string,
-): WorktreeInfo | undefined {
+): Promise<JjWorktreeInfo | undefined> {
   let created = false;
   try {
-    const root = run("jj", ["root", "--ignore-working-copy"], cwd, 5000);
+    const root = await run(pi, "jj", cwd, ["root", "--ignore-working-copy"], 5000);
     const subdir = relative(realpathSync(root), realpathSync(cwd));
-    const baseCount = Number(run(
-      "jj",
-      ["log", "--ignore-working-copy", "-r", "@-", "--count"],
-      cwd,
-      5000,
-    ));
-    if (baseCount !== 1) return undefined;
-    const [baseRevision, baseChangeId, baseParentCount] = run(
-      "jj",
-      [
-        "log",
-        "--ignore-working-copy",
-        "-r",
-        "@-",
-        "--no-graph",
-        "-T",
-        'commit_id ++ "\\0" ++ change_id ++ "\\0" ++ parents.len() ++ "\\n"',
-      ],
-      cwd,
-      5000,
-    ).split("\0");
-    if (Number(baseParentCount) === 0) return undefined;
 
-    // Match the Git backend's fixed committed base: the agent workspace is a
-    // sibling of the caller's mutable @, not its descendant. Parent snapshots
-    // therefore cannot auto-rebase edits or conflicts into a running agent.
-    run("jj", ["workspace", "add", "--name", workspaceName, "-r", baseRevision, path], cwd, 30_000);
+    // With no -r, jj creates the new working copy as a sibling of the caller's
+    // mutable @ and gives both working copies the same parent set. This handles
+    // ordinary and merge working copies without allowing later parent snapshots
+    // to auto-rebase edits or conflicts into a running agent.
+    await run(
+      pi,
+      "jj",
+      cwd,
+      ["workspace", "add", "--name", workspaceName, "-m", jjWorkspaceDescription(workspaceName), path],
+      30_000,
+    );
     created = true;
-    const initial = readJjRevision(path, true);
+    const baseParents = await readJjParents(pi, path);
+    // A fresh repository has only the root commit under @. Match the Git
+    // backend's requirement for at least one committed change.
+    if (!baseParents.some(parent => parent.parentCount > 0)) {
+      throw new Error("Jujutsu repository has no committed change");
+    }
+    const initial = await readJjRevision(pi, path, true);
     const workPath = subdir ? join(path, subdir) : path;
     if (!existsSync(workPath)) throw new Error(`Isolated work path does not exist: ${workPath}`);
     return {
       backend: "jj",
       path,
       ref,
-      baseRevision,
-      baseChangeId,
+      baseParents: baseParents.map(({ revision, changeId }) => ({ revision, changeId })),
       initialChangeId: initial.changeId,
       workspaceName,
       workPath,
@@ -225,55 +244,51 @@ function createJjWorkspace(
     // Only remove the path after `workspace add` succeeded. If creation itself
     // failed, the randomly generated destination may predate this attempt and
     // must never be deleted as best-effort cleanup.
-    if (created) forgetJjWorkspace(cwd, workspaceName, path);
+    if (created) await forgetJjWorkspace(pi, cwd, workspaceName, path);
     return undefined;
   }
 }
 
-/**
- * Clean up an isolated workspace, preserving changed work on a backend ref.
- * This remains synchronous so the completion result cannot race preservation;
- * expensive jj steps get 30-second per-command budgets rather than short probes.
- */
-export function cleanupWorktree(
+/** Clean up an isolated workspace, preserving changed work on a backend ref. */
+export async function cleanupWorktree(
+  pi: ExtensionAPI,
   cwd: string,
   worktree: WorktreeInfo,
   agentDescription: string,
-): WorktreeCleanupResult {
+): Promise<WorktreeCleanupResult> {
   return worktree.backend === "jj"
-    ? cleanupJjWorkspace(cwd, worktree, agentDescription)
-    : cleanupGitWorktree(cwd, worktree, agentDescription);
+    ? cleanupJjWorkspace(pi, cwd, worktree, agentDescription)
+    : cleanupGitWorktree(pi, cwd, worktree, agentDescription);
 }
 
-function cleanupGitWorktree(
+async function cleanupGitWorktree(
+  pi: ExtensionAPI,
   cwd: string,
   worktree: GitWorktreeInfo,
   agentDescription: string,
-): WorktreeCleanupResult {
+): Promise<WorktreeCleanupResult> {
   if (!existsSync(worktree.path)) return { hasChanges: false, backend: "git" };
 
-  let hasChanges = false;
   try {
-    const status = run("git", ["status", "--porcelain"], worktree.path);
+    const status = await run(pi, "git", worktree.path, ["status", "--porcelain"]);
     if (status) {
-      hasChanges = true;
-      run("git", ["add", "-A"], worktree.path);
-      run(
+      await run(pi, "git", worktree.path, ["add", "-A"]);
+      await run(
+        pi,
         "git",
-        ["commit", "--no-verify", "-m", `pi-agent: ${agentDescription.slice(0, 200)}`],
         worktree.path,
+        ["commit", "--no-verify", "-m", `pi-agent: ${agentDescription.slice(0, 200)}`],
       );
     } else {
-      const currentRevision = run("git", ["rev-parse", "HEAD"], worktree.path, 5000);
-      hasChanges = currentRevision !== worktree.baseRevision;
-      if (!hasChanges) {
-        removeGitWorktree(cwd, worktree.path);
+      const currentRevision = await run(pi, "git", worktree.path, ["rev-parse", "HEAD"], 5000);
+      if (currentRevision === worktree.baseRevision) {
+        await removeGitWorktree(pi, cwd, worktree.path);
         return { hasChanges: false, backend: "git" };
       }
     }
 
-    const ref = createUniqueRef("git", worktree.path, worktree.ref, "HEAD");
-    removeGitWorktree(cwd, worktree.path);
+    const ref = await createUniqueRef(pi, "git", worktree.path, worktree.ref, "HEAD");
+    await removeGitWorktree(pi, cwd, worktree.path);
     return { hasChanges: true, backend: "git", ref, refKind: "branch" };
   } catch (err) {
     return {
@@ -288,6 +303,34 @@ function cleanupGitWorktree(
   }
 }
 
+interface JjParentInfo {
+  revision: string;
+  changeId: string;
+  parentCount: number;
+}
+
+async function readJjParents(pi: ExtensionAPI, cwd: string): Promise<JjParentInfo[]> {
+  const output = await run(
+    pi,
+    "jj",
+    cwd,
+    [
+      "log",
+      "--ignore-working-copy",
+      "-r",
+      "@-",
+      "--no-graph",
+      "-T",
+      'commit_id ++ "\\0" ++ change_id ++ "\\0" ++ parents.len() ++ "\\n"',
+    ],
+    5000,
+  );
+  return output.split("\n").filter(Boolean).map((line) => {
+    const [revision, changeId, parentCount] = line.split("\0");
+    return { revision, changeId, parentCount: Number(parentCount) };
+  });
+}
+
 interface JjRevisionInfo {
   changeId: string;
   empty: boolean;
@@ -296,19 +339,25 @@ interface JjRevisionInfo {
   description: string;
 }
 
-function readJjRevision(cwd: string, ignoreWorkingCopy = false): JjRevisionInfo {
-  const output = run(
+async function readJjRevision(
+  pi: ExtensionAPI,
+  cwd: string,
+  ignoreWorkingCopy = false,
+  revision = "@",
+): Promise<JjRevisionInfo> {
+  const output = await run(
+    pi,
     "jj",
+    cwd,
     [
       "log",
       ...(ignoreWorkingCopy ? ["--ignore-working-copy"] : []),
       "-r",
-      "@",
+      revision,
       "--no-graph",
       "-T",
       'change_id ++ "\\0" ++ empty ++ "\\0" ++ conflict ++ "\\0" ++ parents.len() ++ "\\0" ++ description ++ "\\n"',
     ],
-    cwd,
     ignoreWorkingCopy ? 5000 : 30_000,
   );
   const [changeId, empty, conflicted, parentCount, description = ""] = output.split("\0");
@@ -321,48 +370,140 @@ function readJjRevision(cwd: string, ignoreWorkingCopy = false): JjRevisionInfo 
   };
 }
 
-function cleanupJjWorkspace(
+function jjWorkspaceDescription(workspaceName: string): string {
+  return `pi-agent workspace ${workspaceName}`;
+}
+
+async function isOwnedJjRevision(
+  pi: ExtensionAPI,
+  worktree: JjWorktreeInfo,
+  revision: string,
+  changeId?: string,
+): Promise<boolean> {
+  if (changeId === worktree.initialChangeId) return true;
+  try {
+    return Number(await run(
+      pi,
+      "jj",
+      worktree.path,
+      ["log", "--ignore-working-copy", "-r", `${revision} & ${worktree.initialChangeId}::`, "--count"],
+      5000,
+    )) === 1;
+  } catch {
+    return false;
+  }
+}
+
+async function clearJjWorkspaceDescription(pi: ExtensionAPI, worktree: JjWorktreeInfo): Promise<void> {
+  const initial = await readJjRevision(pi, worktree.path, true, worktree.initialChangeId);
+  if (initial.description === jjWorkspaceDescription(worktree.workspaceName)) {
+    await run(pi, "jj", worktree.path, ["describe", "-r", worktree.initialChangeId, "-m", ""], 30_000);
+  }
+}
+
+async function cleanupJjWorkspace(
+  pi: ExtensionAPI,
   cwd: string,
   worktree: JjWorktreeInfo,
   agentDescription: string,
-): WorktreeCleanupResult {
+): Promise<WorktreeCleanupResult> {
   if (!existsSync(worktree.path)) {
-    forgetJjWorkspace(cwd, worktree.workspaceName, worktree.path);
+    await forgetJjWorkspace(pi, cwd, worktree.workspaceName, worktree.path);
     return { hasChanges: false, backend: "jj" };
   }
 
   try {
-    const revision = readJjRevision(worktree.path);
+    // Check ownership before a normal jj command snapshots filesystem edits.
+    // If the agent moved @ to a foreign change and then wrote files, snapshotting
+    // first would commit those files into history outside the isolation line.
+    const observed = await readJjRevision(pi, worktree.path, true);
+    if (!await isOwnedJjRevision(pi, worktree, "@", observed.changeId)) {
+      throw new Error("Isolated workspace moved to a revision outside the agent's workspace history");
+    }
+
+    const revision = await readJjRevision(pi, worktree.path);
+    if (!await isOwnedJjRevision(pi, worktree, "@", revision.changeId)) {
+      throw new Error("Isolated workspace moved to a revision outside the agent's workspace history");
+    }
     // The initial workspace commit is empty. Its commit id can still change if
     // repository metadata evolves, so identity + emptiness — not commit id —
     // determines whether the agent produced work.
-    if (revision.empty && revision.changeId === worktree.initialChangeId) {
-      forgetJjWorkspace(cwd, worktree.workspaceName, worktree.path);
+    const initialMarker = jjWorkspaceDescription(worktree.workspaceName);
+    if (
+      revision.empty &&
+      revision.changeId === worktree.initialChangeId &&
+      (!revision.description.trim() || revision.description === initialMarker)
+    ) {
+      await clearJjWorkspaceDescription(pi, worktree);
+      await forgetJjWorkspace(pi, cwd, worktree.workspaceName, worktree.path);
       return { hasChanges: false, backend: "jj" };
     }
 
-    let target = "@";
-    if (!revision.empty && !revision.description.trim()) {
-      run("jj", ["describe", "-m", `pi-agent: ${agentDescription.slice(0, 200)}`], worktree.path);
-    } else if (revision.empty && revision.changeId !== worktree.initialChangeId && revision.parentCount === 1) {
-      target = "@-";
+    // A committed agent change leaves a new empty @ above it, so preserve @-.
+    // An empty merge @, or a described initial @, is itself meaningful and
+    // remains the target.
+    const target = revision.empty &&
+        revision.changeId !== worktree.initialChangeId &&
+        revision.parentCount === 1
+      ? "@-"
+      : "@";
+    if (!await isOwnedJjRevision(pi, worktree, target)) {
+      throw new Error("Isolated workspace moved to a revision outside the agent's workspace history");
+    }
+    const targetRevision = target === "@"
+      ? revision
+      : await readJjRevision(pi, worktree.path, true, target);
+    if (
+      targetRevision.empty &&
+      targetRevision.changeId === worktree.initialChangeId &&
+      targetRevision.description === initialMarker
+    ) {
+      await clearJjWorkspaceDescription(pi, worktree);
+      await forgetJjWorkspace(pi, cwd, worktree.workspaceName, worktree.path);
+      return { hasChanges: false, backend: "jj" };
     }
 
-    let baseDrifted = true;
-    try {
-      const currentBase = run(
+    if (
+      !targetRevision.empty &&
+      (!targetRevision.description.trim() ||
+        (targetRevision.changeId === worktree.initialChangeId && targetRevision.description === initialMarker))
+    ) {
+      await run(
+        pi,
         "jj",
-        ["log", "--ignore-working-copy", "-r", worktree.baseChangeId, "--no-graph", "-T", 'commit_id ++ "\\n"'],
         worktree.path,
-        5000,
+        ["describe", "-r", target, "-m", `pi-agent: ${agentDescription.slice(0, 200)}`],
+        30_000,
       );
-      baseDrifted = currentBase !== worktree.baseRevision;
-    } catch {
-      // The original base change was abandoned/hidden. Preserve the agent's
-      // bookmark anyway and report the base as drifted.
     }
-    const ref = createUniqueRef("jj", worktree.path, worktree.ref, target);
-    forgetJjWorkspace(cwd, worktree.workspaceName, worktree.path);
+    // The temporary description keeps the initial empty change addressable
+    // while the agent works. Remove it before preservation so it does not leave
+    // an internal marker in the user's visible history.
+    await clearJjWorkspaceDescription(pi, worktree);
+
+    let baseDrifted = false;
+    for (const parent of worktree.baseParents) {
+      try {
+        const currentBase = await run(
+          pi,
+          "jj",
+          worktree.path,
+          ["log", "--ignore-working-copy", "-r", parent.changeId, "--no-graph", "-T", 'commit_id ++ "\\n"'],
+          5000,
+        );
+        if (currentBase !== parent.revision) {
+          baseDrifted = true;
+          break;
+        }
+      } catch {
+        // The original base change was abandoned/hidden. Preserve the agent's
+        // bookmark anyway and report the base as drifted.
+        baseDrifted = true;
+        break;
+      }
+    }
+    const ref = await createUniqueRef(pi, "jj", worktree.path, worktree.ref, target);
+    await forgetJjWorkspace(pi, cwd, worktree.workspaceName, worktree.path);
     return {
       hasChanges: true,
       backend: "jj",
@@ -383,79 +524,91 @@ function cleanupJjWorkspace(
   }
 }
 
-function createUniqueRef(
+async function createUniqueRef(
+  pi: ExtensionAPI,
   backend: ResolvedIsolationBackend,
   cwd: string,
   requested: string,
   revision: string,
-): string {
+): Promise<string> {
   try {
-    createRef(backend, cwd, requested, revision);
+    await createRef(pi, backend, cwd, requested, revision);
     return requested;
   } catch {
     const unique = `${requested}-${Date.now()}`;
-    createRef(backend, cwd, unique, revision);
+    await createRef(pi, backend, cwd, unique, revision);
     return unique;
   }
 }
 
-function createRef(
+async function createRef(
+  pi: ExtensionAPI,
   backend: ResolvedIsolationBackend,
   cwd: string,
   name: string,
   revision: string,
-): void {
+): Promise<void> {
   if (backend === "jj") {
-    run("jj", ["bookmark", "create", name, "-r", revision], cwd, 30_000);
+    await run(pi, "jj", cwd, ["bookmark", "create", name, "-r", revision], 30_000);
   } else {
-    run("git", ["branch", name, revision], cwd, 5000);
+    await run(pi, "git", cwd, ["branch", name, revision], 5000);
   }
 }
 
-function removeGitWorktree(cwd: string, path: string): void {
+async function removeGitWorktree(pi: ExtensionAPI, cwd: string, path: string): Promise<void> {
   try {
-    run("git", ["worktree", "remove", "--force", path], cwd);
+    await run(pi, "git", cwd, ["worktree", "remove", "--force", path]);
   } catch {
     try {
-      run("git", ["worktree", "prune"], cwd, 5000);
+      await run(pi, "git", cwd, ["worktree", "prune"], 5000);
     } catch {
       // Best effort cleanup.
     }
   }
 }
 
-function forgetJjWorkspace(cwd: string, workspaceName: string, path: string): void {
+async function forgetJjWorkspace(
+  pi: ExtensionAPI,
+  cwd: string,
+  workspaceName: string,
+  path: string,
+): Promise<void> {
   try {
-    run("jj", ["workspace", "forget", workspaceName, "--ignore-working-copy"], cwd, 30_000);
+    await run(pi, "jj", cwd, ["workspace", "forget", workspaceName, "--ignore-working-copy"], 30_000);
   } catch {
     // A later prune can remove a stale registration.
   } finally {
-    rmSync(path, { recursive: true, force: true });
+    await rm(path, { recursive: true, force: true });
   }
 }
 
 /** Prune orphaned Git worktrees and plugin-created Jujutsu workspaces. */
-export function pruneWorktrees(cwd: string): void {
+export async function pruneWorktrees(pi: ExtensionAPI, cwd: string): Promise<void> {
   try {
-    run("git", ["worktree", "prune"], cwd, 5000);
+    await run(pi, "git", cwd, ["worktree", "prune"], 5000);
   } catch {
     // Not a Git repository or Git unavailable.
   }
 
   try {
-    const workspaces = run(
+    const workspaces = (await run(
+      pi,
       "jj",
-      ["workspace", "list", "--ignore-working-copy", "-T", 'name ++ "\\0" ++ if(root, root, "") ++ "\\n"'],
       cwd,
+      ["workspace", "list", "--ignore-working-copy", "-T", 'name ++ "\\0" ++ if(root, root, "") ++ "\\n"'],
       5000,
-    )
+    ))
       .split("\n")
       .map((line) => line.split("\0", 2) as [string, string])
       .filter(([name]) => name.startsWith("pi-agent-"));
     for (const [name, root] of workspaces) {
-      if (!root || !existsSync(root)) {
+      // An absent root can mean either an older live workspace whose root was
+      // never recorded or a deleted workspace. Plugin workspaces always use
+      // tmpdir/name, so that path distinguishes those cases conservatively.
+      const workspacePath = root || join(tmpdir(), name);
+      if (!existsSync(workspacePath)) {
         try {
-          run("jj", ["workspace", "forget", name, "--ignore-working-copy"], cwd, 30_000);
+          await run(pi, "jj", cwd, ["workspace", "forget", name, "--ignore-working-copy"], 30_000);
         } catch {
           // A concurrently cleaned workspace is already gone.
         }

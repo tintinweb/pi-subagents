@@ -467,4 +467,57 @@ describe("buildAgentPrompt", () => {
       expect(prompt.indexOf("<worktree_isolation>")).toBeGreaterThan(prompt.indexOf("<sub_agent_context>"));
     });
   });
+
+  describe("workflow child block", () => {
+    function childConfig(promptMode: "append" | "replace"): AgentConfig {
+      return {
+        name: "test-agent",
+        description: "Test",
+        builtinToolNames: [],
+        extensions: true,
+        skills: true,
+        systemPrompt: "Custom instructions.",
+        promptMode,
+        inheritContext: false,
+        runInBackground: false,
+        isolated: false,
+      };
+    }
+
+    it("is absent for an ordinary subagent, whose output a person reads", () => {
+      for (const promptMode of ["replace", "append"] as const) {
+        const prompt = buildAgentPrompt(childConfig(promptMode), "/workspace", env, "Parent.", {});
+        expect(prompt).not.toContain("<workflow_child>");
+      }
+    });
+
+    it("tells a workflow child its final message is the return value, in both modes", () => {
+      for (const promptMode of ["replace", "append"] as const) {
+        const prompt = buildAgentPrompt(childConfig(promptMode), "/workspace", env, "Parent.", {
+          workflowChild: true,
+        });
+        expect(prompt).toContain("<workflow_child>");
+        expect(prompt).toContain("Your final message IS the return value");
+        expect(prompt).toContain("no preamble");
+        expect(prompt.indexOf("<workflow_child>")).toBeGreaterThan(prompt.indexOf("Working directory: /workspace"));
+      }
+    });
+
+    it("stays out of the cacheable inherited prefix", () => {
+      const prompt = buildAgentPrompt(childConfig("append"), "/workspace", env, "Parent prompt.", {
+        workflowChild: true,
+      });
+      expect(prompt.startsWith("Parent prompt.")).toBe(true);
+      expect(prompt.indexOf("<workflow_child>")).toBeGreaterThan(prompt.indexOf("<sub_agent_context>"));
+    });
+
+    it("composes with worktree isolation rather than displacing it", () => {
+      const prompt = buildAgentPrompt(childConfig("append"), "/wt/copy", env, "Parent.", {
+        worktreeBase: "/repo",
+        workflowChild: true,
+      });
+      expect(prompt).toContain("<worktree_isolation>");
+      expect(prompt.indexOf("<workflow_child>")).toBeGreaterThan(prompt.indexOf("<worktree_isolation>"));
+    });
+  });
 });
