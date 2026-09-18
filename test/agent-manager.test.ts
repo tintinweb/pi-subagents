@@ -83,6 +83,25 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
     expect(seenConsumed).toBe(true);
   });
 
+  it("forwards an explicit focus selector to child startup", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      focus: { focusId: "pi-focus", subfocusId: "startup" },
+      isBackground: true,
+    } as any);
+    await manager.getRecord(id)!.promise;
+
+    expect(runAgent).toHaveBeenCalledWith(
+      mockCtx,
+      "general-purpose",
+      "test",
+      expect.objectContaining({ focus: { focusId: "pi-focus", subfocusId: "startup" } }),
+    );
+  });
+
   it("normal case: onComplete fires with resultConsumed falsy when no explicit polling", async () => {
     let completedRecord: AgentRecord | undefined;
     manager = new AgentManager((r) => {

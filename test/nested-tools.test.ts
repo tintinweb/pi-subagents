@@ -90,6 +90,40 @@ afterEach(() => {
 });
 
 describe("child-safe nested Agent tools", () => {
+  it("forwards the explicit focus selector through nested Agent", async () => {
+    const [agent] = tools();
+    expect(agent.parameters.properties.focus.required).toEqual(["focusId"]);
+
+    await execute(agent, {
+      subagent_type: "reviewer",
+      description: "review evidence",
+      prompt: "Review it",
+      focus: { focusId: "pi-focus", subfocusId: "startup" },
+    });
+
+    expect(spawnAndWait).toHaveBeenCalledWith(
+      expect.anything(), expect.anything(), "reviewer", "Review it",
+      expect.objectContaining({ focus: { focusId: "pi-focus", subfocusId: "startup" } }),
+      expect.any(Function),
+    );
+  });
+
+  it("rejects a nested focus selector combined with resume", async () => {
+    const [agent] = tools();
+    const result = await execute(agent, {
+      subagent_type: "reviewer",
+      description: "resume evidence",
+      prompt: "Continue",
+      resume: "child-old",
+      focus: { focusId: "pi-focus" },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/cannot combine.*focus.*resume/i);
+    expect(manager.resume).not.toHaveBeenCalled();
+    expect(spawnAndWait).not.toHaveBeenCalled();
+  });
+
   it("allows any enabled agent when allowed_subagents is omitted", async () => {
     const [agent] = tools();
     const result = await execute(agent, {

@@ -11,6 +11,12 @@ export type { ThinkingLevel };
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
 
+/** Explicit catalog focus selected for a fresh child session. */
+export interface FocusSelector {
+  focusId: string;
+  subfocusId?: string;
+}
+
 /** Names of the three embedded default agents. */
 export const DEFAULT_AGENT_NAMES = ["general-purpose", "Explore", "Plan"] as const;
 

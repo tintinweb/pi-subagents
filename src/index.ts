@@ -1632,6 +1632,10 @@ Terse command-style prompts produce shallow, generic work.
           description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
+      focus: Type.Optional(Type.Object({
+        focusId: Type.String({ description: "Catalog focus ID to bind before the child starts." }),
+        subfocusId: Type.Optional(Type.String({ description: "Optional subfocus ID belonging to focusId." })),
+      }, { additionalProperties: false })),
       isolated: Type.Optional(
         Type.Boolean({
           description: "If true, agent gets no extension/MCP tools — only built-in tools.",
@@ -1767,6 +1771,9 @@ Terse command-style prompts produce shallow, generic work.
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
+      if (params.resume && params.focus) {
+        return textResult("Cannot combine `focus` with `resume`; resumed agents keep their existing binding.");
+      }
 
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
@@ -1932,6 +1939,9 @@ Terse command-style prompts produce shallow, generic work.
         if (params.resume) {
           return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
         }
+        if (params.focus) {
+          return textResult("Cannot combine `schedule` with `focus` — scheduled focus selection is not supported.");
+        }
         if (params.inherit_context) {
           return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
         }
@@ -2058,6 +2068,7 @@ Terse command-style prompts produce shallow, generic work.
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
+          focus: params.focus,
           inheritContext,
           thinkingLevel: thinking,
           isBackground: true,
@@ -2212,6 +2223,7 @@ Terse command-style prompts produce shallow, generic work.
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
+          focus: params.focus,
           inheritContext,
           thinkingLevel: thinking,
           isolation,

@@ -11,7 +11,9 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
+  createEventBus,
   DefaultResourceLoader,
+  type EventBus,
   type ExtensionAPI,
   getAgentDir,
   SessionManager,
@@ -27,7 +29,7 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { FocusSelector, SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
@@ -403,6 +405,7 @@ export interface RunOptions {
   maxTurns?: number;
   signal?: AbortSignal;
   isolated?: boolean;
+  focus?: FocusSelector;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   /**
@@ -607,12 +610,45 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+function hasActiveChildFocus(entries: unknown[]): boolean {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (!entry || typeof entry !== "object" || !("customType" in entry) || entry.customType !== "pi-focus:binding") continue;
+    return !("data" in entry) || !entry.data || typeof entry.data !== "object" || !("active" in entry.data) || entry.data.active !== null;
+  }
+  return false;
+}
+
+function bindChildFocus(eventBus: EventBus, request: FocusSelector | { resume: true }): void {
+  let acknowledgement: { ok: true } | { ok: false; error: string } | undefined;
+  eventBus.emit("pi-focus:bind-child", {
+    ...request,
+    acknowledge(result: unknown) {
+      if (
+        typeof result === "object"
+        && result !== null
+        && "ok" in result
+        && typeof result.ok === "boolean"
+      ) {
+        acknowledgement = result.ok
+          ? { ok: true }
+          : { ok: false, error: "error" in result && typeof result.error === "string" ? result.error : "unknown error" };
+      }
+    },
+  });
+  if (!acknowledgement) throw new Error("Focused child startup failed: pi-focus did not acknowledge the binding request");
+  if (!acknowledgement.ok) throw new Error(`Focused child startup failed: ${acknowledgement.error}`);
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
   prompt: string,
   options: RunOptions,
 ): Promise<RunResult> {
+  if (options.focus && options.resumeSessionFile) {
+    throw new Error("Focused child startup cannot combine a focus selector with resume");
+  }
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
 
@@ -709,6 +745,10 @@ export async function runAgent(
     options.isolated ? [] : (agentConfig?.extSelectors ?? []),
   );
   const noExtensions = extensions === false;
+  if (options.focus && noExtensions) {
+    throw new Error("Focused child startup requires extensions and cannot run isolated");
+  }
+  const focusEventBus = options.focus || options.resumeSessionFile ? createEventBus() : undefined;
 
   const extensionsSpec = Array.isArray(extensions)
     ? parseExtensionsSpec(extensions, configCwd)
@@ -748,6 +788,7 @@ export async function runAgent(
     cwd: configCwd,
     agentDir,
     noExtensions,
+    ...(focusEventBus && { eventBus: focusEventBus }),
     additionalExtensionPaths,
     extensionsOverride,
     noSkills,
@@ -997,6 +1038,9 @@ export async function runAgent(
     tools: sessionTools,
     customTools: [...nestedTools, ...structuredTools],
     resourceLoader: loader,
+    ...(options.resumeSessionFile && {
+      sessionStartEvent: { type: "session_start" as const, reason: "resume" as const },
+    }),
   };
   if (sessionExcludeTools) {
     sessionOpts.excludeTools = sessionExcludeTools;
@@ -1040,6 +1084,18 @@ export async function runAgent(
       narrowing,
       readmitToolNames,
     });
+  }
+
+  const focusRequest = options.focus
+    ?? (options.resumeSessionFile && hasActiveChildFocus(sessionManager.getBranch()) ? { resume: true as const } : undefined);
+  if (focusRequest && focusEventBus) {
+    try {
+      bindChildFocus(focusEventBus, focusRequest);
+    } catch (error) {
+      session.dispose();
+      focusEventBus.clear();
+      throw error;
+    }
   }
 
   options.onSessionCreated?.(session);
