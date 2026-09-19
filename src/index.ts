@@ -845,9 +845,11 @@ export default function (pi: ExtensionAPI) {
     }
     // Last, and only here: CLI flag values are applied by the host AFTER every
     // extension factory has run, so this is the earliest point the real value
-    // exists. Detached inside — a workflow must not hold up session startup.
+    // exists. Detached inside for TUI and RPC — a workflow must not hold up an
+    // interactive session's startup. Awaited for the one-shot headless modes,
+    // which have no later turn to run it in; see runWorkflowFlag.
     resolveWorkflowCollisions(ctx);
-    runWorkflowFlag(ctx);
+    await runWorkflowFlag(ctx);
   });
 
   /** Agent types `@` can start, in the shape the roster wants. */
@@ -2657,7 +2659,7 @@ Terse command-style prompts produce shallow, generic work.
    * session_start for exactly this reason.
    */
   let workflowFlagHandled = false;
-  function runWorkflowFlag(ctx: ExtensionContext): void {
+  async function runWorkflowFlag(ctx: ExtensionContext): Promise<void> {
     if (workflowFlagHandled) return;
     const flag = pi.getFlag(WORKFLOW_FILE_FLAG);
     if (flag === undefined || flag === false) return;
@@ -2710,9 +2712,18 @@ Terse command-style prompts produce shallow, generic work.
     fleet.update();
     report(`Running workflow ${meta.name}…`, "info");
 
-    // Detached: session_start is awaited by the host, and a workflow can run for
-    // minutes — blocking here would hold the whole session's startup.
-    void runWorkflowTask(ctx, task).then(() => {
+    // Detached in TUI and RPC: session_start is awaited by the host, and a
+    // workflow can run for minutes — blocking there would hold up the whole
+    // session's startup, which an interactive user would experience as a hang.
+    //
+    // The one-shot headless modes are the exception. `-p` (mode "print", or
+    // "json" under --mode json) runs a single turn and exits, so a detached
+    // workflow is racing process teardown and generally loses: the run dies
+    // part-finished and takes its in-flight children with it. There is no
+    // later turn for a `nextTurn` message to arrive on either. In those modes
+    // the workflow IS the invocation, so paying for it during startup is what
+    // the caller actually asked for.
+    const settled = runWorkflowTask(ctx, task).then(() => {
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout), and the outcome is handed to the model as context
       // for its next turn rather than forcing one.
@@ -2747,6 +2758,7 @@ Terse command-style prompts produce shallow, generic work.
         // A repaint of a session that no longer exists is a no-op worth ignoring.
       }
     });
+    if (ctx.mode === "print" || ctx.mode === "json") await settled;
   }
 
   // ---- get_subagent_result tool ----

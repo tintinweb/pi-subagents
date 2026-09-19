@@ -1168,6 +1168,27 @@ describe("--subagents-workflow-file", () => {
     expect(String(sent![0].content)).toContain("<result>all clear</result>");
   });
 
+  it.each(["print", "json"] as const)(
+    "awaits the run during session_start in %s mode, where there is no later turn to finish it in",
+    async (mode) => {
+      // `-p` runs one turn and exits. A run left detached there races process
+      // teardown and usually loses, aborting its in-flight children. In these
+      // modes the workflow is the invocation, so startup pays for it.
+      const path = join(hermetic.dir, "flow.js");
+      writeFileSync(path, `${fileScript}return "all clear";\n`);
+      const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+      subagentsExtension(booted.pi);
+
+      await booted.lifecycle.get("session_start")?.({}, ctx({ cwd: hermetic.dir, mode }));
+
+      // No waitFor: by the time session_start resolves the run must have settled.
+      expect(booted.pi.appendEntry).toHaveBeenCalledWith(
+        WORKFLOW_ENTRY_TYPE,
+        expect.objectContaining({ status: "completed" }),
+      );
+    },
+  );
+
   it("survives the session being replaced before a detached run finishes", async () => {
     // A TUI/RPC run is detached, so its completion fires whenever it fires —
     // possibly after `/new`, `/fork`, `/resume` or `/reload` replaced the session.
