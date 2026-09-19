@@ -2716,14 +2716,36 @@ Terse command-style prompts produce shallow, generic work.
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout), and the outcome is handed to the model as context
       // for its next turn rather than forcing one.
-      pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
-      pi.sendMessage({
-        customType: "workflow-result",
-        content: formatWorkflowNotification(task),
-        display: false,
-      }, { deliverAs: "nextTurn" });
-      widget.update();
-      fleet.update();
+      //
+      // Both calls go through the `pi` captured at activation, and this fires
+      // arbitrarily long after startup — a workflow can run for minutes. If the
+      // session was replaced in the meantime (`/new`, `/fork`, `/resume`,
+      // `/reload`), that handle is stale and every method on it throws. Left
+      // unhandled this rejection takes the whole process down, which loses the
+      // run's result AND kills any child still in flight. Delivery is therefore
+      // best-effort: the task stays in `workflowTasks` either way.
+      try {
+        pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
+        pi.sendMessage({
+          customType: "workflow-result",
+          content: formatWorkflowNotification(task),
+          display: false,
+        }, { deliverAs: "nextTurn" });
+      } catch (err) {
+        // Not `report`: that writes through `ctx.ui`, which is stale for exactly
+        // the same reason `pi` is, so it would throw from inside this handler.
+        console.warn(
+          `[pi-subagents] Workflow ${meta.name} finished but its result could not be ` +
+            `delivered to the session: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      // Same exposure: these paint through the replaced session's UI.
+      try {
+        widget.update();
+        fleet.update();
+      } catch {
+        // A repaint of a session that no longer exists is a no-op worth ignoring.
+      }
     });
   }
 

@@ -1168,6 +1168,33 @@ describe("--subagents-workflow-file", () => {
     expect(String(sent![0].content)).toContain("<result>all clear</result>");
   });
 
+  it("survives the session being replaced before a detached run finishes", async () => {
+    // A TUI/RPC run is detached, so its completion fires whenever it fires —
+    // possibly after `/new`, `/fork`, `/resume` or `/reload` replaced the session.
+    // pi then throws from every method on the captured handle. Unhandled, that
+    // rejection took the whole process down with the run's result.
+    const path = join(hermetic.dir, "flow.js");
+    writeFileSync(path, `${fileScript}return "all clear";\n`);
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    const stale = new Error("This extension ctx is stale after session replacement or reload.");
+    booted.pi.appendEntry.mockImplementation(() => { throw stale; });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    subagentsExtension(booted.pi);
+
+    await booted.lifecycle.get("session_start")?.({}, uiCtx());
+
+    // vitest fails the run on an unhandled rejection, so reaching this
+    // assertion at all is the point; the warning is how the loss surfaces.
+    await vi.waitFor(
+      () => expect(warn).toHaveBeenCalledWith(expect.stringContaining("could not be delivered")),
+      { timeout: 10_000 },
+    );
+    expect(booted.pi.sendMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({ customType: "workflow-result" }),
+      expect.anything(),
+    );
+  });
+
   it("renders the persisted entry through the shared workflow card layout", async () => {
     const booted = makePi();
     subagentsExtension(booted.pi);
