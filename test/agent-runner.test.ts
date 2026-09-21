@@ -402,6 +402,106 @@ describe("agent-runner final output capture", () => {
     expect(session.dispose).toHaveBeenCalledTimes(1);
   });
 
+  const inactiveBinding = {
+    version: 1,
+    agentSessionId: "child-session",
+    capturedAt: "2026-09-18T00:00:00.000Z",
+    source: "local",
+    active: null,
+    last: null,
+  };
+
+  it.each([
+    ["active-null only", { active: null }],
+    ["null data", null],
+    ["array data", []],
+    ["wrong version", { ...inactiveBinding, version: 2 }],
+    ["invalid session ID", { ...inactiveBinding, agentSessionId: "Bad_ID" }],
+    ["oversize session ID", { ...inactiveBinding, agentSessionId: "a".repeat(201) }],
+    ["empty capture time", { ...inactiveBinding, capturedAt: "" }],
+    ["oversize capture time", { ...inactiveBinding, capturedAt: "😀".repeat(501) }],
+    ["unknown source", { ...inactiveBinding, source: "other" }],
+    ["local fork metadata", { ...inactiveBinding, forkedFrom: { sessionId: "parent", entryId: "entry" } }],
+    ["missing fork metadata", { ...inactiveBinding, source: "fork" }],
+    ["invalid fork session", { ...inactiveBinding, source: "fork", forkedFrom: { sessionId: "!", entryId: "entry" } }],
+    ["invalid fork entry", { ...inactiveBinding, source: "fork", forkedFrom: { sessionId: "parent", entryId: "!" } }],
+    ["missing last", { ...inactiveBinding, last: undefined }],
+    ["malformed last path", { ...inactiveBinding, last: { focus: {}, subfocus: null } }],
+  ])("fails a malformed active-null cold resume closed: %s", async (_label, data) => {
+    const { session } = createSession("NEVER");
+    const onSessionCreated = vi.fn();
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{ id: "entry", type: "custom", customType: "pi-focus:binding", data }],
+    });
+
+    await expect(runAgent(ctx, "Explore", "do not send", {
+      pi,
+      resumeSessionFile: "/sessions/focused.jsonl",
+      onSessionCreated,
+    })).rejects.toThrow(/did not acknowledge/i);
+
+    expect({
+      callback: onSessionCreated.mock.calls.length,
+      prompts: session.prompt.mock.calls.length,
+      disposed: session.dispose.mock.calls.length,
+    }).toEqual({ callback: 0, prompts: 0, disposed: 1 });
+  });
+
+  it.each([undefined, "Bad_ID", "a".repeat(201)])("requires adapter validation for invalid binding entry ID %s", async id => {
+    const { session } = createSession("NEVER");
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{ id, customType: "pi-focus:binding", data: inactiveBinding }],
+    });
+    await expect(runAgent(ctx, "Explore", "continue", {
+      pi, resumeSessionFile: "/sessions/invalid-entry.jsonl",
+    })).rejects.toThrow(/did not acknowledge/i);
+  });
+
+  it.each(["prior scope", "😀".repeat(25_000)])("requires adapter validation for retained inactive snapshots %#", async scope => {
+    const { session } = createSession("NEVER");
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{ id: "entry", customType: "pi-focus:binding", data: {
+        ...inactiveBinding,
+        last: { focus: {
+          kind: "focus", id: "prior", parentId: null, name: "Prior",
+          createdAt: inactiveBinding.capturedAt, updatedAt: inactiveBinding.capturedAt,
+          revision: 1, goals: "", scope, constraints: "", planningDocs: [], refs: [], notes: [],
+        }, subfocus: null },
+      } }],
+    });
+    await expect(runAgent(ctx, "Explore", "continue", {
+      pi, resumeSessionFile: "/sessions/prior-focus.jsonl",
+    })).rejects.toThrow(/did not acknowledge/i);
+  });
+
+  it.each([
+    inactiveBinding,
+    { ...inactiveBinding, source: "fork", forkedFrom: { sessionId: "parent", entryId: "entry" } },
+    { ...inactiveBinding, capturedAt: "😀".repeat(500) },
+  ])("keeps a valid persisted empty inactive binding unbound on cold resume %#", async data => {
+    const { session } = createSession("RESUMED");
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      // The latest marker wins over an older active/malformed marker.
+      getBranch: () => [
+        { customType: "pi-focus:binding", data: { active: {} } },
+        { id: "entry", type: "custom", customType: "pi-focus:binding", data },
+        { id: "other", type: "custom", customType: "unrelated" },
+      ],
+    });
+
+    await runAgent(ctx, "Explore", "continue", { pi, resumeSessionFile: "/sessions/unbound.jsonl" });
+
+    expect({
+      requests: eventBusEmit.mock.calls.length,
+      prompts: session.prompt.mock.calls.length,
+      disposed: session.dispose.mock.calls.length,
+    }).toEqual({ requests: 0, prompts: 1, disposed: 0 });
+  });
+
   it("passes effective cwd and agentDir to the loader and settings manager", async () => {
     const { session } = createSession("CONFIGURED");
     createAgentSession.mockResolvedValue({ session });

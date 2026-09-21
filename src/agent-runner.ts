@@ -610,11 +610,46 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isBoundedString(value: unknown, maxLength = 500): value is string {
+  return typeof value === "string" && [...value].length <= maxLength;
+}
+
+function isFocusId(value: unknown): value is string {
+  return isBoundedString(value, 200) && /^[a-z0-9][a-z0-9-]*$/.test(value);
+}
+
+// Only the empty inactive envelope is validated locally. Non-null snapshots
+// require pi-focus's validator (including its serialized-size limit), rather
+// than a second copy of that schema here. The current adapter may reject an
+// inactive binding with history; cold resume must fail closed in that case.
+function isInactiveChildFocusBinding(value: unknown): boolean {
+  if (
+    !isRecord(value)
+    || value.version !== 1
+    || !isFocusId(value.agentSessionId)
+    || !isBoundedString(value.capturedAt)
+    || value.capturedAt.length === 0
+    || (value.source !== "local" && value.source !== "fork")
+    || value.active !== null
+    || value.last !== null
+  ) return false;
+  const forkedFrom = value.forkedFrom;
+  return value.source === "local"
+    ? forkedFrom === undefined
+    : isRecord(forkedFrom) && isFocusId(forkedFrom.sessionId) && isFocusId(forkedFrom.entryId);
+}
+
 function hasActiveChildFocus(entries: unknown[]): boolean {
   for (let index = entries.length - 1; index >= 0; index--) {
     const entry = entries[index];
-    if (!entry || typeof entry !== "object" || !("customType" in entry) || entry.customType !== "pi-focus:binding") continue;
-    return !("data" in entry) || !entry.data || typeof entry.data !== "object" || !("active" in entry.data) || entry.data.active !== null;
+    if (!isRecord(entry) || entry.customType !== "pi-focus:binding") continue;
+    // Active and malformed markers both require the adapter. Only a fully valid
+    // persisted "off" binding is safe to resume without focus acknowledgement.
+    return !isFocusId(entry.id) || !isInactiveChildFocusBinding(entry.data);
   }
   return false;
 }

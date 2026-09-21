@@ -419,6 +419,10 @@ Launch a sub-agent.
 | `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
 
+Cold resume skips focus acknowledgement only when there is no binding marker, or the latest marker is a valid empty inactive binding (`active: null`, `last: null`). Malformed markers and retained snapshots require adapter validation. The current pi-focus adapter rejects inactive bindings with a retained `last` snapshot, so that cold-resume case fails closed; live resumes retain their existing binding.
+
+The real pi-focus live-resume integration is opt-in: `PI_FOCUS_EXTENSION=/path/to/pi-focus/extensions/index.ts npx vitest run test/focused-resume-e2e.test.ts`. It loads that adapter through Pi's real loader and runs real sessions with a local scripted provider (no network or paid calls). Without the dependency path, that test is explicitly skipped.
+
 ### `SubagentWorkflow`
 
 Run a deterministic script that orchestrates many subagents. Returns a task id immediately; the run continues in the background and notifies on completion.
