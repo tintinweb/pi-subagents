@@ -12,7 +12,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 
 ## Features
 
-- **Claude Code look & feel** — same tool names, calling conventions, and UI patterns (`Agent`, `get_subagent_result`, `steer_subagent`) — feels native
+- **Claude Code-style invocation** — familiar `Agent` conventions and UI patterns, with explicit [compatibility boundaries](#claude-code-compatibility) for pi's lifecycle tools and agent files
 - **Parallel background agents** — spawn multiple agents that run concurrently with automatic queuing (configurable concurrency limit, default 10) and smart group join (consolidated notifications)
 - **Live widget UI** — persistent above-editor widget with animated spinners, live tool activity, token counts, and colored status icons. Configurable via `/agents → Settings → Widget`: `all` (every agent), `background` (default — hides foreground runs, which already render inline as the `Agent` tool result), or `off`
 - **FleetView** — Claude Code-style navigable list of `main` + every running subagent rendered below the editor (earliest-launched first). Press `↓` (or `←`) at an empty prompt to jump in, `↑`/`↓` to move the selection, `Enter` to open the selected agent's live, auto-updating conversation, `Esc` to return. Finished agents linger briefly before dropping out, and a viewer stays open through completion so you can read the final output. Toggle via `/agents → Settings → Fleet view`
@@ -307,24 +307,46 @@ All fields are optional — sensible defaults for everything.
 | `exclude_extensions` | — | Extension denylist applied after `extensions:` — exclude wins. Plain names only (case-insensitive), no paths or `*`. Useful with `extensions: true` to drop one extension (e.g. `pi-notify`) |
 | `skills` | `true` | `true` inherits the parent's skills; `false` inherits none. A comma-separated list preloads **only** those skills into the system prompt and does not inherit the rest (see [Skill Preloading](#skill-preloading) for discovery locations) |
 | `memory` | — | Persistent agent memory scope: `project`, `local`, or `user`. Auto-detects read-only agents |
-| `disallowed_tools` | — | Comma-separated tools to deny even if extensions provide them |
+| `disallowed_tools` | — | CSV or YAML list of tools to deny even if extensions provide them. Alias: `disallowedTools` |
 | `isolation` | — | Set to `worktree` to run in an isolated git worktree, or `off` to refuse one even when the caller passes `isolation: "worktree"` (frontmatter is authoritative). `none`, `no`, and `false` are accepted spellings of `off` |
 | `model` | inherit parent | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp are interchangeable) and falls back to the same model under another provider if the named one doesn't have it |
 | `thinking` | inherit | off, minimal, low, medium, high, xhigh, max — actual availability depends on your pi version and model; pi clamps unsupported levels down |
-| `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
+| `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited. Alias: `maxTurns` (non-negative integer) |
 | `persist_session` | `subagents.json` `rememberAgents` (default `true`) | Persist this subagent as a normal pi session instead of keeping the session in memory only; overrides the `rememberAgents` project default in both directions. It records its spawning session as parent, so it nests under it in `/resume`. The subagent's `.output` transcript is still written either way unless `output_transcript: false` |
 | `output_transcript` | `true` (or `subagents.json` `outputTranscript`) | Write this subagent's `.output` transcript; when set, overrides the `subagents.json` `outputTranscript` default. Set `false` to write no transcript file or path. Governs only the transcript — independent of `persist_session`, `isolation: worktree`, and `memory:` |
 | `session_dir` | pi default | Optional session directory when `persist_session: true`; omitted uses pi's normal session location, and relative paths resolve from the agent cwd. A session outside the parent's session directory (this override, or `isolation: worktree`) is listed separately, so it shows as a root instead of nesting |
 | `allowed_subagents` | none | Opt in to scoped nested `Agent`, `get_subagent_result`, and `steer_subagent` tools. Omitted / empty / `none` / `false` = no nesting; `all` (or `"*"` / `true`) = any enabled agent; comma-separated list = only those agent types |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
-| `run_in_background` | — | Pin this agent to background (`true`) or foreground (`false`). Omit to follow `backgroundByDefault` |
+| `run_in_background` | — | Pin this agent to background (`true`) or foreground (`false`). Omit to follow invocation/settings defaults. Alias `background: true` pins background; `background: false` leaves mode unspecified |
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
 Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified.
 
 **Forgiving `model:` resolution.** A `model:` pin is matched against pi's model registry tolerantly, so cosmetic id variations don't silently drop the agent back to the parent's model: `.` and `-` are treated as equivalent in version numbers (`claude-haiku-4.5` ≡ `claude-haiku-4-5`), a trailing `-YYYYMMDD` date stamp is optional (`anthropic/claude-haiku-4-5-20251001` matches an undated registry id and vice-versa), and a `provider/modelId` whose named provider doesn't carry that model retries the bare id against every provider. Precedence is **exact → fuzzy under the named provider → same model under any provider → unavailable**, so an exact match always wins and dated snapshots aren't conflated. If nothing resolves, the pin can't run and the agent inherits the parent model — `/agents → Agent types` flags this case as `(unavailable, fallback: inherit)` and shows the resolved target `(→ provider/id)` when resolution lands on a different provider or version than configured. (This is distinct from [Model Scope](#model-scope) enforcement, which matches the `enabledModels` allowlist by *exact* entry.)
+
+### Claude Code compatibility
+
+This is selective input compatibility, compared against Claude Code **2.1.278** during the design review. The [official subagent documentation](https://code.claude.com/docs/en/sub-agents) describes agent-file capabilities; the [tools reference](https://code.claude.com/docs/en/tools-reference) describes lifecycle tools. Claude's full Agent invocation schema is version-dependent and is not a stable published API. These rows do not promise compatibility with every Claude version or measure third-party model success rates.
+
+| Surface | Status | pi behavior |
+|---------|--------|-------------|
+| `Agent`, `prompt`, `description`, explicit `subagent_type` | matched | Familiar core invocation names; top-level type may also be omitted |
+| `disallowedTools`, `maxTurns` | alias | Normalize to `disallowed_tools`, `max_turns`; writers emit canonical snake_case |
+| `background` | alias | Only `true` pins mode; `false` leaves it unspecified. Canonical `run_in_background: false` pins foreground |
+| Builtin tool names such as `Read`, `Bash`, `Grep` | alias | Case-insensitive matches of pi's seven builtin names normalize to lowercase in `tools` and denylists |
+| `Glob` | different | Selects pi `find` (case-insensitive alias), with pi's own invocation schema and search behavior |
+| Nested Agent type | different | Still required; missing, unknown, disabled or out-of-allowlist types cannot use a fallback |
+| `model`, `skills` | different | Frontmatter model outranks invocation; an explicit skills list preloads only those skills instead of inheriting the rest |
+| `permissionMode`, `mcpServers`, `hooks`, `omitClaudeMd`, `initialPrompt`, `experimental`, `effort` | unsupported | Warn and ignore; the requested behavior is not active. Use explicit pi `thinking` configuration instead of `effort` |
+| `resume`, `inherit_context`, `schedule`, `isolated`, lifecycle tools and RPC | pi-only | Keep pi contracts; no `SendMessage`, `TaskStop`, or `fork` emulation |
+
+A non-null canonical field wins over its alias, including `false`, `0`, and empty lists. Supplying both spellings warns rather than merging. Invalid alias types warn and are ignored: `disallowedTools` accepts strings or string arrays, `maxTurns` non-negative integers, and `background` booleans. Existing canonical parsing is unchanged. `Agent`, `StructuredOutput`, unknown names, and `ext:` selectors retain their exact spelling; arbitrary extension tool names are never lowercased.
+
+Unsupported-field and collision warnings name the source file and keys, never their values. Unchanged problems are suppressed across consecutive reloads; removing and reintroducing a problem warns again. Warnings do not enforce permissions or hooks, and importing an agent file does not reproduce Claude's runtime or security model.
+
+The pi-subagents maintainers own these supported parser aliases. They have no scheduled sunset while this compatibility contract is supported; removing them requires an explicit breaking compatibility decision and removal of the corresponding parser entries, matrix rows and tests in the same release.
 
 ### Nested subagents
 
@@ -408,7 +430,7 @@ Launch a sub-agent.
 | `prompt` | string | yes | The task for the agent |
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `name` | string | no | Memorable name for this agent (`auth-audit`), addressable as `@name` and accepted by `steer_subagent`/`get_subagent_result`. Additive — the type-derived handle is still assigned |
-| `subagent_type` | string | yes | Agent type (built-in or custom) |
+| `subagent_type` | string | no | Top-level only: omitted uses `fallbackSubagent` (`general-purpose` by default); `none` rejects new spawns without a type. Resume needs no type. Nested Agent still requires it |
 | `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
@@ -619,7 +641,7 @@ Runtime tuning values set via `/agents` → Settings (max concurrency, max foreg
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
-**Fallback agent** (`fallbackSubagent`, default `general-purpose`): the agent used when a caller-supplied `subagent_type` doesn't resolve to exactly one enabled agent — unknown, disabled, or ambiguous because two agents differ only by case. Name any enabled agent to route those calls there instead, or set `none` for **strict**, fail-closed dispatch: the call is refused with an error listing the available types, and nothing spawns. Strict mode matters most for background and scheduled calls, which would otherwise start executing a substituted agent before the caller learns anything. Also settable from `/agents → Settings → Fallback agent`. The boolean `false` is accepted as a spelling of `none`, because it would otherwise be dropped as the wrong type and silently leave the permissive default in place. Every other value is read as an agent name, so a mistaken `off` fails loudly at dispatch rather than meaning one thing in the settings file and another in the resolver. A fallback agent that is itself unknown or disabled is a misconfiguration and is reported rather than quietly replaced. Note the default is unchanged and stays permissive by design: with `disableDefaultAgents` and no `general-purpose` of your own, an unresolvable type still resolves to a built-in config carrying *all* tools — set `none` (or name one of your own agents) to close that.
+**Fallback agent** (`fallbackSubagent`, default `general-purpose`): the agent used when a caller-supplied `subagent_type` doesn't resolve to exactly one enabled agent — omitted, unknown, disabled, or ambiguous because two agents differ only by case. Name any enabled agent to route those calls there instead, or set `none` for **strict**, fail-closed dispatch: the call is refused with an error listing the available types, and nothing spawns. Strict mode matters most for background and scheduled calls, which would otherwise start executing a substituted agent before the caller learns anything. Also settable from `/agents → Settings → Fallback agent`. The boolean `false` is accepted as a spelling of `none`, because it would otherwise be dropped as the wrong type and silently leave the permissive default in place. Every other value is read as an agent name, so a mistaken `off` fails loudly at dispatch rather than meaning one thing in the settings file and another in the resolver. A fallback agent that is itself unknown or disabled is a misconfiguration and is reported rather than quietly replaced. Note the default is unchanged and stays permissive by design: with `disableDefaultAgents` and no `general-purpose` of your own, an unresolvable type still resolves to a built-in config carrying *all* tools — set `none` (or name one of your own agents) to close that.
 
 **Strict agent files** (`strictAgentFiles`, default `false`): when on, an unreadable or unparseable [agent file](#custom-agents) aborts extension load at startup and names the file, instead of being skipped with a warning — so a checked-in `.pi/agents/` can't silently fall through to a same-named agent from another location. Startup only: the mid-session reload that runs on each `Agent` call keeps warning either way, since a bad edit shouldn't kill a session on an unrelated spawn. Also settable from `/agents → Settings → Strict agent files`.
 

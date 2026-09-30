@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type * as PiSDK from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -31,7 +32,8 @@ const {
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
-vi.mock("@earendil-works/pi-coding-agent", () => ({
+vi.mock("@earendil-works/pi-coding-agent", async () => ({
+  parseFrontmatter: (await vi.importActual<typeof PiSDK>("@earendil-works/pi-coding-agent")).parseFrontmatter,
   createAgentSession,
   // Identity, as pi's own is: `defineTool` exists for the type inference, and
   // the structured-output tool is built through it.
@@ -138,6 +140,7 @@ import {
   setGraceTurns,
   setRememberAgents,
 } from "../src/agent-runner.js";
+import { loadCustomAgents } from "../src/custom-agents.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
@@ -1019,6 +1022,26 @@ describe("agent-runner master tool allowlist", () => {
     const tools = lastToolsPassed();
     expect(tools).toContain("tool_a");
     expect(tools).toContain("tool_b");
+  });
+
+  it("enforces a loaded Claude denylist in the runtime tool scope", async () => {
+    const root = mkdtempSync(join(tmpdir(), "claude-denylist-"));
+    try {
+      mkdirSync(join(root, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(root, ".pi", "agents", "imported.md"), "---\ntools: Read, Bash, Glob\ndisallowedTools: [Bash, Glob, McpTool]\n---\nReview.");
+      const config = loadCustomAgents(root).get("imported")!;
+      vi.mocked(getConfig).mockReturnValueOnce(makeConfig(config));
+      vi.mocked(getAgentConfig).mockReturnValueOnce(config);
+      vi.mocked(getToolNamesForType).mockReturnValueOnce(config.builtinToolNames);
+      withExtensions({ "/ext/mcp.ts": ["McpTool", "mcp_other"] });
+      const { session } = createSession("OK");
+      createAgentSession.mockResolvedValue({ session });
+      await runAgent(ctx, "imported", "go", { pi });
+      expect(lastToolsPassed()).toEqual(["read", "mcp_other"]);
+      for (const name of ["bash", "find", "McpTool"]) {
+        await expect(session.agent.beforeToolCall?.({ toolCall: { name } })).resolves.toMatchObject({ block: true });
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it("disallowedTools removes both built-ins and extension tools", async () => {

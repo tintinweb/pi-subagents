@@ -1,0 +1,8 @@
+{
+  "contract": "immune_brain/managed_task_routing_policy/v1",
+  "revision": 1,
+  "new_task_route": "kernel_task_intent",
+  "v3_new_plan_sync": "retired",
+  "legacy_v3_mode": "drain_read_only",
+  "terminal_import": "disabled"
+}

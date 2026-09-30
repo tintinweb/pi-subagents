@@ -79,6 +79,28 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
     }
     const { frontmatter: fm, body } = parsed;
 
+    for (const [alias, canonical, valid] of [
+      ["disallowedTools", "disallowed_tools", typeof fm.disallowedTools === "string"
+        || (Array.isArray(fm.disallowedTools) && fm.disallowedTools.every(value => typeof value === "string"))],
+      ["maxTurns", "max_turns", typeof fm.maxTurns === "number" && Number.isInteger(fm.maxTurns) && fm.maxTurns >= 0],
+      ["background", "run_in_background", typeof fm.background === "boolean"],
+    ] as const) {
+      if (!(alias in fm)) continue;
+      if (fm[canonical] != null) {
+        warnIfNew(`Agent file ${path}: ${canonical} takes precedence over ${alias}; ${alias} is ignored.`);
+      } else if (!valid) {
+        warnIfNew(`Agent file ${path}: Invalid ${alias} type or value; ignored. Use ${canonical} or a valid alias value.`);
+      } else if (alias !== "background" || fm[alias] === true) {
+        fm[canonical] = fm[alias];
+      }
+    }
+    const unsupported = ["permissionMode", "mcpServers", "hooks", "omitClaudeMd", "initialPrompt", "experimental", "effort"]
+      .filter(key => key in fm);
+    if (unsupported.length) {
+      warnIfNew(`Agent file ${path}: unsupported fields ${unsupported.join(", ")} are ignored; their behavior is not active.`
+        + (unsupported.includes("effort") ? " Configure thinking explicitly instead of effort." : ""));
+    }
+
     // Claude Code's rule: `name:` IS the agent type, and the filename need not
     // match. Absent, the filename stands in — Claude Code requires the field,
     // but most files here predate it and must keep loading.
@@ -114,7 +136,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       description: str(fm.description) ?? name,
       builtinToolNames,
       extSelectors,
-      disallowedTools: csvListOptional(fm.disallowed_tools),
+      disallowedTools: csvListOptional(fm.disallowed_tools)?.map(normalizeToolName),
       extensions: inheritField(fm.extensions ?? fm.inherit_extensions),
       excludeExtensions: csvListOptional(fm.exclude_extensions),
       skills: inheritField(fm.skills ?? fm.inherit_skills),
@@ -258,6 +280,12 @@ function csvList(val: unknown, defaults: string[]): string[] {
   return parseCsvField(val) ?? [];
 }
 
+function normalizeToolName(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower === "glob") return "find";
+  return BUILTIN_TOOL_NAMES.includes(lower) ? lower : name;
+}
+
 /**
  * Partition the `tools:` CSV into the built-in tool allowlist and raw `ext:` selectors.
  * `*` (and the case-insensitive alias `all`, for `tools: all`) expands to all
@@ -266,7 +294,7 @@ function csvList(val: unknown, defaults: string[]): string[] {
  * `tools:` present with only `ext:` entries → zero built-ins (use `*`).
  */
 function parseToolsField(val: unknown): { builtinToolNames: string[]; extSelectors: string[] | undefined } {
-  const entries = csvList(val, BUILTIN_TOOL_NAMES);
+  const entries = csvList(val, BUILTIN_TOOL_NAMES).map(normalizeToolName);
   const isWildcard = (e: string) => e === "*" || e.toLowerCase() === "all";
   const hasWildcard = entries.some(isWildcard);
   const plain = entries.filter(e => !isWildcard(e) && !e.startsWith("ext:"));

@@ -1,0 +1,32 @@
+{
+  "contract": "assurance_kernel/task_intent/v1",
+  "task_id": "claude-schema-alignment",
+  "goal": "Implement selective Claude Code schema compatibility as specified by docs/specs/claude-schema-alignment.spec.md, preserving pi runtime and privilege boundaries.",
+  "acceptance": [
+    {
+      "id": "AC-1",
+      "assertion": "Spec D1: the registered top-level Agent schema permits omitted subagent_type and dispatch, resume, rendering and scheduling preserve existing fallback/strict behavior; nested Agent remains explicitly typed and allowlist-strict.",
+      "verification": "{\"contract\":\"assurance_kernel/verification_descriptor/v2\",\"command\":{\"executable\":\"./node_modules/.bin/vitest\",\"argv\":[\"run\",\"test/fallback-subagent-wiring.test.ts\",\"test/nested-tools.test.ts\"],\"cwd\":\".\",\"timeout_ms\":120000,\"max_output_bytes\":65536},\"environment\":{\"prepare\":{\"executable\":\"cp\",\"argv\":[\"-R\",\"/Users/derek/workspaces/pi-subagents/node_modules\",\"node_modules\"],\"cwd\":\".\",\"timeout_ms\":120000,\"max_output_bytes\":65536},\"writable_paths\":[\"node_modules\"]}}"
+    },
+    {
+      "id": "AC-2",
+      "assertion": "Spec D2-D4: imported frontmatter aliases, precedence and invalid-input diagnostics, narrow builtin/Glob normalization, effective denylist enforcement, canonical round trips and de-duplicated unsupported-field warnings behave as specified without leaking field values or changing extension names, model precedence or skills inheritance.",
+      "verification": "{\"contract\":\"assurance_kernel/verification_descriptor/v2\",\"command\":{\"executable\":\"./node_modules/.bin/vitest\",\"argv\":[\"run\",\"test/custom-agents.test.ts\",\"test/agent-runner.test.ts\"],\"cwd\":\".\",\"timeout_ms\":120000,\"max_output_bytes\":65536},\"environment\":{\"prepare\":{\"executable\":\"cp\",\"argv\":[\"-R\",\"/Users/derek/workspaces/pi-subagents/node_modules\",\"node_modules\"],\"cwd\":\".\",\"timeout_ms\":120000,\"max_output_bytes\":65536},\"writable_paths\":[\"node_modules\"]}}"
+    }
+  ],
+  "scope_hint": [
+    "CHANGELOG.md",
+    "README.md",
+    "docs/plans/claude-schema-alignment.intent.json",
+    "docs/specs/claude-schema-alignment.spec.md",
+    "src/custom-agents.ts",
+    "src/index.ts",
+    "test/agent-runner.test.ts",
+    "test/custom-agents.test.ts",
+    "test/fallback-subagent-wiring.test.ts",
+    "test/nested-tools.test.ts"
+  ],
+  "risk": "material",
+  "revision": 3,
+  "owner": "user"
+}

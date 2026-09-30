@@ -20,6 +20,16 @@ const MAX_WIDGET_LINES = 12;
 /** Braille spinner frames for animated running indicator. */
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/**
+ * Refresh cadence while an agent is running — it advances the spinner and the
+ * live elapsed/token clocks, nothing else. A tick costs a full terminal diff,
+ * so faster only buys more re-renders of frames that differ by one glyph.
+ * 250ms sits at the fast end of what the reference implementation
+ * (nicobailon/pi-subagents) uses for its running surfaces (500–1000ms), which
+ * is as slow as this can go and still read as motion.
+ */
+const TICK_MS = 250;
+
 /** Statuses that indicate an error/non-success outcome (used for linger behavior and icon rendering). */
 export const ERROR_STATUSES = new Set(["error", "aborted", "steered", "stopped"]);
 
@@ -340,7 +350,7 @@ export class AgentWidget {
   /** Ensure the widget update timer is running. */
   ensureTimer() {
     if (!this.widgetInterval) {
-      this.widgetInterval = setInterval(() => this.update(), 80);
+      this.widgetInterval = setInterval(() => this.update(), TICK_MS);
     }
   }
 
@@ -587,6 +597,17 @@ export class AgentWidget {
     }
     const hasActive = runningCount > 0 || queuedCount > 0;
 
+    // Nothing is animating: a finished line carries no spinner and no clock, so
+    // a repeating render would only re-diff an identical frame. The linger is
+    // aged by turns (`onTurnStart`), not by time, so with no turn coming this
+    // timer used to survive to the end of the process — every idle session
+    // paying a render loop for one static line. Stop it; the event-driven
+    // update() calls (markFinished, onTurnStart, a new spawn) restart it.
+    if (!hasActive && this.widgetInterval) {
+      clearInterval(this.widgetInterval);
+      this.widgetInterval = undefined;
+    }
+
     // Nothing to show — clear widget
     if (!hasActive && !hasFinished) {
       if (this.widgetRegistered) {
@@ -598,7 +619,6 @@ export class AgentWidget {
         this.uiCtx.setStatus("subagents", undefined);
         this.lastStatusText = undefined;
       }
-      if (this.widgetInterval) { clearInterval(this.widgetInterval); this.widgetInterval = undefined; }
       // Clean up stale entries
       for (const [id] of this.finishedTurnAge) {
         if (!allAgents.some(a => a.id === id)) this.finishedTurnAge.delete(id);

@@ -12,6 +12,7 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Check } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
@@ -19,6 +20,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";
 import { getAllTypes, getAvailableTypes, NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
@@ -104,6 +106,43 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     return { pi, tools, lifecycle };
   }
 
+  it("accepts omitted type in the registered schema while keeping prompt and description required", () => {
+    const { tools } = boot();
+    const schema = tools.get("Agent").parameters;
+    expect(Check(schema, { prompt: "go", description: "default agent" })).toBe(true);
+    expect(Check(schema, { description: "missing prompt" })).toBe(false);
+    expect(Check(schema, { prompt: "missing description" })).toBe(false);
+  });
+
+  it("renders an omitted type without throwing", () => {
+    const { tools } = boot();
+    const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+    const rendered = tools.get("Agent").renderCall({ prompt: "go", description: "default agent" }, theme, {});
+    expect(rendered.render(80).join("\n")).toContain("default agent");
+  });
+
+  for (const background of [false, true]) {
+    for (const fallback of [undefined, "scout", NO_FALLBACK]) {
+      it(`routes omitted type with fallback=${fallback}, background=${background}`, async () => {
+        const { tools } = boot();
+        setFallbackSubagent(fallback);
+        vi.mocked(runAgent).mockResolvedValue({
+          responseText: "done", session: { dispose: vi.fn() } as never, aborted: false, steered: false,
+        });
+        const result = await tools.get("Agent").execute(
+          "missing-type", { prompt: "go", description: "default", run_in_background: background },
+          undefined, undefined, ctx(),
+        );
+        if (fallback === NO_FALLBACK) {
+          expect(textOf(result)).toContain("No agent type given");
+          expect(runAgent).not.toHaveBeenCalled();
+        } else {
+          expect(runAgent).toHaveBeenCalledWith(expect.anything(), fallback ?? "general-purpose", "go", expect.anything());
+        }
+      });
+    }
+  }
+
   for (const background of [false, true]) {
     it(`refuses an unknown type without spawning (run_in_background: ${background})`, async () => {
       const { tools } = boot();
@@ -185,15 +224,13 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(runAgent).not.toHaveBeenCalled();
   });
 
-  it("never persists a blank type into a scheduled job", async () => {
-    // `fellBackFrom` is "" for a blank request, and `??` does not treat "" as
-    // nullish — the job would be stored with an empty type and re-fail forever.
+  it.each([undefined, "   "])("never persists an unresolved type (%s) into a scheduled job", async (subagent_type) => {
     const { tools, lifecycle } = boot();
     await lifecycle.get("session_start")({}, ctx());
 
     const result = await tools.get("Agent").execute(
       "tc-5",
-      { prompt: "later", description: "blank type", subagent_type: "   ", schedule: "+1h" },
+      { prompt: "later", description: "missing type", subagent_type, schedule: "+1h" },
       undefined, undefined, ctx(),
     );
     expect(textOf(result)).toContain("Scheduled");
@@ -206,10 +243,8 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     expect(jobs[0].subagent_type).toBe("general-purpose");
   });
 
-  it("never blocks resume, which ignores subagent_type entirely", async () => {
-    // resume replays a stored session; the type is required by the schema but
-    // unused. Gating it would make a live agent unresumable the moment its type
-    // is deleted or disabled — the opposite of what strict dispatch is for.
+  it.each([undefined, "deleted-since"])("never blocks resume with type %s", async (subagent_type) => {
+    // Resume replays a stored session and needs no type, even in strict mode.
     const { tools } = boot();
     vi.mocked(runAgent).mockResolvedValue({
       // `messages` is not optional on a real AgentSession, and a background
@@ -228,11 +263,47 @@ describe("fallbackSubagent gates dispatch through the real Agent tool", () => {
     setFallbackSubagent(NO_FALLBACK);
     const resumed = await tools.get("Agent").execute(
       "tc-7",
-      { resume: id, prompt: "keep going", description: "resume", subagent_type: "deleted-since" },
+      { resume: id, prompt: "keep going", description: "resume", subagent_type },
       undefined, undefined, ctx(),
     );
 
     expect(textOf(resumed)).not.toContain("Unknown or disabled agent type");
+  });
+
+  it.each([
+    [true, undefined], [false, undefined], [true, "other"], [false, "other"],
+  ])("resumes the stored type's mode (%s), ignoring requested type %s and fallback config", async (background, subagent_type) => {
+    const { tools } = boot();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first", session: { dispose: vi.fn(), messages: [] } as never, aborted: false, steered: false,
+    });
+    const spawned = await tools.get("Agent").execute(
+      "resume-config-spawn",
+      { prompt: "start", description: "scout", subagent_type: "scout", run_in_background: false },
+      undefined, undefined, ctx(),
+    );
+    const id = spawned.details.agentId;
+    expect(id).toBeTruthy();
+    writeFileSync(join(cwd, ".pi", "agents", "scout.md"), `---\nrun_in_background: ${background}\noutput_transcript: false\n---\nScout.`);
+    writeFileSync(join(cwd, ".pi", "agents", "other.md"), `---\nrun_in_background: ${!background}\nmax_turns: 9\noutput_transcript: true\n---\nOther.`);
+    setFallbackSubagent("other");
+    const resume = vi.spyOn(AgentManager.prototype, "resume").mockImplementation(async function (this: AgentManager, agentId) {
+      return this.getRecord(agentId);
+    });
+    try {
+      const result = await tools.get("Agent").execute(
+        "resume-config", { resume: id, prompt: "continue", description: "resume", subagent_type },
+        undefined, undefined, ctx(),
+      );
+      expect(resume).toHaveBeenCalledTimes(1);
+      if (background) {
+        expect(textOf(result)).toContain("resumed in background");
+        expect(resume.mock.calls[0][3]).toMatchObject({ isBackground: true });
+      } else {
+        expect(textOf(result)).toBe("first");
+        expect(resume.mock.calls[0][3]).toBeUndefined();
+      }
+    } finally { resume.mockRestore(); }
   });
 
   it("applies the same contract to cross-extension spawns", async () => {

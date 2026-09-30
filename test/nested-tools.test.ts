@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Check } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -131,6 +132,19 @@ describe("child-safe nested Agent tools", () => {
     } finally {
       rmSync(workCwd, { recursive: true, force: true });
     }
+  });
+
+  it("requires an explicit nested type in both schema and runtime", async () => {
+    setFallbackSubagent("scout");
+    try {
+      const [agent] = tools(["scout"]);
+      const params = { prompt: "go", description: "missing type" };
+      expect(Check(agent.parameters, params)).toBe(false);
+      const result = await execute(agent, params);
+      expect(result.isError).toBe(true);
+      expect(spawn).not.toHaveBeenCalled();
+      expect(spawnAndWait).not.toHaveBeenCalled();
+    } finally { setFallbackSubagent(undefined); }
   });
 
   it("enforces a narrow allowlist", async () => {

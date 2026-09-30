@@ -36,7 +36,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -1602,9 +1602,9 @@ Terse command-style prompts produce shallow, generic work.
             'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
         }),
       ),
-      subagent_type: Type.String({
-        description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
-      }),
+      subagent_type: Type.Optional(Type.String({
+        description: `The type of specialized agent to use. Omit to use the configured fallback (general-purpose by default); fallbackSubagent: none requires an explicit type for new spawns. Resume needs no type. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
+      })),
       model: Type.Optional(
         Type.String({
           description:
@@ -1771,19 +1771,21 @@ Terse command-style prompts produce shallow, generic work.
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
 
-      const rawType = params.subagent_type as SubagentType;
+      const resumeRecord = params.resume ? manager.getRecord(params.resume) : undefined;
+      if (params.resume && !params.schedule && (!resumeRecord || !isTopLevelAgent(resumeRecord))) {
+        return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
+      }
+      const rawType = params.subagent_type ?? "";
       // Single decision point for dispatch (#183): unknown, disabled and
       // case-ambiguous types are refused here, BEFORE anything spawns, so a
       // background or scheduled call can't start running the wrong agent while
       // the caller is still unaware. `fallbackSubagent` decides whether an
       // unresolvable type falls back or fails closed.
       const dispatch = resolveSpawnType(rawType);
-      // `resume` replays a stored session and ignores `subagent_type` entirely,
-      // but the parameter is required by the schema — so gating it here would
-      // make a live agent unresumable the moment its type is deleted, disabled,
-      // or gains a case-clashing sibling. Only a real spawn is gated.
+      // `resume` replays a stored session and needs no `subagent_type`.
+      // Only a real spawn is gated by the fallback policy.
       if (!dispatch.ok && !params.resume) return textResult(dispatch.message);
-      const subagentType = dispatch.ok ? dispatch.type : rawType;
+      const subagentType = resumeRecord?.type ?? (dispatch.ok ? dispatch.type : rawType);
       // What the caller actually asked for, named once: `fellBackFrom` is "" for
       // a blank request, so reading it inline invites the `??`-vs-`||` slip that
       // once persisted an empty type into a scheduled job.
@@ -1968,11 +1970,8 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       // Resume existing agent
-      if (params.resume) {
-        const existing = manager.getRecord(params.resume);
-        if (!existing || !isTopLevelAgent(existing)) {
-          return textResult(`Agent not found: "${params.resume}". It may have been cleaned up.`);
-        }
+      if (resumeRecord) {
+        const existing = resumeRecord;
         if (!existing.session) {
           return textResult(`Agent "${params.resume}" has no active session to resume.`);
         }
@@ -2017,7 +2016,7 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
-        const record = await manager.resume(params.resume, params.prompt, signal);
+        const record = await manager.resume(existing.id, params.prompt, signal);
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }

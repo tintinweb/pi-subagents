@@ -42,6 +42,124 @@ describe("loadCustomAgents", () => {
     writeAgentIn(".agents", name, content);
   }
 
+  describe("Claude frontmatter compatibility", () => {
+    it("loads aliases, normalizes builtin names, and serializes canonical settings", () => {
+      writeAgent("claude", `---
+tools: [Read, BASH, Edit, Write, Grep, Glob, LS, ext:Mcp/Read, Agent, StructuredOutput, UnknownTool]
+disallowedTools: [Bash, WRITE, Glob, Agent, StructuredOutput, McpTool]
+maxTurns: 7
+background: true
+---
+Prompt.`);
+      const config = loadCustomAgents(tmpDir).get("claude")!;
+      expect(config.builtinToolNames).toEqual(["read", "bash", "edit", "write", "grep", "find", "ls", "Agent", "StructuredOutput", "UnknownTool"]);
+      expect(config.extSelectors).toEqual(["ext:Mcp/Read"]);
+      expect(config.disallowedTools).toEqual(["bash", "write", "find", "Agent", "StructuredOutput", "McpTool"]);
+      expect(config.maxTurns).toBe(7);
+      expect(config.runInBackground).toBe(true);
+      const serialized = serializeAgentFile(config);
+      expect(serialized).toContain("disallowed_tools:");
+      expect(serialized).toContain("max_turns: 7");
+      expect(serialized).toContain("run_in_background: true");
+      expect(serialized).not.toMatch(/disallowedTools:|maxTurns:|\nbackground:/);
+      writeAgent("claude", serialized);
+      expect(loadCustomAgents(tmpDir).get("claude")).toMatchObject({
+        builtinToolNames: config.builtinToolNames,
+        disallowedTools: config.disallowedTools,
+        maxTurns: 7,
+        runInBackground: true,
+      });
+    });
+
+    it("preserves canonical false, zero and empty lists on collisions", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        writeAgent("collision", `---
+run_in_background: false
+background: true
+max_turns: 0
+maxTurns: 9
+disallowed_tools: []
+disallowedTools: Bash
+---`);
+        const config = loadCustomAgents(tmpDir).get("collision")!;
+        expect(config.runInBackground).toBe(false);
+        expect(config.maxTurns).toBe(0);
+        expect(config.disallowedTools).toBeUndefined();
+        const messages = warn.mock.calls.flat().join("\n");
+        for (const key of ["run_in_background", "background", "max_turns", "maxTurns", "disallowed_tools", "disallowedTools"]) {
+          expect(messages).toContain(key);
+        }
+        expect(messages).toContain(join(tmpDir, ".pi", "agents", "collision.md"));
+        expect(messages).toContain("takes precedence");
+        const count = warn.mock.calls.length;
+        loadCustomAgents(tmpDir);
+        expect(warn).toHaveBeenCalledTimes(count);
+      } finally { warn.mockRestore(); }
+    });
+
+    it("leaves background false unspecified and accepts zero, CSV, and null canonical fields", () => {
+      writeAgent("defaults", `---
+background: false
+maxTurns: 0
+max_turns: null
+disallowedTools: Bash, Glob
+---`);
+      const config = loadCustomAgents(tmpDir).get("defaults")!;
+      expect(config.runInBackground).toBeUndefined();
+      expect(config.maxTurns).toBe(0);
+      expect(config.disallowedTools).toEqual(["bash", "find"]);
+      writeAgent("defaults", "---\ntools: ALL, READ, ext:Mcp/Read\ndisallowed_tools: BASH, Agent\n---");
+      const canonical = loadCustomAgents(tmpDir).get("defaults")!;
+      expect(canonical.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+      expect(canonical.extSelectors).toEqual(["ext:Mcp/Read"]);
+      expect(canonical.disallowedTools).toEqual(["bash", "Agent"]);
+    });
+
+    it.each([
+      ["maxTurns", "1.5"], ["maxTurns", "-1"], ["maxTurns", '"3"'],
+      ["background", '"true"'], ["disallowedTools", "42"], ["disallowedTools", "[Bash, 42]"],
+    ])("warns and ignores invalid alias %s: %s", (key, value) => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        writeAgent("invalid", `---\n${key}: ${value}\n---`);
+        const config = loadCustomAgents(tmpDir).get("invalid")!;
+        expect(config.maxTurns).toBeUndefined();
+        expect(config.runInBackground).toBeUndefined();
+        expect(config.disallowedTools).toBeUndefined();
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining(`Invalid ${key}`));
+        expect(warn.mock.calls.flat().join("\n")).toContain(join(tmpDir, ".pi", "agents", "invalid.md"));
+      } finally { warn.mockRestore(); }
+    });
+
+    it("warns about unsupported keys without values, deduplicates, and warns after reintroduction", () => {
+      const keys = ["permissionMode", "mcpServers", "hooks", "omitClaudeMd", "initialPrompt", "experimental", "effort"];
+      const content = `---\n${keys.map(key => `${key}: PRIVATE_VALUE`).join("\n")}\notherMetadata: private\n---`;
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        writeAgent("unsupported", content);
+        expect(loadCustomAgents(tmpDir).get("unsupported")?.thinking).toBeUndefined();
+        const messages = warn.mock.calls.flat().join("\n");
+        for (const key of keys) expect(messages).toContain(key);
+        expect(messages).toContain(join(tmpDir, ".pi", "agents", "unsupported.md"));
+        expect(messages).toContain("ignored");
+        expect(messages).toContain("not active");
+        expect(messages).toContain("thinking");
+        expect(messages).not.toContain("PRIVATE_VALUE");
+        expect(messages).not.toContain("otherMetadata");
+        const count = warn.mock.calls.length;
+        loadCustomAgents(tmpDir);
+        expect(warn).toHaveBeenCalledTimes(count);
+        writeAgent("unsupported", "---\notherMetadata: private\n---");
+        loadCustomAgents(tmpDir);
+        expect(warn).toHaveBeenCalledTimes(count);
+        writeAgent("unsupported", content);
+        loadCustomAgents(tmpDir);
+        expect(warn).toHaveBeenCalledTimes(count * 2);
+      } finally { warn.mockRestore(); }
+    });
+  });
+
   it("returns empty map when custom agent dirs do not exist", () => {
     const result = loadCustomAgents(tmpDir);
     expect(result.size).toBe(0);

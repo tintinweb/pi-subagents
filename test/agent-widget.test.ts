@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
@@ -524,5 +524,77 @@ describe("AgentWidget overflow accounting", () => {
     agent.status = "completed";
     widget.markFinished(agent.id);
     expect(render()).toContain("resumed description");
+  });
+});
+
+describe("AgentWidget refresh timer", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  /**
+   * Arm the widget the way a spawn does. `listAgents` is the tick's first call,
+   * so counting its invocations counts the ticks — the only way to observe a
+   * render loop whose whole cost is a terminal diff of an unchanged frame.
+   */
+  function harness() {
+    const agents: any[] = [{
+      id: "a1", type: "general-purpose", description: "a1 description", status: "running",
+      toolUses: 0, startedAt: Date.now(),
+      lifetimeUsage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, compactionCount: 0,
+    }];
+    const listAgents = vi.fn(() => agents);
+    const widget = new AgentWidget({ listAgents } as any, new Map(), () => "all");
+    let factory: any;
+    widget.setUICtx({ setStatus: () => {}, setWidget: (_k: any, c: any) => { factory = c; } } as any);
+    widget.ensureTimer();
+    widget.update();
+    return { agents, listAgents, widget, factory };
+  }
+
+  it("stops ticking once nothing is running", () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+
+      // Running — the spinner and the two live clocks need the tick.
+      const armed = h.listAgents.mock.calls.length;
+      vi.advanceTimersByTime(1000);
+      expect(h.listAgents.mock.calls.length).toBeGreaterThan(armed);
+
+      // Finished, and lingering: the line is static, so the tick has to stop.
+      // The linger is aged by turns, so with no turn coming this timer used to
+      // run for the rest of the process, one full render per tick.
+      h.agents[0].status = "completed";
+      h.agents[0].completedAt = Date.now();
+      h.widget.markFinished("a1");
+      h.widget.update();
+      const settled = h.listAgents.mock.calls.length;
+      vi.advanceTimersByTime(60_000);
+      expect(h.listAgents.mock.calls.length).toBe(settled);
+
+      // ...and the finished line is still on screen, just not re-rendered.
+      const out = h.factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render().join("\n");
+      expect(out).toContain("a1 description");
+
+      h.widget.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ticks a few times a second, not a dozen", () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      const before = h.listAgents.mock.calls.length;
+      vi.advanceTimersByTime(1000);
+      const ticks = h.listAgents.mock.calls.length - before;
+      // Bounded rather than pinned to the constant: what matters is that the
+      // spinner gets a few frames a second instead of twelve full re-renders.
+      expect(ticks).toBeGreaterThan(0);
+      expect(ticks).toBeLessThanOrEqual(5);
+      h.widget.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

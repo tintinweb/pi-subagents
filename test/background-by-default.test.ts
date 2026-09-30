@@ -15,7 +15,15 @@
  * agents bypass the pool, so the limit only started applying to ordinary
  * parallel work once background became the default.
  */
+import { mkdtempSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { describe, expect, it, vi } from "vitest";
+
+// Redirect the global agent dir so activation doesn't read the developer's
+// real ~/.pi/agent/subagents.json — a global `backgroundByDefault: false`
+// would flip what an unqualified spawn means and sink every assertion here.
+process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-subagents-bg-test-"));
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
