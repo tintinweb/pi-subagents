@@ -194,11 +194,8 @@ describe("resolveModel", () => {
       expect(result).toContain("openai/gpt-4o");
     });
 
-    it("empty string matches a model (multi-part vacuous truth)", () => {
-      // Empty string splits to empty parts; every() on empty array is true
-      // This is fine — callers guard against empty input
-      const result = resolveModel("", makeRegistry());
-      expect(typeof result).toBe("object");
+    it.each(["", "   "])("rejects blank explicit model %j instead of selecting a fallback", (input) => {
+      expect(resolveModel(input, makeRegistry())).toContain("Model not found");
     });
   });
 

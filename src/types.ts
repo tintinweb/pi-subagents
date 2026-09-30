@@ -2,11 +2,12 @@
  * types.ts — Type definitions for the subagent system.
  */
 
-import type { ThinkingLevel } from "@earendil-works/pi-ai";
+import type { ThinkingLevel as EnabledThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { LifetimeUsage } from "./usage.js";
 
-export type { ThinkingLevel };
+// pi-ai's reasoning type excludes the valid session-level disable value.
+export type ThinkingLevel = EnabledThinkingLevel | "off";
 
 /** Agent type: any string name (built-in defaults or user-defined). */
 export type SubagentType = string;
@@ -274,9 +275,7 @@ export interface AgentRecord {
 }
 
 /**
- * What a session reports as its level: pi's `ThinkingLevel` plus the `"off"` a
- * model with thinking disabled reports. Display-only — spawning still takes a
- * `ThinkingLevel`, so this widening cannot leak into an invocation.
+ * What a session reports as its level, including disabled thinking.
  */
 export type EffectiveThinkingLevel = ThinkingLevel | "off";
 

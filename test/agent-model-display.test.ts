@@ -216,7 +216,7 @@ describe("Agent tool result — effective model", () => {
   // exists. That is the only place the two causes of a mismatch are separable:
   // a clamp cannot have happened yet, so "(asked max)" here can only come from
   // the agent file outranking the parameter.
-  it("discloses a level an agent file pinned over the caller's (#182)", async () => {
+  it("honors the caller's level over the profile default without false attribution", async () => {
     pinnedAgent("thinking: low\n");
     const tool = agentTool();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
@@ -229,10 +229,12 @@ describe("Agent tool result — effective model", () => {
       ctx(),
     );
 
-    expect(result.details.tags).toContain("thinking: low (asked max)");
+    expect(result.details.tags).toContain("thinking: max");
+    expect(result.details.tags.join(" ")).not.toContain("asked");
+    expect(vi.mocked(runAgent).mock.lastCall![3].thinkingLevel).toBe("max");
   });
 
-  it("discloses a model an agent file pinned over the caller's (#182)", async () => {
+  it("honors the caller's model over the profile default without false attribution", async () => {
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
@@ -251,7 +253,8 @@ describe("Agent tool result — effective model", () => {
       ctx(),
     );
 
-    expect(result.details.modelName).toBe("haiku 4.5 (asked anthropic/claude-opus-4-6)");
+    expect(result.details.modelName).toBe("opus 4.6");
+    expect(vi.mocked(runAgent).mock.lastCall![3].model?.id).toBe("claude-opus-4-6");
   });
 
   it("stays quiet when the caller's spelling names the model that won", async () => {
@@ -286,7 +289,8 @@ describe("Agent tool result — effective model", () => {
       ctx(),
     );
 
-    expect(result.details.modelName).toBe("haiku 4.5 (asked gpt-9)");
+    expect(result.content[0].text).toContain('Model not found: "gpt-9"');
+    expect(result.details).toBeUndefined();
   });
 
   it("says nothing about a request that was honored", async () => {
@@ -332,7 +336,7 @@ describe("Agent tool result — resume", () => {
       context,
     );
 
-    const resumed = await tool.execute(
+    await expect(tool.execute(
       "tc-8",
       {
         prompt: "continue",
@@ -346,8 +350,13 @@ describe("Agent tool result — resume", () => {
       undefined,
       vi.fn(),
       context,
-    );
+    )).rejects.toThrow("Cannot override model or thinking when resuming");
+    expect(resumeAgent).not.toHaveBeenCalled();
 
+    const resumed = await tool.execute("tc-9", {
+      prompt: "continue", description: "d", subagent_type: "general-purpose",
+      run_in_background: false, resume: first.details.agentId,
+    }, undefined, vi.fn(), context);
     expect(resumed.details.modelName).toBe("haiku 4.5");
     expect(resumed.details.tags).toContain("thinking: low");
     expect(render(tool, resumed)).not.toContain("opus 4.6");

@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
@@ -409,9 +409,9 @@ export interface RunOptions {
    * Reopen this pi session file rather than starting an empty conversation.
    * `createAgentSession` seeds itself from whatever its SessionManager holds,
    * so pointing it at an existing file rehydrates that agent's history and the
-   * prompt continues it. Everything else — tools, model, system prompt, turn
-   * caps — is still resolved from the agent type, so the continuation runs
-   * under the type's *current* definition, not the one the original run used.
+   * prompt continues it. Tools, system prompt and turn caps still resolve from
+   * the type's current definition; recorded model/effort are preserved.
+   * Explicit model/effort options are rejected on this path.
    */
   resumeSessionFile?: string;
   /**
@@ -828,13 +828,22 @@ export async function runAgent(
     }
   }
 
+  // Reopened histories retain their recorded model/effort, never current defaults.
+  if (options.resumeSessionFile && (options.model != null || options.thinkingLevel != null)) {
+    throw new Error("Cannot override model or thinking when resuming an agent. Start a fresh agent to change configuration.");
+  }
   // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
+  const model = options.resumeSessionFile ? undefined : options.model ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
 
   // Resolve thinking level: explicit option > agent config > undefined (inherit)
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
+  const thinkingLevel = options.resumeSessionFile ? undefined : options.thinkingLevel ?? agentConfig?.thinking;
+  // Reject caller choices and selected profile defaults pi would otherwise silently clamp, including unsupported `off`.
+  if (thinkingLevel != null
+    && (!model || !getSupportedThinkingLevels(model).includes(thinkingLevel))) {
+    throw new Error(`Unsupported thinking level "${thinkingLevel}" for ${model ? `${model.provider}/${model.id}` : "an unresolved model"}.`);
+  }
 
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)

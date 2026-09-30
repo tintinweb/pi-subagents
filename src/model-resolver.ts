@@ -66,7 +66,7 @@ export function resolveModel(
   let bestMatch: ModelEntry | undefined;
   let bestScore = 0;
 
-  for (const m of all) {
+  for (const m of input.trim() ? all : []) {
     const id = normalize(m.id);
     const name = normalize(m.name);
     const full = normalize(`${m.provider}/${m.id}`);

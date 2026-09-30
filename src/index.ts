@@ -152,7 +152,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
  * (`off` + every `ThinkingLevel`). Single source for the Agent tool description,
  * the generated-agent template, and the `/agents` wizard so these lists can't
  * drift behind pi again (#147). Availability of any level still depends on the
- * host pi version and the selected model — pi clamps unsupported levels down.
+ * host pi version and the selected model — unsupported explicit requests fail.
  */
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
@@ -1799,6 +1799,10 @@ Terse command-style prompts produce shallow, generic work.
 
       const displayName = getDisplayName(subagentType);
 
+      if (params.resume && (params.model != null || params.thinking != null)) {
+        throw new Error("Cannot override model or thinking when resuming an agent. Start a fresh agent to change configuration.");
+      }
+
       // Get agent config (if any)
       const customConfig = getAgentConfig(subagentType);
 
@@ -1807,9 +1811,9 @@ Terse command-style prompts produce shallow, generic work.
         defaultRunInBackground: getBackgroundByDefault(),
       });
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
+      // Explicit caller model wins; the agent config supplies the default.
       let model = ctx.model;
-      if (resolvedConfig.modelInput) {
+      if (resolvedConfig.modelInput != null) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           if (resolvedConfig.modelFromParams) return textResult(resolved);

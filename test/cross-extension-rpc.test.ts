@@ -99,13 +99,13 @@ describe("cross-extension RPC", () => {
       events.on("subagents:rpc:spawn:reply:req-s2", reply);
       events.emit("subagents:rpc:spawn", {
         requestId: "req-s2", type: "Explore", prompt: "find it",
-        options: { description: "search", isBackground: true },
+        options: { description: "search", isBackground: true, thinkingLevel: "off" },
       });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "Explore", "find it",
-        { description: "search", isBackground: true },
+        { description: "search", isBackground: true, thinkingLevel: "off" },
       );
     });
 
@@ -378,14 +378,14 @@ describe("cross-extension RPC", () => {
       events.on("subagents:rpc:spawn:reply:req-m1", reply);
       events.emit("subagents:rpc:spawn", {
         requestId: "req-m1", type: "general-purpose", prompt: "x",
-        options: { model: "openai-codex/gpt-5.5" },
+        options: { model: "openai-codex/gpt-5.5", thinkingLevel: "high" },
       });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(reply).toHaveBeenCalledWith({ success: true, data: { id: "agent-42" } });
       expect(manager.spawn).toHaveBeenCalledWith(
         deps.pi, ctx, "general-purpose", "x",
-        { model: fakeModel },
+        { model: fakeModel, thinkingLevel: "high" },
       );
     });
 

@@ -180,7 +180,8 @@ describe("child-safe nested Agent tools", () => {
     }
   });
 
-  it("applies the scopeModels allowlist to a caller-supplied model", async () => {
+  it("applies scope to a caller model even when the profile has a default", async () => {
+    writeAgent("scout", "model: anthropic/allowed\nthinking: high\n");
     writeFileSync(
       join(cwd, ".pi", "settings.json"),
       JSON.stringify({ enabledModels: ["anthropic/allowed"] }),
@@ -205,6 +206,27 @@ describe("child-safe nested Agent tools", () => {
       model: "anthropic/allowed",
     });
     expect(inScope.isError).toBe(false);
+  });
+
+  it("forwards caller model and thinking independently of profile defaults", async () => {
+    writeAgent("scout", "model: anthropic/allowed\nthinking: high\n");
+    const [agent] = tools();
+    await execute(agent, {
+      subagent_type: "scout", description: "override", prompt: "Go",
+      model: "anthropic/blocked", thinking: "off",
+    });
+    expect(spawnAndWait.mock.lastCall![4]).toMatchObject({
+      model: { provider: "anthropic", id: "blocked" }, thinkingLevel: "off",
+    });
+  });
+
+  it.each([{ model: "anthropic/allowed" }, { thinking: "off" }])("rejects resume configuration %j without prompting", async (override) => {
+    records.set("child-1", { id: "child-1", parentAgentId: "parent-1", status: "completed" });
+    const [agent] = tools();
+    await expect(execute(agent, {
+      resume: "child-1", subagent_type: "scout", description: "resume", prompt: "Go", ...override,
+    })).rejects.toThrow("Cannot override model or thinking when resuming");
+    expect(manager.resume).not.toHaveBeenCalled();
   });
 
   it("queues a steer for an owned child whose session is not ready yet", async () => {

@@ -309,7 +309,7 @@ function optionalText(value, what) {
  * because a typo should stop the script at the call that made it, not surface
  * later as an agent that quietly ran at the wrong depth.
  */
-const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+const EFFORT_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /**
  * Every option \`agent()\` understands.

@@ -19,7 +19,7 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 }
 
 describe("resolveAgentInvocationConfig", () => {
-  it("prefers agent config over tool-call params for locked fields", () => {
+  it("overrides model/thinking defaults but keeps restriction fields locked", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
         model: "provider/config-model",
@@ -41,9 +41,9 @@ describe("resolveAgentInvocationConfig", () => {
       },
     );
 
-    expect(resolved.modelInput).toBe("provider/config-model");
-    expect(resolved.modelFromParams).toBe(false);
-    expect(resolved.thinking).toBe("high");
+    expect(resolved.modelInput).toBe("provider/param-model");
+    expect(resolved.modelFromParams).toBe(true);
+    expect(resolved.thinking).toBe("minimal");
     expect(resolved.maxTurns).toBe(42);
     expect(resolved.inheritContext).toBe(false);
     expect(resolved.runInBackground).toBe(false);
@@ -137,6 +137,23 @@ describe("resolveAgentInvocationConfig", () => {
   });
 });
 
+describe("independent model/thinking defaults", () => {
+  it.each([
+    [{}, "provider/default", "high", false],
+    [{ model: "provider/caller" }, "provider/caller", "high", true],
+    [{ thinking: "low" }, "provider/default", "low", false],
+    [{ model: "provider/caller", thinking: "off" }, "provider/caller", "off", true],
+    [{ thinking: "off" }, "provider/default", "off", false],
+    [{ model: "", thinking: "invalid" }, "", "invalid", true],
+  ])("resolves %j without suppressing the caller", (params, model, thinking, caller) => {
+    const result = resolveAgentInvocationConfig(makeConfig({ model: "provider/default", thinking: "high" }), params);
+    expect(result.modelInput).toBe(model);
+    expect(result.thinking).toBe(thinking);
+    expect(result.modelFromParams).toBe(caller);
+    expect(result.overridden).toBeUndefined();
+  });
+});
+
 describe("resolveJoinMode", () => {
   it("returns the global default for background agents", () => {
     expect(resolveJoinMode("smart", true)).toBe("smart");
@@ -150,13 +167,13 @@ describe("resolveJoinMode", () => {
 });
 
 describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
-  it("records the caller's values when the agent file outranks them", () => {
+  it("does not attribute honored caller overrides as suppressed requests", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({ model: "provider/config-model", thinking: "low" }),
       { model: "provider/param-model", thinking: "max" },
     );
 
-    expect(resolved.overridden).toEqual({ thinking: "max", model: "provider/param-model" });
+    expect(resolved.overridden).toBeUndefined();
   });
 
   it("records nothing when the caller got what they asked for", () => {
@@ -188,6 +205,6 @@ describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
       { model: "provider/param-model", thinking: "max" },
     );
 
-    expect(resolved.overridden).toEqual({ thinking: "max", model: undefined });
+    expect(resolved.overridden).toBeUndefined();
   });
 });

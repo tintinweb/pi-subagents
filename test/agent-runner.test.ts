@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
@@ -138,6 +139,7 @@ import {
   setGraceTurns,
   setRememberAgents,
 } from "../src/agent-runner.js";
+import { resolveAgentInvocationConfig } from "../src/invocation-config.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
@@ -215,6 +217,141 @@ beforeEach(() => {
   vi.mocked(createNestedSubagentTools).mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
   lastSession = undefined;
+});
+
+describe("agent-runner explicit configuration", () => {
+  const model = {
+    provider: "faux", id: "reasoner", reasoning: true,
+    thinkingLevelMap: { xhigh: null, max: null },
+  } as unknown as Model<Api>;
+
+  it.each(["high", "off"] as const)("forwards supported effort %s without changing it", async (thinkingLevel) => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ thinking: "low" }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    await runAgent(ctx, "Explore", "Go", { pi, model, thinkingLevel });
+    expect(createAgentSession.mock.lastCall![0]).toMatchObject({ model, thinkingLevel });
+  });
+
+  it.each(["max", "invalid", ""])("rejects unsupported explicit effort %j before session creation", async (effort) => {
+    await expect(runAgent(ctx, "Explore", "Go", { pi, model, thinkingLevel: effort as never }))
+      .rejects.toThrow("Unsupported thinking level");
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects explicit off when the reasoning model cannot disable thinking before session creation", async () => {
+    const cannotDisableThinking = { ...model, thinkingLevelMap: { ...model.thinkingLevelMap, off: null } };
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    await expect(runAgent(ctx, "Explore", "Go", { pi, model: cannotDisableThinking, thinkingLevel: "off" }))
+      .rejects.toThrow('Unsupported thinking level "off" for faux/reasoner.');
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects explicit off with an unresolved model before session creation", async () => {
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    await expect(runAgent(ctx, "Explore", "Go", { pi, thinkingLevel: "off" }))
+      .rejects.toThrow('Unsupported thinking level "off" for an unresolved model.');
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("accepts off for a non-reasoning model", async () => {
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    await runAgent(ctx, "Explore", "Go", { pi, model: { ...model, reasoning: false }, thinkingLevel: "off" });
+    expect(createAgentSession.mock.lastCall![0].thinkingLevel).toBe("off");
+  });
+
+  it("keeps profile defaults when no explicit configuration was supplied", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ model: "faux/reasoner", thinking: "low" }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    await runAgent({ ...ctx, modelRegistry: { find: () => model, getAvailable: () => [model] } }, "Explore", "Go", { pi });
+    expect(createAgentSession.mock.lastCall![0]).toMatchObject({ model, thinkingLevel: "low" });
+  });
+
+  describe.each(["direct", "RPC", "workflow"] as const)("%s-shaped selected profile effort", (shape) => {
+    it("rejects an incompatible profile default after a model-only override", async () => {
+      const profile = makeAgentConfig({ model: "faux/reasoner", thinking: "xhigh" });
+      vi.mocked(getAgentConfig).mockReturnValueOnce(profile);
+      createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+      const nonReasoner = { ...model, id: "non-reasoner", reasoning: false };
+      // Direct tools fill omission from the profile before runAgent; RPC and
+      // workflow leave that omission for runAgent to resolve centrally.
+      const thinkingLevel = shape === "direct"
+        ? resolveAgentInvocationConfig(profile, { model: "faux/non-reasoner" }).thinking
+        : undefined;
+      await expect(runAgent(ctx, "Explore", "Go", {
+        pi, model: nonReasoner, thinkingLevel, workflow: shape === "workflow",
+      })).rejects.toThrow('Unsupported thinking level "xhigh" for faux/non-reasoner.');
+      expect(createAgentSession).not.toHaveBeenCalled();
+    });
+
+    it.each(["low", "off"] as const)("forwards supported profile default %s unchanged", async (effort) => {
+      const profile = makeAgentConfig({ model: "faux/reasoner", thinking: effort });
+      vi.mocked(getAgentConfig).mockReturnValueOnce(profile);
+      createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+      const selectedModel = effort === "off" ? { ...model, reasoning: false } : model;
+      const context = { ...ctx, modelRegistry: { find: () => selectedModel, getAvailable: () => [selectedModel] } };
+      const thinkingLevel = shape === "direct" ? resolveAgentInvocationConfig(profile, {}).thinking : undefined;
+      await runAgent(context, "Explore", "Go", { pi, thinkingLevel, workflow: shape === "workflow" });
+      expect(createAgentSession.mock.lastCall![0]).toMatchObject({ model: selectedModel, thinkingLevel: effort });
+    });
+
+    it("lets a supported caller override replace an incompatible profile default", async () => {
+      const profile = makeAgentConfig({ thinking: "xhigh" });
+      vi.mocked(getAgentConfig).mockReturnValueOnce(profile);
+      createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+      const thinkingLevel = shape === "direct"
+        ? resolveAgentInvocationConfig(profile, { thinking: "off" }).thinking
+        : "off";
+      const nonReasoner = { ...model, reasoning: false };
+      await runAgent(ctx, "Explore", "Go", { pi, model: nonReasoner, thinkingLevel, workflow: shape === "workflow" });
+      expect(createAgentSession.mock.lastCall![0]).toMatchObject({ model: nonReasoner, thinkingLevel: "off" });
+    });
+  });
+
+  it.each([undefined, { ...model, reasoning: false }])("leaves absent caller/profile effort to SDK fallback (%j)", async (parentModel) => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent({ ...ctx, model: parentModel }, "Explore", "Go", { pi });
+    expect(createAgentSession.mock.lastCall![0].model).toBe(parentModel);
+    expect(createAgentSession.mock.lastCall![0]).not.toHaveProperty("thinkingLevel");
+  });
+
+  it("rejects profile off when the resolved model cannot disable thinking", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ thinking: "off" }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    const cannotDisableThinking = { ...model, thinkingLevelMap: { ...model.thinkingLevelMap, off: null } };
+    await expect(runAgent(ctx, "Explore", "Go", { pi, model: cannotDisableThinking }))
+      .rejects.toThrow('Unsupported thinking level "off" for faux/reasoner.');
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("rejects profile effort with an unresolved model", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ thinking: "off" }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await expect(runAgent(ctx, "Explore", "Go", { pi }))
+      .rejects.toThrow('Unsupported thinking level "off" for an unresolved model.');
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("does not inject current defaults into a reopened history", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ model: "faux/reasoner", thinking: "high" }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    await runAgent(ctx, "Explore", "Go", { pi, resumeSessionFile: "/history.jsonl" });
+    expect(createAgentSession.mock.lastCall![0].model).toBeUndefined();
+    expect(createAgentSession.mock.lastCall![0]).not.toHaveProperty("thinkingLevel");
+  });
+
+  it.each([{ model }, { thinkingLevel: "off" as const }])("rejects explicit changes on a reopened history", async (override) => {
+    await expect(runAgent(ctx, "Explore", "Go", { pi, resumeSessionFile: "/history.jsonl", ...override }))
+      .rejects.toThrow("Cannot override model or thinking when resuming");
+    expect(sessionManagerOpen).not.toHaveBeenCalled();
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
 });
 
 describe("agent-runner final output capture", () => {

@@ -182,6 +182,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       if (params.resume) {
+        if (params.model != null || params.thinking != null) {
+          throw new Error("Cannot override model or thinking when resuming an agent. Start a fresh agent to change configuration.");
+        }
         const existing = context.manager.getRecord(params.resume);
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
@@ -229,7 +232,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         defaultRunInBackground: false,
       });
       let model = ctx.model;
-      if (invocation.modelInput) {
+      if (invocation.modelInput != null) {
         const resolvedModel = resolveModel(invocation.modelInput, ctx.modelRegistry);
         if (typeof resolvedModel === "string") {
           if (invocation.modelFromParams) return textResult(resolvedModel, true);
