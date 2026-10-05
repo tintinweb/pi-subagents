@@ -129,6 +129,7 @@ import {
   getGraceTurns,
   parseExtensionsSpec,
   parseExtSelectors,
+  piBuiltinExtensions,
   resolveDefaultModel,
   resolveEffectiveMaxTurns,
   resumeAgent,
@@ -1697,6 +1698,51 @@ describe("agent-runner async extension tool registration", () => {
     expect(createAgentSession.mock.calls[0][0].tools).toEqual(["read"]);
     expect(session.setActiveToolsByName).not.toHaveBeenCalled();
     expect(session.agent.beforeToolCall).toBeUndefined();
+  });
+});
+
+// ─── pi's built-in extensions (codemode, tool-search, MCP) ─────────────
+// pi's CLI passes these to its loader as `extensionFactories`; a child loader
+// built without them never loads `builtin:codemode` or `builtin:mcp`.
+
+describe("piBuiltinExtensions", () => {
+  it("mirrors the CLI's built-in entries when pi exports the factories", () => {
+    const factory = () => {};
+    const piModule = {
+      createCodemodeExtension: vi.fn(() => factory),
+      createToolSearchExtension: vi.fn(() => factory),
+      createMcpExtension: vi.fn(() => factory),
+    };
+
+    expect(piBuiltinExtensions(piModule)).toEqual([
+      { name: "codemode", factory, replaceable: true, builtin: true },
+      { name: "tool-search", factory, replaceable: true, builtin: true },
+      { name: "mcp", factory, replaceable: true, builtin: true },
+    ]);
+    expect(piModule.createMcpExtension).toHaveBeenCalledOnce();
+  });
+
+  it("is empty on a pi without the factories (< 0.99), instead of throwing", () => {
+    expect(piBuiltinExtensions({})).toEqual([]);
+  });
+
+  it("skips only the factories a pi version lacks", () => {
+    const factory = () => {};
+    expect(piBuiltinExtensions({ createMcpExtension: () => factory })).toEqual([
+      { name: "mcp", factory, replaceable: true, builtin: true },
+    ]);
+  });
+
+  it("runAgent hands them to the child's resource loader", async () => {
+    // The mocked pi module defines no factories, like pi < 0.99: the option is
+    // still passed, and empty.
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(lastLoaderOpts().extensionFactories).toEqual([]);
   });
 });
 
