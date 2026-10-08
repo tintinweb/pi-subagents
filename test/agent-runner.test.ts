@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const {
   createAgentSession,
   defaultResourceLoaderCtor,
+  codemodeFactory,
+  mcpFactory,
   loaderExtensionsRef,
   getAgentDir,
   sessionManagerInMemory,
@@ -16,6 +18,8 @@ const {
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
+  codemodeFactory: () => {},
+  mcpFactory: () => {},
   loaderExtensionsRef: {
     current: { extensions: [], errors: [], runtime: {} } as {
       extensions: Array<{ path: string; tools: Map<string, unknown> }>;
@@ -33,6 +37,10 @@ const {
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  // pi ≥1.0 exports factories for its built-in extensions. tool-search is left
+  // out on purpose so the runner's older-pi tolerance is exercised too.
+  createCodemodeExtension: () => codemodeFactory,
+  createMcpExtension: () => mcpFactory,
   // Identity, as pi's own is: `defineTool` exists for the type inference, and
   // the structured-output tool is built through it.
   defineTool: (definition: unknown) => definition,
@@ -325,6 +333,21 @@ describe("agent-runner final output capture", () => {
     await runAgent(ctx, "Explore", "Say LEGACY", { pi });
 
     expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("modelRuntime");
+  });
+
+  it("hands pi's built-in extension factories (codemode, mcp) to the child loader", async () => {
+    const { session } = createSession("BUILTINS");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Say BUILTINS", { pi });
+
+    // Without these, `builtin:codemode` & co never resolve in a child — the CLI
+    // injects them itself, a standalone DefaultResourceLoader has none.
+    const factories = defaultResourceLoaderCtor.mock.calls[0][0].extensionFactories;
+    expect(factories).toEqual([
+      { name: "codemode", factory: codemodeFactory, replaceable: true, builtin: true },
+      { name: "mcp", factory: mcpFactory, replaceable: true, builtin: true },
+    ]);
   });
 
   it("suppresses AGENTS.md/CLAUDE.md/APPEND_SYSTEM.md for subagents", async () => {
@@ -1720,6 +1743,10 @@ describe("extensionCanonicalName", () => {
     expect(extensionCanonicalName("/x/MCP.ts")).toBe("mcp");
     expect(extensionCanonicalName("/x/MyExt.js")).toBe("myext");
     expect(extensionCanonicalName("/x/Foo/index.ts")).toBe("foo");
+  });
+  it("maps pi's synthetic builtin:<name> paths to <name>, so exclude_extensions: [mcp] works", () => {
+    expect(extensionCanonicalName("builtin:codemode")).toBe("codemode");
+    expect(extensionCanonicalName("builtin:MCP")).toBe("mcp");
   });
 });
 

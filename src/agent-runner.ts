@@ -6,7 +6,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, InlineExtension, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+import * as pi from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -55,6 +56,8 @@ const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
  * single-file extensions to the basename minus `.ts`/`.js`.
  */
 export function extensionCanonicalName(extPath: string): string {
+  // pi's built-ins are synthetic paths (`builtin:codemode`), not files.
+  if (extPath.startsWith("builtin:")) return extPath.slice("builtin:".length).toLowerCase();
   const base = basename(extPath);
   const name = base === "index.ts" || base === "index.js"
     ? basename(dirname(extPath))
@@ -108,6 +111,26 @@ function extensionPackageName(extPath: string): string | undefined {
     }
     return undefined;
   }
+}
+
+/**
+ * pi ≥1.0 ships codemode, tool-search and mcp as built-in extensions. The CLI
+ * hands them to its resource loader as `extensionFactories`; a loader built
+ * without them cannot resolve `builtin:codemode` & co, so children silently
+ * lacked them. Mirror pi's own list (`builtInExtensions` isn't exported, the
+ * factories are), tolerating older pi versions that predate them.
+ */
+export function builtinExtensionFactories(): InlineExtension[] {
+  const builtins = [
+    ["codemode", "createCodemodeExtension"],
+    ["tool-search", "createToolSearchExtension"],
+    ["mcp", "createMcpExtension"],
+  ] as const;
+  return builtins.flatMap(([name, create]) => {
+    const factory = create in pi ? (pi as Record<string, unknown>)[create] : undefined;
+    if (typeof factory !== "function") return [];
+    return [{ name, factory: factory(), replaceable: true, builtin: true } as InlineExtension];
+  });
 }
 
 /**
@@ -750,6 +773,7 @@ export async function runAgent(
     noExtensions,
     additionalExtensionPaths,
     extensionsOverride,
+    extensionFactories: builtinExtensionFactories(),
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
