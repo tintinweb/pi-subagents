@@ -336,6 +336,135 @@ describe("reporting subagent usage back to the parent session", () => {
     });
   });
 
+  describe("the per-message `subagents:usage` event", () => {
+    const usageEvents = (pi: any) =>
+      pi.events.emit.mock.calls.filter((c: any[]) => c[0] === "subagents:usage").map((c: any[]) => c[1]);
+
+    it("carries each message's spend with the agent's type and thinking level", async () => {
+      // The ledger a footer needs: what was spent, by which kind of agent, at
+      // which level — per message, so a running agent is not free until it stops.
+      const { pi, tools } = boot({});
+      runSpending({ input: 100, output: 50, cacheWrite: 10, cacheRead: 900, cost: 0.0123 });
+
+      await tools.get("Agent").execute(
+        "tc-1",
+        { prompt: "go", description: "spend", subagent_type: "general-purpose", thinking: "low", run_in_background: false },
+        undefined, undefined, ctx(),
+      );
+
+      const events = usageEvents(pi);
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: "general-purpose",
+        description: "spend",
+        thinking: "low",
+        depth: 1,
+        usage: {
+          input: 100,
+          output: 50,
+          cacheRead: 900,
+          cacheWrite: 10,
+          totalTokens: 1060,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.0123 },
+        },
+      });
+      expect(typeof events[0].id).toBe("string");
+    });
+
+    it("is emitted regardless of reportUsage", async () => {
+      // reportUsage decides whether the parent's own totals include the spend.
+      // A listener keeping its own ledger asked for the data itself.
+      const { pi, tools } = boot({ reportUsage: false, showCost: false });
+      runSpending({ input: 100, output: 50, cacheWrite: 0, cost: 0.01 });
+
+      await spawn(tools, "tc-1");
+
+      expect(usageEvents(pi).map((e: any) => e.usage.cost.total)).toEqual([0.01]);
+    });
+
+    it("is not emitted for a message that spent nothing", async () => {
+      const { pi, tools } = boot({});
+      runSpending({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0, cost: 0 });
+
+      await spawn(tools, "tc-1");
+
+      expect(usageEvents(pi)).toHaveLength(0);
+    });
+
+    it("carries the requested level when the agent did not get it", async () => {
+      // A workflow asking for `minimal` on a model whose lowest level is `low`
+      // runs at `low`; the ledger should be able to say so, not relabel it.
+      const { pi, tools } = boot({});
+      let spawned = false;
+      vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, opts: any) => {
+        opts.onAssistantUsage?.({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
+        if (!spawned) {
+          spawned = true;
+          const { manager, parentAgentId } = opts.nestedRuntime;
+          const childId = manager.spawn(pi, ctx(), "general-purpose", "sub", {
+            description: "clamped",
+            isBackground: false,
+            parentAgentId,
+            depth: 2,
+            invocation: { thinking: "low", requestedThinking: "minimal" },
+          });
+          await manager.getRecord(childId).promise;
+        }
+        return { responseText: "done", session: { dispose: vi.fn(), messages: [] } as any, aborted: false, steered: false };
+      });
+
+      await spawn(tools, "tc-1");
+
+      const events = usageEvents(pi);
+      expect(events.find((e: any) => e.description === "clamped")).toMatchObject({ thinking: "low", requestedThinking: "minimal" });
+      // An agent that got what it asked for carries no request.
+      expect(events.find((e: any) => e.description === "spend").requestedThinking).toBeUndefined();
+    });
+
+    it("announces subagents:disposed after shutdown has stopped every agent", async () => {
+      // A ledger's own session_shutdown can run before this extension aborts
+      // the agents; this is its signal that no more usage can arrive.
+      const { pi, lifecycle } = boot({});
+      await lifecycle.get("session_shutdown")?.({}, ctx());
+      const names = pi.events.emit.mock.calls.map((c: any[]) => c[0]);
+      expect(names.at(-1)).toBe("subagents:disposed");
+    });
+
+    it("reports a nested child's message once, as the child's own", async () => {
+      // The lifecycle events never fire for a nested child, and its spend is
+      // double-booked into the ancestor records. A ledger summing this event
+      // must see each message exactly once, under the agent that spent it.
+      const { pi, tools } = boot({});
+      let nested = false;
+
+      vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, opts: any) => {
+        opts.onAssistantUsage?.({ input: 100, output: 50, cacheWrite: 0, cost: 0.01 });
+        if (!nested) {
+          nested = true;
+          const { manager, parentAgentId } = opts.nestedRuntime;
+          const childId = manager.spawn(pi, ctx(), "general-purpose", "sub", {
+            description: "nested",
+            isBackground: false,
+            parentAgentId,
+            depth: 2,
+            onAssistantUsage: (u: any) => addUsage(manager.getRecord(parentAgentId).lifetimeUsage, u),
+          });
+          await manager.getRecord(childId).promise;
+        }
+        return { responseText: "done", session: { dispose: vi.fn(), messages: [] } as any, aborted: false, steered: false };
+      });
+
+      await spawn(tools, "tc-1");
+
+      const events = usageEvents(pi);
+      expect(events).toHaveLength(2);
+      const child = events.find((e: any) => e.description === "nested");
+      const parent = events.find((e: any) => e.description === "spend");
+      expect(child).toMatchObject({ depth: 2, parentAgentId: parent.id });
+      expect(events.reduce((sum: number, e: any) => sum + e.usage.cost.total, 0)).toBeCloseTo(0.02, 10);
+    });
+  });
+
   it("reports spend through get_subagent_result too", async () => {
     // Background agents finish with no tool result of their own to ride on;
     // whichever of our tools is called next has to carry them.
