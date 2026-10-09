@@ -364,6 +364,19 @@ See [`compose.js`](../examples/workflows/compose.js).
 
 ## Troubleshooting
 
+**The running workflow is visible but I cannot open it.**
+At an empty prompt, press `Enter` to open the first workflow, or `↓`/`←` to
+select it and then `Enter`. Mouse clicks on workflow rows open the inspector in
+Pi's regular terminal mode; fullscreen mode uses keyboard navigation. Other
+dialogs keep their own input, and Enter in a nonempty prompt still submits it.
+
+**What happens to a running workflow during `/reload`?**
+The same-process runtime preserves the worker and child agents, restores
+FleetView, and routes completion to the replacement host. It does not rerun the
+script or its completed steps. Quit, switching sessions, and process restart
+still stop runs. If reload removes the plugin or fails to reattach it within
+30 seconds, the retained runs are stopped rather than left orphaned.
+
 **The run failed with `… is unavailable in workflow scripts (breaks resume)`.**
 The script called `Date.now()`, `new Date()` or `Math.random()`. A script that varies run to run cannot be replayed from its journal, so these throw. Use the loop index for ids, pass timestamps in through `args`, or stamp them after the workflow returns. This most often bites pasted-in helper code, and it throws at the line that calls it — *after* you have already paid for the preceding agents.
 

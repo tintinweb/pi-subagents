@@ -32,6 +32,7 @@ import { describeModel, type ModelRegistry, resolveModel } from "./model-resolve
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
+import { registerReloadable } from "./reload-runtime.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
@@ -303,6 +304,11 @@ export default function (pi: ExtensionAPI) {
   // would create another manager and leak handlers. Nested orchestration is
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
+
+  registerReloadable(pi, activateSubagents);
+}
+
+function activateSubagents(pi: ExtensionAPI) {
 
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
@@ -786,13 +792,19 @@ export default function (pi: ExtensionAPI) {
   // Capture ctx from session_start for RPC spawn handler + start the scheduler.
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
+    if (event.reason === "reload") applyPersistedSettings(ctx.cwd);
     currentCtx = ctx;
     if (ctx.hasUI) {
       widget.setUICtx(ctx.ui);
       fleet.setUICtx(ctx.ui as any);
     }
-    manager.clearCompleted(true);
+    if (event.reason !== "reload") manager.clearCompleted(true);
+    else {
+      widget.update();
+      if (manager.hasRunning()) widget.ensureTimer();
+      fleet.update();
+    }
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
     if (!rpcHandle) {
@@ -1094,13 +1106,18 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event) => {
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle = undefined;
     currentCtx = undefined;
+    scheduler.stop();
+    fleet.dispose();
+    widget.dispose();
+    mentionProviderRegistered = false;
+    if (event?.reason === "reload") return;
     // Only release the global slot if this activation claimed it — a child
     // session's shutdown must not delete the root session's registry entry.
     if (ownsManagerRegistry && (globalThis as any)[MANAGER_KEY] === registryEntry) {
@@ -1112,9 +1129,10 @@ export default function (pi: ExtensionAPI) {
     for (const task of workflowTasks.values()) task.abortController.abort();
     workflowTasks.clear();
     manager.abortAll();
+    groupJoin.dispose();
+    if (batchFinalizeTimer) clearTimeout(batchFinalizeTimer);
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
-    fleet.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
     // pi awaits this handler, and the process exits right after — unawaited, those
@@ -1400,7 +1418,8 @@ export default function (pi: ExtensionAPI) {
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
-  applyAndEmitLoaded(
+  function applyPersistedSettings(cwd = process.cwd()): void {
+    applyAndEmitLoaded(
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
@@ -1428,7 +1447,10 @@ export default function (pi: ExtensionAPI) {
       setViewerMarkdown,
     },
     (event, payload) => pi.events.emit(event, payload),
+    cwd,
   );
+  }
+  applyPersistedSettings();
 
   // ---- Agent tool ----
 
@@ -3985,4 +4007,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
   };
 
   fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
+  return () => manager.hasRunning() || pendingNudges.size > 0
+    || [...workflowTasks.values()].some(task => task.status === "running" || task.status === "paused");
 }
