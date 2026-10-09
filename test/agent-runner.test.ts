@@ -864,6 +864,70 @@ function lastLoaderOpts(): Record<string, unknown> {
   return defaultResourceLoaderCtor.mock.calls[0][0];
 }
 
+// The Agent tool merges an agent file's frontmatter with caller params
+// (resolveAgentInvocationConfig) before spawning. Every other spawn path —
+// `@handle` mentions, cross-extension RPC — reaches runAgent without that
+// merge, so the runner itself must fall back to the agent config: an
+// `inherit_context: true` agent invoked by mention went context-blind and
+// worked from guesswork instead of the session it was asked about.
+describe("agent-runner inherit_context fallback to agent config", () => {
+  function ctxWithBranch(entries: unknown[]) {
+    return {
+      ...ctx,
+      sessionManager: { ...ctx.sessionManager, getBranch: vi.fn(() => entries) },
+    } as any;
+  }
+
+  const branch = [
+    { type: "message", message: { role: "user", content: "we settled on vitest" } },
+    { type: "message", message: { role: "assistant", content: [{ type: "text", text: "agreed" }] } },
+  ];
+
+  it("applies an agent file's inherit_context when the spawn omits the option", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ inheritContext: true }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctxWithBranch(branch), "Explore", "summarize", { pi });
+
+    const prompted = session.prompt.mock.calls[0][0] as string;
+    expect(prompted).toContain("# Parent Conversation Context");
+    expect(prompted).toContain("[User]: we settled on vitest");
+    // The parent context is a PREPENDED prefix, never a replacement.
+    expect(prompted.endsWith("summarize")).toBe(true);
+  });
+
+  it("leaves an agent without frontmatter context-free when the spawn is silent too", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ inheritContext: undefined }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctxWithBranch(branch), "Explore", "summarize", { pi });
+
+    expect(session.prompt.mock.calls[0][0]).toBe("summarize");
+  });
+
+  it("keeps honoring an explicit option when the agent file is silent", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ inheritContext: undefined }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctxWithBranch(branch), "Explore", "summarize", { pi, inheritContext: true });
+
+    expect(session.prompt.mock.calls[0][0]).toContain("# Parent Conversation Context");
+  });
+
+  it("lets an agent file's false outrank a caller's true, like the Agent tool path", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ inheritContext: false }));
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctxWithBranch(branch), "Explore", "summarize", { pi, inheritContext: true });
+
+    expect(session.prompt.mock.calls[0][0]).toBe("summarize");
+  });
+});
+
 describe("agent-runner session persistence", () => {
   it("persists by default, so a handle can reopen the conversation later", async () => {
     // `rememberAgents` defaults on: the session file is the only thing an

@@ -1096,9 +1096,11 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  // Build the effective prompt: optionally prepend parent context
+  // Build the effective prompt: optionally prepend parent context. Spawns
+  // that skip the invocation-config merge (@mentions, RPC) fall back to the
+  // agent file, which outranks the caller as everywhere else.
   let effectivePrompt = prompt;
-  if (options.inheritContext) {
+  if (agentConfig?.inheritContext ?? options.inheritContext) {
     const parentContext = buildParentContext(ctx);
     if (parentContext) {
       effectivePrompt = parentContext + prompt;
