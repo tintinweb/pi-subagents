@@ -7,6 +7,7 @@
 
 import { createCodingTools, createReadOnlyTools } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_AGENTS } from "./default-agents.js";
+import { applyNicoOverridesToMap, readNicoAgentOverrides } from "./nico-overrides.js";
 import type { AgentConfig } from "./types.js";
 
 /**
@@ -55,23 +56,31 @@ export function setFallbackSubagent(v: string | undefined): void { fallbackSubag
 
 /**
  * Build a registry map: DEFAULT_AGENTS first (unless disabled via settings),
- * then user agents overlaid on top (same name overrides the default).
- * Pure — callers that must not disturb the process-wide registry (nested
- * delegation resolving agents from its own config root) build their own map.
+ * then user agents overlaid on top (same name overrides the default), and
+ * finally Nico-style JSON overrides from the supplied config root.
+ * This is the shared registry path for both the process-wide registry and
+ * nested delegation, so both paths see the same override precedence.
  */
-export function buildAgentRegistry(userAgents: Map<string, AgentConfig>): Map<string, AgentConfig> {
+export function buildAgentRegistry(
+  userAgents: Map<string, AgentConfig>,
+  cwd = process.cwd(),
+): Map<string, AgentConfig> {
   const registry = new Map<string, AgentConfig>();
   if (!disableDefaults) {
     for (const [name, config] of DEFAULT_AGENTS) registry.set(name, config);
   }
   for (const [name, config] of userAgents) registry.set(name, config);
+
+  const { overrides, defaultModel } = readNicoAgentOverrides(cwd);
+  applyNicoOverridesToMap(registry, overrides, defaultModel);
   return registry;
 }
 
 /**
  * Register agents into the unified registry.
- * Starts with DEFAULT_AGENTS, then overlays user agents (overrides defaults with same name).
- * Disabled agents (enabled === false) are kept in the registry but excluded from spawning.
+ * Starts with DEFAULT_AGENTS, then overlays user agents (overrides defaults with same name),
+ * then applies Nico-style JSON overrides. Disabled agents (enabled === false) are kept
+ * in the registry but excluded from spawning.
  */
 export function registerAgents(userAgents: Map<string, AgentConfig>): void {
   agents.clear();

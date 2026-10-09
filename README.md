@@ -265,6 +265,26 @@ Project-level agents override global ones with the same name, so you can customi
 
 An unreadable or unparseable agent file is skipped, not fatal — a warning names the file and the error. If it was overriding a same-named agent, a second line names the file that loads instead. Set `strictAgentFiles: true` in `subagents.json` (or `/agents → Settings → Strict agent files`) to fail startup on a broken file instead; mid-session reloads still only warn.
 
+### JSON agent overrides
+
+For projects that already use `npm:pi-subagents`-style settings, JSON overrides are read from `~/.pi/agent/settings.json` and `.pi/settings.json`. The project file wins over the global file. They have higher priority than agent files and built-in defaults:
+
+```json
+{
+  "subagents": {
+    "agentOverrides": {
+      "Explore": {
+        "model": "zai/glm-5.3-flash",
+        "thinking": "low",
+        "tools": ["read", "ext:search"]
+      }
+    }
+  }
+}
+```
+
+Override keys are matched by **exact registry name**. Use `"Explore"`, not `"explore"`; a typo is treated as a new name and auto-registers a separate agent rather than changing the existing one. Existing agents keep all of their current configuration fields; JSON changes only `model`, `thinking`, `systemPrompt`, `disabled`, and `tools`. `tools` follows the agent-file rules: plain names select built-ins, `ext:` entries select extension tools, and `*`/`all` selects all built-ins. An unknown override name may be used intentionally to define an agent without an `.md` file.
+
 ### Example: `.pi/agents/auditor.md`
 
 ```markdown
