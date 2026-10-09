@@ -7,13 +7,16 @@ import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
+import * as piCodingAgent from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
   DefaultResourceLoader,
   type ExtensionAPI,
+  type ExtensionFactory,
   getAgentDir,
+  type InlineExtension,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -607,6 +610,31 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+/**
+ * pi's built-in MCP, codemode, and tool-search extensions ship as factories. A
+ * subagent's resource loader is built here rather than by pi's CLI, so it starts with
+ * none of them; forwarding the host's factories is what lets `builtin:<name>` in an
+ * agent's `extensions:` resolve instead of being silently dropped, which otherwise
+ * makes those built-ins unreachable from every subagent.
+ */
+function hostBuiltinExtensions(): InlineExtension[] {
+  // These factories and the `builtin`/`replaceable` fields are pi >= 1.0 API. Read
+  // them off the module at runtime and assert past the older type surface, so the
+  // build keeps working across the whole supported range: on an older pi the names
+  // are absent, nothing is forwarded, and the previous behaviour stands.
+  const host = piCodingAgent as unknown as Record<string, unknown>;
+  const factories: Array<[string, unknown]> = [
+    ["mcp", host.createMcpExtension],
+    ["codemode", host.createCodemodeExtension],
+    ["tool-search", host.createToolSearchExtension],
+  ];
+  return factories.flatMap(([name, create]) =>
+    typeof create === "function"
+      ? [{ name, factory: (create as () => ExtensionFactory)(), builtin: true, replaceable: true }]
+      : [],
+  );
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -745,6 +773,11 @@ export async function runAgent(
         };
 
   const loader = new DefaultResourceLoader({
+    // This loader is built here, not by pi's CLI, so it starts with none of pi's
+    // built-in extensions. Forwarding the host's factories lets a `builtin:<name>`
+    // entry in an agent's `extensions:` resolve; the per-agent allowlist still
+    // filters them like any other extension.
+    extensionFactories: hostBuiltinExtensions(),
     cwd: configCwd,
     agentDir,
     noExtensions,

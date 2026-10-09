@@ -33,6 +33,11 @@ const {
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  // The runner forwards these to the child loader's `extensionFactories`. Stubbed
+  // to the shape pi returns: a factory that registers nothing.
+  createMcpExtension: () => () => {},
+  createCodemodeExtension: () => () => {},
+  createToolSearchExtension: () => () => {},
   // Identity, as pi's own is: `defineTool` exists for the type inference, and
   // the structured-output tool is built through it.
   defineTool: (definition: unknown) => definition,
@@ -262,6 +267,22 @@ describe("agent-runner final output capture", () => {
       cwd: "/tmp/worktree",
       agentDir: "/mock/agent-dir",
     }));
+  });
+
+  it("forwards pi's built-in MCP, codemode, and tool-search extensions to the child loader", async () => {
+    // This loader is built here, not by pi's CLI, so it starts with no built-ins.
+    // Without these, a `builtin:<name>` entry in an agent's `extensions:` resolves
+    // to nothing, and pi's built-in MCP/codemode support is unreachable in a child.
+    const { session } = createSession("BUILTINS");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "Say BUILTINS", { pi });
+
+    const factories = lastLoaderOpts().extensionFactories as Array<{ name: string; builtin?: boolean; replaceable?: boolean }>;
+    expect(factories.map(f => f.name)).toEqual(["mcp", "codemode", "tool-search"]);
+    expect(factories.every(f => f.builtin === true)).toBe(true);
+    expect(factories.every(f => f.replaceable === true)).toBe(true);
+    expect(factories.every(f => typeof f === "object" && typeof (f as { factory?: unknown }).factory === "function")).toBe(true);
   });
 
   it("forwards worktreeBase to the prompt builder, and omits it otherwise", async () => {
