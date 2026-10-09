@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`subagents:rpc:steer` — a cross-extension caller can deliver a message to an agent it spawned.** An extension that spawns over the bus and then learns something the agent needs mid-run (a second CI failure on the head it is already fixing, a review that landed while it works) had to choose between spawning a duplicate agent for the same work and dropping the fact. The new channel is the bus-side half of `steer_subagent`: id only, the same top-level ownership guard as stop, `Agent is not running` once the record has settled, and a message sent before the session exists is flushed when it is created. Outside the `ping` handshake like `consume`; older builds simply do not answer.
+
 ### Fixed
 - **The FleetView list no longer sits flush against pi's footer** (fixes [#351](https://github.com/tintinweb/pi-subagents/issues/351) — thanks [@KKinsz](https://github.com/KKinsz)). pi places below-editor widgets directly on its status bar with no gap, so the last agent row ran into the model/context line. The list now ends with a blank line, matching the one above `main`.
 - **FleetView arrow keys work when another extension replaces the prompt editor** (fixes [#374](https://github.com/tintinweb/pi-subagents/issues/374) — thanks [@BarrMan](https://github.com/BarrMan)). The list only handled keys while an `Editor` subclass had focus, so an editor installed via `ui.setEditorComponent` that implements pi's `EditorComponent` interface without extending `Editor` (e.g. pi-voice-stt's) left `↓`/`←` dead. The list now recognizes any focused component with `getText`/`setText`, lifting the limitation noted in the #123 fix; pi's own dialogs and selectors still keep their keys.
