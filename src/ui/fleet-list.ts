@@ -11,13 +11,13 @@
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
  */
 
-import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
-import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { ConversationViewer, getConversationOverlayOptions } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -144,6 +144,7 @@ export class FleetList {
      * point. Omitted → `m` still cycles, viewer-locally.
      */
     private onViewerMarkdown?: (mode: ViewerMarkdownMode) => void,
+    private scrollbarMode: () => ScrollViewScrollbar = () => "auto",
   ) {}
 
   // ---- Lifecycle ----
@@ -406,9 +407,11 @@ export class FleetList {
     const session = record.session;
     const activity = this.agentActivity.get(record.id);
     this.viewingAgentId = record.id;
+    let overlayOptions = getConversationOverlayOptions({ mode: "regular" });
 
     void this.ui.custom<undefined>(
       (tui, theme, keybindings, done) => {
+        overlayOptions = getConversationOverlayOptions(tui);
         this.viewerClose = () => done(undefined);
         return new ConversationViewer(
           tui,
@@ -425,11 +428,12 @@ export class FleetList {
           this.showCost(),
           this.viewerMarkdown,
           this.onViewerMarkdown,
+          this.scrollbarMode(),
         );
       },
       {
         overlay: true,
-        overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
+        overlayOptions: () => overlayOptions,
       },
     ).then(() => this.clearViewer(), () => this.clearViewer());
   }

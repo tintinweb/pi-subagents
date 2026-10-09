@@ -1,4 +1,4 @@
-import { Editor, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, Input, type OverlayOptions, ScrollView, type TuiMode, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -85,6 +85,8 @@ interface Harness {
   closeWorkflowDialog: () => Promise<void>;
   /** The overlay component (a real ConversationViewer) once one is opened. */
   overlayComponent: () => { handleInput(data: string): void } | undefined;
+  /** Overlay options resolved after the custom factory runs. */
+  overlayOptions: () => OverlayOptions | undefined;
   /** Feed a key to the registered input handler; returns the consume result. */
   press: (data: string) => { consume?: boolean } | undefined;
   /** Render the currently-registered below-editor widget at the given width. */
@@ -116,6 +118,7 @@ function makeWorkflow(over: Partial<FleetWorkflow> = {}): FleetWorkflow {
 function harness(
   agents: AgentRecord[],
   opts: {
+    tuiMode?: TuiMode;
     viewerMarkdown?: () => ViewerMarkdownMode;
     onViewerMarkdown?: (mode: ViewerMarkdownMode) => void;
   } = {},
@@ -127,14 +130,15 @@ function harness(
   let closed = false;
   let overlayDone: ((r: undefined) => void) | undefined;
   let overlayComponent: { handleInput(data: string): void } | undefined;
-  const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+  let overlayOptions: OverlayOptions | undefined;
+  const fakeTui = { mode: opts.tuiMode ?? "regular", handleMouse: () => undefined, requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
 
   const ui: FleetUICtx = {
     setWidget: (_key, content) => { widgetFactory = content as any; },
     onTerminalInput: (h) => { inputHandler = h; return () => { inputHandler = undefined; }; },
     getEditorText: () => editorText,
     notify: () => {},
-    custom: ((factory: any) => {
+    custom: ((factory: any, options?: { overlayOptions?: OverlayOptions | (() => OverlayOptions) }) => {
       opened = true;
       return new Promise<undefined>((resolve) => {
         const done = (r: undefined) => { closed = true; overlayDone = undefined; resolve(r); };
@@ -142,6 +146,7 @@ function harness(
         // Construct the overlay component so the controller wires viewerClose,
         // and keep it so tests can drive the real ConversationViewer's input.
         overlayComponent = factory(fakeTui, theme, undefined, done);
+        overlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
       });
     }) as FleetUICtx["custom"],
   };
@@ -168,6 +173,7 @@ function harness(
     ui,
     manager,
     overlayComponent: () => overlayComponent,
+    overlayOptions: () => overlayOptions,
     press: (data) => inputHandler?.(data),
     render: (width = 120) => (widgetFactory ? widgetFactory(fakeTui, theme).render(width) : []),
     setEditorText: (t) => { editorText = t; },
@@ -483,6 +489,28 @@ describe("FleetList rendering", () => {
 });
 
 describe("FleetList overlay lifecycle", () => {
+  it.each<{ mode: TuiMode; expected: OverlayOptions }>([
+    { mode: "regular", expected: { anchor: "center", width: "90%", maxHeight: "70%" } },
+    {
+      mode: "fullscreen",
+      expected: "handleMouse" in Input.prototype && "isScrollbarActive" in ScrollView.prototype
+        ? { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 }
+        : { anchor: "center", width: "90%", maxHeight: "70%" },
+    },
+  ])("opens the agent viewer with options for the active $mode TUI", async ({ mode, expected }) => {
+    const h = harness([makeRecord()], { tuiMode: mode });
+    try {
+      h.press(DOWN); // activate (main)
+      h.press(DOWN); // select the agent
+      h.press(ENTER);
+
+      expect(h.overlayOptions()).toEqual(expected);
+    } finally {
+      await h.closeOverlay();
+      h.fleet.dispose();
+    }
+  });
+
   it("Enter on 'main' just deactivates (no overlay)", () => {
     const h = harness([makeRecord()]);
     h.press(DOWN); // active, index 0 (main)
