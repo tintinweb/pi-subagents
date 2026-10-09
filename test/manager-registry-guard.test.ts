@@ -149,10 +149,14 @@ describe("the registry spawn strips internal capabilities", () => {
     await root.lifecycle.get("session_shutdown")?.();
   });
 
-  it("refuses a forged session file, which would replay someone else's conversation", async () => {
-    const { root, runOpts } = forge({ resumeSessionFile: "/home/victim/.pi/agent/sessions/private.jsonl" });
+  it("refuses forged session files, which would open or replay someone else's conversation", async () => {
+    const { root, runOpts } = forge({
+      resumeSessionFile: "/home/victim/.pi/agent/sessions/private.jsonl",
+      sessionFile: "/home/victim/.pi/agent/sessions/lane.jsonl",
+    });
 
     expect(runOpts().resumeSessionFile).toBeUndefined();
+    expect(runOpts().sessionFile).toBeUndefined();
     await root.lifecycle.get("session_shutdown")?.();
   });
 

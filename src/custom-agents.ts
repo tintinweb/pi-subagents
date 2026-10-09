@@ -125,6 +125,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       outputTranscript: fm.output_transcript != null ? fm.output_transcript !== false : undefined,
       sessionDir: str(fm.session_dir),
       allowedSubagents: parseAllowedSubagents(fm.allowed_subagents),
+      sessionFile: str(fm.session_file),
       systemPrompt: body.trim(),
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,

@@ -711,6 +711,10 @@ export default function (pi: ExtensionAPI) {
     // conversation. Only the mention dispatcher may set it, and only from a
     // path this extension itself recorded — never from anything a caller sent.
     delete safeOptions.resumeSessionFile;
+    // Like resumeSessionFile, this opens an arbitrary conversation file. The
+    // Agent tool, agent frontmatter, nested tools, workflows, and scheduler
+    // reach the manager directly; the public RPC/registry surface does not.
+    delete safeOptions.sessionFile;
     // Bypasses handle allocation, so a forged value would duplicate a live
     // agent's name and make `@handle` ambiguous. Same rule: dispatcher only.
     delete safeOptions.reclaim;
@@ -1632,6 +1636,11 @@ Terse command-style prompts produce shallow, generic work.
           description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
         }),
       ),
+      session_file: Type.Optional(
+        Type.String({
+          description: "Optional explicit session JSONL file. Implies persistence and resumes/appends when the file exists. Relative paths resolve from the requested agent cwd before worktree isolation is applied. Never run two agents concurrently against the same file.",
+        }),
+      ),
       isolated: Type.Optional(
         Type.Boolean({
           description: "If true, agent gets no extension/MCP tools — only built-in tools.",
@@ -1849,6 +1858,7 @@ Terse command-style prompts produce shallow, generic work.
         rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
         writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
+      const sessionFile = resolvedConfig.sessionFile;
 
       // Unconditional, not "only when it differs from the parent": a thinking
       // level reads as a property of a model, and an agent that inherited the
@@ -1955,6 +1965,7 @@ Terse command-style prompts produce shallow, generic work.
             max_turns: effectiveMaxTurns,
             isolated: isolated,
             isolation: isolation,
+            session_file: sessionFile,
           });
           const next = scheduler.getNextRun(job.id);
           return textResult(
@@ -2062,6 +2073,7 @@ Terse command-style prompts produce shallow, generic work.
           thinkingLevel: thinking,
           isBackground: true,
           isolation,
+          sessionFile,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
           ...bgCallbacks,
@@ -2215,6 +2227,7 @@ Terse command-style prompts produce shallow, generic work.
           inheritContext,
           thinkingLevel: thinking,
           isolation,
+          sessionFile,
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),

@@ -234,6 +234,8 @@ interface SpawnOptions {
   structuredOutput?: CompiledSchema;
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
+  /** Explicit session JSONL file. Implies persistence and resumes/appends when it exists. */
+  sessionFile?: string;
   /**
    * Working directory for the agent (absolute path). Default: parent session
    * cwd. The agent's tools operate here, but .pi config (extensions, skills,
@@ -770,6 +772,8 @@ export class AgentManager {
       resumeSessionFile: options.resumeSessionFile,
       nested: options.parentAgentId !== undefined,
       workflow: options.workflowId !== undefined,
+      sessionFile: options.sessionFile,
+      sessionFileCwd: baseCwd,
       // Worktree wins for the working dir (the agent must run in the copy —
       // which, with a custom cwd, was created from that target). Config stays
       // with the parent project when a caller-supplied cwd is in play; it must

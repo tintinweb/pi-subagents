@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import type * as NodeFs from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -13,6 +13,7 @@ const {
   sessionManagerOpen,
   settingsManagerCreate,
   settingsManagerGetSessionDir,
+  mockMkdirSync,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
   defaultResourceLoaderCtor: vi.fn(),
@@ -29,7 +30,15 @@ const {
   sessionManagerOpen: vi.fn(() => ({ kind: "reopened-session-manager" })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
+  mockMkdirSync: vi.fn(),
 }));
+
+vi.mock("node:fs", async (importOriginal) => ({
+  ...await importOriginal<typeof NodeFs>(),
+  mkdirSync: mockMkdirSync,
+}));
+
+const actualFs = await vi.importActual<typeof NodeFs>("node:fs");
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
@@ -213,6 +222,7 @@ beforeEach(() => {
   settingsManagerGetSessionDir.mockReturnValue(undefined);
   settingsManagerCreate.mockClear();
   vi.mocked(createNestedSubagentTools).mockClear();
+  mockMkdirSync.mockClear();
   loaderExtensionsRef.current = { extensions: [], errors: [], runtime: {} };
   lastSession = undefined;
 });
@@ -986,6 +996,98 @@ describe("agent-runner session persistence", () => {
       { parentSession: "/sessions/parent.jsonl" },
     );
   });
+
+  it("opens an explicit frontmatter sessionFile and implies persistence", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ sessionFile: ".agents/sessions/KEY.dev.jsonl" }),
+    );
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo" });
+
+    expect(sessionManagerInMemory).not.toHaveBeenCalled();
+    expect(sessionManagerCreate).not.toHaveBeenCalled();
+    expect(mockMkdirSync).toHaveBeenCalledWith("/repo/.agents/sessions", { recursive: true });
+    expect(sessionManagerOpen).toHaveBeenCalledWith(
+      "/repo/.agents/sessions/KEY.dev.jsonl",
+      "/repo/.agents/sessions",
+      "/repo",
+    );
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "reopened-session-manager" },
+    }));
+  });
+
+  it("uses sessionDir as the branch/new directory when sessionFile is configured", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({
+        sessionDir: ".agents/session-branches",
+        sessionFile: ".agents/sessions/KEY.reviewer.jsonl",
+      }),
+    );
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo" });
+
+    expect(mockMkdirSync).toHaveBeenCalledWith("/repo/.agents/sessions", { recursive: true });
+    expect(sessionManagerOpen).toHaveBeenCalledWith(
+      "/repo/.agents/sessions/KEY.reviewer.jsonl",
+      "/repo/.agents/session-branches",
+      "/repo",
+    );
+  });
+
+  it("opens a caller-supplied sessionFile when the agent config does not pin one", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, cwd: "/repo", sessionFile: "~/pi-subagents/KEY.plan.jsonl" });
+
+    expect(sessionManagerOpen).toHaveBeenCalledWith(
+      `${homedir()}/pi-subagents/KEY.plan.jsonl`,
+      `${homedir()}/pi-subagents`,
+      "/repo",
+    );
+  });
+
+  it("resolves the sessionFile outside a worktree while using the worktree as the session cwd", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", {
+      pi,
+      cwd: "/worktree/copy",
+      sessionFile: ".agents/sessions/KEY.dev.jsonl",
+      sessionFileCwd: "/repo",
+    });
+
+    expect(sessionManagerOpen).toHaveBeenCalledWith(
+      "/repo/.agents/sessions/KEY.dev.jsonl",
+      "/repo/.agents/sessions",
+      "/worktree/copy",
+    );
+  });
+
+  it("lets an explicit resume override a configured sessionFile", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ sessionFile: ".agents/sessions/KEY.dev.jsonl" }),
+    );
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "continue", {
+      pi,
+      cwd: "/repo",
+      resumeSessionFile: "/sessions/explore.jsonl",
+    });
+
+    expect(mockMkdirSync).not.toHaveBeenCalled();
+    expect(sessionManagerOpen).toHaveBeenCalledWith("/sessions/explore.jsonl", undefined);
+  });
 });
 
 describe("agent-runner master tool allowlist", () => {
@@ -1726,17 +1828,17 @@ describe("extensionCanonicalName", () => {
 describe("extensionCanonicalNames (#143 — package short name alias)", () => {
   const tmpDirs: string[] = [];
   function pkgDir(name: string, piExtensions: unknown): string {
-    const dir = mkdtempSync(join(tmpdir(), "subagents-pkg-"));
+    const dir = actualFs.mkdtempSync(join(tmpdir(), "subagents-pkg-"));
     tmpDirs.push(dir);
     const manifest: Record<string, unknown> = { name };
     if (piExtensions !== undefined) manifest.pi = { extensions: piExtensions };
-    writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
-    mkdirSync(join(dir, "src"));
-    writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
+    actualFs.writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
+    actualFs.mkdirSync(join(dir, "src"));
+    actualFs.writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
     return dir;
   }
   afterEach(() => {
-    while (tmpDirs.length) rmSync(tmpDirs.pop()!, { recursive: true, force: true });
+    while (tmpDirs.length) actualFs.rmSync(tmpDirs.pop()!, { recursive: true, force: true });
   });
 
   it("aliases a package-declared index.ts entry to the unscoped, lowercased package name", () => {
@@ -1746,9 +1848,9 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
   });
 
   it("adds no alias for a loose file with no enclosing package.json", () => {
-    const dir = mkdtempSync(join(tmpdir(), "subagents-loose-"));
+    const dir = actualFs.mkdtempSync(join(tmpdir(), "subagents-loose-"));
     tmpDirs.push(dir);
-    writeFileSync(join(dir, "foo.ts"), "export default () => {};");
+    actualFs.writeFileSync(join(dir, "foo.ts"), "export default () => {};");
     expect(extensionCanonicalNames(join(dir, "foo.ts"))).toEqual(["foo"]);
   });
 
@@ -1768,15 +1870,15 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
   it("does not climb past a node_modules boundary into a consumer's manifest", () => {
     // A consumer that *declares* a dependency's entry must not lend its name to
     // that dependency: the walk stops at node_modules before reading it.
-    const root = mkdtempSync(join(tmpdir(), "subagents-consumer-"));
+    const root = actualFs.mkdtempSync(join(tmpdir(), "subagents-consumer-"));
     tmpDirs.push(root);
-    writeFileSync(
+    actualFs.writeFileSync(
       join(root, "package.json"),
       JSON.stringify({ name: "consumer", pi: { extensions: ["./node_modules/inner-ext/index.ts"] } }),
     );
     const inner = join(root, "node_modules", "inner-ext");
-    mkdirSync(inner, { recursive: true });
-    writeFileSync(join(inner, "index.ts"), "export default () => {};");
+    actualFs.mkdirSync(inner, { recursive: true });
+    actualFs.writeFileSync(join(inner, "index.ts"), "export default () => {};");
     // Only the path-derived name — never "consumer".
     expect(extensionCanonicalNames(join(inner, "index.ts"))).toEqual(["inner-ext"]);
   });
@@ -1868,14 +1970,14 @@ describe("agent-runner extension allowlist", () => {
   it("matches a package-installed extension by its package short name, not just its src dir (#143)", async () => {
     // A package whose entry is `src/index.ts` canonicalizes to "src"; a child
     // agent must still be able to allowlist it by the package name.
-    const dir = mkdtempSync(join(tmpdir(), "subagents-match-"));
+    const dir = actualFs.mkdtempSync(join(tmpdir(), "subagents-match-"));
     try {
-      writeFileSync(
+      actualFs.writeFileSync(
         join(dir, "package.json"),
         JSON.stringify({ name: "@tintinweb/pi-subagents", pi: { extensions: ["./src/index.ts"] } }),
       );
-      mkdirSync(join(dir, "src"));
-      writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
+      actualFs.mkdirSync(join(dir, "src"));
+      actualFs.writeFileSync(join(dir, "src", "index.ts"), "export default () => {};");
       const entry = join(dir, "src", "index.ts");
 
       setupArrayAgent(["pi-subagents"]);
@@ -1889,7 +1991,7 @@ describe("agent-runner extension allowlist", () => {
       // to "src", so it was filtered out and pkg_tool never reached the allowlist.
       expect(lastToolsPassed()).toContain("pkg_tool");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      actualFs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
