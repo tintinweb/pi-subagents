@@ -30,6 +30,7 @@ import type {
   AgentConfig,
   AgentInvocation,
   AgentRecord,
+  FocusSelector,
   IsolationMode,
   ThinkingLevel,
 } from "./types.js";
@@ -54,6 +55,7 @@ interface NestedSpawnOptions {
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
+  focus?: FocusSelector;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isBackground?: boolean;
@@ -176,11 +178,18 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }),
       ),
       resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
+      focus: Type.Optional(Type.Object({
+        focusId: Type.String({ description: "Catalog focus ID to bind before the child starts." }),
+        subfocusId: Type.Optional(Type.String({ description: "Optional subfocus ID belonging to focusId." })),
+      }, { additionalProperties: false })),
       isolated: Type.Optional(Type.Boolean()),
       inherit_context: Type.Optional(Type.Boolean()),
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+      if (params.resume && params.focus) {
+        return textResult("Cannot combine `focus` with `resume`; resumed agents keep their existing binding.", true);
+      }
       if (params.resume) {
         const existing = context.manager.getRecord(params.resume);
         if (!ownsRecord(existing, context.parentAgentId)) {
@@ -260,6 +269,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         model,
         maxTurns: invocation.maxTurns,
         isolated: invocation.isolated,
+        focus: params.focus,
         inheritContext: invocation.inheritContext,
         thinkingLevel: invocation.thinking,
         isolation: invocation.isolation,

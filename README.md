@@ -101,7 +101,7 @@ Schedules are **session-scoped**: they reset on `/new` and restore on `/resume`.
 **Disable the feature entirely**: `/agents → Settings → Scheduling → disabled` removes `schedule` from the `Agent` tool spec (no LLM-context cost), hides the menu entry, and stops any active scheduler. The schema-level removal takes effect on the next pi session; the runtime kill is immediate. Re-enable from the same menu.
 
 Restrictions:
-- `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time) or `resume` (schedules create fresh agents).
+- `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time), `resume` (schedules create fresh agents), or `focus` (scheduled focus selection is not supported).
 - `run_in_background: false` is refused — scheduled jobs always run in the background. Omitting it, or passing `true`, is fine.
 - Scheduled fires bypass the `maxConcurrent` queue so a 5-minute interval cannot be deferred behind long-running manual agents.
 - **Headless `pi -p` doesn't wait for scheduled subagents.**
@@ -413,10 +413,15 @@ Launch a sub-agent.
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Defaults to `true`; `false` blocks and returns the result inline |
-| `resume` | string | no | Agent ID to resume a previous session |
+| `resume` | string | no | Agent ID to resume a previous session. A focused cold resume restores its captured binding and fails closed if the `pi-focus` adapter is unavailable; it never recaptures the catalog. |
+| `focus` | `{ focusId: string, subfocusId?: string }` | no | Bind the fresh child to an existing `pi-focus` catalog path before callbacks, tools, context, or model requests. Fails closed if the adapter is unavailable or rejects the selection; cannot be combined with `resume`, `isolated`, or `schedule` |
 | `isolated` | boolean | no | No extension/MCP tools |
 | `isolation` | `"off"` \| `"worktree"` | no | `worktree` runs in an isolated git worktree; `off` (the default) does not. Absent from the schema entirely when `worktreeIsolation: false` |
 | `inherit_context` | boolean | no | Fork parent conversation into agent |
+
+Cold resume skips focus acknowledgement only when there is no binding marker, or the latest marker is a valid empty inactive binding (`active: null`, `last: null`). Malformed markers and retained snapshots require adapter validation. The current pi-focus adapter rejects inactive bindings with a retained `last` snapshot, so that cold-resume case fails closed; live resumes retain their existing binding.
+
+The real pi-focus live-resume integration is opt-in: `PI_FOCUS_EXTENSION=/path/to/pi-focus/extensions/index.ts npx vitest run test/focused-resume-e2e.test.ts`. It loads that adapter through Pi's real loader and runs real sessions with a local scripted provider (no network or paid calls). Without the dependency path, that test is explicitly skipped.
 
 ### `SubagentWorkflow`
 

@@ -5,7 +5,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const {
   createAgentSession,
+  createEventBus,
   defaultResourceLoaderCtor,
+  eventBusClear,
+  eventBusEmit,
   loaderExtensionsRef,
   getAgentDir,
   sessionManagerInMemory,
@@ -15,6 +18,13 @@ const {
   settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
   createAgentSession: vi.fn(),
+  eventBusClear: vi.fn(),
+  eventBusEmit: vi.fn(),
+  createEventBus: vi.fn(() => ({
+    emit: eventBusEmit,
+    on: vi.fn(),
+    clear: eventBusClear,
+  })),
   defaultResourceLoaderCtor: vi.fn(),
   loaderExtensionsRef: {
     current: { extensions: [], errors: [], runtime: {} } as {
@@ -26,13 +36,14 @@ const {
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
-  sessionManagerOpen: vi.fn(() => ({ kind: "reopened-session-manager" })),
+  sessionManagerOpen: vi.fn(() => ({ kind: "reopened-session-manager", getBranch: () => [] })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession,
+  createEventBus,
   // Identity, as pi's own is: `defineTool` exists for the type inference, and
   // the structured-output tool is built through it.
   defineTool: (definition: unknown) => definition,
@@ -181,6 +192,7 @@ function createSession(finalText: string) {
     },
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
+    dispose: vi.fn(),
   };
   lastSession = session;
   return { session, listeners };
@@ -201,6 +213,9 @@ const pi = {} as any;
 
 beforeEach(() => {
   createAgentSession.mockReset();
+  createEventBus.mockClear();
+  eventBusClear.mockReset();
+  eventBusEmit.mockReset();
   defaultResourceLoaderCtor.mockClear();
   getAgentDir.mockClear();
   sessionManagerInMemory.mockClear();
@@ -241,6 +256,250 @@ describe("agent-runner final output capture", () => {
     const bindOrder = session.bindExtensions.mock.invocationCallOrder[0];
     const promptOrder = session.prompt.mock.invocationCallOrder[0];
     expect(bindOrder).toBeLessThan(promptOrder);
+    expect(createEventBus).not.toHaveBeenCalled();
+    expect(eventBusEmit).not.toHaveBeenCalled();
+  });
+
+  it("requires child-local focus acknowledgement after bind and before callbacks or prompts", async () => {
+    const { session } = createSession("FOCUSED");
+    const onSessionCreated = vi.fn();
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    eventBusEmit.mockImplementation((channel, request: any) => {
+      expect(channel).toBe("pi-focus:bind-child");
+      request.acknowledge({ ok: true });
+    });
+
+    await runAgent(ctx, "Explore", "Say FOCUSED", {
+      pi,
+      focus: { focusId: "pi-focus", subfocusId: "startup" },
+      onSessionCreated,
+    });
+
+    const eventBus = createEventBus.mock.results[0].value;
+    expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(expect.objectContaining({ eventBus }));
+    expect(eventBusEmit).toHaveBeenCalledWith("pi-focus:bind-child", expect.objectContaining({
+      focusId: "pi-focus",
+      subfocusId: "startup",
+      acknowledge: expect.any(Function),
+    }));
+    expect(session.bindExtensions.mock.invocationCallOrder[0]).toBeLessThan(eventBusEmit.mock.invocationCallOrder[0]);
+    expect(eventBusEmit.mock.invocationCallOrder[0]).toBeLessThan(onSessionCreated.mock.invocationCallOrder[0]);
+    expect(eventBusEmit.mock.invocationCallOrder[0]).toBeLessThan(session.prompt.mock.invocationCallOrder[0]);
+  });
+
+  it("fails focused startup without acknowledgement and disposes only the child session", async () => {
+    const { session } = createSession("NEVER");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+
+    await expect(runAgent(ctx, "Explore", "do not send", {
+      pi,
+      focus: { focusId: "pi-focus" },
+    })).rejects.toThrow(/did not acknowledge/i);
+
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(eventBusClear).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails focused startup on adapter errors before any model request", async () => {
+    const { session } = createSession("NEVER");
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    eventBusEmit.mockImplementation((_channel, request: any) => {
+      request.acknowledge({ ok: false, error: "focus: persistence failed" });
+    });
+
+    await expect(runAgent(ctx, "Explore", "do not send", {
+      pi,
+      focus: { focusId: "pi-focus" },
+    })).rejects.toThrow(/persistence failed/i);
+
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects focused isolated, extension-free, and cold-resume starts before creation", async () => {
+    await expect(runAgent(ctx, "Explore", "go", {
+      pi,
+      isolated: true,
+      focus: { focusId: "pi-focus" },
+    })).rejects.toThrow(/requires extensions/i);
+    await expect(runAgent(ctx, "Explore", "go", {
+      pi,
+      focus: { focusId: "pi-focus" },
+    })).rejects.toThrow(/requires extensions/i);
+    await expect(runAgent(ctx, "Explore", "go", {
+      pi,
+      focus: { focusId: "pi-focus" },
+      resumeSessionFile: "/sessions/old.jsonl",
+    })).rejects.toThrow(/cannot combine.*resume/i);
+    expect(createAgentSession).not.toHaveBeenCalled();
+  });
+
+  it("marks a no-focus cold resume for extension state restoration", async () => {
+    const { session } = createSession("RESUMED");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "continue", {
+      pi,
+      resumeSessionFile: "/sessions/old.jsonl",
+    });
+
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionStartEvent: { type: "session_start", reason: "resume" },
+    }));
+    expect(eventBusEmit).not.toHaveBeenCalled();
+  });
+
+  it("requires the child adapter to restore a focused cold resume before callbacks or prompts", async () => {
+    const { session } = createSession("RESUMED");
+    const onSessionCreated = vi.fn();
+    createAgentSession.mockResolvedValue({ session });
+    vi.mocked(getConfig).mockReturnValueOnce(makeAgentConfig({ extensions: true }));
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{
+        type: "custom",
+        customType: "pi-focus:binding",
+        data: { version: 1, active: { focus: { id: "pi-focus" }, subfocus: null } },
+      }],
+    });
+    eventBusEmit.mockImplementation((_channel, request: any) => request.acknowledge({ ok: true }));
+
+    await runAgent(ctx, "Explore", "continue", {
+      pi,
+      resumeSessionFile: "/sessions/focused.jsonl",
+      onSessionCreated,
+    });
+
+    expect(eventBusEmit).toHaveBeenCalledWith("pi-focus:bind-child", expect.objectContaining({
+      resume: true,
+      acknowledge: expect.any(Function),
+    }));
+    expect(session.bindExtensions.mock.invocationCallOrder[0]).toBeLessThan(eventBusEmit.mock.invocationCallOrder[0]);
+    expect(eventBusEmit.mock.invocationCallOrder[0]).toBeLessThan(onSessionCreated.mock.invocationCallOrder[0]);
+    expect(eventBusEmit.mock.invocationCallOrder[0]).toBeLessThan(session.prompt.mock.invocationCallOrder[0]);
+  });
+
+  it("fails a malformed focused cold resume closed when the child adapter is absent", async () => {
+    const { session } = createSession("NEVER");
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{
+        type: "custom",
+        customType: "pi-focus:binding",
+        data: { version: 1 },
+      }],
+    });
+
+    await expect(runAgent(ctx, "Explore", "do not send", {
+      pi,
+      resumeSessionFile: "/sessions/focused.jsonl",
+    })).rejects.toThrow(/did not acknowledge/i);
+
+    expect(session.prompt).not.toHaveBeenCalled();
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  const inactiveBinding = {
+    version: 1,
+    agentSessionId: "child-session",
+    capturedAt: "2026-09-18T00:00:00.000Z",
+    source: "local",
+    active: null,
+    last: null,
+  };
+
+  it.each([
+    ["active-null only", { active: null }],
+    ["null data", null],
+    ["array data", []],
+    ["wrong version", { ...inactiveBinding, version: 2 }],
+    ["invalid session ID", { ...inactiveBinding, agentSessionId: "Bad_ID" }],
+    ["oversize session ID", { ...inactiveBinding, agentSessionId: "a".repeat(201) }],
+    ["empty capture time", { ...inactiveBinding, capturedAt: "" }],
+    ["oversize capture time", { ...inactiveBinding, capturedAt: "😀".repeat(501) }],
+    ["unknown source", { ...inactiveBinding, source: "other" }],
+    ["local fork metadata", { ...inactiveBinding, forkedFrom: { sessionId: "parent", entryId: "entry" } }],
+    ["missing fork metadata", { ...inactiveBinding, source: "fork" }],
+    ["invalid fork session", { ...inactiveBinding, source: "fork", forkedFrom: { sessionId: "!", entryId: "entry" } }],
+    ["invalid fork entry", { ...inactiveBinding, source: "fork", forkedFrom: { sessionId: "parent", entryId: "!" } }],
+    ["missing last", { ...inactiveBinding, last: undefined }],
+    ["malformed last path", { ...inactiveBinding, last: { focus: {}, subfocus: null } }],
+  ])("fails a malformed active-null cold resume closed: %s", async (_label, data) => {
+    const { session } = createSession("NEVER");
+    const onSessionCreated = vi.fn();
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{ id: "entry", type: "custom", customType: "pi-focus:binding", data }],
+    });
+
+    await expect(runAgent(ctx, "Explore", "do not send", {
+      pi,
+      resumeSessionFile: "/sessions/focused.jsonl",
+      onSessionCreated,
+    })).rejects.toThrow(/did not acknowledge/i);
+
+    expect({
+      callback: onSessionCreated.mock.calls.length,
+      prompts: session.prompt.mock.calls.length,
+      disposed: session.dispose.mock.calls.length,
+    }).toEqual({ callback: 0, prompts: 0, disposed: 1 });
+  });
+
+  it.each([undefined, "Bad_ID", "a".repeat(201)])("requires adapter validation for invalid binding entry ID %s", async id => {
+    const { session } = createSession("NEVER");
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{ id, customType: "pi-focus:binding", data: inactiveBinding }],
+    });
+    await expect(runAgent(ctx, "Explore", "continue", {
+      pi, resumeSessionFile: "/sessions/invalid-entry.jsonl",
+    })).rejects.toThrow(/did not acknowledge/i);
+  });
+
+  it.each(["prior scope", "😀".repeat(25_000)])("requires adapter validation for retained inactive snapshots %#", async scope => {
+    const { session } = createSession("NEVER");
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      getBranch: () => [{ id: "entry", customType: "pi-focus:binding", data: {
+        ...inactiveBinding,
+        last: { focus: {
+          kind: "focus", id: "prior", parentId: null, name: "Prior",
+          createdAt: inactiveBinding.capturedAt, updatedAt: inactiveBinding.capturedAt,
+          revision: 1, goals: "", scope, constraints: "", planningDocs: [], refs: [], notes: [],
+        }, subfocus: null },
+      } }],
+    });
+    await expect(runAgent(ctx, "Explore", "continue", {
+      pi, resumeSessionFile: "/sessions/prior-focus.jsonl",
+    })).rejects.toThrow(/did not acknowledge/i);
+  });
+
+  it.each([
+    inactiveBinding,
+    { ...inactiveBinding, source: "fork", forkedFrom: { sessionId: "parent", entryId: "entry" } },
+    { ...inactiveBinding, capturedAt: "😀".repeat(500) },
+  ])("keeps a valid persisted empty inactive binding unbound on cold resume %#", async data => {
+    const { session } = createSession("RESUMED");
+    createAgentSession.mockResolvedValue({ session });
+    sessionManagerOpen.mockReturnValueOnce({
+      // The latest marker wins over an older active/malformed marker.
+      getBranch: () => [
+        { customType: "pi-focus:binding", data: { active: {} } },
+        { id: "entry", type: "custom", customType: "pi-focus:binding", data },
+        { id: "other", type: "custom", customType: "unrelated" },
+      ],
+    });
+
+    await runAgent(ctx, "Explore", "continue", { pi, resumeSessionFile: "/sessions/unbound.jsonl" });
+
+    expect({
+      requests: eventBusEmit.mock.calls.length,
+      prompts: session.prompt.mock.calls.length,
+      disposed: session.dispose.mock.calls.length,
+    }).toEqual({ requests: 0, prompts: 1, disposed: 0 });
   });
 
   it("passes effective cwd and agentDir to the loader and settings manager", async () => {

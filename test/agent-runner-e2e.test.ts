@@ -40,6 +40,7 @@ import { registerFauxProvider } from "./helpers/pi-ai.js";
 vi.setConfig({ testTimeout: 30_000 });
 
 const FIXTURE = resolve(fileURLToPath(new URL("./fixtures/e2e-probe-ext.mjs", import.meta.url)));
+const FOCUS_FIXTURE = resolve(fileURLToPath(new URL("./fixtures/focus-adapter-e2e.mjs", import.meta.url)));
 /** The fixture registers exactly this tool. */
 const EXT_TOOL = "e2e_probe";
 const BUILTINS = ["read", "bash", "edit", "write", "grep", "find", "ls"];
@@ -116,6 +117,50 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     }
     return active;
   }
+
+  it("binds focus through the real child-local loader and session before any prompt", async () => {
+    registerAgents(new Map([["focused-e2e", {
+      name: "focused-e2e",
+      description: "focused e2e",
+      builtinToolNames: ["read"],
+      extensions: [FOCUS_FIXTURE],
+      skills: false,
+      systemPrompt: "You are focused e2e.",
+      promptMode: "replace",
+      inheritContext: false,
+      runInBackground: false,
+      isolated: false,
+    } as AgentConfig]]));
+    const model = faux.getModel();
+    const modelRegistry: any = {
+      find: () => model,
+      getAll: () => [model],
+      getAvailable: () => [model],
+      hasConfiguredAuth: () => true,
+      isUsingOAuth: () => false,
+      getApiKeyAndHeaders: async () => ({ apiKey: "faux", headers: {} }),
+      registerProvider: () => {},
+      unregisterProvider: () => {},
+    };
+    const ctx: any = { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry };
+    let branch: any[] = [];
+
+    await expect(runAgent(ctx, "focused-e2e", "must not reach a model", {
+      pi: makePi(),
+      model,
+      focus: { focusId: "pi-focus", subfocusId: "startup" },
+      onSessionCreated: (session) => {
+        branch = (session as any).sessionManager.getBranch();
+        session.dispose();
+        throw new Error("stop before prompt");
+      },
+    })).rejects.toThrow("stop before prompt");
+
+    expect(branch.at(-1)).toMatchObject({
+      customType: "focus-adapter-probe",
+      data: { focusId: "pi-focus", subfocusId: "startup" },
+    });
+  });
 
   it("real pi-mono admits an extension-registered tool when it's in the allowlist (#47)", async () => {
     const active = await activeToolsFor({ extensions: [FIXTURE] });
