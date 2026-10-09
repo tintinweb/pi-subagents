@@ -27,7 +27,7 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
+import type { SubagentType, ThinkingLevel, TurnBudgetController } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
@@ -42,6 +42,7 @@ export const SUBAGENT_TOOL_NAMES = {
   WORKFLOW: "SubagentWorkflow",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
+  EXTEND: "extend_subagent",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -459,6 +460,8 @@ export interface RunOptions {
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
+  /** Exposes this run's mutable turn ceiling to AgentManager. */
+  onTurnBudgetCreated?: (controller: TurnBudgetController) => void;
   /**
    * Called once per assistant message_end with that message's usage delta.
    * Lets callers maintain a lifetime accumulator that survives compaction
@@ -605,6 +608,55 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
   if (isAbsolute(sessionDir)) return sessionDir;
   return resolve(cwd, sessionDir);
+}
+
+/** One run's mutable ceiling, shared by fresh spawns and resumed prompts. */
+export function createTurnBudget(
+  session: AgentSession,
+  initialMaxTurns: number | undefined,
+  onTurnEnd?: (turnCount: number) => void,
+) {
+  let turnCount = 0;
+  let maxTurns = initialMaxTurns;
+  let softLimitReached = false;
+  let aborted = false;
+
+  const controller: TurnBudgetController = {
+    snapshot: () => ({ turnCount, maxTurns, softLimitReached }),
+    extend: (additionalTurns) => {
+      if (!Number.isSafeInteger(additionalTurns) || additionalTurns < 1) {
+        throw new Error("additional_turns must be a positive integer");
+      }
+      if (maxTurns == null) return { extended: false, reason: "unlimited", turnCount };
+      if (aborted) throw new Error("agent is already aborting");
+      const previousMaxTurns = maxTurns;
+      const resumedFromSoftLimit = softLimitReached;
+      maxTurns += additionalTurns;
+      softLimitReached = false;
+      return { extended: true, turnCount, previousMaxTurns, maxTurns, resumedFromSoftLimit };
+    },
+  };
+
+  const onEvent = (event: AgentSessionEvent) => {
+    if (event.type !== "turn_end") return;
+    turnCount++;
+    onTurnEnd?.(turnCount);
+    if (maxTurns == null) return;
+    if (!softLimitReached && turnCount >= maxTurns) {
+      softLimitReached = true;
+      void session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
+    } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
+      aborted = true;
+      void session.abort();
+    }
+  };
+
+  return {
+    controller,
+    onEvent,
+    wasAborted: () => aborted,
+    wasSteered: () => softLimitReached,
+  };
 }
 
 export async function runAgent(
@@ -1044,27 +1096,17 @@ export async function runAgent(
 
   options.onSessionCreated?.(session);
 
-  // Track turns for graceful max_turns enforcement
-  let turnCount = 0;
-  const maxTurns = resolveEffectiveMaxTurns(type, options.maxTurns);
-  let softLimitReached = false;
-  let aborted = false;
+  // Track and expose turns for graceful, extendable max_turns enforcement.
+  const turnBudget = createTurnBudget(
+    session,
+    resolveEffectiveMaxTurns(type, options.maxTurns),
+    options.onTurnEnd,
+  );
+  options.onTurnBudgetCreated?.(turnBudget.controller);
 
   let currentMessageText = "";
   const unsubTurns = session.subscribe((event: AgentSessionEvent) => {
-    if (event.type === "turn_end") {
-      turnCount++;
-      options.onTurnEnd?.(turnCount);
-      if (maxTurns != null) {
-        if (!softLimitReached && turnCount >= maxTurns) {
-          softLimitReached = true;
-          session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (softLimitReached && turnCount >= maxTurns + graceTurns) {
-          aborted = true;
-          session.abort();
-        }
-      }
-    }
+    turnBudget.onEvent(event);
     if (event.type === "message_start") {
       currentMessageText = "";
     }
@@ -1118,7 +1160,7 @@ export async function runAgent(
     // the abort forwarding are still live: torn down first, a retry would be
     // unkillable.
     if (structuredCapture !== undefined && structuredCapture.json === undefined
-      && !aborted && options.signal?.aborted !== true) {
+      && !turnBudget.wasAborted() && options.signal?.aborted !== true) {
       structuredRetried = true;
       await session.prompt(structuredRetryPrompt(structuredCapture));
     }
@@ -1140,8 +1182,8 @@ export async function runAgent(
   return {
     responseText,
     session,
-    aborted,
-    steered: softLimitReached,
+    aborted: turnBudget.wasAborted(),
+    steered: turnBudget.wasSteered(),
     failure: finalTurnError(session, startLen) ?? structuredFailure,
     ...(structuredCapture?.json !== undefined ? { structuredJson: structuredCapture.json } : {}),
     ...(structuredRetried ? { structuredRetried } : {}),
@@ -1158,18 +1200,23 @@ export async function resumeAgent(
     onToolActivity?: (activity: ToolActivity) => void;
     onAssistantUsage?: (usage: LifetimeUsage) => void;
     onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+    onTurnEnd?: (turnCount: number) => void;
+    onTurnBudgetCreated?: (controller: TurnBudgetController) => void;
+    maxTurns?: number;
     signal?: AbortSignal;
   } = {},
-): Promise<{ text: string; failure?: string }> {
+): Promise<{ text: string; failure?: string; aborted: boolean; steered: boolean }> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
+  const turnBudget = createTurnBudget(session, options.maxTurns, options.onTurnEnd);
+  options.onTurnBudgetCreated?.(turnBudget.controller);
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
-    ? session.subscribe((event: AgentSessionEvent) => {
+  const unsubEvents = session.subscribe((event: AgentSessionEvent) => {
+        turnBudget.onEvent(event);
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
         if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
         if (event.type === "message_end" && event.message.role === "assistant") {
@@ -1185,8 +1232,7 @@ export async function resumeAgent(
         if (event.type === "compaction_end" && !event.aborted && event.result) {
           options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
         }
-      })
-    : () => {};
+      });
 
   try {
     await session.prompt(prompt);
@@ -1199,6 +1245,8 @@ export async function resumeAgent(
   return {
     text: collector.getText().trim() || getLastAssistantText(session, startLen),
     failure: finalTurnError(session, startLen),
+    aborted: turnBudget.wasAborted(),
+    steered: turnBudget.wasSteered(),
   };
 }
 

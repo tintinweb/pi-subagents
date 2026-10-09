@@ -153,6 +153,28 @@ export type MentionResolution =
   | { kind: "live"; record: AgentRecord }
   | { kind: "tombstone"; entry: AgentTombstone };
 
+export interface TurnBudgetSnapshot {
+  turnCount: number;
+  maxTurns?: number;
+  softLimitReached: boolean;
+}
+
+export type TurnBudgetExtensionResult =
+  | { extended: false; reason: "unlimited"; turnCount: number }
+  | {
+      extended: true;
+      turnCount: number;
+      previousMaxTurns: number;
+      maxTurns: number;
+      resumedFromSoftLimit: boolean;
+    };
+
+/** Mutable controller for one active spawn/resume run's turn ceiling. */
+export interface TurnBudgetController {
+  snapshot(): TurnBudgetSnapshot;
+  extend(additionalTurns: number): TurnBudgetExtensionResult;
+}
+
 export interface AgentRecord {
   id: string;
   type: SubagentType;
@@ -180,6 +202,8 @@ export interface AgentRecord {
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;
+  /** Active run's mutable turn budget. Cleared when that run settles. */
+  turnBudget?: TurnBudgetController;
   /**
    * A caller is awaiting this agent inline (`spawnAndWait`) — what
    * `maxConcurrentForeground` bounds. Distinct from `isBackground === false`,

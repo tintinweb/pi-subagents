@@ -36,7 +36,7 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type TurnBudgetExtensionResult, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -1313,7 +1313,9 @@ export default function (pi: ExtensionAPI) {
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
       onToolActivity: bgCallbacks.onToolActivity,
+      onTurnEnd: bgCallbacks.onTurnEnd,
       onAssistantUsage: bgCallbacks.onAssistantUsage,
+      maxTurns: opts.maxTurns,
       // Fires when the run actually starts — immediately, or on queue
       // drain. Wiring it here (rather than after resume() returns) means a
       // resume stopped while still queued never started streaming, so
@@ -1482,7 +1484,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls — they run concurrently.
 - Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
+- resume continues a previous agent by ID; steer_subagent redirects a running one; extend_subagent grants a real bounded turn extension without resuming.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1508,6 +1510,7 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
+- Use extend_subagent to grant a running agent a real bounded turn extension; a normal steer does not change max_turns.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
@@ -2017,7 +2020,9 @@ Terse command-style prompts produce shallow, generic work.
           );
         }
 
-        const record = await manager.resume(params.resume, params.prompt, signal);
+        const record = await manager.resume(params.resume, params.prompt, signal, {
+          maxTurns: effectiveMaxTurns,
+        });
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
@@ -2870,6 +2875,84 @@ Terse command-style prompts produce shallow, generic work.
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+  }));
+
+  // ---- extend_subagent tool ----
+
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.EXTEND,
+    label: "Extend Agent",
+    description:
+      "Grant a running agent additional turns by changing its real runner ceiling. " +
+      "Spent turns are preserved; this does not reset or resume the conversation. " +
+      "Use only when live evidence shows the agent is converging and the extension is explicitly bounded.",
+    promptSnippet: "Extend a running subagent's real turn budget",
+    promptGuidelines: [
+      "Use extend_subagent only for a converging running agent, with a bounded additional_turns value and a concrete reason. A steering message alone does not change max_turns.",
+    ],
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The running agent ID or handle.",
+      }),
+      additional_turns: Type.Integer({
+        description: "Positive number of turns to add to the agent's current ceiling.",
+        minimum: 1,
+        maximum: 1000,
+      }),
+      reason: Type.Optional(
+        Type.String({ description: "Concrete evidence justifying the bounded extension." }),
+      ),
+    }),
+    execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+      const record = resolveAgentRef(params.agent_id);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      }
+      if (record.status !== "running") {
+        return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}).`);
+      }
+
+      let result: TurnBudgetExtensionResult | undefined;
+      try {
+        result = manager.extendTurnBudget(record.id, params.additional_turns);
+      } catch (err) {
+        return textResult(`Could not extend agent: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (!result) {
+        return textResult(`Agent "${params.agent_id}" has not initialized its turn budget yet. Try again after it starts.`);
+      }
+      if (!result.extended) {
+        return textResult(`Agent "${params.agent_id}" already has an unlimited turn budget; no extension was applied.`);
+      }
+
+      const activity = agentActivity.get(record.id);
+      if (activity) activity.maxTurns = result.maxTurns;
+      const reason = params.reason?.trim();
+      const continuation =
+        `Turn budget extended by ${params.additional_turns} turns (${result.previousMaxTurns} → ${result.maxTurns}). ` +
+        `Continue the assigned work and converge within the new ceiling.` +
+        (reason ? ` Reason: ${reason}` : "");
+      manager.steer(record.id, continuation);
+      pi.events.emit("subagents:turn_budget_extended", {
+        id: record.id,
+        type: record.type,
+        description: record.description,
+        additionalTurns: params.additional_turns,
+        previousMaxTurns: result.previousMaxTurns,
+        maxTurns: result.maxTurns,
+        turnCount: result.turnCount,
+        resumedFromSoftLimit: result.resumedFromSoftLimit,
+        reason,
+      });
+      widget.update();
+      fleet.update();
+
+      return textResult(
+        `Extended agent "${record.alias ?? record.handle ?? record.id}" by ${params.additional_turns} turns: ` +
+        `${result.previousMaxTurns} → ${result.maxTurns}. It has used ${result.turnCount} turns in this run.` +
+        (result.resumedFromSoftLimit ? " The previous wrap-up latch was cleared." : ""),
+      );
     },
   }));
 

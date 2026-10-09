@@ -6,10 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import type { AgentRecord } from "../src/types.js";
 
-vi.mock("../src/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-  resumeAgent: vi.fn(),
-}));
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
@@ -1401,6 +1401,53 @@ describe("AgentManager — abort() state machine", () => {
 
     expect(record.status).toBe("stopped");        // not overwritten to "completed"
     expect(record.result).toBe("partial output"); // partial result still captured
+  });
+});
+
+describe("AgentManager — extendTurnBudget()", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  it("updates the live controller and invocation metadata", () => {
+    const extend = vi.fn(() => ({
+      extended: true as const,
+      turnCount: 20,
+      previousMaxTurns: 30,
+      maxTurns: 60,
+      resumedFromSoftLimit: true,
+    }));
+    vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options) => {
+      options.onTurnBudgetCreated?.({ snapshot: vi.fn(), extend });
+      return new Promise(() => {});
+    });
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "X", "p", {
+      description: "r",
+      isBackground: true,
+      invocation: { maxTurns: 30 },
+    });
+
+    expect(manager.extendTurnBudget(id, 30)).toEqual(expect.objectContaining({
+      extended: true,
+      maxTurns: 60,
+      turnCount: 20,
+    }));
+    expect(extend).toHaveBeenCalledWith(30);
+    expect(manager.getRecord(id)?.invocation?.maxTurns).toBe(60);
+  });
+
+  it("refuses an unknown, terminal, or not-yet-initialized agent", async () => {
+    manager = new AgentManager();
+    expect(manager.extendTurnBudget("missing", 10)).toBeUndefined();
+
+    resolvedRun();
+    const completed = manager.spawn(mockPi, mockCtx, "X", "p", { description: "done" });
+    await manager.getRecord(completed)?.promise;
+    expect(manager.extendTurnBudget(completed, 10)).toBeUndefined();
+
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    const starting = manager.spawn(mockPi, mockCtx, "X", "p", { description: "starting" });
+    expect(manager.extendTurnBudget(starting, 10)).toBeUndefined();
   });
 });
 
