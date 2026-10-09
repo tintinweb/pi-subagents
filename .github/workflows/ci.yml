@@ -20,12 +20,13 @@ jobs:
       - run: npm run typecheck
       - run: npm run test
 
-  # The pi devDependencies pin the compile baseline POST-migration (0.84.2), so the `build`
+  # The pi devDependencies pin the compile baseline (1.1.0), so the `build`
   # job above is what guards the modelRegistry -> modelRuntime world: PR #152's
   # isolated-provider test (test/e2e/isolated-provider.e2e.test.ts) skips itself on
   # pre-migration Pi and now actually runs there.
   #
-  # This job covers the other end: the earliest Pi the peerDependencies claim (`>=0.84.0`).
+  # This job covers the other end: the earliest Pi the peerDependencies claim (`>=1.1.0`). While it equals the
+  # devDependency pin it duplicates `build`; it starts earning its keep when the pin moves ahead.
   # It is NOT continue-on-error — a green run here is the only evidence behind that range,
   # and if the floor genuinely can't be supported any more, the peer range is what should
   # change. That is what moved it twice. 0.80.0 -> 0.81.0: pi only began folding
@@ -36,6 +37,10 @@ jobs:
   # is forced to call `StructuredOutput`, and pi-tui's `stripTerminalSequences` (0.84.0),
   # which the workflow card and inspector use to strip the resets `truncateToWidth` injects.
   # Both are typecheck failures at 0.81.0, not soft degradations, so the range had to move.
+  # 0.84.0 -> 1.1.0: pi 0.86/0.87 moved the system prompt and history into the session
+  # transcript (`AgentState.systemPrompt` became a read-only getter), and the `@mention`
+  # clone seeds itself through `SessionManager.inMemory(..., entries)` and a resource-loader
+  # prompt override instead of mutating agent state.
   compat-floor-pi:
     runs-on: ubuntu-latest
     steps:
@@ -46,7 +51,7 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Install floor Pi
-        run: npm install --no-save @earendil-works/pi-coding-agent@0.84.0 @earendil-works/pi-ai@0.84.0 @earendil-works/pi-tui@0.84.0
+        run: npm install --no-save @earendil-works/pi-coding-agent@1.1.0 @earendil-works/pi-ai@1.1.0 @earendil-works/pi-tui@1.1.0
       - name: Typecheck against floor Pi
         run: npm run typecheck
       - name: Test suite against floor Pi
@@ -55,7 +60,7 @@ jobs:
   # Forward canary: reinstall whatever Pi is `latest` over the pin, so a release newer than
   # the baseline surfaces here before it reaches users. It runs the full typecheck + suite,
   # not a hand-picked file list, so new drift can't hide in a test nobody remembered to add
-  # here. Both steps pass as of the 0.84.2 baseline — a failure IS fresh breakage.
+  # here. Both steps pass as of the 1.1.0 baseline — a failure IS fresh breakage.
   compat-latest-pi:
     runs-on: ubuntu-latest
     continue-on-error: true # current Pi is not a hard support guarantee; surface breakage without blocking

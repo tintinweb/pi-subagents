@@ -143,4 +143,58 @@ describe("output-file streaming across a real compaction (#145)", () => {
     }
     expect(entries.length).toBe(writtenBeforeCompact + 2); // + final question + its answer
   }, 30_000);
+
+  it("writes the spawn prompt once and keeps pi's system messages out", async () => {
+    // Pi 1.x records the prompt and tool loadout as `system` messages in the
+    // transcript: one ahead of the first user message, and another whenever
+    // the loadout changes mid-run. Neither is a Claude Code transcript entry.
+    const cwd = tmp;
+    const faux = registerFauxProvider({ provider: "faux", models: [{ id: "faux-1", contextWindow: 200_000 }] });
+    try {
+      const model = faux.getModel();
+      const backend = fauxModelBackend(model);
+      faux.setResponses([fauxAssistantMessage("first answer"), fauxAssistantMessage("second answer")]);
+      const agentDir = getAgentDir();
+      const loader = new DefaultResourceLoader({
+        cwd,
+        agentDir,
+        systemPromptOverride: () => "You are a test agent.",
+        appendSystemPromptOverride: () => [],
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+      });
+      await loader.reload();
+      const { session } = await createAgentSession({
+        cwd,
+        agentDir,
+        model,
+        modelRegistry: backend.modelRegistry as never,
+        modelRuntime: backend.modelRuntime as never,
+        resourceLoader: loader,
+        sessionManager: SessionManager.inMemory(cwd),
+        settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
+      });
+
+      const outPath = join(tmp, "agent.output");
+      writeInitialEntry(outPath, "agent-sys", "the spawn prompt", cwd);
+      const cleanup = streamToOutputFile(session as never, outPath, "agent-sys", cwd);
+      await session.prompt("the spawn prompt");
+      session.setActiveToolsByName(["read"]); // a loadout change: pi appends a system message
+      await session.prompt("a follow-up");
+      cleanup();
+      session.dispose();
+
+      // Sanity: pi really did put system messages in the run.
+      expect(session.messages.filter((m) => m.role === "system").length).toBeGreaterThanOrEqual(2);
+      const entries = readFileSync(outPath, "utf-8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { type: string; message: { role: string; content: unknown } });
+      expect(entries.map((e) => e.message.role)).toEqual(["user", "assistant", "user", "assistant"]);
+      expect(entries.map((e) => e.type)).toEqual(["user", "assistant", "user", "assistant"]);
+    } finally {
+      faux.unregister();
+    }
+  }, 30_000);
 });

@@ -53,6 +53,7 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  getCurrentTools,
   type Model,
   type ToolCall,
 } from "@earendil-works/pi-ai";
@@ -210,7 +211,7 @@ export function routeBySession(routes: {
   subagent: FauxReply | ((ctx: Context) => FauxReply);
 }): FauxResponder {
   return (context) => {
-    const isParent = (context.tools ?? []).some((t) => t.name === "Agent");
+    const isParent = getCurrentTools(context.messages).some((t) => t.name === "Agent");
     if (!isParent) return resolveReply(routes.subagent, context);
     const spawned = context.messages.some(
       (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",

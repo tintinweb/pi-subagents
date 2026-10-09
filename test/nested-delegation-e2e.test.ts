@@ -19,7 +19,7 @@
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Context, fauxToolCall } from "@earendil-works/pi-ai";
+import { type Context, fauxToolCall, getCurrentTools } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -101,7 +101,7 @@ describe("nested delegation e2e (real pi-mono, faux model)", () => {
 
     const respond = (context: Context): FauxReply => {
       const text = firstUserText(context);
-      const names = (context.tools ?? []).map((t) => t.name);
+      const names = getCurrentTools(context.messages).map((t) => t.name);
 
       // Leaf: no nested tools (it never opted in) — just answer.
       if (text.includes("Do the leaf work")) {

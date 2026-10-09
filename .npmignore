@@ -18,6 +18,7 @@ CLAUDE.md
 *.log
 npm-debug.log*
 .DS_Store
+.scratch
 
 # Tests (if any)
 test/

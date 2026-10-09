@@ -104,17 +104,27 @@ export function streamToOutputFile(
   cwd: string,
   startIndex?: number,
 ): () => void {
-  // Index of the first message this stream is responsible for. A spawn writes
-  // messages[0] as the initial prompt entry, so it starts at 1. A resume hands
+  // Index of the first message this stream is responsible for. A resume hands
   // in the session's length as of just before the run: the session already
   // holds every prior turn, and re-emitting those would duplicate history that
-  // is already in the file.
-  let writtenCount = startIndex ?? 1;
+  // is already in the file. A spawn has already written its prompt as the
+  // initial entry, so it starts after the first user message — found on the
+  // first flush, because pi puts a system message ahead of it and adds both
+  // only once the prompt runs.
+  let writtenCount = startIndex;
 
   const flush = () => {
     const messages = session.messages;
+    if (writtenCount === undefined) {
+      const prompt = messages.findIndex((m) => m.role === "user");
+      if (prompt === -1) return;
+      writtenCount = prompt + 1;
+    }
     while (writtenCount < messages.length) {
-      const msg = messages[writtenCount];
+      const msg = messages[writtenCount++];
+      // Pi's prompt and tool-loadout records; a Claude Code transcript has no
+      // such entry.
+      if (msg.role === "system") continue;
       const entry = {
         isSidechain: true,
         agentId,
@@ -126,7 +136,6 @@ export function streamToOutputFile(
       try {
         appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
       } catch { /* ignore write errors */ }
-      writtenCount++;
     }
   };
 

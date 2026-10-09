@@ -16,7 +16,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context, ToolCall } from "@earendil-works/pi-ai";
+import { type Context, getCurrentTools, type ToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { registerAgents } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
@@ -47,7 +47,7 @@ function userPrompt(ctx: Context): string {
 }
 
 function tools(ctx: Context): string[] {
-  return (ctx.tools ?? []).map((tool) => tool.name);
+  return getCurrentTools(ctx.messages).map((tool) => tool.name);
 }
 
 function toolResults(ctx: Context, name: string): string[] {

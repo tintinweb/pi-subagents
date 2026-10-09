@@ -29,6 +29,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Context, fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Real pi-mono session construction; a cold first run under full-suite CPU
@@ -79,7 +82,7 @@ describe("mention clone tool reachability against real pi-mono", () => {
       // mention-clone reads the runtime off the registry facade, the same shim
       // agent-runner carries for Pi >= 0.80.8.
       modelRegistry: { ...backend.modelRegistry, runtime: backend.modelRuntime },
-      sessionManager: { getEntries: () => [], getLeafId: () => undefined },
+      sessionManager: { getBranch: () => [] },
     };
 
     // Never called: the assertion is on what the session exposes, not on the
@@ -93,5 +96,61 @@ describe("mention clone tool reachability against real pi-mono", () => {
     expect(sessions).toHaveLength(1);
     // The bug this file exists for: with an empty allowlist this is `[]`.
     expect(sessions[0].getActiveToolNames()).toEqual(["Agent"]);
+  });
+
+  it("the clone's request carries the parent's conversation and system prompt, and it spawns", async () => {
+    // Pi 1.x keeps the prompt and the history in the session's transcript:
+    // `AgentState.systemPrompt` is a read-only getter, and SessionManager is the
+    // source of every request's context. A clone seeded by mutating agent state
+    // throws on the prompt assignment and never reaches its turn.
+    const model = faux.getModel();
+    const backend = fauxModelBackend(model);
+    const parent = SessionManager.inMemory(cwd);
+    // What a real parent transcript opens with: its prompt and its full tool set.
+    parent.appendMessage({
+      role: "system",
+      content: "",
+      sections: { preamble: "STALE-PARENT-PROMPT" },
+      toolsAdded: [{ name: "read", description: "Read a file.", parameters: Type.Object({ path: Type.String() }) }],
+      timestamp: 0,
+    } as never);
+    parent.appendMessage({ role: "user", content: "PARENT-HISTORY question", timestamp: 1 });
+    parent.appendMessage(fauxAssistantMessage("PARENT-HISTORY answer"));
+    const ctx: any = {
+      cwd,
+      model,
+      getSystemPrompt: () => "PARENT-PROMPT",
+      modelRegistry: { ...backend.modelRegistry, runtime: backend.modelRuntime },
+      sessionManager: parent,
+    };
+
+    let seen: Context | undefined;
+    faux.setResponses([
+      (context: Context) => {
+        seen = context;
+        return fauxAssistantMessage(fauxToolCall("Agent", { subagent_type: "Explore", prompt: "go" }));
+      },
+      fauxAssistantMessage("done"),
+    ]);
+    const agentTool = {
+      name: "Agent",
+      description: "Launch an agent.",
+      parameters: Type.Object({ subagent_type: Type.String(), prompt: Type.String() }),
+      execute: vi.fn(async () => ({ content: [{ type: "text", text: "Agent ID: a1" }], details: undefined })),
+    } as any;
+
+    const result = await runMentionClone({ ctx, type: "Explore", message: "go", agentTool });
+
+    expect(result).toEqual({ spawned: true });
+    expect(seen).toBeDefined();
+    const text = JSON.stringify(seen!.messages.filter((m) => m.role !== "system"));
+    expect(text).toContain("PARENT-HISTORY question");
+    expect(text).toContain("PARENT-HISTORY answer");
+    expect(getCurrentSystemPrompt(seen!.messages)).toContain("PARENT-PROMPT");
+    // Replayed, then patched over — not dropped on the way in.
+    expect(JSON.stringify(seen!.messages)).toContain("STALE-PARENT-PROMPT");
+    expect(getCurrentSystemPrompt(seen!.messages)).not.toContain("STALE-PARENT-PROMPT");
+    // The parent's tools are withdrawn: the invisible turn can call Agent and nothing else.
+    expect(getCurrentTools(seen!.messages).map((t) => t.name)).toEqual(["Agent"]);
   });
 });
