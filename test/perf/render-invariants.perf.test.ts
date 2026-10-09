@@ -56,34 +56,50 @@ beforeEach(() => {
 });
 
 describe("ConversationViewer — cost stays linear in transcript length", () => {
-  /** Leaf calls one render makes over a transcript of `n` messages. */
-  function wrapsFor(n: number, mode: string): number {
+  /** Leaf calls the first render of a fresh viewer makes over `n` messages. */
+  function coldWrapsFor(n: number, mode: string): number {
     const viewer = mountViewer(ConversationViewer, makeSession(n), undefined, () => mode);
-    viewer.render(120); // prime, so caches are warm and only steady state counts
     counts.wrap = 0;
     counts.markdownRender = 0;
     viewer.render(120);
     return counts.wrap + counts.markdownRender;
   }
 
-  // The viewer rebuilds every line of the transcript on every frame, so the work
-  // is expected to grow with it. What must not happen is growing FASTER than it:
-  // ten times the messages, at most ~ten times the work. A quadratic here is
-  // invisible on a short conversation and locks the TUI on a long one.
+  // Every message is wrapped/parsed exactly once, the first time it renders, so
+  // cold work grows with the transcript. What must not happen is growing FASTER
+  // than it: ten times the messages, at most ~ten times the work. A quadratic
+  // here is invisible on a short conversation and locks the TUI on a long one.
   it("does ~10x the work for 10x the messages (raw wrap path)", () => {
-    const small = wrapsFor(30, "off");
-    const large = wrapsFor(300, "off");
+    const small = coldWrapsFor(30, "off");
+    const large = coldWrapsFor(300, "off");
 
     expect(small).toBeGreaterThan(0);
     expect(large / small).toBeLessThanOrEqual(11);
   });
 
   it("does ~10x the work for 10x the messages (markdown path)", () => {
-    const small = wrapsFor(30, "assistant");
-    const large = wrapsFor(300, "assistant");
+    const small = coldWrapsFor(30, "assistant");
+    const large = coldWrapsFor(300, "assistant");
 
     expect(small).toBeGreaterThan(0);
     expect(large / small).toBeLessThanOrEqual(11);
+  });
+
+  // The per-message content cache is what keeps a long transcript affordable:
+  // a warm frame with unchanged messages must re-render NOTHING. Before it,
+  // every frame (and every scroll key) re-wrapped the whole transcript, well
+  // past the frame budget on a long session. Zero is the whole point; a regression that
+  // drops the cache rediscovers that cost, and nothing else in the suite would
+  // notice.
+  it("re-renders a warm transcript without touching a single wrap", () => {
+    for (const mode of ["off", "assistant"] as const) {
+      const viewer = mountViewer(ConversationViewer, makeSession(300), undefined, () => mode);
+      viewer.render(120);
+      counts.wrap = 0;
+      counts.markdownRender = 0;
+      viewer.render(120);
+      expect(counts.wrap + counts.markdownRender, `mode ${mode}`).toBe(0);
+    }
   });
 
   // #259's WeakMap is keyed by the message object. If a refactor ever rebuilds

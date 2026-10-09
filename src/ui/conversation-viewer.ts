@@ -159,6 +159,13 @@ export class ConversationViewer implements Component {
    * Weak so a compacted-away message doesn't pin its render.
    */
   private readonly markdownCache = new WeakMap<object, { md: Markdown; text: string; failed?: boolean }>();
+  /**
+   * One rendered block per message, so a warm `buildContentLines()` only
+   * re-renders messages that changed. Message objects are stable and their
+   * text only grows while streaming, so the `{ width, mode, key }` guard 
+   * catches the three ways a cached block can go stale.
+   */
+  private readonly contentCache = new WeakMap<object, { width: number; mode: ViewerMarkdownMode; key: string; lines: string[] }>();
 
   constructor(
     private tui: TUI,
@@ -327,7 +334,8 @@ export class ConversationViewer implements Component {
     if (invocationLine) lines.push(row(invocationLine));
     lines.push(hrMid);
 
-    // Content area — rebuild every render (live data, no cache needed)
+    // Content area — assembled from the per-message block cache; only messages
+    // that changed since the last frame re-render (see messageLines).
     const contentLines = this.buildContentLines(innerW);
     const viewportHeight = this.viewportHeight();
     const maxScroll = Math.max(0, contentLines.length - viewportHeight);
@@ -519,61 +527,13 @@ export class ConversationViewer implements Component {
     }
 
     const mode = this.markdownMode();
+    const separator = th.fg("dim", "───");
     let needsSeparator = false;
     for (const msg of messages) {
-      if (msg.role === "user") {
-        const text = typeof msg.content === "string"
-          ? msg.content
-          : extractText(msg.content);
-        if (!text.trim()) continue;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.fg("accent", "[User]"));
-        for (const line of wrapTextWithAnsi(text.trim(), width)) {
-          lines.push(line);
-        }
-      } else if (msg.role === "assistant") {
-        const textParts: string[] = [];
-        const toolCalls: string[] = [];
-        for (const c of msg.content) {
-          if (c.type === "text" && c.text) textParts.push(c.text);
-          else if (c.type === "toolCall") {
-            toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
-          }
-        }
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.bold("[Assistant]"));
-        if (textParts.length > 0) {
-          const text = textParts.join("\n").trim();
-          lines.push(...(mode === "off"
-            ? this.rawLines(text, width, false)
-            : this.markdownLines(msg, text, width, false)));
-        }
-        for (const name of toolCalls) {
-          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
-        }
-      } else if (msg.role === "toolResult") {
-        const { text, elided } = capResult(extractText(msg.content).trim());
-        if (!text) continue;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(th.fg("dim", "[Result]"));
-        lines.push(...(mode === "all"
-          ? this.markdownLines(msg, text, width, true)
-          : this.rawLines(text, width, true)));
-        if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
-      } else if ((msg as any).role === "bashExecution") {
-        const bash = msg as any;
-        if (needsSeparator) lines.push(th.fg("dim", "───"));
-        lines.push(truncateToWidth(th.fg("muted", `  $ ${bash.command}`), width));
-        if (bash.output?.trim()) {
-          // Same cap as a tool result, never Markdown: command output is the one
-          // thing here that is definitionally not authored as Markdown.
-          const { text, elided } = capResult(bash.output.trim());
-          lines.push(...this.rawLines(text, width, true));
-          if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
-        }
-      } else {
-        continue;
-      }
+      const block = this.messageLines(msg, width, mode);
+      if (block.length === 0) continue;
+      if (needsSeparator) lines.push(separator);
+      lines.push(...block);
       needsSeparator = true;
     }
 
@@ -584,6 +544,87 @@ export class ConversationViewer implements Component {
       lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
     }
 
-    return lines.map(l => truncateToWidth(l, width));
+    return lines;
+  }
+
+  /**
+   * One message's rendered block (header + body, lines pre-truncated to
+   * `width`), or an empty array for a message the transcript skips. Cached per
+   * message against `{ width, mode, key }`; a miss rebuilds just that block.
+   */
+  private messageLines(msg: AgentSession["messages"][number], width: number, mode: ViewerMarkdownMode): string[] {
+    const th = this.theme;
+    // The key folds in everything the block is rendered from, so a streaming
+    // append (same object, new text) rebuilds while an unchanged message hits.
+    let key: string;
+    let render: () => string[];
+    if (msg.role === "user") {
+      const text = typeof msg.content === "string" ? msg.content : extractText(msg.content);
+      key = text;
+      render = () => {
+        const lines = [th.fg("accent", "[User]")];
+        for (const line of wrapTextWithAnsi(text.trim(), width)) lines.push(line);
+        return lines;
+      };
+      if (!text.trim()) return [];
+    } else if (msg.role === "assistant") {
+      const textParts: string[] = [];
+      const toolCalls: string[] = [];
+      for (const c of msg.content) {
+        if (c.type === "text" && c.text) textParts.push(c.text);
+        else if (c.type === "toolCall") {
+          toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
+        }
+      }
+      key = `${textParts.join("")} ${toolCalls.join("")}`;
+      render = () => {
+        const lines = [th.bold("[Assistant]")];
+        if (textParts.length > 0) {
+          const text = textParts.join("\n").trim();
+          lines.push(...(mode === "off"
+            ? this.rawLines(text, width, false)
+            : this.markdownLines(msg, text, width, false)));
+        }
+        for (const name of toolCalls) {
+          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
+        }
+        return lines;
+      };
+    } else if (msg.role === "toolResult") {
+      const raw = extractText(msg.content).trim();
+      key = raw;
+      if (!raw) return [];
+      render = () => {
+        const { text, elided } = capResult(raw);
+        const lines = [th.fg("dim", "[Result]")];
+        lines.push(...(mode === "all"
+          ? this.markdownLines(msg, text, width, true)
+          : this.rawLines(text, width, true)));
+        if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
+        return lines;
+      };
+    } else if ((msg as any).role === "bashExecution") {
+      const bash = msg as any;
+      key = `${bash.command ?? ""} ${bash.output ?? ""}`;
+      render = () => {
+        const lines = [truncateToWidth(th.fg("muted", `  $ ${bash.command}`), width)];
+        if (bash.output?.trim()) {
+          // Same cap as a tool result, never Markdown: command output is the one
+          // thing here that is definitionally not authored as Markdown.
+          const { text, elided } = capResult(bash.output.trim());
+          lines.push(...this.rawLines(text, width, true));
+          if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
+        }
+        return lines;
+      };
+    } else {
+      return [];
+    }
+
+    const cached = this.contentCache.get(msg);
+    if (cached && cached.width === width && cached.mode === mode && cached.key === key) return cached.lines;
+    const lines = render().map(l => truncateToWidth(l, width));
+    this.contentCache.set(msg, { width, mode, key, lines });
+    return lines;
   }
 }
