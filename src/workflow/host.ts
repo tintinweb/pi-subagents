@@ -263,7 +263,8 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         // `runAgent` returns, but `runAgent` decides when its own
         // `onSessionCreated` fires — synchronously, for a stub. Each fires once,
         // so the first call finds a half missing and returns, and the second is
-        // the one that reports.
+        // the one that reports. Then again from `onInvocationChanged`, each
+        // time the child is routed elsewhere mid-run.
         if (!sessionReady || spawnedId === undefined) return;
         const info = resolvedInfo(manager.getRecord(spawnedId));
         if (info !== undefined) request.onResolved?.(info);
@@ -327,6 +328,9 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             // Fires once the child's session exists, which is where the model
             // and the clamped thinking level first become knowable.
             onSessionCreated: () => { sessionReady = true; reportResolved(); },
+            // A `before_agent_start` extension can route the child AFTER
+            // creation; the manager reports that here, for this run only.
+            onInvocationChanged: reportResolved,
             ...(request.schema !== undefined ? { structuredOutput: request.schema } : {}),
             ...(request.isolation !== undefined ? { isolation: request.isolation } : {}),
             ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
@@ -366,21 +370,27 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       if (id === undefined) {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
       }
-      const record = await manager.resume(id, prompt, deps.signal);
+      // The resumed row is built from scratch, so it has to be told the same
+      // thing the first one was — the child's session already exists, so this is
+      // simply read back rather than waited for. The id goes first for the same
+      // reason it does on the spawn path: it is knowable even when the rest is
+      // not. Mid-run routing reaches THIS row through the resume's own
+      // `onInvocationChanged`, never the first spawn's.
+      const report = (record: AgentRecord | undefined) => {
+        const info = resolvedInfo(record);
+        if (info !== undefined) onResolved?.(info);
+      };
+      const record = await manager.resume(id, prompt, deps.signal, {
+        onInvocationChanged: () => report(manager.getRecord(id)),
+      });
       if (record === undefined) {
         return {
           ok: false,
           error: `Agent ${id} has no session left to resume — records are dropped ten minutes after they finish.`,
         };
       }
-      // The resumed row is built from scratch, so it has to be told the same
-      // thing the first one was — the child's session already exists, so this is
-      // simply read back rather than waited for. The id goes first for the same
-      // reason it does on the spawn path: it is knowable even when the rest is
-      // not.
       onResolved?.({ recordId: id });
-      const info = resolvedInfo(record);
-      if (info !== undefined) onResolved?.(info);
+      report(record);
       return toSpawnResult(record);
     },
 

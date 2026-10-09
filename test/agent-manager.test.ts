@@ -2529,4 +2529,110 @@ describe("AgentManager — effective model and thinking write-back", () => {
 
     expect(record.invocation).toEqual({ thinking: "max" });
   });
+
+  it("re-reads the session at run and turn boundaries, after before_agent_start has run", async () => {
+    // The creation-time snapshot is taken BEFORE `before_agent_start`, so an
+    // extension that re-routes the child there (setModel / setThinkingLevel)
+    // leaves the record describing a model the child never calls. The session
+    // events fire after that hook, so re-reading there catches the change.
+    const listeners: ((event: any) => void)[] = [];
+    const unsubscribe = vi.fn();
+    const session: any = {
+      dispose: vi.fn(),
+      model: { provider: "anthropic", id: "claude-haiku-4-5" },
+      thinkingLevel: "medium",
+      subscribe: vi.fn((listener: (event: any) => void) => {
+        listeners.push(listener);
+        return unsubscribe;
+      }),
+    };
+    const fire = (type: string) => { for (const listener of listeners) listener({ type }); };
+    const changed: AgentRecord["invocation"][] = [];
+    let atCreation: AgentRecord["invocation"];
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, options: any) => {
+      options.onSessionCreated?.(session);
+      // Yield once: `spawn` has not returned the id yet at this point.
+      await Promise.resolve();
+      atCreation = { ...manager.getRecord(id)!.invocation };
+      // An extension routes the child to opus/max, then the run starts.
+      session.model = { provider: "anthropic", id: "claude-opus-4-6" };
+      session.thinkingLevel = "max";
+      fire("agent_start");
+      // A turn that changes nothing must not be reported as a change.
+      fire("turn_start");
+      // A later turn changes the level again.
+      session.thinkingLevel = "high";
+      fire("turn_start");
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false } as any;
+    });
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", {
+      description: "go",
+      isBackground: true,
+      invocation: { thinking: "max" },
+      onInvocationChanged: invocation => changed.push({ ...invocation }),
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+
+    // Creation time: inherited haiku, level clamped below the `max` requested.
+    expect(atCreation).toMatchObject({ modelId: "anthropic/claude-haiku-4-5", thinking: "medium", requestedThinking: "max" });
+    // Only the two real changes were reported, and the record tracked each.
+    expect(changed).toHaveLength(2);
+    expect(changed[0]).toMatchObject({ modelId: "anthropic/claude-opus-4-6", thinking: "max" });
+    expect(changed[1]).toMatchObject({ modelId: "anthropic/claude-opus-4-6", thinking: "high" });
+    expect(record.invocation).toMatchObject({ modelId: "anthropic/claude-opus-4-6", thinking: "high" });
+    // The ORIGINAL request is what is disclosed, never overwritten once kept:
+    // the renderers hide it while the effective level matches it.
+    expect(changed[0]?.requestedThinking).toBe("max");
+    expect(record.invocation!.requestedThinking).toBe("max");
+
+    // Per run: the watch is torn down when the run settles, so a later event
+    // on the retained session — a resume, which installs its own — cannot
+    // fire into this run's callback.
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("watches a resumed run on its own, and stops when it settles", async () => {
+    // A resume goes through before_agent_start again and can be routed
+    // differently; its caller's callback must see that, and only that run's.
+    const listeners: ((event: any) => void)[] = [];
+    const unsubscribe = vi.fn();
+    const session: any = {
+      dispose: vi.fn(),
+      model: { provider: "anthropic", id: "claude-haiku-4-5" },
+      thinkingLevel: "low",
+      subscribe: vi.fn((listener: (event: any) => void) => {
+        listeners.push(listener);
+        return unsubscribe;
+      }),
+    };
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, options: any) => {
+      options.onSessionCreated?.(session);
+      return { responseText: "done", session, aborted: false, steered: false } as any;
+    });
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "go", isBackground: true });
+    await manager.getRecord(id)!.promise;
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    listeners.length = 0;
+
+    const changed: AgentRecord["invocation"][] = [];
+    vi.mocked(resumeAgent).mockImplementation(async () => {
+      session.model = { provider: "anthropic", id: "claude-opus-4-6" };
+      session.thinkingLevel = "max";
+      for (const listener of listeners) listener({ type: "agent_start" });
+      return { text: "again" };
+    });
+    const record = await manager.resume(id, "more", undefined, {
+      onInvocationChanged: invocation => changed.push({ ...invocation }),
+    });
+
+    expect(record?.invocation).toMatchObject({ modelId: "anthropic/claude-opus-4-6", thinking: "max" });
+    expect(changed).toHaveLength(1);
+    // No request was kept from the first run, and a resume seeds none: the
+    // previous EFFECTIVE level is not a request to disclose against.
+    expect(record?.invocation?.requestedThinking).toBeUndefined();
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+  });
 });

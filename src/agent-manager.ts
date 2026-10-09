@@ -285,6 +285,12 @@ interface SpawnOptions {
   onTextDelta?: (delta: string, fullText: string) => void;
   /** Called when the agent session is created (for accessing session stats). */
   onSessionCreated?: (session: AgentSession) => void;
+  /**
+   * Called when `record.invocation` changes during THIS run — a
+   * `before_agent_start` extension routed the child after its session was
+   * created. Stops firing when the run settles.
+   */
+  onInvocationChanged?: (invocation: AgentInvocation) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /** Called once per assistant message_end with that message's usage delta. */
@@ -318,6 +324,8 @@ interface ResumeOptions {
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
   /** Called when the session successfully compacts. */
   onCompaction?: (info: CompactionInfo) => void;
+  /** As on `SpawnOptions`: the resumed run's own routing, torn down with it. */
+  onInvocationChanged?: (invocation: AgentInvocation) => void;
   /**
    * Background resume only: called synchronously when the run actually starts —
    * immediately, or later from drainQueue. Callers wire per-run side effects
@@ -756,7 +764,13 @@ export class AgentManager {
         detachParentSignal = () => options.signal!.removeEventListener("abort", onParentAbort);
       }
     }
-    const detach = () => { detachParentSignal?.(); detachParentSignal = undefined; };
+    let unwatchInvocation: (() => void) | undefined;
+    const detach = () => {
+      detachParentSignal?.();
+      detachParentSignal = undefined;
+      unwatchInvocation?.();
+      unwatchInvocation = undefined;
+    };
 
     const promise = runAgent(ctx, type, prompt, {
       pi,
@@ -819,23 +833,10 @@ export class AgentManager {
         // what the model supports. Writing them back here makes the record
         // authoritative, so every surface reads one place instead of each
         // re-deriving "session, else the request" for itself.
-        if (session.model) {
-          record.invocation ??= {};
-          // Read the kept request first: a caller's level survives being clamped
-          // AND, one line later, being replaced by the effective one.
-          const requested = record.invocation.requestedThinking ?? record.invocation.thinking;
-          Object.assign(record.invocation, describeModel(session.model));
-          // Guarded for the reason above: a session that reports no level keeps
-          // the request rather than losing it. Overwriting unconditionally would
-          // turn an older or stubbed session into a blank `thinking:` tag, which
-          // is worse than the stale-but-true value it replaced.
-          if (session.thinkingLevel) {
-            record.invocation.thinking = session.thinkingLevel;
-            if (requested && requested !== session.thinkingLevel) {
-              record.invocation.requestedThinking = requested;
-            }
-          }
-        }
+        // Read the kept request first: a caller's level survives being clamped
+        // AND, one line later, being replaced by the effective one.
+        const requested = record.invocation?.requestedThinking ?? record.invocation?.thinking;
+        unwatchInvocation = this.watchInvocation(record, session, requested, options.onInvocationChanged);
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
@@ -1173,6 +1174,10 @@ export class AgentManager {
     record.result = undefined;
     record.error = undefined;
 
+    // A resumed prompt goes through `before_agent_start` again.
+    const unwatchInvocation = this.watchInvocation(
+      record, record.session, record.invocation?.requestedThinking, options?.onInvocationChanged,
+    );
     try {
       const { text, failure } = await resumeAgent(record.session, prompt, {
         onToolActivity: (activity) => {
@@ -1201,6 +1206,8 @@ export class AgentManager {
       record.status = "error";
       record.error = err instanceof Error ? err.message : String(err);
       record.completedAt = Date.now();
+    } finally {
+      unwatchInvocation();
     }
 
     // Same contract as the spawn settle paths: children spawned during the
@@ -1216,6 +1223,7 @@ export class AgentManager {
    * a concurrency slot frees. The session already exists (resume reuses it), so
    * there is no onSessionCreated to hang per-run wiring off — callers use
    * `options.onStarted`, which fires on both the immediate and the drained path.
+   * The manager's own per-run wiring (the invocation watch) is torn down in `settle`.
    */
   private startResume(
     id: string,
@@ -1249,10 +1257,14 @@ export class AgentManager {
     // Per-run side effects (output streaming) — see ResumeOptions.onStarted.
     // After the record is in its running shape, before the run is kicked off.
     try { options.onStarted?.(); } catch { /* ignore caller wiring errors */ }
+    const unwatchInvocation = this.watchInvocation(
+      record, record.session, record.invocation?.requestedThinking, options.onInvocationChanged,
+    );
 
     const settle = () => {
       detachParentSignal?.();
       detachParentSignal = undefined;
+      unwatchInvocation();
       // Final flush of streaming output file
       if (record.outputCleanup) {
         try { record.outputCleanup(); } catch { /* ignore */ }
@@ -1306,6 +1318,52 @@ export class AgentManager {
       });
 
     record.promise = promise;
+  }
+
+  /**
+   * Keep `record.invocation` describing what the session actually runs with.
+   *
+   * Read once now, then again at each run and turn boundary: a
+   * `before_agent_start` extension can route the child AFTER the session is
+   * created, and `agent_start` fires after that hook and before the first
+   * provider request. `turn_start` and `agent_end` catch later changes.
+   *
+   * Per run, not per session: the installing run tears it down when it
+   * settles and a resume installs its own, so `onChanged` never fires into a
+   * caller whose run is over — the workflow host's callback updates a row
+   * that is finished by the time the same child is resumed.
+   *
+   * `requested` is kept beside the effective level when they differ and never
+   * overwritten once set (`types.ts`); the renderers compare the two.
+   */
+  private watchInvocation(
+    record: AgentRecord,
+    session: AgentSession,
+    requested: AgentInvocation["thinking"],
+    onChanged: ((invocation: AgentInvocation) => void) | undefined,
+  ): () => void {
+    const refresh = (): boolean => {
+      // Guarded: an older or stubbed session that reports nothing keeps the
+      // request rather than replacing it with a blank `thinking:` tag.
+      if (!session.model) return false;
+      const before = JSON.stringify(record.invocation);
+      record.invocation ??= {};
+      Object.assign(record.invocation, describeModel(session.model));
+      if (session.thinkingLevel) {
+        record.invocation.thinking = session.thinkingLevel;
+        if (requested && requested !== session.thinkingLevel) {
+          record.invocation.requestedThinking = requested;
+        }
+      }
+      return JSON.stringify(record.invocation) !== before;
+    };
+    refresh();
+    // Optional: a stubbed session without `subscribe` keeps the read above.
+    const unsubscribe = session.subscribe?.((event) => {
+      if (event.type !== "agent_start" && event.type !== "turn_start" && event.type !== "agent_end") return;
+      if (refresh() && record.invocation !== undefined) onChanged?.(record.invocation);
+    });
+    return unsubscribe ?? (() => {});
   }
 
   /**
