@@ -162,6 +162,15 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });
 
+  it("round-trips nestedTreeView and drops non-boolean values", () => {
+    saveSettings({ nestedTreeView: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ nestedTreeView: true });
+    saveSettings({ nestedTreeView: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ nestedTreeView: false });
+    writeProject({ nestedTreeView: "on" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips outputTranscript; drops non-boolean", () => {
     saveSettings({ outputTranscript: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ outputTranscript: false });
@@ -545,11 +554,12 @@ describe("settings persistence", () => {
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
+        setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
+        setWorkflowsEnabled: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
         setReportUsage: vi.fn(),
@@ -669,6 +679,17 @@ describe("settings persistence", () => {
       expect(appliers.setViewerMarkdown).toHaveBeenCalledWith("all");
       applySettings({}, appliers);
       expect(appliers.setViewerMarkdown).toHaveBeenCalledTimes(1); // absence is "use default"
+    });
+
+    it("applies nestedTreeView when the UI supplies its live setter", () => {
+      const setNestedTreeView = vi.fn();
+      appliers.setNestedTreeView = setNestedTreeView;
+      applySettings({ nestedTreeView: true }, appliers);
+      applySettings({ nestedTreeView: false }, appliers);
+      applySettings({}, appliers);
+      expect(setNestedTreeView).toHaveBeenNthCalledWith(1, true);
+      expect(setNestedTreeView).toHaveBeenNthCalledWith(2, false);
+      expect(setNestedTreeView).toHaveBeenCalledTimes(2);
     });
 
     it("applies fleetView (true and false); skips it when absent", () => {
@@ -796,11 +817,12 @@ describe("settings persistence", () => {
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
+        setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
         setWorktreeIsolation: vi.fn(),
+        setWorkflowsEnabled: vi.fn(),
         setMaxSubagentDepth: vi.fn(),
         setFallbackSubagent: vi.fn(),
         setReportUsage: vi.fn(),

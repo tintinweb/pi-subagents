@@ -279,6 +279,11 @@ export interface SubagentsSettings {
   showCost?: boolean;
 
   /**
+   * Whether FleetView includes nested children in an indented tree.
+   * Defaults to false so the existing top-level-only roster stays compact.
+   */
+  nestedTreeView?: boolean;
+  /**
    * Whether the widget's running rows name the model driving each agent and the
    * thinking level it is running at.
    *
@@ -332,6 +337,7 @@ export interface SettingsAppliers {
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
   setViewerMarkdown: (mode: ViewerMarkdownMode) => void;
+  setNestedTreeView?: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -448,6 +454,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.viewerMarkdown === "string" && VALID_VIEWER_MARKDOWN_MODES.has(r.viewerMarkdown)) {
     out.viewerMarkdown = r.viewerMarkdown as ViewerMarkdownMode;
   }
+  if (typeof r.nestedTreeView === "boolean") {
+    out.nestedTreeView = r.nestedTreeView;
+  }
   if (typeof r.workflowsEnabled === "boolean") {
     out.workflowsEnabled = r.workflowsEnabled;
   }
@@ -536,6 +545,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
   if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
   if (s.viewerMarkdown) appliers.setViewerMarkdown(s.viewerMarkdown);
+  if (typeof s.nestedTreeView === "boolean") appliers.setNestedTreeView?.(s.nestedTreeView);
   if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
 }
 

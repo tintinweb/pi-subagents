@@ -118,6 +118,7 @@ function harness(
   opts: {
     viewerMarkdown?: () => ViewerMarkdownMode;
     onViewerMarkdown?: (mode: ViewerMarkdownMode) => void;
+    nestedTreeView?: boolean;
   } = {},
 ): Harness {
   let inputHandler: ((data: string) => { consume?: boolean } | undefined) | undefined;
@@ -147,7 +148,8 @@ function harness(
   };
 
   const manager = fakeManager(agents);
-  const fleet = new FleetList(manager, new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown);
+  const fleet = new FleetList(manager, new Map(), undefined, opts.viewerMarkdown, opts.onViewerMarkdown,
+    () => opts.nestedTreeView === true);
   fleet.setUICtx(ui);
   let workflows: FleetWorkflow[] = [];
   const openedWorkflows: string[] = [];
@@ -212,6 +214,35 @@ describe("FleetList navigation", () => {
     const output = h.render().join("\n");
     expect(output).toContain("top-level");
     expect(output).not.toContain("nested-child");
+  });
+
+  it("renders nested children as an indented tree when enabled", () => {
+    const h = harness([
+      makeRecord({ id: "top", description: "top-level", startedAt: 1000 }),
+      makeRecord({ id: "nested", description: "nested-child", parentAgentId: "top", startedAt: 2000 }),
+      makeRecord({ id: "grandchild", description: "grandchild", parentAgentId: "nested", startedAt: 3000 }),
+    ], { nestedTreeView: true });
+    const lines = h.render().join("\n");
+    expect(lines).toContain("nested-child");
+    expect(lines).toContain("grandchild");
+    expect(lines.indexOf("top-level")).toBeLessThan(lines.indexOf("nested-child"));
+    expect(lines.indexOf("nested-child")).toBeLessThan(lines.indexOf("grandchild"));
+    expect(lines).toContain("└─");
+    for (const width of [8, 20, 40]) {
+      for (const line of h.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    }
+  });
+
+  it("keeps nested children of workflow workers inside their workflow", () => {
+    const h = harness([
+      makeRecord({ id: "top", description: "top-level" }),
+      makeRecord({ id: "workflow-worker", description: "workflow worker", workflowId: "wf_abc123" }),
+      makeRecord({ id: "workflow-child", description: "workflow nested child", parentAgentId: "workflow-worker" }),
+    ], { nestedTreeView: true });
+    const output = h.render().join("\n");
+    expect(output).toContain("top-level");
+    expect(output).not.toContain("workflow worker");
+    expect(output).not.toContain("workflow nested child");
   });
 
   it("activates on ↓ at an empty prompt, consuming the key", () => {
@@ -553,6 +584,26 @@ describe("FleetList overlay lifecycle", () => {
     viewer!.handleInput("\r");                       // Enter → send
 
     expect(h.manager.steer).toHaveBeenCalledWith("live", "go left");
+  });
+
+  it("opens a nested tree row in the existing conversation viewer", () => {
+    const h = harness([
+      makeRecord({ id: "top", description: "top-level" }),
+      makeRecord({ id: "nested", description: "nested-child", parentAgentId: "top" }),
+    ], { nestedTreeView: true });
+    h.press(DOWN);  // activate (main)
+    h.press(DOWN);  // → top-level
+    h.press(DOWN);  // → nested child
+    expect(h.render().find(line => line.includes("nested-child"))).toContain("●");
+    h.press(ENTER);
+
+    const viewer = h.overlayComponent();
+    expect(viewer).toBeDefined();
+    viewer!.handleInput("\r");
+    for (const char of "inspect child") viewer!.handleInput(char);
+    viewer!.handleInput("\r");
+
+    expect(h.manager.steer).toHaveBeenCalledWith("nested", "inspect child");
   });
 
   it("hands the viewer the user's markdown setting, and persists a mode chosen with m", () => {

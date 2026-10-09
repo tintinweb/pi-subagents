@@ -1133,10 +1133,14 @@ export default function (pi: ExtensionAPI) {
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  // The last two arguments keep a conversation overlay opened here identical to
-  // one opened from `/agents`: same setting on the way in, same persist out.
+  // The last arguments keep a conversation overlay opened here identical to one
+  // opened from `/agents`, and optionally expose owned nested children as a tree.
+  let nestedTreeView = false;
+  function isNestedTreeViewEnabled(): boolean { return nestedTreeView; }
+  function setNestedTreeViewEnabled(b: boolean): void { nestedTreeView = b; fleet.update(); }
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
-    (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined));
+    (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
+    isNestedTreeViewEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -1426,6 +1430,7 @@ export default function (pi: ExtensionAPI) {
       setShowCost,
       setShowModel,
       setViewerMarkdown,
+      setNestedTreeView: setNestedTreeViewEnabled,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -3475,6 +3480,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
       viewerMarkdown: getViewerMarkdown(),
+      nestedTreeView: isNestedTreeViewEnabled(),
     } satisfies SubagentsSettings;
   }
 
@@ -3657,6 +3663,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
+          id: "nestedTreeView",
+          label: "Nested tree",
+          description: "Show nested children in FleetView with indentation and openable rows",
+          currentValue: isNestedTreeViewEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "agentMentions",
           label: "Agent mentions",
           description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
@@ -3827,6 +3840,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         setFleetViewEnabled(enabled);
         notifyApplied(ctx, `Fleet view ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "nestedTreeView") {
+        const enabled = value === "on";
+        setNestedTreeViewEnabled(enabled);
+        notifyApplied(ctx, `Nested tree ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "agentMentions") {
         const mode = value as AgentMentionMode;
         setAgentMentionMode(mode);

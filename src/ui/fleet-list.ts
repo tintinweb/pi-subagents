@@ -65,7 +65,7 @@ export interface FleetWorkflow {
 }
 
 type MainEntry = { kind: "main" };
-type AgentEntry = { kind: "agent"; record: AgentRecord };
+type AgentEntry = { kind: "agent"; record: AgentRecord; indent: number };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
 
@@ -144,6 +144,8 @@ export class FleetList {
      * point. Omitted → `m` still cycles, viewer-locally.
      */
     private onViewerMarkdown?: (mode: ViewerMarkdownMode) => void,
+    /** Read live so the settings toggle changes the roster without a restart. */
+    private showNestedTree: () => boolean = () => false,
   ) {}
 
   // ---- Lifecycle ----
@@ -246,12 +248,53 @@ export class FleetList {
   private agentRecords(): AgentRecord[] {
     const now = Date.now();
     return this.manager.listAgents()
-      .filter(a => isTopLevelAgent(a) && a.session && (
+      .filter(a => a.session && (
         a.status === "running" || a.status === "queued"
         || a.id === this.viewingAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
       ))
       .sort((a, b) => a.startedAt - b.startedAt);
+  }
+
+  /** Flatten parentAgentId links into a stable, indented display tree. */
+  private agentEntries(): AgentEntry[] {
+    const records = this.agentRecords();
+    if (!this.showNestedTree()) {
+      return records.flatMap(record =>
+        isTopLevelAgent(record) ? [{ kind: "agent" as const, record, indent: 0 }] : []);
+    }
+
+    const recordsById = new Map(this.manager.listAgents().map(record => [record.id, record]));
+    const byParent = new Map<string | undefined, AgentRecord[]>();
+    for (const record of records) {
+      const siblings = byParent.get(record.parentAgentId) ?? [];
+      siblings.push(record);
+      byParent.set(record.parentAgentId, siblings);
+    }
+    for (const siblings of byParent.values()) siblings.sort((a, b) => a.startedAt - b.startedAt);
+
+    const entries: AgentEntry[] = [];
+    const visited = new Set<string>();
+    const visit = (record: AgentRecord, indent: number): void => {
+      if (visited.has(record.id)) return;
+      visited.add(record.id);
+      entries.push({ kind: "agent", record, indent });
+      // Workflow-owned records stay inside their workflow inspector, including
+      // nested children that a workflow worker starts.
+      for (const child of byParent.get(record.id) ?? []) {
+        if (child.workflowId === undefined) visit(child, indent + 1);
+      }
+    };
+
+    // Roots retain the existing launch order. Orphaned nested records render
+    // with one level of indentation only when their parent left the manager.
+    for (const record of records.filter(isTopLevelAgent)) visit(record, 0);
+    for (const record of records) {
+      if (record.parentAgentId !== undefined && !recordsById.has(record.parentAgentId)) {
+        visit(record, 1);
+      }
+    }
+    return entries;
   }
 
   /**
@@ -292,7 +335,7 @@ export class FleetList {
     return [
       { kind: "main" },
       ...this.workflows().map(workflow => ({ kind: "workflow" as const, workflow })),
-      ...this.agentRecords().map(record => ({ kind: "agent" as const, record })),
+      ...this.agentEntries(),
     ];
   }
 
@@ -484,11 +527,11 @@ export class FleetList {
     if (start > 0) lines.push(rightAlign("", theme.fg("dim", `↑ ${start} more`), width));
     for (let a = start; a < start + visible; a++) {
       const row = rows[a];
-      lines.push(
-        row.kind === "workflow" ?
-          this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme)
-        : this.renderAgentRow(a + 1, sel, row.record, width, theme),
-      );
+      if (row.kind === "workflow") {
+        lines.push(this.renderWorkflowRow(a + 1, sel, row.workflow, width, theme));
+      } else {
+        lines.push(this.renderAgentRow(a + 1, sel, row.record, width, theme, row.indent));
+      }
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
     // pi stacks below-editor widgets directly on its footer with no spacer (#351).
@@ -524,7 +567,14 @@ export class FleetList {
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
   }
 
-  private renderAgentRow(rosterIndex: number, sel: number, record: AgentRecord, width: number, theme: Theme): string {
+  private renderAgentRow(
+    rosterIndex: number,
+    sel: number,
+    record: AgentRecord,
+    width: number,
+    theme: Theme,
+    indent = 0,
+  ): string {
     // The selected row renders in the theme's primary text color so it reads as
     // one selection (#230). A configured badge survives — Claude Code's FleetView
     // keeps the agent color on the selected row too and only bolds it — which also
@@ -534,7 +584,8 @@ export class FleetList {
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    const treePrefix = indent > 0 ? `${"  ".repeat(indent - 1)}└─ ` : "";
+    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${treePrefix}${name}  ${description}`;
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it
     // outlives the agent.
