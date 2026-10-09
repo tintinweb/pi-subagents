@@ -41,18 +41,32 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { isSymlink, isUnsafeName, safeReadFile } from "../memory.js";
+import { isPackageResourceExcluded, packageWorkflowDirs, packageWorkflowFiles } from "../package-resources.js";
 import { hasMetaDeclaration } from "./meta.js";
 import { MAX_SCRIPT_LENGTH } from "./runtime.js";
 
 /** Extension a saved workflow file carries. */
 const WORKFLOW_EXTENSION = ".js";
 
-/** The roots a `name` is looked up in, highest priority first. */
+/**
+ * The roots a `name` is looked up in, highest priority first.
+ *
+ * Directories declared by installed pi packages come last, so a project, shared
+ * workspace or personal script always wins the name. That is the same tier
+ * package-provided agents get, and the same tier pi gives package-provided
+ * skills — a package offers a workflow, it never takes a name away from you.
+ *
+ * The `packageWorkflows` gate and pi's project-trust answer are session state in
+ * package-resources.ts rather than parameters here, so a gate set in `/agents`
+ * reaches this without an options bag travelling through `resolveWorkflowScript`,
+ * `resolveWorkflowSource` and `readSavedWorkflow` purely to be consulted once.
+ */
 export function savedWorkflowRoots(cwd: string): string[] {
   return [
     join(cwd, ".pi", "workflows"),
     join(cwd, ".agents", "workflows"),
     join(getAgentDir(), "workflows"),
+    ...packageWorkflowDirs(cwd),
   ];
 }
 
@@ -82,6 +96,9 @@ export function readSavedWorkflow(name: string, cwd: string): SavedWorkflow {
   for (const root of roots) {
     if (isSymlink(root)) continue; // reject a symlinked root entirely, as skill-loader does
     const path = join(root, `${trimmed}${WORKFLOW_EXTENSION}`);
+    // A `!` entry in the declaring package's manifest. Only ever true for a path
+    // under a package root, so the local roots pay one set lookup for it.
+    if (isPackageResourceExcluded(path, cwd, "workflows")) continue;
     const script = safeReadFile(path);
     if (script === undefined) continue;
     // Found the file, so stop looking — a shadowing name that turns out not to
@@ -95,6 +112,25 @@ export function readSavedWorkflow(name: string, cwd: string): SavedWorkflow {
       };
     }
     return { ok: true, script, path };
+  }
+
+  // Last: a package that declared an individual file rather than a directory.
+  // It carries no root to look a name up in, so it is matched by name here
+  // instead — after every root, which keeps package scripts lowest-precedence.
+  const declared = packageWorkflowFiles(cwd).get(trimmed);
+  if (declared !== undefined) {
+    const script = safeReadFile(declared);
+    if (script !== undefined) {
+      if (!hasMetaDeclaration(script)) {
+        return {
+          ok: false,
+          message:
+            `"${declared}" is not a workflow script — it has no \`export const meta = { name, description }\` ` +
+            "declaration. Nothing was run.",
+        };
+      }
+      return { ok: true, script, path: declared };
+    }
   }
 
   const known = listSavedWorkflows(cwd);
@@ -151,8 +187,14 @@ export function listSavedWorkflows(cwd: string): string[] {
       if (!entry.endsWith(WORKFLOW_EXTENSION)) continue;
       const name = entry.slice(0, -WORKFLOW_EXTENSION.length);
       if (isUnsafeName(name)) continue;
-      if (isWorkflowFile(join(root, entry))) names.add(name);
+      const path = join(root, entry);
+      if (isPackageResourceExcluded(path, cwd, "workflows")) continue;
+      if (isWorkflowFile(path)) names.add(name);
     }
+  }
+  for (const [name, path] of packageWorkflowFiles(cwd)) {
+    if (isUnsafeName(name)) continue;
+    if (isWorkflowFile(path)) names.add(name);
   }
   return [...names].sort();
 }
