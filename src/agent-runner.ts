@@ -562,14 +562,18 @@ function getLastAssistantText(session: AgentSession, startIndex = 0): string {
 
 /**
  * Error message of THIS invocation's final assistant message, when that turn
- * failed. Two failure shapes, both keyed off how the final turn STOPPED:
+ * failed. Three failure shapes, all keyed off how the final turn STOPPED:
  *   - stopReason "error": a provider failure pi resolved instead of rejecting
  *     (any text; partial output is surfaced separately).
  *   - stopReason "length" with NO text: a silent max-token death — the run hit
  *     the output-token ceiling before writing anything, which would otherwise
  *     land as a "completed" run with an empty result (the #144 symptom).
- * Everything else completes: a clean "stop"/"toolUse" final, and — crucially — a
- * "length" stop that DID produce text (a legitimate truncated-but-useful answer).
+ *   - any non-"toolUse" stop with NO text: the model ended its final turn
+ *     without writing output — a "stop"/"end_turn" final with an empty text
+ *     block must not report "completed" with a stale fallback answer.
+ * Everything else completes: a "toolUse" stop (never final), and — crucially — a
+ * "length" or "stop" stop that DID produce text (a legitimate truncated or
+ * concluding answer).
  * "aborted" is handled by the manager's abort flag / "stopped" guard, not here.
  * Bounded by `startIndex` (like the text fallback) so a resume that produced no
  * assistant message of its own never inherits a PRIOR turn's stop reason.
@@ -583,6 +587,9 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
     }
     if (msg.stopReason === "length" && !extractText(msg.content).trim()) {
       return "run hit the output token limit before producing any text";
+    }
+    if (msg.stopReason !== "toolUse" && !extractText(msg.content).trim()) {
+      return "run ended without producing any text";
     }
     return undefined;
   }
