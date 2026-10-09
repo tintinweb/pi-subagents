@@ -116,6 +116,7 @@ export function makeActivity(records: { id: string; toolUses: number }[]): Map<s
       r.id,
       {
         activeTools: new Map(),
+        activeToolCalls: new Map(),
         toolUses: r.toolUses,
         responseText: "working on the fixture",
         turnCount: 2,

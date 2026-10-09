@@ -19,7 +19,7 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent, type ToolActivity } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -107,6 +107,7 @@ function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
 function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
   const state: AgentActivity = {
     activeTools: new Map(),
+    activeToolCalls: new Map(),
     toolUses: 0,
     turnCount: 1,
     maxTurns,
@@ -115,12 +116,32 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
   };
 
   const callbacks = {
-    onToolActivity: (activity: { type: "start" | "end"; toolName: string }) => {
+    onToolActivity: (activity: ToolActivity) => {
       if (activity.type === "start") {
-        state.activeTools.set(activity.toolName + "_" + Date.now(), activity.toolName);
+        state.activeTools.set(activity.toolCallId, activity.toolName);
+        state.activeToolCalls.set(activity.toolCallId, {
+          toolName: activity.toolName,
+          args: activity.args,
+          startedAt: Date.now(),
+        });
+      } else if (activity.type === "update") {
+        const call = state.activeToolCalls.get(activity.toolCallId);
+        if (call) {
+          call.args = activity.args;
+          call.partialResult = activity.partialResult;
+        }
       } else {
-        for (const [key, name] of state.activeTools) {
-          if (name === activity.toolName) { state.activeTools.delete(key); break; }
+        if (activity.toolCallId) {
+          state.activeTools.delete(activity.toolCallId);
+          state.activeToolCalls.delete(activity.toolCallId);
+        } else {
+          for (const [key, name] of state.activeTools) {
+            if (name === activity.toolName) {
+              state.activeTools.delete(key);
+              state.activeToolCalls.delete(key);
+              break;
+            }
+          }
         }
         state.toolUses++;
       }

@@ -66,24 +66,28 @@ describe("ConversationViewer — cost stays linear in transcript length", () => 
     return counts.wrap + counts.markdownRender;
   }
 
-  // The viewer rebuilds every line of the transcript on every frame, so the work
-  // is expected to grow with it. What must not happen is growing FASTER than it:
-  // ten times the messages, at most ~ten times the work. A quadratic here is
-  // invisible on a short conversation and locks the TUI on a long one.
-  it("does ~10x the work for 10x the messages (raw wrap path)", () => {
-    const small = wrapsFor(30, "off");
-    const large = wrapsFor(300, "off");
-
-    expect(small).toBeGreaterThan(0);
-    expect(large / small).toBeLessThanOrEqual(11);
+  it("does not re-wrap unchanged raw history on a warm frame", () => {
+    expect(wrapsFor(30, "off")).toBe(0);
+    expect(wrapsFor(300, "off")).toBe(0);
   });
 
-  it("does ~10x the work for 10x the messages (markdown path)", () => {
-    const small = wrapsFor(30, "assistant");
-    const large = wrapsFor(300, "assistant");
+  it("does not re-render unchanged Markdown history on a warm frame", () => {
+    expect(wrapsFor(30, "assistant")).toBe(0);
+    expect(wrapsFor(300, "assistant")).toBe(0);
+  });
 
-    expect(small).toBeGreaterThan(0);
-    expect(large / small).toBeLessThanOrEqual(11);
+  it("keeps cold raw and Markdown rendering linear in transcript length", () => {
+    function coldLeavesFor(n: number, mode: string): number {
+      const before = counts.wrap + counts.markdownRender;
+      mountViewer(ConversationViewer, makeSession(n), undefined, () => mode).render(120);
+      return counts.wrap + counts.markdownRender - before;
+    }
+
+    for (const mode of ["off", "assistant"]) {
+      const small = coldLeavesFor(30, mode);
+      const large = coldLeavesFor(300, mode);
+      expect(large / small).toBeLessThanOrEqual(11);
+    }
   });
 
   // #259's WeakMap is keyed by the message object. If a refactor ever rebuilds
@@ -100,6 +104,209 @@ describe("ConversationViewer — cost stays linear in transcript length", () => 
     viewer.render(120);
 
     expect(counts.markdownNew).toBe(afterFirst);
+  });
+
+  it("rebuilds only the live suffix across tool execution updates", () => {
+    function activeWorkFor(messageCount: number): { leaves: number; messageReads: number } {
+      const session = makeSession(messageCount);
+      session.messages.push({
+        role: "assistant",
+        content: [{ type: "toolCall", id: "live-1", name: "bash", arguments: { command: "sleep 10" } }],
+      } as any);
+      let messageReads = 0;
+      let listener = (_event: unknown) => {};
+      session.messages = new Proxy(session.messages, {
+        get(target, property, receiver) {
+          if (typeof property === "string" && /^\d+$/.test(property)) messageReads++;
+          return Reflect.get(target, property, receiver);
+        },
+      });
+      session.subscribe = (callback: (event: unknown) => void) => {
+        listener = callback;
+        return () => {};
+      };
+      const record = makeFleet({ running: 1 })[0];
+      const activity = {
+        activeTools: new Map([["live-1", "bash"]]),
+        activeToolCalls: new Map([["live-1", {
+          toolName: "bash",
+          args: { command: "sleep 10" },
+          startedAt: Date.now() - 1_000,
+          partialResult: { content: [{ type: "text", text: "quiet build" }] },
+        }]]),
+        toolUses: 1,
+        responseText: "",
+        turnCount: 1,
+      };
+      const viewer = new ConversationViewer(perfTui(), session, record, activity, perfTheme, () => {}, undefined, undefined, undefined, false, () => "off");
+      viewer.render(120);
+      counts.wrap = 0;
+      counts.markdownRender = 0;
+      messageReads = 0;
+      for (let i = 0; i < 10; i++) {
+        listener({
+          type: "tool_execution_update",
+          toolCallId: "live-1",
+          toolName: "bash",
+          args: { command: "sleep 10" },
+          partialResult: { content: [{ type: "text", text: `chunk ${i}` }] },
+        });
+        viewer.render(120);
+      }
+      viewer.dispose();
+      return { leaves: counts.wrap + counts.markdownRender, messageReads };
+    }
+
+    const small = activeWorkFor(1_000);
+    const large = activeWorkFor(5_000);
+    expect(small.leaves).toBeLessThanOrEqual(10);
+    expect(large.leaves).toBe(small.leaves);
+    expect(small.messageReads).toBeLessThanOrEqual(30);
+    expect(large.messageReads).toBe(small.messageReads);
+  });
+
+  it("does not reread completed results during a live output update", () => {
+    let contentReads = 0;
+    const messages: any[] = [];
+    for (let i = 0; i < 60; i++) {
+      messages.push({
+        role: "assistant",
+        content: [{ type: "toolCall", id: `done-${i}`, name: "bash", arguments: { command: "true" } }],
+      });
+      const content = [{ type: "text", text: `completed ${i}\n`.repeat(20) }];
+      const result = { role: "toolResult", toolCallId: `done-${i}` } as any;
+      Object.defineProperty(result, "content", {
+        enumerable: true,
+        get: () => {
+          contentReads++;
+          return content;
+        },
+      });
+      messages.push(result);
+    }
+    messages.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id: "live", name: "bash", arguments: { command: "sleep 10" } }],
+    });
+    let listener = (_event: unknown) => {};
+    const session = {
+      ...makeSession(0),
+      messages,
+      subscribe: (callback: (event: unknown) => void) => {
+        listener = callback;
+        return () => {};
+      },
+    } as any;
+    const record = makeFleet({ running: 1 })[0];
+    const activity = {
+      activeTools: new Map([["live", "bash"]]),
+      activeToolCalls: new Map([["live", {
+        toolName: "bash",
+        args: { command: "sleep 10" },
+        startedAt: Date.now() - 1_000,
+        partialResult: { content: [{ type: "text", text: "first" }] },
+      }]]),
+      toolUses: 61,
+      responseText: "",
+      turnCount: 1,
+    };
+    const viewer = new ConversationViewer(perfTui(), session, record, activity as any, perfTheme, () => {});
+    listener({ type: "tool_execution_start", toolCallId: "live", toolName: "bash", args: { command: "sleep 10" } });
+    viewer.render(120);
+    contentReads = 0;
+
+    listener({
+      type: "tool_execution_update",
+      toolCallId: "live",
+      toolName: "bash",
+      args: { command: "sleep 10" },
+      partialResult: { content: [{ type: "text", text: "first\nsecond" }] },
+    });
+    viewer.render(120);
+    viewer.dispose();
+
+    expect(contentReads).toBe(0);
+  });
+
+  it("reads one live partial result once per dirty frame", () => {
+    let contentReads = 0;
+    let text = "first";
+    const partialResult = {} as any;
+    Object.defineProperty(partialResult, "content", {
+      get: () => {
+        contentReads++;
+        return [{ type: "text", text }];
+      },
+    });
+    const session = makeSession(300);
+    session.messages.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id: "live", name: "bash", arguments: { command: "sleep 10" } }],
+    } as any);
+    const record = makeFleet({ running: 1 })[0];
+    const activity = {
+      activeTools: new Map([["live", "bash"]]),
+      activeToolCalls: new Map([["live", {
+        toolName: "bash",
+        args: { command: "sleep 10" },
+        startedAt: Date.now() - 1_000,
+        partialResult,
+      }]]),
+      toolUses: 1,
+      responseText: "",
+      turnCount: 1,
+    };
+    const viewer = new ConversationViewer(perfTui(), session, record, activity as any, perfTheme, () => {});
+    viewer.render(120);
+    contentReads = 0;
+    text = "second";
+    (viewer as any).contentDirty = true;
+
+    viewer.render(120);
+    viewer.dispose();
+
+    expect(contentReads).toBeLessThanOrEqual(1);
+  });
+
+  it("does not rescan transcript roles for each live event", () => {
+    let roleReads = 0;
+    const messages = Array.from({ length: 5_000 }, (_, i) => {
+      const message = { content: `message ${i}` } as any;
+      Object.defineProperty(message, "role", {
+        get: () => {
+          roleReads++;
+          return "user";
+        },
+      });
+      return message;
+    });
+    let listener = (_event: unknown) => {};
+    const session = {
+      ...makeSession(0),
+      messages,
+      subscribe: (callback: (event: unknown) => void) => {
+        listener = callback;
+        return () => {};
+      },
+    } as any;
+    const viewer = new ConversationViewer(
+      perfTui(), session, makeFleet({ running: 1 })[0], undefined, perfTheme, () => {},
+    );
+    listener({ type: "tool_execution_start", toolCallId: "live", toolName: "bash", args: {} });
+    roleReads = 0;
+
+    for (let i = 0; i < 10; i++) {
+      listener({
+        type: "tool_execution_update",
+        toolCallId: "live",
+        toolName: "bash",
+        args: {},
+        partialResult: { content: [{ type: "text", text: `chunk ${i}` }] },
+      });
+    }
+    viewer.dispose();
+
+    expect(roleReads).toBeLessThanOrEqual(1);
   });
 });
 

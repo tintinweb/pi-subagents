@@ -633,7 +633,7 @@ describe("FleetList cost display", () => {
     // is what the old fallback preferred, so a row that still renders the
     // record's numbers proves the tracker is no longer consulted for spend.
     const tracked = new Map<string, AgentActivity>([["a1", {
-      activeTools: new Map(), toolUses: 0, responseText: "", turnCount: 1,
+      activeTools: new Map(), activeToolCalls: new Map(), toolUses: 0, responseText: "", turnCount: 1,
       lifetimeUsage: { input: 1, output: 1, cacheWrite: 0, cost: 0.9 },
     } as unknown as AgentActivity]]);
 

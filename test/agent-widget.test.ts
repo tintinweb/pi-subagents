@@ -60,6 +60,7 @@ describe("AgentWidget", () => {
   function makeActivity(): AgentActivity {
     return {
       activeTools: new Map(),
+      activeToolCalls: new Map(),
       toolUses: 0,
       responseText: "",
       turnCount: 1,
@@ -288,6 +289,7 @@ describe("AgentWidget cost display", () => {
     // record accumulates a nested child's spend, and only it outlives the run.
     const activity = new Map([["a1", {
       activeTools: new Map(),
+      activeToolCalls: new Map(),
       toolUses: 1,
       responseText: "",
       turnCount: 1,
@@ -373,7 +375,7 @@ describe("AgentWidget cost display", () => {
       lifetimeUsage: { input: 1000, output: 200, cacheWrite: 0, cost: 0.5 }, compactionCount: 0,
     };
     const activity = new Map([["a1", {
-      activeTools: new Map(), toolUses: 0, responseText: "", turnCount: 1,
+      activeTools: new Map(), activeToolCalls: new Map(), toolUses: 0, responseText: "", turnCount: 1,
     } as AgentActivity]]);
     const widget = new AgentWidget({ listAgents: () => [agent] } as any, activity, () => "all");
     let factory: any;
@@ -411,6 +413,7 @@ describe("AgentWidget overflow accounting", () => {
     ];
     const activity = new Map(agents.map(a => [a.id, {
       activeTools: new Map(),
+      activeToolCalls: new Map(),
       toolUses: 0,
       responseText: "",
       turnCount: 1,
@@ -497,6 +500,7 @@ describe("AgentWidget overflow accounting", () => {
     const agent = record("resumed", "completed");
     const activity = new Map([[agent.id, {
       activeTools: new Map(),
+      activeToolCalls: new Map(),
       toolUses: 0,
       responseText: "",
       turnCount: 1,
