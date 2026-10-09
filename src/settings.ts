@@ -89,6 +89,18 @@ export interface SubagentsSettings {
    */
   scopeModels?: boolean;
   /**
+   * Force every fresh subagent session onto one model after resolving caller,
+   * frontmatter, and inherited choices. This policy is independent of the
+   * parent session's model and applies below every spawn surface (top-level,
+   * nested, workflow, scheduler, mentions, and cross-extension RPC).
+   *
+   * A model string uses the same exact/fuzzy resolver as `Agent({ model })`.
+   * An unavailable model fails the spawn before a record is created. `false`
+   * is the project-level escape hatch that overrides a global forced model.
+   * Omitted means no forced model.
+   */
+  forceSubagentModel?: string | false;
+  /**
    * When true, an unreadable or unparseable agent `.md` aborts extension load
    * instead of being skipped with a warning — pi exits, naming the file.
    *
@@ -316,6 +328,7 @@ export interface SettingsAppliers {
   setBackgroundByDefault: (b: boolean) => void;
   setSchedulingEnabled: (b: boolean) => void;
   setScopeModels: (enabled: boolean) => void;
+  setForceSubagentModel: (model: string | undefined) => void;
   setStrictAgentFiles: (b: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
@@ -404,6 +417,11 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.scopeModels === "boolean") {
     out.scopeModels = r.scopeModels;
+  }
+  if (r.forceSubagentModel === false) {
+    out.forceSubagentModel = false;
+  } else if (typeof r.forceSubagentModel === "string" && r.forceSubagentModel.trim()) {
+    out.forceSubagentModel = r.forceSubagentModel.trim();
   }
   if (typeof r.strictAgentFiles === "boolean") {
     out.strictAgentFiles = r.strictAgentFiles;
@@ -523,6 +541,8 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.backgroundByDefault === "boolean") appliers.setBackgroundByDefault(s.backgroundByDefault);
   if (typeof s.schedulingEnabled === "boolean") appliers.setSchedulingEnabled(s.schedulingEnabled);
   if (typeof s.scopeModels === "boolean") appliers.setScopeModels(s.scopeModels);
+  if (typeof s.forceSubagentModel === "string") appliers.setForceSubagentModel(s.forceSubagentModel);
+  else if (s.forceSubagentModel === false) appliers.setForceSubagentModel(undefined);
   if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
@@ -564,6 +584,10 @@ export function applyAndEmitLoaded(
   cwd: string = process.cwd(),
 ): SubagentsSettings {
   const settings = loadSettings(cwd);
+  // Extension modules survive `/reload` in Node's cache. Reset the opt-in
+  // policy before applying the new snapshot so deleting the key really turns
+  // it off instead of retaining the previous activation's forced model.
+  appliers.setForceSubagentModel(undefined);
   applySettings(settings, appliers);
   emit("subagents:settings_loaded", { settings });
   return settings;

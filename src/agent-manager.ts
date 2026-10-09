@@ -20,8 +20,10 @@ import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
+import { getAgentConfig } from "./agent-types.js";
+import { getForcedSubagentModel } from "./forced-model.js";
 import { assignHandle, handleBase } from "./mention.js";
-import { describeModel } from "./model-resolver.js";
+import { describeModel, resolveModel } from "./model-resolver.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
@@ -303,6 +305,58 @@ interface SpawnOptions {
   rootSessionId?: string;
 }
 
+/**
+ * Apply the machine/project forced-model policy at the one funnel every fresh
+ * top-level, nested, workflow, scheduled, mention, and RPC spawn reaches.
+ */
+function withForcedSubagentModel(
+  ctx: ExtensionContext,
+  type: SubagentType,
+  options: SpawnOptions,
+): SpawnOptions {
+  const forcedInput = getForcedSubagentModel();
+  if (!forcedInput) return options;
+
+  const resolved = resolveModel(forcedInput, ctx.modelRegistry);
+  if (typeof resolved === "string") {
+    throw new Error(`Forced subagent model "${forcedInput}" is unavailable.\n\n${resolved}`);
+  }
+  const forcedModel = resolved as Model<any>;
+  const forcedIdentity = describeModel(forcedModel);
+
+  let requestedModel = options.invocation?.requestedModel;
+  if (!requestedModel) {
+    let originalModel = options.model && typeof options.model === "object" ? options.model : undefined;
+    let originalInput = options.invocation?.modelId;
+    if (!originalModel && !originalInput) {
+      const configured = getAgentConfig(type)?.model;
+      if (configured) {
+        const configuredModel = resolveModel(configured, ctx.modelRegistry);
+        if (typeof configuredModel === "string") originalInput = configured;
+        else originalModel = configuredModel as Model<any>;
+      } else {
+        originalModel = ctx.model;
+      }
+    }
+    if (originalModel) {
+      const originalIdentity = describeModel(originalModel);
+      if (originalIdentity.modelId !== forcedIdentity.modelId) requestedModel = originalIdentity.modelId;
+    } else if (originalInput && originalInput !== forcedIdentity.modelId) {
+      requestedModel = originalInput;
+    }
+  }
+
+  return {
+    ...options,
+    model: forcedModel,
+    invocation: {
+      ...options.invocation,
+      ...forcedIdentity,
+      ...(requestedModel ? { requestedModel } : {}),
+    },
+  };
+}
+
 interface ResumeOptions {
   /**
    * Run the resumed turn detached in the background: return immediately with
@@ -493,6 +547,9 @@ export class AgentManager {
     prompt: string,
     options: SpawnOptions,
   ): string {
+    // Force before queueing or record creation: every spawn path reaches this
+    // funnel, and a missing policy model must fail without leaving an orphan.
+    options = withForcedSubagentModel(ctx, type, options);
     // Validate before the queue branch — a queued spawn should fail at the
     // call, not minutes later at drain. Throw (not warn): programmatic callers
     // can fix and retry; the RPC layer converts throws into error envelopes.

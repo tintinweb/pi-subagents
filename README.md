@@ -36,6 +36,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Cross-extension RPC** — other pi extensions can spawn, stop, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results land via the same `subagent-notification` followUp path as manual background completions; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
+- **Forced subagent model** — optional `forceSubagentModel` policy that overrides caller, frontmatter, and parent-inherited model choices at the manager spawn funnel, covering top-level, nested, workflow, scheduled, mention, and cross-extension RPC agents without changing the parent model
 
 ## Install
 
@@ -409,7 +410,7 @@ Launch a sub-agent.
 | `description` | string | yes | Short 3-5 word summary (shown in UI) |
 | `name` | string | no | Memorable name for this agent (`auth-audit`), addressable as `@name` and accepted by `steer_subagent`/`get_subagent_result`. Additive — the type-derived handle is still assigned |
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
-| `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback |
+| `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback. Recorded but overridden when `forceSubagentModel` is configured |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
 | `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Defaults to `true`; `false` blocks and returns the result inline |
@@ -608,14 +609,36 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 **No-op safety:** if `enabledModels` is missing or empty in pi's settings, scope check skips entirely — no false positives, no spurious errors.
 
+## Forced Subagent Model
+
+`forceSubagentModel` is a separate, stronger policy for installations where the parent may use one model but every delegated child must use another. Configure it in global or project `subagents.json`:
+
+```json
+{
+  "forceSubagentModel": "openrouter/~anthropic/claude-opus-latest"
+}
+```
+
+The value uses the ordinary exact/fuzzy model resolver. It is applied inside `AgentManager.spawn`, after caller/frontmatter/inherited selection and before queueing or record creation. That one funnel covers fresh top-level, nested, workflow, scheduled, `@mention`, manager-registry, and cross-extension RPC spawns. If the forced model is unavailable or unauthenticated, the spawn fails before an agent record is created; it never falls back to the parent. The requested model is retained in invocation metadata so model surfaces can show what was overridden.
+
+The setting does not change the parent session model. It is config-only rather than a `/agents` toggle because changing it while agents are live would produce a mixed fleet; edit the file, let useful agents finish, then reload the parent session. A project can explicitly clear a machine-wide policy with:
+
+```json
+{
+  "forceSubagentModel": false
+}
+```
+
+Existing child sessions keep the model they were created with. Agents spawned after the next extension load use the forced model; their later resumes therefore remain on it.
+
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. The config-only `forceSubagentModel` policy is preserved when the menu writes another setting. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled, no forced model). `forceSubagentModel: false` explicitly clears a global forced model for one project.
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
@@ -960,7 +983,8 @@ src/
   invocation-config.ts # Shared tool-parameter schemas (isolation, join, thinking, ...)
   model-resolver.ts   # Model resolution: exact provider/modelId with fuzzy fallback
   enabled-models.ts   # Read pi's enabledModels settings (project over global)
-  model-scope.ts      # scopeModels allowlist policy, shared by top-level and nested tools
+  model-scope.ts      # scopeModels allowlist policy shared by tool-facing spawn paths
+  forced-model.ts     # Global exact-model coercion read by the AgentManager spawn funnel
   mention.ts          # `@handle message` grammar: suggestion triggers and send parsing
   mention-clone.ts    # Run a mention's turn in a cloned conversation, off the main chat
   cross-extension-rpc.ts # RPC handlers for cross-extension spawn/ping via pi.events

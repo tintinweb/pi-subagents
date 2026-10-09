@@ -24,6 +24,7 @@ import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, get
 import { inChildSessionContext } from "./child-context.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
+import { getForcedSubagentModel, setForcedSubagentModel } from "./forced-model.js";
 import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
@@ -1370,7 +1371,11 @@ export default function (pi: ExtensionAPI) {
 
     return available.map((name) => {
       const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
+      const forcedModel = getForcedSubagentModel();
+      const modelInput = forcedModel ?? cfg?.model;
+      const modelSuffix = modelInput
+        ? ` (${getModelLabelFromConfig(modelInput)}${forcedModel ? ", forced" : ""})`
+        : "";
       const toolsSuffix = ` (Tools: ${formatToolsSuffix(cfg)})`;
       return `- ${name}: ${cfg?.description ?? name}${modelSuffix}${toolsSuffix}`;
     }).join("\n");
@@ -1410,6 +1415,7 @@ export default function (pi: ExtensionAPI) {
       setBackgroundByDefault,
       setSchedulingEnabled,
       setScopeModels: setScopeModelsEnabled,
+      setForceSubagentModel: setForcedSubagentModel,
       setStrictAgentFiles: (b) => { strictAgentFiles = b; },
       setDisableDefaultAgents: setDisableDefaultAgents,
       setToolDescriptionMode: setToolDescriptionMode,
@@ -1510,7 +1516,9 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - Use steer_subagent to send mid-run messages to a running background agent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
+${getForcedSubagentModel()
+    ? `- Every subagent is forced to ${getForcedSubagentModel()}; caller and agent-file model choices are recorded but cannot override it.`
+    : `- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").`}
 - Use thinking to control extended thinking level.
 - Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
 
@@ -1607,8 +1615,9 @@ Terse command-style prompts produce shallow, generic work.
       }),
       model: Type.Optional(
         Type.String({
-          description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+          description: getForcedSubagentModel()
+            ? `Ignored by policy: every subagent uses ${getForcedSubagentModel()}. The requested value is retained for audit/display.`
+            : 'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
         }),
       ),
       thinking: Type.Optional(
@@ -2880,6 +2889,8 @@ Terse command-style prompts produce shallow, generic work.
   // through `registerCommand`, which every test mocks.
 
   function getModelLabel(type: string, registry?: ModelRegistry): string {
+    const forcedModel = getForcedSubagentModel();
+    if (forcedModel) return `${getModelLabelFromConfig(forcedModel)} (forced)`;
     const cfg = getAgentConfig(type);
     if (!cfg?.model) return "inherit"; // no model configured → really inherits parent
     const label = getModelLabelFromConfig(cfg.model);
@@ -3448,6 +3459,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
       scopeModels: isScopeModelsEnabled(),
+      forceSubagentModel: getForcedSubagentModel() ?? false,
       strictAgentFiles,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),

@@ -72,13 +72,19 @@ describe("settings persistence", () => {
   });
 
   it("merges global + project with project winning on conflicts", () => {
-    writeGlobal({ maxConcurrent: 16, graceTurns: 10, defaultJoinMode: "async" });
-    writeProject({ maxConcurrent: 4, defaultMaxTurns: 50 });
+    writeGlobal({
+      maxConcurrent: 16,
+      graceTurns: 10,
+      defaultJoinMode: "async",
+      forceSubagentModel: "openrouter/~anthropic/claude-opus-latest",
+    });
+    writeProject({ maxConcurrent: 4, defaultMaxTurns: 50, forceSubagentModel: false });
     expect(loadSettings(projectDir)).toEqual({
       maxConcurrent: 4, // project wins
       graceTurns: 10, // from global
       defaultJoinMode: "async", // from global
       defaultMaxTurns: 50, // from project only
+      forceSubagentModel: false, // explicit project escape hatch
     });
   });
 
@@ -218,6 +224,17 @@ describe("settings persistence", () => {
     saveSettings({ showModel: false }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ showModel: false });
     writeProject({ showModel: "on" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("round-trips forceSubagentModel and its project-level false override", () => {
+    saveSettings({ forceSubagentModel: "  openrouter/~anthropic/claude-opus-latest  " }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({
+      forceSubagentModel: "openrouter/~anthropic/claude-opus-latest",
+    });
+    saveSettings({ forceSubagentModel: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ forceSubagentModel: false });
+    writeProject({ forceSubagentModel: "   " });
     expect(loadSettings(projectDir)).toEqual({});
   });
 
@@ -540,12 +557,13 @@ describe("settings persistence", () => {
         setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setForceSubagentModel: vi.fn(),
         setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
+        setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
@@ -589,6 +607,15 @@ describe("settings persistence", () => {
       expect(appliers.setShowModel).toHaveBeenCalledWith(false);
     });
 
+    it("applies and clears forceSubagentModel", () => {
+      applySettings({ forceSubagentModel: "openrouter/~anthropic/claude-opus-latest" }, appliers);
+      expect(appliers.setForceSubagentModel)
+        .toHaveBeenCalledWith("openrouter/~anthropic/claude-opus-latest");
+
+      applySettings({ forceSubagentModel: false }, appliers);
+      expect(appliers.setForceSubagentModel).toHaveBeenCalledWith(undefined);
+    });
+
     it("is a no-op on an empty settings object", () => {
       applySettings({}, appliers);
       expect(appliers.setReportUsage).not.toHaveBeenCalled();
@@ -599,6 +626,7 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
       expect(appliers.setSchedulingEnabled).not.toHaveBeenCalled();
       expect(appliers.setScopeModels).not.toHaveBeenCalled();
+      expect(appliers.setForceSubagentModel).not.toHaveBeenCalled();
       expect(appliers.setDisableDefaultAgents).not.toHaveBeenCalled();
       expect(appliers.setToolDescriptionMode).not.toHaveBeenCalled();
     });
@@ -630,6 +658,7 @@ describe("settings persistence", () => {
           defaultJoinMode: "group",
           schedulingEnabled: false,
           scopeModels: true,
+          forceSubagentModel: "openrouter/~anthropic/claude-opus-latest",
           disableDefaultAgents: true,
           toolDescriptionMode: "compact",
           fleetView: false,
@@ -643,6 +672,8 @@ describe("settings persistence", () => {
       expect(appliers.setDefaultJoinMode).toHaveBeenCalledWith("group");
       expect(appliers.setSchedulingEnabled).toHaveBeenCalledWith(false);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(true);
+      expect(appliers.setForceSubagentModel)
+        .toHaveBeenCalledWith("openrouter/~anthropic/claude-opus-latest");
       expect(appliers.setStrictAgentFiles).not.toHaveBeenCalled();  // absent from this snapshot
       expect(appliers.setDisableDefaultAgents).toHaveBeenCalledWith(true);
       expect(appliers.setToolDescriptionMode).toHaveBeenCalledWith("compact");
@@ -791,12 +822,13 @@ describe("settings persistence", () => {
         setBackgroundByDefault: vi.fn(),
         setSchedulingEnabled: vi.fn(),
         setScopeModels: vi.fn(),
+        setForceSubagentModel: vi.fn(),
         setStrictAgentFiles: vi.fn(),
         setDisableDefaultAgents: vi.fn(),
         setToolDescriptionMode: vi.fn(),
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
-      setRememberAgents: vi.fn(),
+        setRememberAgents: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
@@ -835,11 +867,29 @@ describe("settings persistence", () => {
 
       expect(emit).toHaveBeenCalledWith("subagents:settings_loaded", { settings: {} });
       expect(result).toEqual({});
-      // No setters fired — defaults preserved
+      // Ordinary defaults stay untouched; the module-global forced model is
+      // explicitly reset because Node keeps extension modules across /reload.
       expect(appliers.setMaxConcurrent).not.toHaveBeenCalled();
       expect(appliers.setDefaultMaxTurns).not.toHaveBeenCalled();
       expect(appliers.setGraceTurns).not.toHaveBeenCalled();
       expect(appliers.setDefaultJoinMode).not.toHaveBeenCalled();
+      expect(appliers.setForceSubagentModel).toHaveBeenCalledOnce();
+      expect(appliers.setForceSubagentModel).toHaveBeenCalledWith(undefined);
+    });
+
+    it("clears a cached forced model before applying each loaded snapshot", () => {
+      const emit = vi.fn();
+      writeGlobal({ forceSubagentModel: "openrouter/~anthropic/claude-opus-latest" });
+
+      applyAndEmitLoaded(appliers, emit, projectDir);
+      expect(vi.mocked(appliers.setForceSubagentModel).mock.calls).toEqual([
+        [undefined],
+        ["openrouter/~anthropic/claude-opus-latest"],
+      ]);
+
+      writeGlobal({});
+      applyAndEmitLoaded(appliers, emit, projectDir);
+      expect(appliers.setForceSubagentModel).toHaveBeenLastCalledWith(undefined);
     });
   });
 
