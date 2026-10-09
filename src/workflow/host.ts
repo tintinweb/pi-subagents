@@ -117,18 +117,26 @@ function resolvedInfo(record: AgentRecord | undefined) {
   };
 }
 
-function toSpawnResult(record: AgentRecord): WorkflowSpawnResult {
-  const tokens = getLifetimeTotal(record.lifetimeUsage);
-  // Reported separately from `tokens`, which is the lifetime total. The script's
-  // `budget` counts *output* tokens, as Claude Code's does — billing the input
-  // and cache reads a fan-out re-sends would over-report it by an order of
-  // magnitude and make the documented guards useless.
-  const outputTokens = record.lifetimeUsage?.output ?? 0;
+/** Counters for this invocation, excluding earlier turns when resuming a child. */
+function usageSince(
+  record: AgentRecord,
+  baseline?: Pick<WorkflowSpawnResult, "tokens" | "outputTokens" | "toolCalls">,
+) {
+  return {
+    tokens: getLifetimeTotal(record.lifetimeUsage) - (baseline?.tokens ?? 0),
+    // The script's budget counts output, not input or cache reads.
+    outputTokens: (record.lifetimeUsage?.output ?? 0) - (baseline?.outputTokens ?? 0),
+    toolCalls: record.toolUses - (baseline?.toolCalls ?? 0),
+  };
+}
+
+function toSpawnResult(record: AgentRecord, baseline?: ReturnType<typeof usageSince>): WorkflowSpawnResult {
+  const { tokens, outputTokens, toolCalls } = usageSince(record, baseline);
   const cwd = childCwd(record);
   const common = {
     ...(tokens > 0 ? { tokens } : {}),
     ...(outputTokens > 0 ? { outputTokens } : {}),
-    ...(record.toolUses > 0 ? { toolCalls: record.toolUses } : {}),
+    ...(toolCalls > 0 ? { toolCalls } : {}),
     ...(cwd !== undefined ? { cwd } : {}),
   };
 
@@ -268,6 +276,10 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         const info = resolvedInfo(manager.getRecord(spawnedId));
         if (info !== undefined) request.onResolved?.(info);
       };
+      const reportProgress = () => {
+        const record = spawnedId === undefined ? undefined : manager.getRecord(spawnedId);
+        if (record !== undefined) request.onProgress?.(usageSince(record));
+      };
       const command = request.gate;
       /**
        * Verify the child's work while its worktree still exists.
@@ -327,6 +339,8 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             // Fires once the child's session exists, which is where the model
             // and the clamped thinking level first become knowable.
             onSessionCreated: () => { sessionReady = true; reportResolved(); },
+            onToolActivity: activity => { if (activity.type === "end") reportProgress(); },
+            onAssistantUsage: reportProgress,
             ...(request.schema !== undefined ? { structuredOutput: request.schema } : {}),
             ...(request.isolation !== undefined ? { isolation: request.isolation } : {}),
             ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
@@ -343,6 +357,8 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             // would otherwise never be openable at all.
             request.onResolved?.({ recordId: id });
             reportResolved();
+            // Also catches events fired synchronously before the id was handed back.
+            reportProgress();
           },
         );
         return { ...toSpawnResult(record), ...(gate !== undefined ? { gate } : {}) };
@@ -361,12 +377,21 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       if (id !== undefined) manager.abort(id);
     },
 
-    async resumeAgent(agentId, prompt, onResolved) {
+    async resumeAgent(agentId, prompt, onResolved, onProgress) {
       const id = records.get(agentId);
       if (id === undefined) {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
       }
-      const record = await manager.resume(id, prompt, deps.signal);
+      const previous = manager.getRecord(id);
+      const baseline = previous === undefined ? undefined : usageSince(previous);
+      const reportProgress = () => {
+        const current = manager.getRecord(id);
+        if (current !== undefined) onProgress?.(usageSince(current, baseline));
+      };
+      const record = await manager.resume(id, prompt, deps.signal, {
+        onToolActivity: activity => { if (activity.type === "end") reportProgress(); },
+        onAssistantUsage: reportProgress,
+      });
       if (record === undefined) {
         return {
           ok: false,
@@ -381,7 +406,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       onResolved?.({ recordId: id });
       const info = resolvedInfo(record);
       if (info !== undefined) onResolved?.(info);
-      return toSpawnResult(record);
+      return toSpawnResult(record, baseline);
     },
 
     /**

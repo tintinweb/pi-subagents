@@ -501,6 +501,8 @@ Send a steering message to a running agent. The message interrupts after the cur
 
 The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, with `⏎` now expanding the prompt and `esc` going back a level rather than closing. `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. The dialog opens as a centered overlay, like the conversation viewer an agent row opens; the frame sizes itself to what it holds, between six rows and twenty-two, so a three-agent run is not twenty rows of nothing and a two-hundred-agent one scrolls inside the pane. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
 
+Workflow token and completed-tool counters update while children run, including resumed children. Tokens advance on finalized assistant `message_end` usage, not streaming estimates. Each resume row counts only its continuation; retry rows include the spend of earlier attempts once. **Activity** shows a tool-call count, not a tool transcript.
+
 The run itself takes five keys, and the footer offers each only while it can actually do something:
 
 | Key | What it does |
