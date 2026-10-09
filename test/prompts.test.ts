@@ -6,12 +6,21 @@ import type { AgentConfig, EnvInfo } from "../src/types.js";
 const env: EnvInfo = {
   isGitRepo: true,
   branch: "main",
+  vcs: "git",
   platform: "darwin",
 };
 
 const envNoGit: EnvInfo = {
   isGitRepo: false,
   branch: "",
+  platform: "linux",
+};
+
+const envJj: EnvInfo = {
+  isGitRepo: false,
+  branch: "",
+  vcs: "jj",
+  change: "abc12345 agent work",
   platform: "linux",
 };
 
@@ -33,11 +42,19 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("darwin");
   });
 
-  it("handles non-git repos", () => {
+  it("handles directories without version control", () => {
     const config = getDefaultConfig("Explore");
     const prompt = buildAgentPrompt(config, "/workspace", envNoGit);
-    expect(prompt).toContain("Not a git repository");
+    expect(prompt).toContain("Not a version-controlled repository");
     expect(prompt).not.toContain("Branch:");
+  });
+
+  it("includes jj working-copy information", () => {
+    const config = getDefaultConfig("Explore");
+    const prompt = buildAgentPrompt(config, "/workspace", envJj);
+    expect(prompt).toContain("Jujutsu repository: yes");
+    expect(prompt).toContain("Working copy: abc12345 agent work");
+    expect(prompt).not.toContain("Not a version-controlled repository");
   });
 
   it("Explore prompt is read-only", () => {
@@ -414,20 +431,37 @@ describe("buildAgentPrompt", () => {
       }
     });
 
-    it("names the parent checkout and follows the env block in both modes", () => {
+    it("describes a Git worktree and follows the env block in both modes", () => {
       for (const promptMode of ["replace", "append"] as const) {
         const prompt = buildAgentPrompt(worktreeConfig(promptMode), "/wt/copy", env, "Parent.", {
           worktreeBase: "/repo",
+          worktreeBackend: "git",
         });
-        expect(prompt).toContain("isolated git worktree copy of /repo");
+        expect(prompt).toContain("isolated Git worktree copy of /repo");
         expect(prompt).toContain("never in /repo, even if other instructions name that path");
+        expect(prompt).not.toContain("Git commands do not work");
         expect(prompt.indexOf("<worktree_isolation>")).toBeGreaterThan(prompt.indexOf("Working directory: /wt/copy"));
+      }
+    });
+
+    it("describes a Jujutsu workspace and rejects Git commands in both modes", () => {
+      for (const promptMode of ["replace", "append"] as const) {
+        const prompt = buildAgentPrompt(worktreeConfig(promptMode), "/wt/copy", envJj, "Parent.", {
+          worktreeBase: "/repo",
+          worktreeBackend: "jj",
+        });
+        expect(prompt).toContain("isolated Jujutsu workspace created from /repo");
+        expect(prompt).toContain("Use jj for version-control operations");
+        expect(prompt).toContain("Git commands do not work inside this workspace");
+        expect(prompt).toContain("shares its repository and operation log with the main checkout");
+        expect(prompt).toContain("do not rewrite or abandon changes outside this workspace's own work");
       }
     });
 
     it("stays out of the cacheable inherited prefix", () => {
       const prompt = buildAgentPrompt(worktreeConfig("append"), "/wt/copy", env, "Parent prompt.", {
         worktreeBase: "/repo",
+        worktreeBackend: "git",
       });
       expect(prompt.startsWith("Parent prompt.")).toBe(true);
       expect(prompt.indexOf("<worktree_isolation>")).toBeGreaterThan(prompt.indexOf("<sub_agent_context>"));

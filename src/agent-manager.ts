@@ -11,7 +11,8 @@
  * charging it to the background pool would let a saturated pool starve the main
  * session of work it could have done itself. Excess agents in either pool are
  * queued and auto-started as slots free up. Nested children take no slot in
- * either — see `occupiesPoolSlot` / `occupiesForegroundSlot`.
+ * either — see `occupiesPoolSlot` / `occupiesForegroundSlot`. Isolated spawns
+ * use the configured Git worktree or Jujutsu workspace backend.
  */
 
 import { randomUUID } from "node:crypto";
@@ -22,10 +23,10 @@ import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-wor
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
+import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationBackend, IsolationMode, MentionResolution, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
-import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -232,15 +233,15 @@ interface SpawnOptions {
    * compiled schema. Set only by the workflow host, for `agent({ schema })`.
    */
   structuredOutput?: CompiledSchema;
-  /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
+  /** Isolation mode — "worktree" creates a temporary isolated repository workspace. */
   isolation?: IsolationMode;
   /**
    * Working directory for the agent (absolute path). Default: parent session
    * cwd. The agent's tools operate here, but .pi config (extensions, skills,
    * settings, memory) still loads from the parent session's project — the
    * target directory's `.pi` extensions never execute. With isolation:
-   * "worktree", the worktree is created FROM this directory and the result
-   * branch lands in that repo.
+   * "worktree", the workspace is created FROM this directory and the result
+   * branch/bookmark lands in that repository.
    */
   cwd?: string;
   /**
@@ -368,6 +369,7 @@ export class AgentManager {
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private maxConcurrent: number;
+  private isolationBackend: IsolationBackend = "auto";
   private maxConcurrentForeground = DEFAULT_MAX_CONCURRENT_FOREGROUND;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
@@ -438,6 +440,14 @@ export class AgentManager {
 
   getMaxConcurrent(): number {
     return this.maxConcurrent;
+  }
+
+  setIsolationBackend(backend: IsolationBackend): void {
+    this.isolationBackend = backend;
+  }
+
+  getIsolationBackend(): IsolationBackend {
+    return this.isolationBackend;
   }
 
   /** Update the max concurrent foreground (blocking) agents limit. 0 = unlimited. */
@@ -678,11 +688,11 @@ export class AgentManager {
     const baseCwd = customCwd ?? ctx.cwd;
 
     // Take the running state — and with it the concurrency slot — BEFORE the
-    // first await. Creating a worktree is an awaited git call, and drainQueue
-    // reads the pool counters synchronously in a loop: incrementing after the
-    // await would let it start every queued agent at once while the first is
-    // still copying its repo. Claiming "running" here also keeps abort() and
-    // abortAll() able to reach an agent whose worktree is still being created.
+    // first await. Creating a workspace is an awaited repository command, and
+    // drainQueue reads the pool counters synchronously in a loop: incrementing
+    // after the await would let it start every queued agent at once while the
+    // first is still copying its repository. Claiming "running" here also keeps
+    // abort() and abortAll() able to reach an agent during workspace creation.
     //
     // The pool is resolved ONCE, here, and carried to `settleRun` below:
     // `poolFor` reads `maxConcurrentForeground`, which the user can change from
@@ -702,20 +712,25 @@ export class AgentManager {
     if (pool === "background") this.runningBackground++;
     else if (pool === "foreground") this.runningForeground++;
 
-    // Worktree isolation: try to create a temporary git worktree. Strict —
-    // fail loud if not possible (no silent fallback to main tree). Done BEFORE
-    // the run is kicked off so a failure doesn't leave a half-running agent.
-    // The project switch is enforced here as well as at the tool boundary
-    // because cross-extension RPC forwards its options unvalidated — a schema
-    // that omits the field can't stop a caller that never saw the schema.
+    // Worktree isolation is strict: fail loud instead of silently running in
+    // the main tree. The configured backend resolves inside createWorktree;
+    // `auto` chooses the nearest repo and prefers jj at a colocated root. The
+    // project switch is enforced here too because RPC callers bypass the tool
+    // schema that omits `isolation` when worktrees are disabled.
     let worktreeCwd: string | undefined;
     if (options.isolation === "worktree" && isWorktreeIsolationEnabled()) {
-      const wt = await createWorktree(pi, baseCwd, id);
+      const wt = await createWorktree(pi, baseCwd, id, this.isolationBackend);
       if (!wt) {
         releaseSlot();
+        const backend = this.isolationBackend;
+        const requirement = backend === "jj"
+          ? "a Jujutsu repository with at least one committed change and a working `jj workspace add`"
+          : backend === "git"
+            ? "a Git repository with at least one commit and a working `git worktree add`"
+            : "a Jujutsu or Git repository with at least one committed change";
         throw new Error(
-          'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
-          'Initialize git and commit at least once, or omit `isolation`.',
+          `Cannot run with isolation: "worktree" using backend "${backend}" — requires ${requirement}. ` +
+          "Initialize the selected repository backend, fix workspace creation, or omit `isolation`.",
         );
       }
       record.worktree = wt;
@@ -779,6 +794,7 @@ export class AgentManager {
       // Set iff a worktree was created (see above) — names the directory the
       // copy came from, so the prompt can tell the agent not to work there.
       worktreeBase: worktreeCwd ? baseCwd : undefined,
+      worktreeBackend: record.worktree?.backend,
       configCwd: options.configCwd ?? (customCwd !== undefined ? ctx.cwd : undefined),
       signal: record.abortController!.signal,
       onToolActivity: (activity) => {
@@ -890,15 +906,31 @@ export class AgentManager {
           }
           const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
           record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
-            // With a caller-supplied cwd the branch lives in THAT repo, not the
-            // parent session's — say so, or the orchestrator merges in the wrong repo.
-            const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
-            // Appended to the prose only. A structured child's caller parses
-            // `structuredJson`, which stays untouched — but `result` is also
-            // what a human reads, so the note still belongs on it.
+          // Appended to the prose only. A structured child's caller parses
+          // `structuredJson`, which stays untouched — but `result` is also
+          // what a human reads, so the note still belongs on it.
+          const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
+          const commandNote = customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : "";
+          if (wtResult.hasChanges && wtResult.ref && wtResult.refKind) {
+            const integrate = wtResult.backend === "jj"
+              ? `jj new @ ${wtResult.ref}`
+              : `git merge ${wtResult.ref}`;
+            const warnings = [
+              wtResult.baseDrifted ? "the jj base changed while the agent was running" : undefined,
+              wtResult.hasConflicts ? "the bookmark contains conflicts" : undefined,
+            ].filter(Boolean);
+            const warning = warnings.length > 0
+              ? ` Warning: ${warnings.join(" and ")}.` +
+                (wtResult.hasConflicts ? " Resolve the conflicts before integrating." : "") +
+                ` Inspect with: \`jj log -r ${wtResult.ref}\`.`
+              : "";
             record.result = (record.result ?? "") +
-              `\n\n---\nChanges saved to branch \`${wtResult.branch}\`${repoNote}. Merge with: \`git merge ${wtResult.branch}\`${customCwd !== undefined ? ` (run in \`${baseCwd}\`)` : ""}`;
+              `\n\n---\nChanges saved to ${wtResult.refKind} \`${wtResult.ref}\`${repoNote}.${warning} ` +
+              `Integrate with: \`${integrate}\`${commandNote}`;
+          } else if (wtResult.hasChanges && wtResult.error) {
+            record.result = (record.result ?? "") +
+              `\n\n---\nCould not preserve the isolated ${wtResult.backend} workspace as a ref: ${wtResult.error}. ` +
+              `Changes remain at \`${wtResult.path ?? record.worktree.path}\`.`;
           }
         }
 
@@ -1563,13 +1595,13 @@ export class AgentManager {
     this.agents.clear();
     this.startups.clear();
     if (pi) {
-      // Prune any orphaned git worktrees (crash recovery). Detached: dispose runs
-      // on the shutdown path, which cannot wait for git. Started before the awaited
-      // shutdown below rather than after it, so the git calls have that window to
-      // finish in instead of racing the process exit that follows.
+      // Prune orphaned Git worktrees and plugin-created jj workspaces. Detached:
+      // dispose runs on the shutdown path, which cannot wait for repository
+      // commands. Start before the awaited shutdown below so pruning has that
+      // window to finish instead of racing the process exit that follows.
       const prune = (repo: string) => { pruneWorktrees(pi, repo).catch(() => {}); };
       prune(process.cwd());
-      // Also prune repos that caller-supplied cwds created worktrees in — a clean
+      // Also prune repos that caller-supplied cwds created workspaces in — a clean
       // exit with in-flight agents would otherwise leave stale registrations there.
       for (const repo of this.worktreeRepos) prune(repo);
     }
@@ -1577,5 +1609,6 @@ export class AgentManager {
     // handler and the process exits right after it returns, so anything left unawaited
     // here never runs at all. Bounded — each call carries its own ceiling, concurrently.
     await Promise.all(sessions.map(session => shutdownChildSession(session)));
+
   }
 }

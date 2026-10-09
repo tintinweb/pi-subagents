@@ -474,7 +474,7 @@ describe("createWorkflowHost — worktree cwd propagation", () => {
 
   it("reports the directory the child ran in, so a gate verifies that tree", async () => {
     const stub = stubManager(() =>
-      record({ worktree: { path: worktree, branch: "b", baseSha: "sha", workPath: worktree } }),
+      record({ worktree: { backend: "git", path: worktree, ref: "b", baseRevision: "sha", workPath: worktree } }),
     );
     const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
 
@@ -490,7 +490,7 @@ describe("createWorkflowHost — worktree cwd propagation", () => {
     const gone = join(worktree, "already-removed");
     expect(existsSync(gone)).toBe(false);
     const stub = stubManager(() =>
-      record({ worktree: { path: gone, branch: "b", baseSha: "sha", workPath: gone } }),
+      record({ worktree: { backend: "git", path: gone, ref: "b", baseRevision: "sha", workPath: gone } }),
     );
     const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
 

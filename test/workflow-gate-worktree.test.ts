@@ -57,16 +57,16 @@ interface ExecResult {
 }
 
 /**
- * A `pi` whose `exec` runs git for real and answers anything else — i.e. a gate
- * command — from `gate`, recording what the directory looked like at that
- * instant. Sampling inside the call is the point: afterwards the worktree is
- * gone, so a post-hoc `existsSync` would prove nothing either way.
+ * A `pi` whose `exec` runs repository commands for real and answers anything
+ * else — i.e. a gate command — from `gate`, recording what the directory looked
+ * like at that instant. Sampling inside the call is the point: afterwards the
+ * worktree is gone, so a post-hoc `existsSync` would prove nothing either way.
  */
 function makePi(gate: (command: string) => ExecResult | Promise<ExecResult> = () => execOk("3 passing")) {
   const gateRuns: GateRun[] = [];
   const exec = vi.fn(
     async (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => {
-      if (command === "git") {
+      if (command === "git" || command === "jj") {
         try {
           const stdout = execFileSync(command, args, {
             cwd: options?.cwd,
@@ -100,6 +100,7 @@ function initRepo(): string {
   execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
   execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir, stdio: "pipe" });
   execFileSync("git", ["config", "user.name", "Test"], { cwd: dir, stdio: "pipe" });
+  execFileSync("git", ["config", "commit.gpgsign", "false"], { cwd: dir, stdio: "pipe" });
   writeFileSync(join(dir, "README.md"), "# gate");
   execFileSync("git", ["add", "README.md"], { cwd: dir, stdio: "pipe" });
   execFileSync("git", ["commit", "-m", "initial"], { cwd: dir, stdio: "pipe" });
@@ -341,7 +342,8 @@ describe("an isolated child with no gate", () => {
     const record = manager.listAgents()[0];
     expect(record.worktreeResult?.hasChanges).toBe(true);
     // The child's file survives the copy's removal, on the branch.
-    const branch = record.worktreeResult!.branch!;
+    expect(record.worktreeResult).toMatchObject({ backend: "git", refKind: "branch" });
+    const branch = record.worktreeResult!.ref!;
     const files = execFileSync("git", ["show", "--name-only", "--format=", branch], {
       cwd: repo,
       encoding: "utf-8",

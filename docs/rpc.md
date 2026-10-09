@@ -18,13 +18,13 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 | `name` | string | A memorable second handle (`@auth-audit`). Slugged, never validated — anything unusable degrades rather than failing the spawn |
 | `model` | `Model` **or** `"provider/modelId"` | Strings are resolved at the RPC boundary against `ctx.modelRegistry`. `null` means inherit, not override. Resolution is fuzzy — see [Model Scope](../README.md#model-scope) |
 | `maxTurns` | number | Turn ceiling for the run |
-| `isolated` | boolean | Strips extensions, skills and nested tools. **Not** a git worktree — see the trap table below |
+| `isolated` | boolean | Strips extensions, skills and nested tools. **Not** a repository workspace — see the trap table below |
 | `inheritContext` | boolean | Fork the parent conversation into the child |
 | `thinkingLevel` | ThinkingLevel | Clamped to what the resolved model supports |
 | `isBackground` | boolean | Occupies a `maxConcurrent` slot and queues behind them. Every RPC spawn runs detached regardless; this is what decides whether it is *pooled* |
 | `bypassQueue` | boolean | Starts immediately even when the concurrency limit would queue it. The slot is still counted once running |
 | `structuredOutput` | CompiledSchema | Makes the child report through a `StructuredOutput` tool |
-| `isolation` | `"worktree"` | Temp git worktree, committed to a `pi-agent-*` branch on completion |
+| `isolation` | `"worktree"` | Temporary jj workspace or Git worktree. Changed work is preserved on a `pi-agent-*` bookmark or branch, according to the project-wide `isolationBackend` setting |
 | `cwd` | absolute path | The agent's tools operate here; `.pi` config still loads from the parent session's project |
 | `invocation` | AgentInvocation | Resolved snapshot used for UI display |
 | `signal` | AbortSignal | Aborting it stops the subagent |
@@ -59,8 +59,8 @@ One of these already shipped as a bug in this project's own README example, so i
 | You might write | What it does | What you meant |
 |---|---|---|
 | `run_in_background` | Forwarded verbatim and ignored — it is the [`Agent`](../README.md#agent) *tool's* parameter name | `isBackground` |
-| `isolated: true` | Disables extensions, skills and nested tools | `isolation: "worktree"` for a git worktree |
-| `isolation: "worktree"` | Creates a git worktree | `isolated: true` to strip capabilities |
+| `isolated: true` | Disables extensions, skills and nested tools | `isolation: "worktree"` for an isolated repository workspace |
+| `isolation: "worktree"` | Creates a jj workspace or Git worktree, based on `isolationBackend` | `isolated: true` to strip capabilities |
 | `configCwd` | Stripped | `cwd` |
 | `max_turns` / `thinking` / `inherit_context` | Ignored — tool and frontmatter spellings | `maxTurns` / `thinkingLevel` / `inheritContext` |
 | `memory` | Nothing. **There is no such option** | Memory scope comes only from the agent definition's frontmatter |
@@ -83,8 +83,8 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | `SpawnOptions.cwd must be an absolute path: "<value>"` | `src/agent-manager.ts:85` |
 | `SpawnOptions.cwd does not exist: "<cwd>"` | `src/agent-manager.ts:91` |
 | `SpawnOptions.cwd is not a directory: "<cwd>"` | `src/agent-manager.ts:94` |
-| `Cannot run with isolation: "worktree" — not a git repo, no commits yet, or 'git worktree add' failed.` | `src/agent-manager.ts:716-719`, surfaced through `awaitStartup` |
-| git plumbing failures | `src/worktree.ts:76` |
+| `Cannot run with isolation: "worktree" using backend "<backend>" — requires <requirement>. Initialize the selected repository backend, fix workspace creation, or omit \`isolation\`.` | `src/agent-manager.ts:732-733`, surfaced through `awaitStartup` |
+| Repository command failures | `src/worktree.ts:83-95` |
 | `Agent not found` | stop — `src/cross-extension-rpc.ts:170` |
 | `Agent is owned by another agent or workflow` | stop — `:178` |
 | `Agent is not running` | stop — `:182`. The record exists, so it has already settled |
@@ -92,7 +92,7 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 
 Three things the table cannot show:
 
-- **The failure that is not an error.** With `worktreeIsolation` off project-wide, `isolation: "worktree"` is dropped at `src/agent-manager.ts:712` with no error, no note on the record, and a success envelope on the wire. Your agent runs in the main tree. If you asked for isolation because two agents were going to write the same files, they now collide and nothing told you.
+- **The failure that is not an error.** With `worktreeIsolation` off project-wide, `isolation: "worktree"` is dropped at `src/agent-manager.ts:721` with no error, no note on the record, and a success envelope on the wire. Your agent runs in the main tree. If you asked for isolation because two agents were going to write the same files, they now collide and nothing told you.
 - **`data` is omitted** when a handler returns nothing, so a successful stop or consume reply is a bare `{ success: true }` and `reply.data.anything` throws.
 - **`requestId` is not validated.** It is interpolated straight into the reply channel, so a caller that omits it gets its reply on the literal channel `subagents:rpc:spawn:reply:undefined` — where every other caller that omitted it is also listening. Send one, and send a unique one.
 

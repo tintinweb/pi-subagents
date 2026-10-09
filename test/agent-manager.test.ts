@@ -13,7 +13,7 @@ vi.mock("../src/agent-runner.js", () => ({
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),
-  cleanupWorktree: vi.fn(() => ({ hasChanges: false })),
+  cleanupWorktree: vi.fn(() => ({ hasChanges: false, backend: "git" })),
   pruneWorktrees: vi.fn(),
   isWorktreeIsolationEnabled: vi.fn(() => true),
 }));
@@ -832,6 +832,20 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(runAgent).not.toHaveBeenCalled();
   });
 
+  it("passes an explicitly configured backend and reports it on failure", async () => {
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockResolvedValueOnce(undefined);
+    manager = new AgentManager();
+    manager.setIsolationBackend("jj");
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+    await expect(manager.awaitStartup(id)).rejects.toThrow(/backend "jj"/);
+    expect(createWorktree).toHaveBeenCalledWith(mockPi, "/tmp", expect.any(String), "jj");
+  });
+
   it("a foreground spawn surfaces the same failure by rejecting spawnAndWait", async () => {
     // The other half of the strict contract: the top-level Agent tool awaits
     // this call and reports failure by letting the throw out of execute.
@@ -912,9 +926,11 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     // way out. A schema'd payload living in the same field would stop parsing
     // for every `agent({ schema, isolation: "worktree" })` call.
     const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
-    const wt = { path: "/wt/a", branch: "pi-agent-a", baseSha: "abc", workPath: "/wt/a" };
+    const wt = { backend: "git", path: "/wt/a", ref: "pi-agent-a", baseRevision: "abc", workPath: "/wt/a" };
     vi.mocked(createWorktree).mockResolvedValueOnce(wt as never);
-    vi.mocked(cleanupWorktree).mockReturnValueOnce({ hasChanges: true, branch: "pi-agent-a" } as never);
+    vi.mocked(cleanupWorktree).mockResolvedValueOnce({
+      hasChanges: true, backend: "git", ref: "pi-agent-a", refKind: "branch",
+    } as never);
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "I edited two files",
       session: mockSession(),
@@ -941,9 +957,9 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     // the record stopped while the repo is still being copied.
     const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
     let releaseCopy!: () => void;
-    const wt = { path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy" };
+    const wt = { backend: "git", path: "/wt/copy", ref: "pi-agent-x", baseRevision: "abc", workPath: "/wt/copy" };
     vi.mocked(createWorktree).mockImplementationOnce(
-      () => new Promise(resolve => { releaseCopy = () => resolve(wt); }),
+      () => new Promise(resolve => { releaseCopy = () => resolve(wt as never); }),
     );
     vi.mocked(cleanupWorktree).mockClear();
     vi.mocked(runAgent).mockClear();
@@ -970,7 +986,7 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
 // `gate` runs there, and a gate pointed at the wrong tree is worse than none.
 describe("AgentManager — onBeforeWorktreeCleanup", () => {
   let manager: AgentManager;
-  const wt = { path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy" };
+  const wt = { backend: "git" as const, path: "/wt/copy", ref: "pi-agent-x", baseRevision: "abc", workPath: "/wt/copy" };
 
   /** Records call order across the hook and the (mocked) cleanup. */
   async function trace() {
@@ -980,7 +996,7 @@ describe("AgentManager — onBeforeWorktreeCleanup", () => {
     vi.mocked(cleanupWorktree).mockReset();
     vi.mocked(cleanupWorktree).mockImplementation(async () => {
       order.push("cleanup");
-      return { hasChanges: false };
+      return { hasChanges: false, backend: "git" };
     });
     return { order, cleanupWorktree: vi.mocked(cleanupWorktree) };
   }
@@ -990,7 +1006,7 @@ describe("AgentManager — onBeforeWorktreeCleanup", () => {
     const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockReset();
     vi.mocked(cleanupWorktree).mockReset();
-    vi.mocked(cleanupWorktree).mockImplementation(async () => ({ hasChanges: false }));
+    vi.mocked(cleanupWorktree).mockImplementation(async () => ({ hasChanges: false, backend: "git" }));
   });
 
   it("fires with the worktree path, before the worktree is cleaned up", async () => {
@@ -1189,7 +1205,11 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
   it("cwd + isolation: worktree — worktree created FROM cwd, session runs at the copy's workPath, cleanup targets cwd's repo", async () => {
     const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockResolvedValueOnce({
-      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/packages/api",
+      backend: "git",
+      path: "/wt/copy",
+      ref: "pi-agent-x",
+      baseRevision: "abc",
+      workPath: "/wt/copy/packages/api",
     });
     resolvedRun();
 
@@ -1204,12 +1224,17 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     await manager.awaitStartup(id);
     await manager.getRecord(id)!.promise;
 
-    expect(createWorktree).toHaveBeenCalledWith(mockPi, "/", id);
+    expect(createWorktree).toHaveBeenCalledWith(mockPi, "/", id, "auto");
     // Worktree wins for the working dir — at workPath, so subdirectory scoping
     // survives isolation. Config still anchored to the parent.
     expect(runAgent).toHaveBeenCalledWith(
       mockCtx, "general-purpose", "test",
-      expect.objectContaining({ cwd: "/wt/copy/packages/api", configCwd: "/tmp", worktreeBase: "/" }),
+      expect.objectContaining({
+        cwd: "/wt/copy/packages/api",
+        configCwd: "/tmp",
+        worktreeBase: "/",
+        worktreeBackend: "git",
+      }),
     );
     expect(cleanupWorktree).toHaveBeenCalledWith(mockPi, "/", expect.anything(), "test");
   });
@@ -1220,7 +1245,11 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     // copy's root — moving it would also move .pi config discovery.
     const { createWorktree } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockResolvedValueOnce({
-      path: "/wt/copy", branch: "pi-agent-x", baseSha: "abc", workPath: "/wt/copy/sub/dir",
+      backend: "git",
+      path: "/wt/copy",
+      ref: "pi-agent-x",
+      baseRevision: "abc",
+      workPath: "/wt/copy/sub/dir",
     });
     vi.mocked(runAgent).mockClear();
     resolvedRun();
@@ -1239,6 +1268,7 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     // The copy came from the parent session's cwd — that is what the prompt
     // must name as off-limits (#187).
     expect(opts.worktreeBase).toBe("/tmp");
+    expect(opts.worktreeBackend).toBe("git");
   });
 
   it("no worktree — no worktreeBase, so no isolation block in the prompt", async () => {
@@ -1249,7 +1279,78 @@ describe("AgentManager — SpawnOptions.cwd passthrough (#96)", () => {
     const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test" });
     await manager.getRecord(id)!.promise;
 
-    expect(vi.mocked(runAgent).mock.lastCall![3].worktreeBase).toBeUndefined();
+    const opts = vi.mocked(runAgent).mock.lastCall![3];
+    expect(opts.worktreeBase).toBeUndefined();
+    expect(opts.worktreeBackend).toBeUndefined();
+  });
+
+  it("reports jj bookmarks with a jj integration command", async () => {
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockResolvedValueOnce({
+      backend: "jj",
+      path: "/wt/jj-copy",
+      ref: "pi-agent-x",
+      baseParents: [{ revision: "base-commit", changeId: "base-change" }],
+      initialChangeId: "change",
+      workspaceName: "pi-agent-x-workspace",
+      workPath: "/wt/jj-copy",
+    });
+    vi.mocked(cleanupWorktree).mockResolvedValueOnce({
+      hasChanges: true,
+      backend: "jj",
+      ref: "pi-agent-result",
+      refKind: "bookmark",
+      baseDrifted: true,
+      hasConflicts: true,
+    });
+    resolvedRun();
+    manager = new AgentManager();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+    await manager.awaitStartup(id);
+    await manager.getRecord(id)!.promise;
+
+    expect(vi.mocked(runAgent).mock.lastCall![3].worktreeBackend).toBe("jj");
+    expect(manager.getRecord(id)?.result).toContain("Changes saved to bookmark `pi-agent-result`");
+    expect(manager.getRecord(id)?.result).toContain("the jj base changed while the agent was running");
+    expect(manager.getRecord(id)?.result).toContain("the bookmark contains conflicts");
+    expect(manager.getRecord(id)?.result).toContain("Resolve the conflicts before integrating");
+    expect(manager.getRecord(id)?.result).toContain("jj new @ pi-agent-result");
+    expect(manager.getRecord(id)?.result).not.toContain("git merge");
+  });
+
+  it("reports a retained workspace when ref preservation fails", async () => {
+    const { createWorktree, cleanupWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockResolvedValueOnce({
+      backend: "jj",
+      path: "/wt/jj-retained",
+      ref: "pi-agent-x",
+      baseParents: [{ revision: "base-commit", changeId: "base-change" }],
+      initialChangeId: "change",
+      workspaceName: "pi-agent-x-workspace",
+      workPath: "/wt/jj-retained",
+    });
+    vi.mocked(cleanupWorktree).mockResolvedValueOnce({
+      hasChanges: true,
+      backend: "jj",
+      path: "/wt/jj-retained",
+      error: "bookmark collision",
+    });
+    resolvedRun();
+    manager = new AgentManager();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isolation: "worktree",
+    });
+    await manager.awaitStartup(id);
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)?.result).toContain("Could not preserve the isolated jj workspace as a ref");
+    expect(manager.getRecord(id)?.result).toContain("Changes remain at `/wt/jj-retained`");
   });
 
   it("passes `workflow` to the runner exactly when the spawn carries a workflowId", async () => {
@@ -2005,7 +2106,9 @@ describe("AgentManager — waitForAll", () => {
     let releaseCopy!: () => void;
     vi.mocked(createWorktree).mockImplementationOnce(
       () => new Promise(resolve => {
-        releaseCopy = () => resolve({ path: "/wt/copy", branch: "b", baseSha: "abc", workPath: "/wt/copy" });
+        releaseCopy = () => resolve({
+          backend: "git", path: "/wt/copy", ref: "b", baseRevision: "abc", workPath: "/wt/copy",
+        });
       }),
     );
     vi.mocked(runAgent).mockClear();
@@ -2045,7 +2148,7 @@ describe("AgentManager — dispose prunes worktree repos", () => {
     // dispose. A manager disposed without one just skips it.
     const { createWorktree, pruneWorktrees } = await import("../src/worktree.js");
     vi.mocked(createWorktree).mockResolvedValueOnce({
-      path: "/wt/copy", branch: "b", baseSha: "abc", workPath: "/wt/copy",
+      backend: "git", path: "/wt/copy", ref: "b", baseRevision: "abc", workPath: "/wt/copy",
     });
     vi.mocked(pruneWorktrees).mockClear().mockResolvedValue(undefined);
     resolvedRun();

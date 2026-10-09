@@ -30,6 +30,7 @@ import { createStructuredCapture, createStructuredOutputTool, structuredRetryPro
 import type { SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
+import type { ResolvedIsolationBackend } from "./worktree.js";
 
 /**
  * Tool names registered by THIS extension. Single source of truth so the
@@ -438,6 +439,8 @@ export interface RunOptions {
    * instead of following the inherited parent prompt back to the main tree.
    */
   worktreeBase?: string;
+  /** Resolved backend for the isolated workspace named by `worktreeBase`. */
+  worktreeBackend?: ResolvedIsolationBackend;
   /**
    * Where .pi config is discovered (project extensions, skills, pi settings,
    * agent memory). Default: same as the working directory. The manager sets
@@ -629,7 +632,10 @@ export async function runAgent(
 
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = {};
-  if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
+  if (options.worktreeBase) {
+    extras.worktreeBase = options.worktreeBase;
+    extras.worktreeBackend = options.worktreeBackend;
+  }
   if (options.workflow && !options.structuredOutput) extras.workflowChild = true;
 
   // Resolve extensions/skills: isolated overrides to false
