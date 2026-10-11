@@ -2621,3 +2621,20 @@ describe("AgentManager — the agent file's `isolation` wins over the spawn opti
     expect(createWorktree).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("AgentManager — spawn prompt", () => {
+  let manager: AgentManager;
+  afterEach(() => { manager?.dispose(); });
+
+  it("stores the spawn prompt on the record", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "find the auth files", {
+      description: "auth",
+      isBackground: true,
+    });
+    expect(manager.getRecord(id)!.prompt).toBe("find the auth files");
+    await manager.getRecord(id)!.promise;
+    expect(manager.getRecord(id)!.prompt).toBe("find the auth files");
+  });
+});

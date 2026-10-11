@@ -171,6 +171,12 @@ export interface AgentRecord {
    */
   alias?: string;
   description: string;
+  /**
+   * The spawn prompt as handed to the agent. Not the session's first user
+   * message: inherit_context prepends parent conversation there. Unset on
+   * records spawned before this field existed.
+   */
+  prompt?: string;
   status: "queued" | "running" | "completed" | "steered" | "aborted" | "stopped" | "error";
   result?: string;
   error?: string;

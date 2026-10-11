@@ -910,3 +910,114 @@ describe("ConversationViewer", () => {
     });
   });
 });
+
+describe("ConversationViewer views", () => {
+  const strip = (text: string) => text.replace(/\x1b\[[0-9;]*m/g, "");
+  const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
+
+  function viewer(over: Partial<AgentRecord> = {}, initialView: "transcript" | "info" | "prompt" | "output" = "transcript") {
+    const session = mockSession([
+      { role: "user", content: "PARENT CONTEXT\n\nspawn prompt" },
+      { role: "assistant", content: [{ type: "text", text: "final answer" }] },
+    ]);
+    return new ConversationViewer(
+      mockTui(30, 80), session, mockRecord({
+        prompt: "spawn prompt",
+        result: "final answer",
+        toolUses: 3,
+        lifetimeUsage: { input: 1000, output: 200, cacheWrite: 0, cost: 0.0042 },
+        invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" },
+        ...over,
+      }), undefined, theme, vi.fn(), undefined, undefined, undefined, true, undefined, undefined, initialView,
+    );
+  }
+
+  it("names the active view in the header", () => {
+    expect(strip(viewer().render(80).join("\n"))).toContain("Transcript");
+    expect(strip(viewer({}, "prompt").render(80).join("\n"))).toContain("Prompt");
+  });
+
+  it("Prompt shows the stored spawn prompt, not parent context", () => {
+    const out = strip(viewer({}, "prompt").render(80).join("\n"));
+    expect(out).toContain("spawn prompt");
+    expect(out).not.toContain("PARENT CONTEXT");
+  });
+
+  it("Prompt shows No prompt stored when the record has none", () => {
+    const out = strip(viewer({ prompt: undefined }, "prompt").render(80).join("\n"));
+    expect(out).toContain("No prompt stored.");
+  });
+
+  it("Info shows model, thinking, cost, tools, times, and no turn count", () => {
+    const started = Date.UTC(2026, 3, 4, 12, 0, 0);
+    const out = strip(viewer({
+      startedAt: started,
+      completedAt: started + 12_300,
+    }, "info").render(120).join("\n"));
+    expect(out).toContain("anthropic/claude-sonnet-4-6");
+    expect(out).toContain("high");
+    expect(out).toContain("~$0.0042");
+    expect(out).toContain("Tools:     3");
+    expect(out).toContain("Elapsed:");
+    expect(out).toContain("Started:");
+    expect(out).toContain("Ended:");
+    expect(out).not.toMatch(/Turns:/);
+    expect(out).not.toContain("↻");
+  });
+
+  it("Output shows only the result", () => {
+    const out = strip(viewer({}, "output").render(80).join("\n"));
+    expect(out).toContain("final answer");
+    expect(out).not.toContain("spawn prompt");
+    expect(out).not.toContain("[User]");
+  });
+
+  it("Output shows No output yet when the agent has no result", () => {
+    const out = strip(viewer({ result: undefined }, "output").render(80).join("\n"));
+    expect(out).toContain("No output yet.");
+  });
+
+  it("t/i/p/o switch views without closing", () => {
+    const done = vi.fn();
+    const v = new ConversationViewer(
+      mockTui(30, 80), mockSession([]), mockRecord({ prompt: "hello", result: "bye" }),
+      undefined, theme, done, undefined, undefined, undefined, false, undefined, undefined, "transcript",
+    );
+    v.handleInput("p");
+    expect(strip(v.render(80).join("\n"))).toContain("Prompt");
+    expect(strip(v.render(80).join("\n"))).toContain("hello");
+    v.handleInput("i");
+    expect(strip(v.render(80).join("\n"))).toContain("Info");
+    v.handleInput("o");
+    expect(strip(v.render(80).join("\n"))).toContain("Output");
+    v.handleInput("t");
+    expect(strip(v.render(80).join("\n"))).toContain("Transcript");
+    expect(done).not.toHaveBeenCalled();
+  });
+
+  it("steer composer swallows p instead of switching view", () => {
+    const v = new ConversationViewer(
+      mockTui(30, 80), mockSession([]), mockRecord({ status: "running", prompt: "hello" }),
+      undefined, theme, vi.fn(), undefined, undefined, vi.fn(),
+    );
+    v.handleInput("\r");
+    v.handleInput("p");
+    const out = strip(v.render(80).join("\n"));
+    expect(out).toContain("Transcript");
+    expect(out).not.toContain("hello");
+    expect(out).toContain("Enter send");
+  });
+
+  it("p disarms a pending stop rather than confirming it", () => {
+    const onStop = vi.fn();
+    const v = new ConversationViewer(
+      mockTui(30, 80), mockSession([]), mockRecord({ status: "running", prompt: "hello" }),
+      undefined, theme, vi.fn(), onStop,
+    );
+    v.handleInput("x");
+    v.handleInput("p");
+    v.handleInput("x");
+    expect(onStop).not.toHaveBeenCalled();
+    expect(strip(v.render(80).join("\n"))).toContain("Prompt");
+  });
+});
