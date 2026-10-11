@@ -1114,6 +1114,19 @@ export default function (pi: ExtensionAPI) {
     manager.abortAll();
     for (const timer of pendingNudges.values()) clearTimeout(timer);
     pendingNudges.clear();
+    // Activation-owned timers/UI (#256): the Node process survives reload and
+    // session replacement, so a pending batch debounce, group-join timeout, or
+    // widget render interval from this activation can fire into the next one.
+    // Clear the debounce first — a late finalizeBatch would otherwise schedule
+    // fresh nudges and register stale groups through the paths above — then the
+    // group-join timeouts, then the widget, all before the fleet/manager teardown.
+    if (batchFinalizeTimer) {
+      clearTimeout(batchFinalizeTimer);
+      batchFinalizeTimer = undefined;
+    }
+    currentBatchAgents = [];
+    groupJoin.dispose();
+    widget.dispose();
     fleet.dispose();
     // Awaited: it emits `session_shutdown` into every retained child session so
     // extensions bound there can release what they armed in `session_start` (#242).
