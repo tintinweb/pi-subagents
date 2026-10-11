@@ -68,6 +68,7 @@ function makeRecord(): AgentRecord {
 function makeActivity(): AgentActivity {
   return {
     activeTools: new Map(),
+    activeToolCalls: new Map(),
     toolUses: 0,
     responseText: "",
     turnCount: 1,

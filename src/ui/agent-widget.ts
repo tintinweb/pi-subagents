@@ -50,9 +50,16 @@ export type UICtx = {
   ): void;
 };
 
-/** Per-agent live activity state. */
+export interface ActiveToolCall {
+  toolName: string;
+  args: unknown;
+  startedAt: number;
+  partialResult?: unknown;
+}
+
 export interface AgentActivity {
   activeTools: Map<string, string>;
+  activeToolCalls: Map<string, ActiveToolCall>;
   toolUses: number;
   responseText: string;
   session?: SessionLike;

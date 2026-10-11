@@ -627,6 +627,55 @@ describe("agent-runner usage callback wiring", () => {
     expect(seen).toEqual([{ input: 10, output: 20, cacheWrite: 5, cacheRead: 90, cost: 0.001 }]);
   });
 
+  it("forwards complete tool lifecycle data from runAgent", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const onToolActivity = vi.fn();
+    const args = { command: "npm test", timeout: 30 };
+    const partialResult = { content: [{ type: "text", text: "PASS one" }] };
+
+    session.prompt = vi.fn(async () => {
+      for (const listener of listeners) {
+        listener({ type: "tool_execution_start", toolCallId: "call-1", toolName: "bash", args });
+        listener({ type: "tool_execution_update", toolCallId: "call-1", toolName: "bash", args, partialResult });
+        listener({ type: "tool_execution_end", toolCallId: "call-1", toolName: "bash", result: partialResult, isError: false });
+      }
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", { pi, onToolActivity });
+
+    expect(onToolActivity.mock.calls.map(call => call[0])).toEqual([
+      { type: "start", toolCallId: "call-1", toolName: "bash", args },
+      { type: "update", toolCallId: "call-1", toolName: "bash", args, partialResult },
+      { type: "end", toolCallId: "call-1", toolName: "bash" },
+    ]);
+  });
+
+  it("forwards complete tool lifecycle data from resumeAgent", async () => {
+    const { session, listeners } = createSession("RESUMED");
+    const onToolActivity = vi.fn();
+    const args = { path: "src/index.ts" };
+    const partialResult = { content: [{ type: "text", text: "partial" }] };
+
+    session.prompt = vi.fn(async () => {
+      for (const listener of listeners) {
+        listener({ type: "tool_execution_start", toolCallId: "call-2", toolName: "read", args });
+        listener({ type: "tool_execution_update", toolCallId: "call-2", toolName: "read", args, partialResult });
+        listener({ type: "tool_execution_end", toolCallId: "call-2", toolName: "read", result: partialResult, isError: false });
+      }
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "RESUMED" }] });
+    });
+
+    await resumeAgent(session as any, "continue", { onToolActivity });
+
+    expect(onToolActivity.mock.calls.map(call => call[0])).toEqual([
+      { type: "start", toolCallId: "call-2", toolName: "read", args },
+      { type: "update", toolCallId: "call-2", toolName: "read", args, partialResult },
+      { type: "end", toolCallId: "call-2", toolName: "read" },
+    ]);
+  });
+
   it("forwards compaction_end events to onCompaction (only when not aborted)", async () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
