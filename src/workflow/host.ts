@@ -213,10 +213,11 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         }
       }
 
-      // Same scopeModels policy as the Agent tool and the nested delegation
-      // tools: a script's `agent({ model })` is a runtime LLM choice, and the
-      // script is written by the model, so it must not reach a model the user's
-      // enabledModels list excludes. `callerSupplied` keys off `request.model`
+      // Same model policies as the Agent tool and the nested delegation tools:
+      // a script's `agent({ model })` is a runtime LLM choice, and the script is
+      // written by the model, so it must not reach a model the user's
+      // enabledModels list excludes, nor one on another provider than the
+      // session running the workflow. `callerSupplied` keys off `request.model`
       // and NOT `modelInput` — the latter has already absorbed the agent file's
       // own `model:`, which is user-authored config and so earns the
       // warn-and-proceed branch rather than a refusal.
@@ -227,6 +228,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         callerSupplied: request.model !== undefined,
         agentLabel: config?.displayName ?? dispatch.type,
         modelInput,
+        sessionProvider: ctx.model?.provider,
       });
       // This agent's failure, not the run's — the same shape a bad agent type
       // takes above. The script sees `null` and its siblings carry on, which is

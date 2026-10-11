@@ -14,12 +14,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ModelRegistryRef } from "../src/enabled-models.js";
-import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
+import {
+  checkModelScope,
+  isProviderModelsEnabled,
+  isScopeModelsEnabled,
+  setProviderModelsEnabled,
+  setScopeModelsEnabled,
+} from "../src/model-scope.js";
 
 const MODELS = [
   { id: "claude-opus-4-6", name: "Claude Opus 4.6", provider: "anthropic" },
   { id: "claude-haiku-4-5", name: "Claude Haiku 4.5", provider: "anthropic" },
   { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic" },
+  { id: "glm-5.3", name: "GLM 5.3", provider: "zai-coding-cn" },
 ];
 
 function makeRegistry(models = MODELS): ModelRegistryRef {
@@ -28,12 +35,17 @@ function makeRegistry(models = MODELS): ModelRegistryRef {
 
 const HAIKU = { provider: "anthropic", id: "claude-haiku-4-5" };
 const OPUS = { provider: "anthropic", id: "claude-opus-4-6" };
+/** A model on another provider — the subject of the providerModels cases. */
+const FOREIGN = { provider: "zai-coding-cn", id: "glm-5.3" };
+/** The provider the spawning session is running on in these cases. */
+const SESSION_PROVIDER = "anthropic";
 
 describe("checkModelScope", () => {
   let projectDir: string;
   let agentDir: string;
   let prevAgentDir: string | undefined;
   let prevEnabled: boolean;
+  let prevProviderEnabled: boolean;
 
   beforeEach(() => {
     // resolveEnabledModels memoizes on (patterns, mtime+size of both settings
@@ -44,10 +56,12 @@ describe("checkModelScope", () => {
     prevAgentDir = process.env.PI_CODING_AGENT_DIR;
     process.env.PI_CODING_AGENT_DIR = agentDir;
     prevEnabled = isScopeModelsEnabled();
+    prevProviderEnabled = isProviderModelsEnabled();
   });
 
   afterEach(() => {
     setScopeModelsEnabled(prevEnabled); // module-global — restore for other suites
+    setProviderModelsEnabled(prevProviderEnabled);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
     rmSync(projectDir, { recursive: true, force: true });
@@ -142,6 +156,117 @@ describe("checkModelScope", () => {
       setEnabledModels(["Anthropic/Claude-Opus-4-6"]);
       expect(check({ model: OPUS }).kind).toBe("ok");
       expect(check({ model: HAIKU }).kind).toBe("error");
+    });
+  });
+
+  // The provider policy answers a structurally different question than the
+  // allowlist: "is this model from the same place as the session?" rather than
+  // "did the user enumerate it?". It is reference-by-session, so the interesting
+  // cases are the reference (unknown, other provider) and the two sources that
+  // earn different treatment (caller-supplied vs pinned).
+  describe("providerModels", () => {
+    beforeEach(() => {
+      setProviderModelsEnabled(true);
+    });
+
+    function checkProvider(overrides: Partial<Parameters<typeof checkModelScope>[0]> = {}) {
+      return check({
+        model: FOREIGN,
+        callerSupplied: true,
+        sessionProvider: SESSION_PROVIDER,
+        ...overrides,
+      });
+    }
+
+    it("is a no-op while the feature is off, even for another provider", () => {
+      setProviderModelsEnabled(false);
+      expect(checkProvider().kind).toBe("ok");
+    });
+
+    it("passes a model on the session's provider", () => {
+      expect(checkProvider({ model: OPUS }).kind).toBe("ok");
+    });
+
+    it("is a no-op when the session provider is unknown", () => {
+      // An unknown reference must not refuse every spawn — the same stance an
+      // empty enabledModels list takes for scopeModels.
+      expect(checkProvider({ sessionProvider: undefined }).kind).toBe("ok");
+    });
+
+    it("is a no-op when no model was resolved", () => {
+      expect(checkProvider({ model: undefined }).kind).toBe("ok");
+    });
+
+    it("passes an inherited model without warning", () => {
+      // The whole point of the split: an inherited model came from the spawning
+      // session, so it cannot be cross-provider. A warn-on-default setting is
+      // one users learn to ignore.
+      const verdict = checkProvider({ model: OPUS, callerSupplied: false, modelInput: undefined });
+      expect(verdict.kind).toBe("ok");
+    });
+
+    it("refuses a caller-supplied choice on another provider", () => {
+      const verdict = checkProvider({ modelInput: "zai-coding-cn/glm-5.3" });
+      expect(verdict.kind).toBe("error");
+      expect((verdict as { message: string }).message)
+        .toBe('Model not on this session\'s provider: "zai-coding-cn/glm-5.3". This session runs on provider "anthropic".');
+    });
+
+    it("only warns for a frontmatter-pinned choice, so the spawn still proceeds", () => {
+      const verdict = checkProvider({
+        callerSupplied: false,
+        modelInput: "zai-coding-cn/glm-5.3",
+      });
+      expect(verdict.kind).toBe("warn");
+      expect((verdict as { message: string }).message)
+        .toBe('Agent "scout" using out-of-provider model "zai-coding-cn/glm-5.3" (session provider: anthropic)');
+    });
+
+    it("names the resolved model in the warning when there was no raw input", () => {
+      const verdict = checkProvider({ callerSupplied: false, modelInput: undefined });
+      expect(verdict.kind).toBe("warn");
+      expect((verdict as { message: string }).message).toContain("zai-coding-cn/glm-5.3");
+      expect((verdict as { message: string }).message).not.toContain("undefined");
+    });
+
+    it("compares providers case-insensitively", () => {
+      expect(checkProvider({ sessionProvider: "Zai-Coding-CN", model: FOREIGN }).kind).toBe("ok");
+      expect(checkProvider({ sessionProvider: "DeepSeek" }).kind).toBe("error");
+    });
+
+    it("stops enforcing as soon as the setting is turned back off", () => {
+      expect(checkProvider().kind).toBe("error");
+      setProviderModelsEnabled(false);
+      expect(checkProvider().kind).toBe("ok");
+    });
+
+    describe("combined with scopeModels", () => {
+      beforeEach(() => {
+        setScopeModelsEnabled(true);
+      });
+
+      it("reports the provider refusal first and needs no allowlist to do it", () => {
+        // FOREIGN is deliberately ON the allowlist: the provider policy is the
+        // constraint being violated, so the allowlist must not be what refuses
+        // this spawn, and must not be consulted to find out.
+        setEnabledModels(["anthropic/claude-opus-4-6", "zai-coding-cn/glm-5.3"]);
+        const verdict = checkProvider({ modelInput: "zai-coding-cn/glm-5.3" });
+        expect(verdict.kind).toBe("error");
+        expect((verdict as { message: string }).message).toContain("not on this session's provider");
+        expect((verdict as { message: string }).message).not.toContain("enabledModels");
+      });
+
+      it("joins both warnings when a pinned model breaks both policies", () => {
+        setEnabledModels(["anthropic/claude-haiku-4-5"]);
+        const verdict = checkProvider({
+          callerSupplied: false,
+          modelInput: "zai-coding-cn/glm-5.3",
+        });
+        expect(verdict.kind).toBe("warn");
+        const message = (verdict as { message: string }).message;
+        expect(message).toContain("out-of-provider");
+        expect(message).toContain("out-of-scope");
+      });
     });
   });
 });

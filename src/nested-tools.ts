@@ -238,9 +238,11 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
       }
 
-      // Same scopeModels policy as the top-level Agent tool — a nested spawn
-      // must not escape the allowlist. A "warn" verdict proceeds silently:
-      // child sessions have no UI surface to toast to.
+      // Same model policies as the top-level Agent tool — a nested spawn must
+      // not escape the allowlist or the session's provider. `ctx` here is the
+      // child session doing the spawning, so `ctx.model` is this nested spawn's
+      // parent — validation at each level keeps the tree on one provider. A
+      // "warn" verdict proceeds silently: child sessions have no UI to toast to.
       const scopeVerdict = checkModelScope({
         model,
         cwd: context.configCwd,
@@ -248,6 +250,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         callerSupplied: invocation.modelFromParams,
         agentLabel: config?.displayName ?? resolvedType,
         modelInput: invocation.modelInput,
+        sessionProvider: ctx.model?.provider,
       });
       if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message, true);
 
