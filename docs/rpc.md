@@ -18,14 +18,14 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 | `name` | string | A memorable second handle (`@auth-audit`). Slugged, never validated — anything unusable degrades rather than failing the spawn |
 | `model` | `Model` **or** `"provider/modelId"` | Strings are resolved at the RPC boundary against `ctx.modelRegistry`. `null` means inherit, not override. Resolution is fuzzy — see [Model Scope](../README.md#model-scope) |
 | `maxTurns` | number | Turn ceiling for the run |
-| `isolated` | boolean | Strips extensions, skills and nested tools. **Not** a git worktree — see the trap table below |
-| `inheritContext` | boolean | Fork the parent conversation into the child |
+| `isolated` | boolean | Strips extensions, skills and nested tools. Applies only when the agent file leaves `isolated:` unset — frontmatter is authoritative. **Not** a git worktree — see the trap table below |
+| `inheritContext` | boolean | Fork the parent conversation into the child. Only this option decides — an agent file's `inherit_context:` does not apply to RPC spawns |
 | `thinkingLevel` | ThinkingLevel | Clamped to what the resolved model supports |
 | `isBackground` | boolean | Occupies a `maxConcurrent` slot and queues behind them. Every RPC spawn runs detached regardless; this is what decides whether it is *pooled* |
 | `bypassQueue` | boolean | Starts immediately even when the concurrency limit would queue it. The slot is still counted once running |
 | `structuredOutput` | CompiledSchema | Makes the child report through a `StructuredOutput` tool |
-| `isolation` | `"worktree"` | Temp git worktree, committed to a `pi-agent-*` branch on completion |
-| `cwd` | absolute path | The agent's tools operate here; `.pi` config still loads from the parent session's project |
+| `isolation` | `"worktree"` | Temp git worktree, committed to a `pi-agent-*` branch on completion. The agent file's `isolation:` wins: `worktree` applies even when this is omitted, and `off` refuses it |
+| `cwd` | absolute path | The agent's tools operate here; `.pi` config still loads from the parent session's project, and the child reports this directory as untrusted (`ctx.isProjectTrusted()` is `false`) |
 | `invocation` | AgentInvocation | Resolved snapshot used for UI display |
 | `signal` | AbortSignal | Aborting it stops the subagent |
 | `onSpawned` / `onQueued` / `onCompaction` / `onBeforeWorktreeCleanup` | functions | Fire as documented on `SpawnOptions` |

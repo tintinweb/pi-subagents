@@ -19,7 +19,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Context } from "@earendil-works/pi-ai";
+import { type Context, getCurrentTools } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   agentCall,
@@ -72,7 +72,7 @@ describe.skipIf(LIVE)("maxConcurrentForeground e2e (real pi agent loop)", () => 
       cwd: projectDir(settings),
       live: false, // scripted on purpose: a real model may not emit both calls
       respond: async (context: Context) => {
-        const isParent = (context.tools ?? []).some(t => t.name === "Agent");
+        const isParent = getCurrentTools(context.messages).some(t => t.name === "Agent");
         if (isParent) {
           const alreadySpawned = context.messages.some(
             m => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",

@@ -298,6 +298,10 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
           request.prompt,
           {
             description: request.label,
+            // Same as the Agent tool: `isolated` comes off the agent definition.
+            // Left out, a hermetic agent's script-spawned children loaded every
+            // host extension and picked up its MCP and web tools.
+            ...(config?.isolated !== undefined ? { isolated: config.isolated } : {}),
             // The stamp is what keeps this child out of the session's
             // `maxConcurrent` pool — see `occupiesPoolSlot`. The run already
             // bounds how many of its agents run at once, and counting them

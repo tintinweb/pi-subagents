@@ -12,9 +12,9 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { Container, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { Container, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
@@ -1068,8 +1068,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      // Nothing else to pass: runAgent resolves model, thinking and max turns
-      // from the agent's own config when the spawn omits them, and the
+      // Nothing else to pass: runAgent resolves model, thinking, max turns and
+      // `isolated` from the agent's own config when the spawn omits them, and the
       // manager's onStart/onComplete callbacks own the widget, the fleet list
       // and the completion notification — the same contract the scheduler and
       // cross-extension RPC spawns run under.
@@ -1133,12 +1133,21 @@ export default function (pi: ExtensionAPI) {
   const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
+  /**
+   * pi's fullscreen scrollbar preference, read from the main session's live,
+   * trust-aware settings and normalized as pi's own `getFullscreenScrollbar()` does.
+   */
+  function getFullscreenScrollbar(): ScrollViewScrollbar {
+    const mode = pi.getSettings().fullscreenScrollbar;
+    return mode === "always" || mode === "hidden" ? mode : "auto";
+  }
+
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  // The last two arguments keep a conversation overlay opened here identical to
-  // one opened from `/agents`: same setting on the way in, same persist out.
+  // The trailing arguments keep a conversation overlay opened here identical to
+  // one opened from `/agents`: same settings on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    () => currentCtx ? SettingsManager.create(currentCtx.cwd).getFullscreenScrollbar() : "auto");
+    getFullscreenScrollbar);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -2051,9 +2060,9 @@ Terse command-style prompts produce shallow, generic work.
           }
         };
 
-        // A throw here means the agent never started. Let it out: pi marks a
-        // tool call failed only when execute throws, and a returned message
-        // reads to the model as a subagent that ran and reported this (#179).
+        // A throw here means the agent never started. Let it out: pi marks the
+        // tool call failed, whereas a returned message reads to the model as a
+        // subagent that ran and reported this (#179).
         id = manager.spawn(pi, ctx, subagentType, params.prompt, {
           description: params.description,
           name: params.name as string | undefined,
@@ -3075,7 +3084,7 @@ Terse command-style prompts produce shallow, generic work.
           if (manager.abort(record.id)) {
             ctx.ui.notify(`Stopped "${record.description}".`, "info");
           }
-        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), SettingsManager.create(ctx.cwd).getFullscreenScrollbar());
+        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), getFullscreenScrollbar());
       },
       {
         overlay: true,

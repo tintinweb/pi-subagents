@@ -1,11 +1,8 @@
 import type { AgentSession, AgentSessionEventListener } from "@earendil-works/pi-coding-agent";
-import { Input, ScrollView, type ScrollViewScrollbar, type Terminal, Text, type TUI, TuiAltScreen, type TuiMode, VStack, visibleWidth } from "@earendil-works/pi-tui";
+import { Input, ScrollView, type ScrollViewScrollbar, type Terminal, Text, type TUI, TuiAltScreen, type TuiMode, type TuiMouseEvent, VStack, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
 import { ConversationViewer, getConversationOverlayOptions } from "../src/ui/conversation-viewer.js";
-
-const supportsMouse = "handleMouse" in Input.prototype && "isScrollbarActive" in ScrollView.prototype;
-type ViewerMouseEvent = Parameters<ConversationViewer["handleMouse"]>[0];
 
 function setup(rows = 20, columns = 100, host?: TUI, scrollbar: ScrollViewScrollbar = "always", mode: TuiMode = "fullscreen") {
   const terminal = { rows, columns };
@@ -23,9 +20,9 @@ function setup(rows = 20, columns = 100, host?: TUI, scrollbar: ScrollViewScroll
     bold: (text: string) => text,
   }, done, stop, undefined, steer, false, undefined, undefined, scrollbar);
   const render = () => viewer.render(terminal.columns);
-  const mouse = (event: Partial<ViewerMouseEvent>) => viewer.handleMouse({
-    type: "wheel", button: "none", x: 10, y: 8,
-    width: terminal.columns, height: terminal.rows,
+  const mouse = (event: Partial<TuiMouseEvent>) => viewer.handleMouse({
+    type: "wheel", button: "none", x: 10, y: 8, screenX: 10, screenY: 8,
+    width: terminal.columns, height: terminal.rows, shift: false, alt: false, ctrl: false,
     ...event,
   });
   const click = (label: string) => {
@@ -43,34 +40,6 @@ function firstRow(lines: string[]): string | undefined {
 }
 
 describe("regular conversation viewer", () => {
-  it("falls back to the floating viewer when fullscreen mouse APIs are absent", () => {
-    const descriptor = Object.getOwnPropertyDescriptor(Input.prototype, "handleMouse");
-    Reflect.deleteProperty(Input.prototype, "handleMouse");
-    const { viewer, tui, render } = setup(30, 90);
-    try {
-      expect(getConversationOverlayOptions(tui)).toEqual({ anchor: "center", width: "90%", maxHeight: "70%" });
-      expect(render()).toHaveLength(21);
-      expect(render()[0]).toBe(`╭${"─".repeat(88)}╮`);
-      viewer.handleInput("\x1b[H");
-      expect(render().join("\n")).toContain("row-000");
-    } finally {
-      viewer.dispose();
-      if (descriptor) Object.defineProperty(Input.prototype, "handleMouse", descriptor);
-    }
-  });
-
-  it("keeps an older fullscreen host floating even with newer component libraries", () => {
-    const host = { mode: "fullscreen", terminal: { rows: 30, columns: 90 }, requestRender: vi.fn() } as unknown as TUI;
-    const { viewer, render } = setup(30, 90, host);
-    try {
-      expect(getConversationOverlayOptions(host)).toEqual({ anchor: "center", width: "90%", maxHeight: "70%" });
-      expect(render()).toHaveLength(21);
-      expect(render()[0]).toBe(`╭${"─".repeat(88)}╮`);
-    } finally {
-      viewer.dispose();
-    }
-  });
-
   it("retains its floating frame, height cap, and keyboard-only navigation", () => {
     const { viewer, render, terminal, mouse, steer } = setup(30, 90, undefined, "always", "regular");
     try {
@@ -101,7 +70,7 @@ describe("regular conversation viewer", () => {
   });
 });
 
-describe.skipIf(!supportsMouse)("fullscreen conversation observer", () => {
+describe("fullscreen conversation observer", () => {
   it("covers every cell without a frame, including after resize and while composing", () => {
     const { render, terminal, viewer } = setup();
     for (const [rows, columns] of [[20, 100], [35, 70], [4, 12], [1, 1]]) {
@@ -343,7 +312,7 @@ describe.skipIf(!supportsMouse)("fullscreen conversation observer", () => {
   });
 });
 
-describe.skipIf(!supportsMouse)("observer input isolation in Pi's fullscreen renderer", () => {
+describe("observer input isolation in Pi's fullscreen renderer", () => {
   it("keeps real wheel, drag, click, and keyboard input off the main view, then restores focus", () => {
     let input: (data: string) => void = () => {};
     const terminal: Terminal = {

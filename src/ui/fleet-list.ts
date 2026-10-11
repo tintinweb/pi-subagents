@@ -11,7 +11,7 @@
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
  */
 
-import { Editor, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
@@ -362,16 +362,19 @@ export class FleetList {
   }
 
   /**
-   * True when pi's prompt editor owns the keyboard. pi's editor is an `Editor`
-   * subclass (CustomEditor) while every dialog/selector is not, and the loader
-   * aliases pi-tui to pi's own copy, so `instanceof` is a reliable identity
-   * check. `focusedComponent` is TUI-private (no public accessor), hence the
-   * best-effort peek: unknowable focus (no tui seen yet, nothing focused)
-   * counts as the editor so activation keeps working.
+   * True when pi's prompt editor owns the keyboard. The editor is pluggable
+   * (ui.setEditorComponent) and need not extend `Editor` (#374), so match pi-tui's
+   * `EditorComponent` contract instead: `getText` + `setText`, which pi calls on
+   * every editor and none of pi's dialogs, selectors or overlays implement.
+   * `focusedComponent` is TUI-private (no public accessor), hence the best-effort
+   * peek: unknowable focus (no tui seen yet, nothing focused) counts as the
+   * editor so activation keeps working.
    */
   private editorHasFocus(): boolean {
     const focused = (this.tui as { focusedComponent?: unknown } | undefined)?.focusedComponent;
-    return focused == null || focused instanceof Editor;
+    if (focused == null) return true;
+    const c = focused as { getText?: unknown; setText?: unknown };
+    return typeof c.getText === "function" && typeof c.setText === "function";
   }
 
   private deactivate(): void {
@@ -492,6 +495,8 @@ export class FleetList {
       );
     }
     if (hiddenBelow > 0) lines.push(rightAlign("", theme.fg("dim", `↓ ${hiddenBelow} more`), width));
+    // pi stacks below-editor widgets directly on its footer with no spacer (#351).
+    lines.push("");
 
     return lines;
   }

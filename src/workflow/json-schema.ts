@@ -7,14 +7,15 @@
  *
  * ## Which typebox
  *
- * **`typebox`, not `@sinclair/typebox`.** They are different packages and both
- * are installed here. `@sinclair/typebox` (0.34) dispatches on a `Kind` symbol
- * that a schema arriving over the wire does not carry, so `Value.Check` throws
- * `Unknown type` on a plain JSON Schema — and `Type.Unsafe` does not help, it
- * stamps a `Kind` that is not registered. `typebox` v1 is a standards JSON
- * Schema validator and takes the schema as-is. It is also the package pi itself
- * types `ToolDefinition.parameters` against, so the same schema object serves
- * both roles with no conversion.
+ * **`typebox`, not `@sinclair/typebox`.** They are different packages.
+ * `@sinclair/typebox` (0.34) dispatches on a `Kind` symbol that a schema
+ * arriving over the wire does not carry, so `Value.Check` throws `Unknown type`
+ * on a plain JSON Schema — and `Type.Unsafe` does not help, it stamps a `Kind`
+ * that is not registered. `typebox` v1 is a standards JSON Schema validator and
+ * takes the schema as-is. It is also the package pi itself types
+ * `ToolDefinition.parameters` against and supplies to extensions at runtime
+ * (a peer dependency here), so the same schema object serves both roles with no
+ * conversion.
  *
  * ## Why we validate at all
  *

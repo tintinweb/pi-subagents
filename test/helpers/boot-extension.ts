@@ -68,6 +68,8 @@ export function makePi(flags: Record<string, boolean | string> = {}): BootedPi {
       activeTools.length = 0;
       activeTools.push(...names);
     }),
+    // The main session's settings; empty means every setting at pi's default.
+    getSettings: vi.fn(() => ({})),
     appendEntry: vi.fn(),
     sendMessage: vi.fn(),
     exec: vi.fn(async () => ({ stdout: "", stderr: "", code: 0, killed: false })),

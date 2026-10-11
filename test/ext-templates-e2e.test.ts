@@ -112,7 +112,7 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
     // cwd = fixtures dir so the templates' relative extensions: paths resolve.
     // getSystemPrompt returns a distinctive marker so prompt_mode: append can be
     // proven to inherit the parent prompt.
-    const ctx: any = { cwd: FIXTURES_DIR, getSystemPrompt: () => PARENT_PROMPT, model, modelRegistry };
+    const ctx: any = { cwd: FIXTURES_DIR, getSystemPrompt: () => PARENT_PROMPT, isProjectTrusted: () => true, model, modelRegistry };
     const pi: any = { exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
 
     // Mirror production: the caller resolves frontmatter-locked fields (isolated,

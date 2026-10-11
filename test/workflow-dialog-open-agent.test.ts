@@ -23,18 +23,26 @@ import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
+/** The child's conversation; a test that needs it to overflow the viewer fills it. */
+let sessionMessages: unknown[] = [];
+
 /** Enough of a pi session for the manager to keep, and the viewer to render. */
 const fakeSession = () => ({
   dispose: vi.fn(),
   subscribe: vi.fn(() => vi.fn()),
-  messages: [],
+  messages: sessionMessages,
   getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
 });
 
 /** One overlay the extension asked `ui.custom` for, held open like a real one. */
 interface OpenOverlay {
   options: { overlay?: boolean; onHandle?: (handle: unknown) => void };
-  instance: { handleInput?(data: string): void; render?(width: number): string[]; dispose?(): void };
+  instance: {
+    handleInput?(data: string): void;
+    handleMouse?(event: Record<string, unknown>): unknown;
+    render?(width: number): string[];
+    dispose?(): void;
+  };
   /** Resolve the overlay's promise, as closing it does. */
   close(): void;
 }
@@ -46,7 +54,7 @@ interface OpenOverlay {
  * enough to assert on wiring. Here the dialog has to stay up while a second
  * overlay opens on top of it, because that stacking is the thing under test.
  */
-function overlayCtx() {
+function overlayCtx(mode: "regular" | "fullscreen" = "regular") {
   const overlays: OpenOverlay[] = [];
   const hidden: boolean[] = [];
   let entryTaken = false;
@@ -61,7 +69,7 @@ function overlayCtx() {
       custom: vi.fn(async (factory: (...args: unknown[]) => unknown, options?: OpenOverlay["options"]) => {
         // `terminal` included: the conversation viewer sizes itself off it, so
         // a bare `requestRender` stub would throw on the second overlay.
-        const tui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+        const tui = { mode, requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
         const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
         return await new Promise(resolve => {
           const instance = factory(tui, theme, undefined, resolve) as OpenOverlay["instance"];
@@ -79,6 +87,7 @@ describe("the inspector opens a workflow agent's conversation", () => {
 
   beforeEach(() => {
     hermetic = hermeticDir({ settings: { workflowsEnabled: true } });
+    sessionMessages = [];
     vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
       const session = fakeSession();
       opts.onSessionCreated?.(session as any);
@@ -140,6 +149,34 @@ describe("the inspector opens a workflow agent's conversation", () => {
     // from rather than to an empty screen.
     await vi.waitFor(() => expect(ui.hidden).toEqual([true, false]));
 
+    ui.overlays[0].close();
+  });
+
+  it.each([
+    { setting: "always", atRest: true, afterScroll: true },
+    { setting: "hidden", atRest: false, afterScroll: false },
+    // Normalized to "auto", as pi does; pi-tui alone would treat it as "hidden".
+    { setting: "not-a-mode", atRest: false, afterScroll: true },
+  ])("hands pi's fullscreenScrollbar $setting to the fullscreen viewer", async ({ setting, atRest, afterScroll }) => {
+    sessionMessages = [{ role: "user", content: Array.from({ length: 100 }, (_, i) => `row-${i}`).join("\n") }];
+    const { command, pi } = await bootWithChild();
+    pi.getSettings.mockReturnValue({ fullscreenScrollbar: setting });
+    const ui = overlayCtx("fullscreen");
+
+    void command.handler("", ui.context);
+    await vi.waitFor(() => expect(ui.overlays).toHaveLength(1));
+    const dialog = ui.overlays[0].instance;
+    await vi.waitFor(() => expect(dialog.render?.(120).at(-1)).toContain("c convo"));
+    dialog.handleInput?.("c");
+    await vi.waitFor(() => expect(ui.overlays).toHaveLength(2));
+
+    const viewer = ui.overlays[1].instance;
+    const hasRail = () => (viewer.render?.(120) ?? []).some(line => /[┃│█]$/.test(line));
+    expect(hasRail()).toBe(atRest);
+    viewer.handleMouse?.({ type: "wheel", button: "none", x: 10, y: 8, wheelDelta: -5 });
+    expect(hasRail()).toBe(afterScroll);
+
+    ui.overlays[1].close();
     ui.overlays[0].close();
   });
 });

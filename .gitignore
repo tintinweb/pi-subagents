@@ -23,6 +23,7 @@ Thumbs.db
 *.swp
 *.swo
 *~
+.scratch
 
 # Temporary files
 *.tmp

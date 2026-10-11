@@ -11,9 +11,13 @@ import {
   type AgentSession,
   type AgentSessionEvent,
   createAgentSession,
+  createCodemodeExtension,
+  createMcpExtension,
+  createToolSearchExtension,
   DefaultResourceLoader,
   type ExtensionAPI,
   getAgentDir,
+  type InlineExtension,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -82,6 +86,8 @@ export function extensionCanonicalName(extPath: string): string {
  * co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
+  // `builtin:<name>` names no file; climbing from it would read the process cwd's manifest.
+  if (extPath.startsWith("builtin:")) return undefined;
   const entry = resolve(extPath);
   let dir = dirname(extPath);
   for (;;) {
@@ -245,9 +251,11 @@ export function installExtensionToolScope(
      * seeded from `toolNames`.
      */
     readmitToolNames: Set<string>;
+    /** Receives the scope check the child's nested-call gate extension applies. */
+    nestedCallGate: NestedCallGate;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames } = ctx;
+  const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames, nestedCallGate } = ctx;
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -277,10 +285,29 @@ export function installExtensionToolScope(
     return keep;
   };
 
+  // Names this agent selects explicitly: its built-ins, injected tools, and
+  // `ext:foo/bar` narrowings. pi activates a named tool even when it is
+  // `defaultActive: false`, as `--tools` does.
+  const named = new Set([...toolNames, ...readmitToolNames, ...[...narrowing.values()].flatMap((s) => [...s])]);
+
+  // Activate what pi itself would: only tools declared to the model (`direct`/
+  // `model-only` exposure), and of those only named ones or ones not opted out
+  // with `defaultActive: false`. `codemode`/`deferred` tools (pi's MCP tools by
+  // default) stay undeclared until their extension or `tool_search` activates
+  // them — so an already-active tool is kept, or turn_end would undo that.
   const renarrow = () => {
     const allowed = inScope();
-    const next = session.getAllTools().map((t) => t.name).filter((n) => allowed.has(n));
     const current = session.getActiveToolNames();
+    const active = new Set(current);
+    const next = session
+      .getAllTools()
+      .filter(({ name, exposure = "direct" }) => {
+        if (!allowed.has(name)) return false;
+        if (active.has(name)) return true;
+        if (exposure !== "direct" && exposure !== "model-only") return false;
+        return named.has(name) || session.getToolDefinition(name)?.defaultActive !== false;
+      })
+      .map((t) => t.name);
     // setActiveToolsByName unconditionally rebuilds the system prompt, so skip
     // the no-op that steady-state turns would otherwise pay for every turn.
     if (next.length !== current.length || next.some((n, i) => n !== current[i])) {
@@ -296,6 +323,8 @@ export function installExtensionToolScope(
     if (event.type === "turn_end") renarrow();
   });
 
+  nestedCallGate.allows = (name) => inScope().has(name);
+
   const priorBeforeToolCall = session.agent.beforeToolCall;
   session.agent.beforeToolCall = async (context, signal) => {
     if (!inScope().has(context.toolCall.name)) {
@@ -305,6 +334,32 @@ export function installExtensionToolScope(
       };
     }
     return priorBeforeToolCall?.(context, signal);
+  };
+}
+
+/** Set once the child's tool scope is installed; until then the gate admits everything. */
+type NestedCallGate = { allows?: (name: string) => boolean };
+
+/**
+ * Inline extension that applies the subagent's tool scope to calls a tool makes
+ * through `ctx.executeTool()` — codemode scripts calling MCP tools. pi runs those
+ * past extensions' `tool_call` handlers only, never `agent.beforeToolCall`, and
+ * every registered `codemode`/`deferred` tool is callable there whether or not
+ * it is in scope.
+ */
+const SCOPE_GATE_NAME = "pi-subagents-scope";
+
+function scopeGateExtension(gate: NestedCallGate): InlineExtension {
+  return {
+    name: SCOPE_GATE_NAME,
+    hidden: true,
+    factory: (ext) => {
+      ext.on("tool_call", (event) =>
+        gate.allows?.(event.toolName) === false
+          ? { block: true, reason: `Tool "${event.toolName}" is not available to this subagent.` }
+          : undefined,
+      );
+    },
   };
 }
 
@@ -402,6 +457,7 @@ export interface RunOptions {
   model?: Model<any>;
   maxTurns?: number;
   signal?: AbortSignal;
+  /** Applies only when the agent file leaves `isolated:` unset — frontmatter is authoritative. */
   isolated?: boolean;
   inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
@@ -632,12 +688,15 @@ export async function runAgent(
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
   if (options.workflow && !options.structuredOutput) extras.workflowChild = true;
 
+  // Resolved here, not by each caller: mention and RPC spawns pass no `isolated`,
+  // and the agent file's value must hold on every path.
+  const isolated = agentConfig?.isolated ?? options.isolated;
   // Resolve extensions/skills: isolated overrides to false
-  const extensions = options.isolated ? false : config.extensions;
+  const extensions = isolated ? false : config.extensions;
   // Nulling excludes under isolated also suppresses the orphaned-exclude warning —
   // isolation is an intentional override, not a misconfiguration.
-  const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
-  const skills = options.isolated ? false : config.skills;
+  const excludeExtensions = isolated ? undefined : config.excludeExtensions;
+  const skills = isolated ? false : config.skills;
 
   // Skill preloading: when skills is string[], preload their content into prompt
   if (Array.isArray(skills)) {
@@ -706,7 +765,7 @@ export async function runAgent(
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
   // is an orphan and warns after reload. `isolated` means no extension tools at all.
   const { extNames, narrowing } = parseExtSelectors(
-    options.isolated ? [] : (agentConfig?.extSelectors ?? []),
+    isolated ? [] : (agentConfig?.extSelectors ?? []),
   );
   const noExtensions = extensions === false;
 
@@ -737,6 +796,7 @@ export async function runAgent(
           return {
             ...base,
             extensions: base.extensions.filter((e) => {
+              if (e.path === `<inline:${SCOPE_GATE_NAME}>`) return true; // ours, not the agent's
               const canons = extensionCanonicalNames(e.path);
               if (canons.some((n) => excludeNames.has(n))) return false; // exclude wins
               return loadAll || canons.some((n) => keepNames.has(n));
@@ -744,7 +804,46 @@ export async function runAgent(
           };
         };
 
+  // The child inherits the parent's project-trust decision. pi's SettingsManager
+  // defaults to trusted, so without this a subagent in a project the user declined
+  // to trust would load its `.pi` extensions and settings, and pi's built-in MCP
+  // would start the stdio servers in its `.pi/mcp.json`.
+  const projectTrusted = ctx.isProjectTrusted();
+  const settingsManager = SettingsManager.create(configCwd, agentDir, { projectTrusted });
+  // That trust covers the parent's project (`configCwd`), not a directory a spawn
+  // was sent into. The session answers `ctx.isProjectTrusted()` for its own cwd,
+  // which pi's MCP uses to read `<cwd>/.pi/mcp.json` — so a cross-directory session
+  // keeps the parent project's settings but reports its cwd as untrusted. The
+  // loader keeps the trusted manager: it loads the parent project's extensions.
+  const sessionSettingsManager =
+    resolve(effectiveCwd) === resolve(configCwd)
+      ? settingsManager
+      : Object.assign(SettingsManager.create(configCwd, agentDir, { projectTrusted }), {
+          isProjectTrusted: () => false,
+        });
+  const nestedCallGate: NestedCallGate = {};
+
   const loader = new DefaultResourceLoader({
+    settingsManager,
+    // pi's CLI hands its built-in extensions to the loader it builds; this one starts
+    // with none. Forwarded as `builtin:` resources they load as in the main session —
+    // default-on, disabled by `-builtin:<name>` in settings — and the per-agent
+    // allowlist filters them like any other extension. pi's `llama.cpp` built-in is
+    // CLI-only (not exported). Fresh factories per spawn: MCP state lives in the closure.
+    extensionFactories: [
+      { name: "codemode", factory: createCodemodeExtension(), builtin: true, replaceable: true },
+      { name: "tool-search", factory: createToolSearchExtension(), builtin: true, replaceable: true },
+      { name: "mcp", factory: createMcpExtension(), builtin: true, replaceable: true },
+      // Under `noExtensions` the static allowlist gates the registry itself.
+      ...(noExtensions ? [] : [scopeGateExtension(nestedCallGate)]),
+    ],
+    // Mirrors pi's CLI: `--no-mcp` keeps MCP out of subagents too, and `--no-extensions`
+    // keeps all the built-ins out. Discovered extensions still follow `extensions:`.
+    disabledBuiltinExtensions: process.argv.some((a) => a === "--no-extensions" || a === "-ne")
+      ? ["codemode", "tool-search", "mcp"]
+      : process.argv.includes("--no-mcp")
+        ? ["mcp"]
+        : undefined,
     cwd: configCwd,
     agentDir,
     noExtensions,
@@ -852,7 +951,7 @@ export async function runAgent(
   const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
     ? options.nestedRuntime
     : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !options.isolated
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
     ? createNestedSubagentTools({
         manager: nestedRuntime.manager,
         pi: options.pi,
@@ -952,7 +1051,6 @@ export async function runAgent(
     sessionExcludeTools = [...denyTools];
   }
 
-  const settingsManager = SettingsManager.create(configCwd, agentDir);
   const configuredSessionDir = resolveConfiguredSessionDir(agentConfig?.sessionDir, effectiveCwd);
   const defaultSessionDir = process.env.PI_CODING_AGENT_SESSION_DIR ?? settingsManager.getSessionDir?.();
   // Frontmatter wins when it says anything; otherwise the project default,
@@ -986,7 +1084,7 @@ export async function runAgent(
     cwd: effectiveCwd,
     agentDir,
     sessionManager,
-    settingsManager,
+    settingsManager: sessionSettingsManager,
     modelRegistry: ctx.modelRegistry,
     // `as never` is what keeps this assignable across the supported Pi range:
     // pre-0.80.8 the field exists only via the `modelRuntime?: unknown` shim
@@ -1039,6 +1137,7 @@ export async function runAgent(
       extNames,
       narrowing,
       readmitToolNames,
+      nestedCallGate,
     });
   }
 

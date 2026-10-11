@@ -1,4 +1,4 @@
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 import type { AgentConfig, IsolationMode, JoinMode, ThinkingLevel } from "./types.js";
 
 /**

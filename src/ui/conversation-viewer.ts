@@ -6,7 +6,7 @@
  */
 
 import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { type Component, type Focusable, Input, Markdown, type MarkdownOptions, type MarkdownTheme, matchesKey, type OverlayOptions, ScrollView, type ScrollViewScrollbar, stripTerminalSequences, type TUI, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { type Component, type Focusable, Input, Markdown, type MarkdownOptions, type MarkdownTheme, matchesKey, type OverlayOptions, ScrollView, type ScrollViewScrollbar, stripTerminalSequences, type TUI, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { renderAgentName } from "../agent-color.js";
 import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
@@ -22,34 +22,9 @@ const MIN_VIEWPORT = 3;
 export const VIEWPORT_HEIGHT_PCT = 70;
 const SCROLLBAR_WIDTH = 1;
 
-// The mouse types are structural so this module also compiles against Pi 0.84.0,
-// which has ScrollView but no component mouse dispatch. Only newer hosts use them.
-interface ViewerMouseEvent {
-  type: "press" | "release" | "move" | "drag" | "click" | "wheel";
-  button: "left" | "middle" | "right" | "none";
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  wheelDelta?: number;
-}
-interface ViewerMouseResult {
-  handled?: boolean;
-  capture?: boolean;
-  render?: boolean;
-}
-type MouseInput = Input & { handleMouse?: (event: ViewerMouseEvent) => unknown };
-
-function supportsFullscreenObserver(tui: Pick<TUI, "mode">): boolean {
-  return tui.mode === "fullscreen"
-    && "handleMouse" in tui && typeof tui.handleMouse === "function"
-    && typeof (Input.prototype as MouseInput).handleMouse === "function"
-    && "isScrollbarActive" in ScrollView.prototype;
-}
-
 /** Follow the active renderer, not a setting that may require a restart. */
 export function getConversationOverlayOptions(tui: Pick<TUI, "mode">): OverlayOptions {
-  return supportsFullscreenObserver(tui)
+  return tui.mode === "fullscreen"
     ? { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 }
     : { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` };
 }
@@ -180,7 +155,7 @@ export class ConversationViewer implements Component, Focusable {
   private footerTargets: { start: number; end: number; key: string }[] = [];
   private latestTarget: { row: number; start: number; end: number } | undefined;
   private newMessages = 0;
-  private readonly scrollView: ScrollView & { readonly isScrollbarActive?: boolean };
+  private readonly scrollView: ScrollView;
   private unsubscribe: (() => void) | undefined;
   private lastInnerW = 0;
   private closed = false;
@@ -234,7 +209,7 @@ export class ConversationViewer implements Component, Focusable {
     /** Pi's fullscreen scrollbar preference, captured when the observer opens. */
     scrollbarMode: ScrollViewScrollbar = "auto",
   ) {
-    this.fullscreen = supportsFullscreenObserver(tui);
+    this.fullscreen = tui.mode === "fullscreen";
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
     this.scrollView = new ScrollView({
@@ -350,7 +325,7 @@ export class ConversationViewer implements Component, Focusable {
     this.tui.requestRender();
   }
 
-  handleMouse(event: ViewerMouseEvent): ViewerMouseResult {
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult {
     if (!this.fullscreen) return { handled: false };
     // Every cell belongs to this observer. Even unused clicks/drags must not
     // fall through to Pi's transcript selection, scrolling, or editor.
@@ -394,7 +369,7 @@ export class ConversationViewer implements Component, Focusable {
       }
       this.stopArmed = false;
       if (this.composer && event.y === this.tui.terminal.rows - 2) {
-        (this.composer as MouseInput).handleMouse?.({ ...event, x: event.x - 1, y: 0, width: this.lastInnerW, height: 1 });
+        this.composer.handleMouse({ ...event, x: event.x - 1, y: 0, width: this.lastInnerW, height: 1 });
         return { handled: true, render: true };
       }
       if (onScrollbar && view.maxScroll > 0) {

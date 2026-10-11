@@ -1,4 +1,4 @@
-import { Editor, Input, type OverlayOptions, ScrollView, type TuiMode, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, type OverlayOptions, type TuiMode, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -412,6 +412,23 @@ describe("FleetList vs other focused components (#123)", () => {
     expect(h.press(DOWN)).toEqual({ consume: true });
   });
 
+  it("activates under another extension's editor that is not an Editor subclass (#374)", () => {
+    // ui.setEditorComponent accepts any EditorComponent; pi-voice-stt's
+    // VoiceEditorWrapper implements the interface without extending Editor.
+    const h = harness([makeRecord()]);
+    focusInHarness(h, {
+      render: () => [], invalidate: () => {}, handleInput: () => {},
+      getText: () => "", setText: () => {},
+    });
+    expect(h.press(DOWN)).toEqual({ consume: true });
+  });
+
+  it("does not steal ↓ from a selector that handles input but holds no text (#374)", () => {
+    const h = harness([makeRecord()]);
+    focusInHarness(h, { render: () => [], invalidate: () => {}, handleInput: () => {} });
+    expect(h.press(DOWN)).toBeUndefined();
+  });
+
   it("assumes the editor when focus is unknowable (no tui yet / nothing focused)", () => {
     const h = harness([makeRecord()]);
     // No render yet → the list has never seen a tui: activation must still work.
@@ -423,7 +440,7 @@ describe("FleetList rendering", () => {
   it("renders main + agent rows with markers, type, description and right-aligned stats", () => {
     const h = harness([makeRecord({ description: "Sleep then report 1" })]);
     const lines = h.render(120);
-    // hint + blank + main + one agent
+    // hint + blank + main + one agent + blank
     expect(lines[0]).toContain("← for agents");
     expect(lines.find(l => l.includes("main"))).toContain("●"); // main selected by default
     const agentLine = lines.find(l => l.includes("Sleep then report 1"))!;
@@ -464,6 +481,17 @@ describe("FleetList rendering", () => {
     expect(lines.some(l => l.includes("↓ 3 more"))).toBe(true);
   });
 
+  it("ends with a blank spacer so the last row clears pi's footer (#351)", () => {
+    const one = harness([makeRecord({ description: "only agent" })]).render(120);
+    expect(one.at(-1)).toBe("");
+    expect(one.at(-2)).toContain("only agent");
+
+    const many = harness(Array.from({ length: 8 }, (_, i) =>
+      makeRecord({ id: `a${i}`, description: `report ${i}` }))).render(120);
+    expect(many.at(-1)).toBe("");
+    expect(many.at(-2)).toContain("↓ 3 more");
+  });
+
   it("never emits a line wider than the terminal (guards wrap-induced flicker)", () => {
     const agents = Array.from({ length: 8 }, (_, i) =>
       makeRecord({ id: `a${i}`, description: `a very long agent description number ${i} that keeps going` }));
@@ -491,12 +519,7 @@ describe("FleetList rendering", () => {
 describe("FleetList overlay lifecycle", () => {
   it.each<{ mode: TuiMode; expected: OverlayOptions }>([
     { mode: "regular", expected: { anchor: "center", width: "90%", maxHeight: "70%" } },
-    {
-      mode: "fullscreen",
-      expected: "handleMouse" in Input.prototype && "isScrollbarActive" in ScrollView.prototype
-        ? { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 }
-        : { anchor: "center", width: "90%", maxHeight: "70%" },
-    },
+    { mode: "fullscreen", expected: { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 } },
   ])("opens the agent viewer with options for the active $mode TUI", async ({ mode, expected }) => {
     const h = harness([makeRecord()], { tuiMode: mode });
     try {

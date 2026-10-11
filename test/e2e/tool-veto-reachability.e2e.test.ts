@@ -18,6 +18,9 @@
  *   - So we wrap the property Pi itself installs in the AgentSession constructor
  *     (`_installAgentToolHooks`), chaining to the prior hook so Pi's own `tool_call`
  *     dispatch still runs.
+ *   - Calls a tool makes through `ctx.executeTool()` bypass that property, so the
+ *     runner also loads a hidden inline extension into the child whose `tool_call`
+ *     handler applies the same scope (asserted below via `_beforeToolCall`).
  *
  * The unit tests assert our wrapper's behavior against a MOCK session whose `agent`
  * is a hand-written `{ beforeToolCall: undefined }`. That mock cannot catch the one
@@ -107,7 +110,7 @@ describe("tool veto reachability against real pi-mono", () => {
       registerProvider: () => {},
       unregisterProvider: () => {},
     };
-    const ctx: any = { cwd, getSystemPrompt: () => "PARENT", model, modelRegistry };
+    const ctx: any = { cwd, getSystemPrompt: () => "PARENT", isProjectTrusted: () => true, model, modelRegistry };
 
     let priorIsFunction: boolean | undefined;
     let session: any;
@@ -140,6 +143,17 @@ describe("tool veto reachability against real pi-mono", () => {
     // also proves the chain is intact (a clobbered/absent prior would surface here).
     await expect(
       session.agent.beforeToolCall({ toolCall: { name: "alpha_read" }, args: {} }),
+    ).resolves.toSatisfy((r: any) => !r?.block);
+
+    // Calls a tool makes through `ctx.executeTool()` (codemode scripts) never
+    // reach `agent.beforeToolCall`: pi runs them past the session's own
+    // `_beforeToolCall`, i.e. extensions' `tool_call` handlers. Our inline scope
+    // gate must veto there too, or a codemode script reaches out-of-scope tools.
+    await expect(
+      session._beforeToolCall({ toolCall: { name: "beta_tool", id: "n1" }, args: {} }, "parent-call"),
+    ).resolves.toMatchObject({ block: true, reason: expect.any(String) });
+    await expect(
+      session._beforeToolCall({ toolCall: { name: "alpha_read", id: "n2" }, args: {} }, "parent-call"),
     ).resolves.toSatisfy((r: any) => !r?.block);
   });
 });
