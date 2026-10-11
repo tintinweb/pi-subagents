@@ -1003,8 +1003,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             if (info.requestedModel !== undefined) base.requestedModel = info.requestedModel;
             // `base.state` is still "start", so emitting after the row reached a
             // terminal state would revert it to running under last-write-wins.
-            // Not reachable from this repo's host, which reports during startup
-            // — but this is the host boundary, and every other promise it makes
+            // This repo's host reports during startup and again mid-run, each
+            // time the child is routed elsewhere, and stops when the run does —
+            // but this is the host boundary, and every other promise it makes
             // is checked rather than trusted.
             if (!inflight.has(agentId)) return;
             emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);

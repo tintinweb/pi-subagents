@@ -28,7 +28,7 @@ vi.mock("../src/worktree.js", () => ({
 }));
 
 import { AgentManager } from "../src/agent-manager.js";
-import { runAgent } from "../src/agent-runner.js";
+import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import { registerAgents } from "../src/agent-types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
 import type { WorkflowSpawnRequest } from "../src/workflow/runtime.js";
@@ -178,6 +178,87 @@ describe("the workflow host reports a child's effective configuration", () => {
     await host.spawnAgent(spawnRequest({ effort: "low", onResolved: configCollector(reported) }));
 
     expect(reported[0]?.requestedThinking).toBeUndefined();
+  });
+
+  it("reports again when a before_agent_start extension re-routes the child after creation", async () => {
+    // The creation-time report fires before `before_agent_start`, so an
+    // extension that calls setModel / setThinkingLevel there leaves the row
+    // naming a model the child never calls — for the whole run, and after it.
+    // The manager re-reads the session at the run boundary and tells the host.
+    const listeners: ((event: any) => void)[] = [];
+    const session: any = {
+      dispose: vi.fn(),
+      model: { provider: "anthropic", id: "claude-haiku-4-5" },
+      thinkingLevel: "medium",
+      subscribe: vi.fn((listener: (event: any) => void) => {
+        listeners.push(listener);
+        return () => {};
+      }),
+    };
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
+      opts.onSessionCreated?.(session);
+      // Yield once so the manager has issued the record id (`onSpawned` runs
+      // synchronously after `runAgent` is called) and the creation-time report
+      // has gone out — the hook fires after both, on the first turn.
+      await Promise.resolve();
+      session.model = { provider: "anthropic", id: "claude-opus-4-6" };
+      session.thinkingLevel = "max";
+      for (const listener of listeners) listener({ type: "agent_start" });
+      // A turn that changes nothing must not cost the run another entry.
+      for (const listener of listeners) listener({ type: "turn_start" });
+      return { responseText: "done", session: { dispose: vi.fn() } as any, aborted: false, steered: false };
+    });
+    const host = createWorkflowHost({ pi, ctx: ctx({}), manager });
+    const reported: { modelId?: string; thinking?: string; requestedThinking?: string }[] = [];
+
+    await host.spawnAgent(spawnRequest({ effort: "max", onResolved: configCollector(reported) }));
+
+    expect(reported).toHaveLength(2);
+    // What the row showed at creation: inherited haiku, `max` clamped to medium.
+    expect(reported[0]).toMatchObject({ modelId: "anthropic/claude-haiku-4-5", thinking: "medium" });
+    expect(reported[0]?.requestedThinking).toBe("max");
+    // What it must show once the child actually runs. The request rides along
+    // unchanged; the card hides "(asked max)" while the two agree.
+    expect(reported[1]).toMatchObject({ modelId: "anthropic/claude-opus-4-6", thinking: "max" });
+    expect(reported[1]?.requestedThinking).toBe("max");
+  });
+
+  it("routes a resumed run's re-report to the resumed row, not the first one", async () => {
+    // The resumed row's `onResolved` is a different callback from the first
+    // row's. The first run's watch is gone by now, so only the new one fires.
+    const listeners: ((event: any) => void)[] = [];
+    const session: any = {
+      dispose: vi.fn(),
+      model: { provider: "anthropic", id: "claude-haiku-4-5" },
+      thinkingLevel: "low",
+      subscribe: vi.fn((listener: (event: any) => void) => {
+        listeners.push(listener);
+        return () => { listeners.length = 0; };
+      }),
+    };
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, opts: any) => {
+      opts.onSessionCreated?.(session);
+      return { responseText: "done", session, aborted: false, steered: false };
+    });
+    const host = createWorkflowHost({ pi, ctx: ctx({}), manager });
+    const first: Record<string, unknown>[] = [];
+    await host.spawnAgent(spawnRequest({ onResolved: configCollector(first) }));
+    expect(first).toHaveLength(1);
+
+    vi.mocked(resumeAgent).mockImplementation(async () => {
+      session.model = { provider: "anthropic", id: "claude-opus-4-6" };
+      session.thinkingLevel = "max";
+      for (const listener of listeners) listener({ type: "agent_start" });
+      return { text: "again" };
+    });
+    const resumed: { modelId?: string }[] = [];
+    await host.resumeAgent!("wf-agent-0", "more", configCollector(resumed));
+
+    // Mid-run change, then the read-back once the run is over: both opus.
+    expect(resumed.map(r => r.modelId)).toEqual(["anthropic/claude-opus-4-6", "anthropic/claude-opus-4-6"]);
+    // The finished first row heard nothing — this is what used to flip it back
+    // to "running" for the rest of the workflow.
+    expect(first).toHaveLength(1);
   });
 
   it("does not fire when the session never reports a model", async () => {
