@@ -26,7 +26,7 @@ import { describeModel } from "./model-resolver.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
-import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
+import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, type WorktreeCleanupResult, } from "./worktree.js";
 
 export type OnAgentComplete = (record: AgentRecord) => void;
 export type OnAgentStart = (record: AgentRecord) => void;
@@ -79,6 +79,14 @@ const DEFAULT_MAX_CONCURRENT_FOREGROUND = 0;
  * far above the handful anyone keeps in their head.
  */
 const MAX_TOMBSTONES = 100;
+
+function applyWorktreeCleanupFailure(record: AgentRecord, result: WorktreeCleanupResult): boolean {
+  if (!result.error || !result.path) return false;
+  const message = `Worktree cleanup failed: ${result.error}\nAgent worktree remains at \`${result.path}\` for recovery.`;
+  record.status = "error";
+  record.error = record.error ? `${record.error}\n${message}` : message;
+  return true;
+}
 
 /**
  * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
@@ -782,6 +790,9 @@ export class AgentManager {
       if (record.status !== "running") {
         this.chargePool(record.chargedPool, -1);
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
+        if (applyWorktreeCleanupFailure(record, record.worktreeResult)) {
+          throw new Error(record.error);
+        }
         this.drainQueue();
         return;
       }
@@ -914,7 +925,8 @@ export class AgentManager {
           }
           const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
           record.worktreeResult = wtResult;
-          if (wtResult.hasChanges && wtResult.branch) {
+          const cleanupFailed = applyWorktreeCleanupFailure(record, wtResult);
+          if (!cleanupFailed && wtResult.hasChanges && wtResult.branch) {
             // With a caller-supplied cwd the branch lives in THAT repo, not the
             // parent session's — say so, or the orchestrator merges in the wrong repo.
             const repoNote = customCwd !== undefined ? ` in \`${baseCwd}\`` : "";
@@ -952,6 +964,7 @@ export class AgentManager {
           try {
             const wtResult = await cleanupWorktree(pi, baseCwd, record.worktree, options.description);
             record.worktreeResult = wtResult;
+            applyWorktreeCleanupFailure(record, wtResult);
           } catch { /* ignore cleanup errors */ }
         }
 
