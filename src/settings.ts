@@ -67,6 +67,34 @@ export interface SubagentsSettings {
    */
   schedulingEnabled?: boolean;
   /**
+   * How the model reaches the `Agent` tool. Defaults to `"direct"`: declared
+   * (and its full JSON schema paid for) on every single turn, same as today.
+   *
+   * Set to `"deferred"` to stop declaring it by default — pi's `tool_search`
+   * extension (`"defaultTools": ["+tool_search"]`) then finds and declares it
+   * only on the turn it is actually relevant. `Agent`'s schema (nested
+   * `acceptance`, `preflight`, `lane`, `control`, `workflow`, and more) is the
+   * single largest contributor to Pi's per-turn tool-definitions payload in
+   * measurements that drove this setting — see the project's cost diagnosis
+   * referenced in the README.
+   *
+   * WARNING: unlike pi-web-access's `web_enable`, this extension has no
+   * fallback activation path of its own. If `tool_search` is not also
+   * enabled, `"deferred"` makes `Agent` completely unreachable for the
+   * entire session — there is no other way to declare it. A console
+   * warning fires at `session_start` when this is detected (best effort;
+   * `tool_search` loading later in the same session is not re-checked).
+   *
+   * Measured results are also model- and task-dependent, not a guaranteed
+   * cost reduction: on sessions that do end up spawning a subagent, the
+   * `tool_search` round trip can cost more than the avoided declaration
+   * saves. Benchmark against your own workload before relying on this.
+   *
+   * Read once at registration, like `schedulingEnabled`'s schema gating above;
+   * flipping it takes effect on the next pi session.
+   */
+  toolExposure?: "direct" | "deferred";
+  /**
    * When true, the effective model of each subagent spawn is validated
    * against `enabledModels` from pi's settings — both global
    * (`<agentDir>/settings.json`) and project-local (`<cwd>/.pi/settings.json`),
@@ -376,6 +404,7 @@ export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
+const VALID_TOOL_EXPOSURES: ReadonlySet<string> = new Set(["direct", "deferred"]);
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 const VALID_VIEWER_MARKDOWN_MODES: ReadonlySet<string> = new Set<ViewerMarkdownMode>(["off", "assistant", "all"]);
 const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
@@ -506,6 +535,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.workflowsEnabled === "boolean") {
     out.workflowsEnabled = r.workflowsEnabled;
+  }
+  if (typeof r.toolExposure === "string" && VALID_TOOL_EXPOSURES.has(r.toolExposure)) {
+    out.toolExposure = r.toolExposure as "direct" | "deferred";
   }
   const packageAgents = sanitizePackageGate(r.packageAgents);
   if (packageAgents !== undefined) out.packageAgents = packageAgents;

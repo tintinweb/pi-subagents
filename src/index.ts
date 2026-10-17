@@ -12,7 +12,7 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme, type ToolExposure } from "@earendil-works/pi-coding-agent";
 import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
@@ -1744,6 +1744,14 @@ Terse command-style prompts produce shallow, generic work.
     return fullAgentToolDescription;
   })();
 
+  // Read once at registration, like `scheduleParamShape` above — see
+  // `SubagentsSettings.toolExposure` for why "deferred" exists and what it
+  // costs/saves. Defaulting to "direct" keeps today's behavior unchanged for
+  // everyone who does not opt in. There is no runtime toggle for this, unlike
+  // `schedulingEnabled`: changing it takes effect on the next pi session, same
+  // as the schema-shape decision above.
+  const agentToolExposure: ToolExposure = bootSettings.toolExposure === "deferred" ? "deferred" : "direct";
+
   // Held rather than registered inline: the mention clone reuses this exact
   // definition, so the agent it starts is an ordinary top-level spawn instead
   // of a second implementation that has to be kept in step with this one.
@@ -1751,6 +1759,7 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
     description: agentToolDescription,
+    exposure: agentToolExposure,
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
       "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
@@ -2535,6 +2544,24 @@ Terse command-style prompts produce shallow, generic work.
   // mention-clone header on why the clone must call the registered tool.
   const registeredAgentTool = withUsageReporting(agentTool);
   pi.registerTool(registeredAgentTool);
+
+  // Unlike pi-web-access's `web_enable`, this extension has no fallback
+  // activation path of its own -- `tool_search` is the ONLY way to reach a
+  // deferred Agent. Checked at session_start, not at registration: built-in
+  // extensions (including tool_search) are not guaranteed to have registered
+  // their tools yet at this extension's own load time, so an earlier check
+  // risks a false warning. Best effort: tool_search loading later in the same
+  // session (for example a lazy MCP-style activation) is not re-checked.
+  if (agentToolExposure === "deferred") {
+    pi.on("session_start", () => {
+      if (!pi.getAllTools().some((tool) => tool.name === "tool_search")) {
+        console.warn(
+          '[pi-subagents] toolExposure is "deferred" but tool_search is not active — Agent is unreachable this session. ' +
+            'Enable it with `"defaultTools": ["+tool_search"]` in Pi\'s settings, or set toolExposure back to "direct".',
+        );
+      }
+    });
+  }
 
   // ---- Workflow tool ----
 
@@ -3732,6 +3759,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
       viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
+      // Deliberately NOT `?? "direct"`: same reasoning as `fallbackSubagent` and
+      // `workflowsEnabled` above — materializing the implicit default would turn
+      // it into explicit configuration. undefined is dropped by JSON.stringify,
+      // so unset stays unset.
+      toolExposure: agentToolExposure === "deferred" ? "deferred" : undefined,
     } satisfies SubagentsSettings;
   }
 
