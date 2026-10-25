@@ -171,6 +171,15 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips compactSubagentResults; drops non-boolean", () => {
+    saveSettings({ compactSubagentResults: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ compactSubagentResults: false });
+    saveSettings({ compactSubagentResults: true }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ compactSubagentResults: true });
+    writeProject({ compactSubagentResults: "no" } as any);
+    expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
+  });
+
   it("round-trips backgroundByDefault (true and false), and absence stays absent", () => {
     // `false` is the load-bearing case: it's how a user restores the previous
     // foreground default, so it must survive a save/load rather than being
