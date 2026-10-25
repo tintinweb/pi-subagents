@@ -5,7 +5,7 @@
  * Subscribes to session events for real-time streaming updates.
  */
 
-import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition, createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, getMarkdownTheme, ToolExecutionComponent } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, Input, Markdown, type MarkdownOptions, type MarkdownTheme, matchesKey, type OverlayOptions, ScrollView, type ScrollViewScrollbar, stripTerminalSequences, type TUI, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { renderAgentName } from "../agent-color.js";
 import { extractText } from "../context.js";
@@ -14,6 +14,51 @@ import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatDuration, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
+
+/** An assistant message's tool call, and the message that answers it. */
+type AgentMessage = AgentSession["messages"][number];
+type ToolCallPart = Extract<Extract<AgentMessage, { role: "assistant" }>["content"][number], { type: "toolCall" }>;
+type ToolResultPart = Extract<AgentMessage, { role: "toolResult" }>;
+
+/** A rendered tool call, reused across renders so its component's caches survive. */
+interface ToolBlock {
+  component: ToolExecutionComponent;
+  /** The part the component was last built from, so grown arguments are noticed. */
+  call: ToolCallPart;
+  /** The result already handed to the component, if any. */
+  result?: ToolResultPart;
+  /**
+   * The block's rendered rows and the width they were produced at.
+   *
+   * `ToolExecutionComponent` re-wraps and re-paints its whole subtree on every
+   * `render()`, which costs ~0.4 ms per settled call — enough that a 500-message
+   * transcript re-wrapped every block on every keystroke. The rows only change
+   * when the inputs above do, so they are kept and reused until one does.
+   */
+  rows?: string[];
+  width?: number;
+}
+
+/** The definition a `ToolExecutionComponent` takes: pi's renderers, or a whole tool definition. */
+type ToolRendering = NonNullable<ConstructorParameters<typeof ToolExecutionComponent>[4]>;
+
+/**
+ * Whether pi's global theme is initialized.
+ *
+ * `ToolExecutionComponent` draws with pi's theme rather than the instance this
+ * viewer is handed, and pi throws on the first color lookup when nothing called
+ * `initTheme()`. This viewer is constructed outside pi too — its own unit tests,
+ * an embedded session — so the tool path is gated on a probe, the same way
+ * `resolveMarkdownTheme` already treats pi's Markdown theme.
+ */
+function piThemeAvailable(): boolean {
+  try {
+    getMarkdownTheme().heading("probe");
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Base lines consumed by chrome: top border + header + header sep + footer sep + footer + bottom border. */
 const CHROME_LINES_BASE = 6;
@@ -181,6 +226,17 @@ export class ConversationViewer implements Component, Focusable {
    * Weak so a compacted-away message doesn't pin its render.
    */
   private readonly markdownCache = new WeakMap<object, { md: Markdown; text: string; failed?: boolean }>();
+  /** One block per tool call id, so a redraw reuses the component's own caches. */
+  private readonly toolBlocks = new Map<string, ToolBlock>();
+  /** pi's own renderers for its builtin tools, resolved once per viewer. */
+  private toolRendererCache: Map<string, ToolRendering> | undefined;
+  /**
+   * Whether calls render through pi's components. Probe-gated: without pi's
+   * theme the viewer keeps its own plain rendering rather than throwing.
+   */
+  private readonly toolRendering = piThemeAvailable();
+  /** Whether tool blocks show their full output; toggled with pi's expand key. */
+  private toolsExpanded = false;
 
   constructor(
     private tui: TUI,
@@ -303,6 +359,18 @@ export class ConversationViewer implements Component, Focusable {
       return;
     }
     if (this.stopArmed) this.stopArmed = false;
+
+    // Unfold tool output — the same key, and the same meaning, as in the main
+    // transcript. It is what the renderers' own elision notices refer to.
+    if (this.keys.expand(data)) {
+      this.toolsExpanded = !this.toolsExpanded;
+      for (const block of this.toolBlocks.values()) {
+        block.component.setExpanded(this.toolsExpanded);
+        block.rows = undefined;
+      }
+      this.tui.requestRender();
+      return;
+    }
 
     const totalLines = this.buildContentLines(this.lastInnerW).length;
     const viewportHeight = this.viewportHeight();
@@ -719,6 +787,14 @@ export class ConversationViewer implements Component, Focusable {
       return lines;
     }
 
+    // A result is folded into the block of the call it answers, so every call
+    // has to find its result before the loop reaches it.
+    const results = new Map<string, ToolResultPart>();
+    for (const msg of messages) {
+      if (msg.role === "toolResult") results.set(msg.toolCallId, msg);
+    }
+    const foldedCalls = new Set<string>();
+
     const mode = this.markdownMode();
     let needsSeparator = false;
     for (const msg of messages) {
@@ -734,12 +810,10 @@ export class ConversationViewer implements Component, Focusable {
         }
       } else if (msg.role === "assistant") {
         const textParts: string[] = [];
-        const toolCalls: string[] = [];
+        const toolCalls: ToolCallPart[] = [];
         for (const c of msg.content) {
           if (c.type === "text" && c.text) textParts.push(c.text);
-          else if (c.type === "toolCall") {
-            toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
-          }
+          else if (c.type === "toolCall") toolCalls.push(c);
         }
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.bold("[Assistant]"));
@@ -749,10 +823,19 @@ export class ConversationViewer implements Component, Focusable {
             ? this.rawLines(text, width, false)
             : this.markdownLines(msg, text, width, false)));
         }
-        for (const name of toolCalls) {
-          lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${name}]`), width));
+        for (const call of toolCalls) {
+          if (!this.toolRendering) {
+            lines.push(truncateToWidth(th.fg("muted", `  [Tool: ${call.name}]`), width));
+            continue;
+          }
+          foldedCalls.add(call.id);
+          lines.push(...this.toolBlockLines(call, results.get(call.id), width));
         }
       } else if (msg.role === "toolResult") {
+        // Rendered under its call above. A result whose call is not in the
+        // transcript — a compacted prefix, a reopened session — keeps the plain
+        // block, because there is no call row to fold it into.
+        if (foldedCalls.has(msg.toolCallId)) continue;
         const { text, elided } = capResult(extractText(msg.content).trim());
         if (!text) continue;
         if (needsSeparator) lines.push(th.fg("dim", "───"));
@@ -785,6 +868,91 @@ export class ConversationViewer implements Component, Focusable {
       lines.push(truncateToWidth(th.fg("accent", "▍ ") + th.fg("dim", act), width));
     }
 
-    return lines.map(l => truncateToWidth(l, width));
+    // Only clamp what actually overflows: `truncateToWidth` takes a slow,
+    // character-by-character path for any line carrying an escape sequence, and
+    // a tool block's rows are already rendered at this width by its component.
+    return lines.map(l => (visibleWidth(l) > width ? truncateToWidth(l, width) : l));
+  }
+
+  /**
+   * One tool call as pi draws it in the main transcript: the arguments on the
+   * call, then the result in that tool's own format — a bash box, read line
+   * numbers, an edit diff. Blocks are cached per call id because
+   * `ToolExecutionComponent` rebuilds its renderer tree on every update.
+   *
+   * A tool pi has no renderer for still renders: `undefined` makes the component
+   * fall back to its generic `name key=value` header plus a bounded preview,
+   * which is what pi shows for such a tool itself.
+   */
+  private toolBlockLines(call: ToolCallPart, result: ToolResultPart | undefined, width: number): string[] {
+    let block = this.toolBlocks.get(call.id);
+    let changed = false;
+    if (!block) {
+      const component = new ToolExecutionComponent(
+        call.name,
+        call.id,
+        call.arguments,
+        // Text only: an image needs rows this line-based renderer cannot reserve.
+        { showImages: false },
+        this.toolRenderer(call.name),
+        this.tui,
+        this.toolCwd(),
+      );
+      // Deliberately not markExecutionStarted(): it calls requestRender(), and
+      // this runs inside a render. A settled call still gets its duration from
+      // the result, so the clock only matters for a call still in flight.
+      component.setArgsComplete();
+      component.setExpanded(this.toolsExpanded);
+      block = { component, call };
+      this.toolBlocks.set(call.id, block);
+      changed = true;
+    } else if (block.call !== call) {
+      // The part object is replaced as its arguments stream in.
+      block.call = call;
+      block.component.updateArgs(call.arguments);
+      changed = true;
+    }
+    if (result && block.result !== result) {
+      block.result = result;
+      block.component.updateResult({
+        content: result.content,
+        details: result.details,
+        isError: result.isError,
+        durationMs: result.durationMs,
+      });
+      changed = true;
+    }
+    if (!changed && block.rows && block.width === width) return block.rows;
+    block.rows = block.component.render(width);
+    block.width = width;
+    return block.rows;
+  }
+
+  /** The directory the agent worked in, for the renderers that shorten paths. */
+  private toolCwd(): string {
+    return this.session.sessionManager.getCwd();
+  }
+
+  /**
+   * pi's renderer for a builtin tool, or `undefined` for a tool it does not ship
+   * — an MCP or extension tool then renders through the component's fallback.
+   *
+   * Built per viewer rather than at module load: the factories take the cwd the
+   * renderers resolve paths against, and most sessions never open a viewer.
+   */
+  private toolRenderer(toolName: string): ToolRendering | undefined {
+    if (!this.toolRendererCache) {
+      const cwd = this.toolCwd();
+      this.toolRendererCache = new Map<string, ToolRendering>([
+        createBashToolDefinition(cwd),
+        createEditToolDefinition(cwd),
+        createFindToolDefinition(cwd),
+        createGrepToolDefinition(cwd),
+        createLsToolDefinition(cwd),
+        createReadToolDefinition(cwd),
+        createWriteToolDefinition(cwd),
+      ].map((definition): [string, ToolRendering] => [definition.name, definition]));
+    }
+    return this.toolRendererCache.get(toolName);
   }
 }
