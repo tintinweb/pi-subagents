@@ -15,10 +15,10 @@ import { isAbsolute, join } from "node:path";
 import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { abortable } from "./abortable.js";
+import { abortableWithTimeout } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
-import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
+import { AgentManager, getStopGraceMs, isTopLevelAgent, setStopGraceMs } from "./agent-manager.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -37,7 +37,25 @@ import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, ses
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import {
+  applyAndEmitLoaded,
+  getInactivityTimeoutMs,
+  getNotificationDelivery,
+  getResultWaitTimeoutMs,
+  getScheduleOverlap,
+  getStalledWarningMs,
+  getToolCallTimeoutMs,
+  loadSettings,
+  type SubagentsSettings,
+  saveAndEmitChanged,
+  setInactivityTimeoutMs,
+  setNotificationDelivery,
+  setResultWaitTimeoutMs,
+  setScheduleOverlap,
+  setStalledWarningMs,
+  setToolCallTimeoutMs,
+  type ToolDescriptionMode,
+} from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
@@ -613,8 +631,6 @@ export default function (pi: ExtensionAPI) {
     if (result === 'pass') {
       sendIndividualNudge(record);
     }
-    // 'held' → do nothing, group will fire later
-    // 'delivered' → group callback already fired
     widget.update();
   }, undefined, (record) => {
     if (!isTopLevelAgent(record)) return;
@@ -685,6 +701,13 @@ export default function (pi: ExtensionAPI) {
   }, (record, message) => {
     if (!isTopLevelAgent(record)) return;
     pi.events.emit("subagents:steered", { id: record.id, message });
+  }, (record, activity) => {
+    if (!isTopLevelAgent(record)) return;
+    pi.events.emit("subagents:activity", {
+      id: record.id,
+      sessionGeneration,
+      activity,
+    });
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -792,6 +815,7 @@ export default function (pi: ExtensionAPI) {
 
   // --- Cross-extension RPC via pi.events ---
   let currentCtx: ExtensionContext | undefined;
+  let sessionGeneration = 1;
   // RPC handlers + the `subagents:ready` broadcast are wired on `session_start`
   // (a bound lifecycle event), not at factory time. pi runs every extension
   // factory before the `extensions:` filter and only fires lifecycle events for
@@ -828,6 +852,7 @@ export default function (pi: ExtensionAPI) {
   // This also wires the RPC handlers and broadcasts readiness — on the first
   // bound session_start, so a filtered-out activation never advertises (#142).
   pi.on("session_start", async (_event, ctx) => {
+    sessionGeneration++;
     currentCtx = ctx;
     // Pi resolves project trust before the first session starts, so this is the
     // earliest honest answer. The activation-time load defaulted to untrusted,
@@ -1595,6 +1620,13 @@ export default function (pi: ExtensionAPI) {
       setViewerMarkdown,
       setPackageAgents: setPackageAgentsGate,
       setPackageWorkflows: setPackageWorkflowsGate,
+      setStopGraceMs,
+      setResultWaitTimeoutMs,
+      setStalledWarningMs,
+      setToolCallTimeoutMs,
+      setInactivityTimeoutMs,
+      setNotificationDelivery,
+      setScheduleOverlap,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -1613,6 +1645,12 @@ export default function (pi: ExtensionAPI) {
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
           'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+      }),
+    ),
+    schedule_overlap: Type.Optional(
+      Type.String({
+        description:
+          'Overlap policy for recurring schedule triggers: "skip" (default, skip if active), "queue-one" (hold 1 pending trigger), "parallel" (allow overlap). Valid only with schedule.',
       }),
     ),
   };
@@ -2100,6 +2138,9 @@ Terse command-style prompts produce shallow, generic work.
       };
 
       // ---- Schedule: register a job, don't spawn now ----
+      if (params.schedule_overlap && !params.schedule) {
+        return textResult("Cannot pass `schedule_overlap` without `schedule`.");
+      }
       if (params.schedule) {
         if (!isSchedulingEnabled()) {
           return textResult("Scheduling is disabled in this project. Enable via /agents → Settings → Scheduling.");
@@ -2113,6 +2154,14 @@ Terse command-style prompts produce shallow, generic work.
         if (params.run_in_background === false) {
           return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
         }
+        if (
+          params.schedule_overlap &&
+          params.schedule_overlap !== "skip" &&
+          params.schedule_overlap !== "queue-one" &&
+          params.schedule_overlap !== "parallel"
+        ) {
+          return textResult(`Invalid schedule_overlap: "${params.schedule_overlap}". Must be "skip", "queue-one", or "parallel".`);
+        }
         if (!scheduler.isActive()) {
           return textResult("Scheduler is not active in this session yet. Try again after the session has fully started.");
         }
@@ -2121,6 +2170,7 @@ Terse command-style prompts produce shallow, generic work.
             name: params.description as string,
             description: params.description as string,
             schedule: params.schedule as string,
+            overlapPolicy: params.schedule_overlap as any,
             // The caller's own name, not the substitute — the scheduler re-resolves
             // at fire time, and the original is what a user edits.
             subagent_type: requestedType,
@@ -2981,6 +3031,14 @@ Terse command-style prompts produce shallow, generic work.
           description: "If true, include the agent's full conversation (messages + tool calls). Default: false.",
         }),
       ),
+      timeout_ms: Type.Optional(
+        Type.Number({
+          description:
+            "Maximum duration in milliseconds to wait for completion (1000-600000). Defaults to resultWaitTimeoutMs (30s).",
+          minimum: 1_000,
+          maximum: 600_000,
+        }),
+      ),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
       const record = resolveAgentRef(params.agent_id);
@@ -2993,14 +3051,39 @@ Terse command-style prompts produce shallow, generic work.
       // completion notification can still be delivered.
       // Queued agents have no promise yet (it's created when the queue starts
       // them), so poll until they leave the queue, then await like a running one.
+      let timedOut = false;
       if (params.wait && (record.status === "running" || record.status === "queued")) {
+        const timeoutMs = params.timeout_ms ?? getResultWaitTimeoutMs();
+        const deadline = Date.now() + timeoutMs;
         while (record.status === "queued") {
-          await abortable(
-            new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
-            signal,
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            timedOut = true;
+            break;
+          }
+          const outcome = await abortableWithTimeout(
+            new Promise<void>((resolve) => setTimeout(resolve, Math.min(remaining, QUEUE_WAIT_POLL_MS))),
+            { signal, timeoutMs: remaining },
           );
+          if (outcome.timedOut) {
+            timedOut = true;
+            break;
+          }
         }
-        if (record.promise) await abortable(record.promise, signal);
+        if (!timedOut && record.promise) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) {
+            timedOut = true;
+          } else {
+            const outcome = await abortableWithTimeout(record.promise, {
+              signal,
+              timeoutMs: remaining,
+            });
+            if (outcome.timedOut) {
+              timedOut = true;
+            }
+          }
+        }
       }
 
       const displayName = getDisplayName(record.type);
@@ -3022,7 +3105,9 @@ Terse command-style prompts produce shallow, generic work.
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
+      if (timedOut) {
+        output += "Wait timed out. The agent is still running. You can query its result again with get_subagent_result.";
+      } else if (record.status === "running" || record.status === "queued") {
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
@@ -3030,8 +3115,8 @@ Terse command-style prompts produce shallow, generic work.
         output += record.result?.trim() || "No output.";
       }
 
-      // Mark result as consumed — suppresses the completion notification
-      if (record.status !== "running" && record.status !== "queued") {
+      // Mark result as consumed only if wait did not time out
+      if (!timedOut && record.status !== "running" && record.status !== "queued") {
         record.resultConsumed = true;
         outbox.cancel(record.id);
       }
@@ -3732,6 +3817,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
       viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
+      stopGraceMs: getStopGraceMs(),
+      resultWaitTimeoutMs: getResultWaitTimeoutMs(),
+      stalledWarningMs: getStalledWarningMs(),
+      toolCallTimeoutMs: getToolCallTimeoutMs(),
+      inactivityTimeoutMs: getInactivityTimeoutMs(),
+      notificationDelivery: getNotificationDelivery(),
+      scheduleOverlap: getScheduleOverlap(),
     } satisfies SubagentsSettings;
   }
 
@@ -3771,7 +3863,16 @@ Write the file using the write tool. Only write the file, nothing else.`;
   }
 
   const NUMERIC_IDS = new Set([
-    "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
+    "maxConcurrent",
+    "maxConcurrentForeground",
+    "defaultMaxTurns",
+    "graceTurns",
+    "maxSubagentDepth",
+    "stopGraceMs",
+    "resultWaitTimeoutMs",
+    "stalledWarningMs",
+    "toolCallTimeoutMs",
+    "inactivityTimeoutMs",
   ]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
@@ -3781,6 +3882,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
+      const sgm = getStopGraceMs();
       // Label what unset actually does — it targets general-purpose even when
       // that is unregistered (the permissive hardcoded tier), so showing "none"
       // there would advertise strict dispatch for the most permissive state.
@@ -3824,6 +3926,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
           currentValue: String(msd),
           values: [String(msd)],
+        },
+        {
+          id: "stopGraceMs",
+          label: "Stop grace",
+          description: "Grace period (ms) a stopped attempt gets before forced disposal (1000-600000, Enter to type)",
+          currentValue: String(sgm),
+          values: [String(sgm)],
         },
         {
           id: "joinMode",
@@ -3982,6 +4091,20 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["all", "background", "off"],
         },
         {
+          id: "notificationDelivery",
+          label: "Notification delivery",
+          description: "Delivery timing for background completions: steer (default, delivered via steer mid-turn) or settled (held until parent turn completes)",
+          currentValue: getNotificationDelivery(),
+          values: ["steer", "settled"],
+        },
+        {
+          id: "scheduleOverlap",
+          label: "Schedule overlap",
+          description: "Overlap policy for recurring scheduled jobs: skip (default), queue-one (coalesce pending), or parallel",
+          currentValue: getScheduleOverlap(),
+          values: ["skip", "queue-one", "parallel"],
+        },
+        {
           id: "toolDescriptionMode",
           label: "Tool description",
           description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
@@ -4033,6 +4156,42 @@ Write the file using the write tool. Only write the file, nothing else.`;
               : `Nested depth set to ${n}. Applies to agents started from now on.`,
           );
         }
+      } else if (id === "stopGraceMs") {
+        const n = parseInt(value, 10);
+        if (n >= 1_000) {
+          setStopGraceMs(n);
+          notifyApplied(ctx, `Stop grace set to ${n}ms. Applies to attempts started from now on.`);
+        }
+      } else if (id === "resultWaitTimeoutMs") {
+        const n = parseInt(value, 10);
+        if (n >= 1_000) {
+          setResultWaitTimeoutMs(n);
+          notifyApplied(ctx, `Result wait timeout set to ${n}ms`);
+        }
+      } else if (id === "stalledWarningMs") {
+        const n = parseInt(value, 10);
+        if (n >= 1_000) {
+          setStalledWarningMs(n);
+          notifyApplied(ctx, `Stalled warning threshold set to ${n}ms`);
+        }
+      } else if (id === "toolCallTimeoutMs") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          setToolCallTimeoutMs(n);
+          notifyApplied(ctx, n === 0 ? "Tool call timeout disabled" : `Tool call timeout set to ${n}ms`);
+        }
+      } else if (id === "inactivityTimeoutMs") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          setInactivityTimeoutMs(n);
+          notifyApplied(ctx, n === 0 ? "Inactivity timeout disabled" : `Inactivity timeout set to ${n}ms`);
+        }
+      } else if (id === "notificationDelivery") {
+        setNotificationDelivery(value as any);
+        notifyApplied(ctx, `Notification delivery set to ${value}`);
+      } else if (id === "scheduleOverlap") {
+        setScheduleOverlap(value as any);
+        notifyApplied(ctx, `Schedule overlap policy set to ${value}`);
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
         notifyApplied(ctx, `Default join mode set to ${value}`);

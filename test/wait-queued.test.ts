@@ -228,4 +228,48 @@ describe("get_subagent_result wait:true on a queued agent", () => {
     expect(outcome).toBe("AbortError");
     expect(textOf(completedResult)).toContain("THE-RESULT-PAYLOAD");
   });
+
+  it("times out a running wait after timeout_ms without cancelling or consuming the child", async () => {
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+
+    let resolveRun: (() => void) | undefined;
+    vi.mocked(runAgent).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRun = () =>
+            resolve({
+              responseText: "THE-FINAL-RESULT",
+              session: { messages: [] } as any,
+              aborted: false,
+              steered: false,
+            });
+        }),
+    );
+
+    const { id } = await spawnBackground(tools);
+
+    const timedOutRes = await tools
+      .get("get_subagent_result")
+      .execute(
+        "tc-wait-timeout",
+        { agent_id: id, wait: true, timeout_ms: 50 },
+        undefined,
+        undefined,
+        ctx(),
+      );
+
+    expect(textOf(timedOutRes)).toContain("Wait timed out");
+
+    // Finish the child
+    resolveRun?.();
+    await flush();
+
+    const finalRes = await tools
+      .get("get_subagent_result")
+      .execute("tc-fetch-later", { agent_id: id }, undefined, undefined, ctx());
+
+    expect(textOf(finalRes)).toContain("THE-FINAL-RESULT");
+    await lifecycle.get("session_shutdown")?.();
+  });
 });

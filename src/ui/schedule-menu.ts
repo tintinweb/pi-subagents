@@ -55,16 +55,20 @@ function formatJob(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
 /** Multi-line details block for the cancel confirm. */
 function formatDetails(j: ScheduledSubagent, scheduler: SubagentScheduler): string {
   const next = scheduler.getNextRun(j.id) ?? "—";
-  return [
+  const lines = [
     `name:      ${j.name}`,
     `schedule:  ${j.schedule} (${j.scheduleType})`,
     `agent:     ${j.subagent_type}`,
+    `overlap:   ${j.overlapPolicy ?? "skip"}`,
     `prompt:    ${j.prompt.slice(0, 200)}${j.prompt.length > 200 ? "…" : ""}`,
     `created:   ${j.createdAt}`,
     `last run:  ${j.lastRun ?? "—"} (${j.lastStatus ?? "—"})`,
     `next run:  ${next}`,
     `runs:      ${j.runCount}`,
-  ].join("\n");
+  ];
+  if (j.skippedCount) lines.push(`skipped:   ${j.skippedCount}`);
+  if (j.coalescedCount) lines.push(`coalesced: ${j.coalescedCount}`);
+  return lines.join("\n");
 }
 
 /**

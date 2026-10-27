@@ -31,8 +31,8 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
-import type { SubagentType, ThinkingLevel } from "./types.js";
-import type { LifetimeUsage } from "./usage.js";
+import type { AgentActivityEvent, SubagentType, ThinkingLevel } from "./types.js";
+import { getSessionContextPercent, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
 /**
@@ -510,6 +510,8 @@ export interface RunOptions {
   configCwd?: string;
   /** Called on tool start/end with activity info. */
   onToolActivity?: (activity: ToolActivity) => void;
+  /** Called on canonical activity events across the lifecycle. */
+  onActivity?: (event: AgentActivityEvent) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
@@ -646,9 +648,13 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
 }
 
 /** The per-run callbacks a spawn and a resume share, plus the resolved turn limit. */
-type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onToolActivity" | "onAssistantUsage" | "onCompaction"> & {
+type RunObserverOptions = Pick<
+  RunOptions,
+  "onTurnEnd" | "onTextDelta" | "onToolActivity" | "onAssistantUsage" | "onCompaction" | "onActivity"
+> & {
   /** Already resolved: undefined = unlimited. */
   maxTurns?: number;
+  graceTurns?: number;
 };
 
 /**
@@ -667,15 +673,22 @@ function observeRun(session: AgentSession, options: RunObserverOptions) {
     aborted: false,
     unsubscribe: () => {},
   };
+  const effectiveGraceTurns = options.graceTurns ?? graceTurns;
   run.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") {
       turnCount++;
       options.onTurnEnd?.(turnCount);
+      options.onActivity?.({
+        type: "turn-end",
+        at: Date.now(),
+        turnCount,
+        contextPercent: getSessionContextPercent(session) ?? undefined,
+      });
       if (options.maxTurns != null) {
         if (!run.steered && turnCount >= options.maxTurns) {
           run.steered = true;
           session.steer("You have reached your turn limit. Wrap up immediately — provide your final answer now.");
-        } else if (run.steered && turnCount >= options.maxTurns + graceTurns) {
+        } else if (run.steered && turnCount >= options.maxTurns + effectiveGraceTurns) {
           run.aborted = true;
           session.abort();
         }
@@ -683,16 +696,60 @@ function observeRun(session: AgentSession, options: RunObserverOptions) {
     }
     if (event.type === "message_start") {
       currentMessageText = "";
+      if (event.message.role === "assistant") {
+        options.onActivity?.({ type: "model-inference", at: Date.now() });
+      }
     }
-    if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-      currentMessageText += event.assistantMessageEvent.delta;
-      options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+    if (event.type === "message_update") {
+      if (event.assistantMessageEvent.type === "text_delta") {
+        currentMessageText += event.assistantMessageEvent.delta;
+        options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+      }
+      options.onActivity?.({ type: "model-progress", at: Date.now() });
     }
     if (event.type === "tool_execution_start") {
       options.onToolActivity?.({ type: "start", toolName: event.toolName });
+      options.onActivity?.({
+        type: "tool-start",
+        at: Date.now(),
+        tool: {
+          callId: event.toolCallId,
+          name: event.toolName,
+          startedAt: Date.now(),
+          lastUpdateAt: Date.now(),
+        },
+      });
+    }
+    if (event.type === "tool_execution_update") {
+      options.onActivity?.({
+        type: "tool-update",
+        at: Date.now(),
+        callId: event.toolCallId,
+      });
     }
     if (event.type === "tool_execution_end") {
       options.onToolActivity?.({ type: "end", toolName: event.toolName });
+      options.onActivity?.({
+        type: "tool-end",
+        at: Date.now(),
+        callId: event.toolCallId,
+      });
+    }
+    if (event.type === "compaction_start") {
+      options.onActivity?.({
+        type: "compaction-start",
+        at: Date.now(),
+        compaction: { startedAt: Date.now(), reason: event.reason },
+      });
+    }
+    if (event.type === "compaction_end") {
+      options.onActivity?.({ type: "compaction-end", at: Date.now() });
+      if (!event.aborted && event.result) {
+        options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+      }
+    }
+    if (event.type === "agent_settled") {
+      options.onActivity?.({ type: "idle", at: Date.now() });
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
@@ -704,24 +761,37 @@ function observeRun(session: AgentSession, options: RunObserverOptions) {
         cost: u.cost?.total ?? 0,
       });
     }
-    if (event.type === "compaction_end" && !event.aborted && event.result) {
-      options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
-    }
   });
   return run;
 }
 
 /**
  * Wire an AbortSignal to abort a session.
- * Returns a cleanup function to remove the listener.
+ *
+ * Handles an already-aborted signal synchronously: `addEventListener` never
+ * fires on a signal that aborted before the listener was attached, so without
+ * the upfront check a stop that landed during startup would leave the child to
+ * reach `session.prompt()` unreachable-by-abort.
+ *
+ * Returns a cleanup function to remove the listener (idempotent).
  */
 function forwardAbortSignal(session: AgentSession, signal?: AbortSignal): () => void {
   if (!signal) return () => {};
-  const onAbort = () => session.abort();
+  if (signal.aborted) {
+    session.abort();
+    return () => {};
+  }
+  const onAbort = () => { session.abort(); };
   signal.addEventListener("abort", onAbort, { once: true });
   return () => signal.removeEventListener("abort", onAbort);
 }
 
+/**
+ * Reject with the abort reason when a signal is already aborted, else resolve.
+ * The runner checks this BEFORE each asynchronous startup phase and before
+ * `session.prompt()`, so a stop that arrived earlier stops the phase that
+ * would otherwise let the child reach the model.
+ */
 function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string): string | undefined {
   if (!sessionDir) return undefined;
   if (sessionDir === "~" || sessionDir.startsWith("~/")) return resolve(homedir(), sessionDir.slice(2));
@@ -744,6 +814,7 @@ export async function runAgent(
   // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
   const configCwd = options.configCwd ?? effectiveCwd;
 
+  options.onActivity?.({ type: "initializing", stage: "environment", at: Date.now() });
   const env = await detectEnv(options.pi, effectiveCwd);
 
   // Get parent system prompt for append-mode agents
@@ -922,6 +993,7 @@ export async function runAgent(
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });
+  options.onActivity?.({ type: "initializing", stage: "loader", at: Date.now() });
   await runInChildSessionContext(() => loader.reload());
 
   // Plain entries in `tools:` are expected to be built-in names (extension tools
@@ -1169,6 +1241,7 @@ export async function runAgent(
     sessionOpts.thinkingLevel = thinkingLevel;
   }
 
+  options.onActivity?.({ type: "initializing", stage: "session", at: Date.now() });
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
 
   const baseSessionName = agentConfig?.name ?? type;
@@ -1180,6 +1253,7 @@ export async function runAgent(
   // (e.g. loading credentials, setting up state). Tool gating already happened
   // at session construction via the `tools:` allowlist above — no separate
   // post-bind filter is needed. All ExtensionBindings fields are optional.
+  options.onActivity?.({ type: "initializing", stage: "extensions", at: Date.now() });
   await session.bindExtensions({
     onError: (err) => {
       options.onToolActivity?.({
@@ -1231,7 +1305,10 @@ export async function runAgent(
     // A signal that fired before this point never calls the listener above, and
     // pi's `session.abort()` is a no-op until a run is active — so a child whose
     // parent is already gone is not prompted at all.
-    if (options.signal?.aborted !== true) await session.prompt(effectivePrompt);
+    if (options.signal?.aborted !== true) {
+      options.onActivity?.({ type: "model-inference", at: Date.now() });
+      await session.prompt(effectivePrompt);
+    }
 
     // One more prompt when a schema was asked for and nothing usable came back
     // — the model answered in prose, or only ever called the tool invalidly.
@@ -1269,6 +1346,22 @@ export async function runAgent(
   };
 }
 
+export type ResumeRunOptions = Pick<
+  RunOptions,
+  "maxTurns" | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onCompaction" | "onActivity" | "signal"
+> & {
+  /** The agent's type, for its own `max_turns`. */
+  type?: SubagentType;
+  graceTurns?: number;
+};
+
+export type ResumeRunResult = {
+  text: string;
+  aborted: boolean;
+  steered: boolean;
+  failure?: string;
+};
+
 /**
  * Send a new prompt to an existing session (resume). A fresh run of the same
  * agent: the turn limit is resolved as `runAgent` resolves it — an explicit
@@ -1278,22 +1371,29 @@ export async function runAgent(
 export async function resumeAgent(
   session: AgentSession,
   prompt: string,
-  options: Pick<RunOptions, "maxTurns" | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onCompaction" | "signal"> & {
-    /** The agent's type, for its own `max_turns`. */
-    type: SubagentType;
-  },
-): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">> {
+  options: ResumeRunOptions = {},
+): Promise<ResumeRunResult> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
-  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(options.type, options.maxTurns) });
+  const effectiveMaxTurns = options.type
+    ? resolveEffectiveMaxTurns(options.type, options.maxTurns)
+    : options.maxTurns;
+  const run = observeRun(session, {
+    ...options,
+    maxTurns: effectiveMaxTurns,
+    graceTurns: options.graceTurns,
+  });
 
   try {
     // Already aborted: not prompted, as in `runAgent`.
-    if (options.signal?.aborted !== true) await session.prompt(prompt);
+    if (options.signal?.aborted !== true) {
+      options.onActivity?.({ type: "model-inference", at: Date.now() });
+      await session.prompt(prompt);
+    }
   } finally {
     collector.unsubscribe();
     run.unsubscribe();

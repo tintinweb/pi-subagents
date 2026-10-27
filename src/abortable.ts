@@ -41,3 +41,81 @@ export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise
     );
   });
 }
+
+export interface WaitOptions {
+  signal?: AbortSignal;
+  timeoutMs: number;
+  now?: () => number;
+}
+
+export type WaitOutcome<T> =
+  | { timedOut: false; value: T }
+  | { timedOut: true };
+
+/**
+ * Await a promise until it settles, the caller aborts, or the timeout expires.
+ * Timeout absorbs late promise settlement without throwing and returns `{ timedOut: true }`.
+ */
+export function abortableWithTimeout<T>(
+  promise: Promise<T>,
+  options: WaitOptions,
+): Promise<WaitOutcome<T>> {
+  if (options.signal?.aborted) {
+    return Promise.reject(options.signal.reason);
+  }
+
+  return new Promise<WaitOutcome<T>>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      if (options.signal) {
+        options.signal.removeEventListener("abort", onAbort);
+      }
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(options.signal?.reason);
+    };
+
+    if (options.signal) {
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    if (options.timeoutMs <= 0) {
+      settled = true;
+      cleanup();
+      resolve({ timedOut: true });
+      return;
+    }
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({ timedOut: true });
+    }, options.timeoutMs);
+
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve({ timedOut: false, value });
+      },
+      (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}

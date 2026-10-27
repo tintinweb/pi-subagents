@@ -491,6 +491,67 @@ describe("SubagentScheduler — fire path", () => {
       expect(scheduler.list().find(j => j.id === a.id)?.lastStatus).toBe("error");
       expect(scheduler.list().find(j => j.id === b.id)?.lastStatus).toBe("error");
     });
+
+    it("overlapPolicy 'skip' skips firing while prior run is active", async () => {
+      const records = installFaithfulMock();
+      const job = scheduler.addJob({
+        name: "skip-overlap",
+        description: "x",
+        schedule: "1s",
+        subagent_type: "general-purpose",
+        prompt: "x",
+        overlapPolicy: "skip",
+      });
+
+      // First tick starts run 1
+      vi.advanceTimersByTime(1_000);
+      expect(records.size).toBe(1);
+
+      // Second tick while run 1 is running: skipped
+      vi.advanceTimersByTime(1_000);
+      expect(records.size).toBe(1);
+      expect(scheduler.list().find((j) => j.id === job.id)?.skippedCount).toBe(1);
+
+      // Finish run 1
+      const r = [...records.values()][0];
+      r.status = "completed";
+      r.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Third tick after finish: fires run 2
+      vi.advanceTimersByTime(1_000);
+      expect(records.size).toBe(2);
+    });
+
+    it("overlapPolicy 'queue-one' coalesces pending triggers and launches one after completion", async () => {
+      const records = installFaithfulMock();
+      const job = scheduler.addJob({
+        name: "queue-one-overlap",
+        description: "x",
+        schedule: "1s",
+        subagent_type: "general-purpose",
+        prompt: "x",
+        overlapPolicy: "queue-one",
+      });
+
+      // First tick starts run 1
+      vi.advanceTimersByTime(1_000);
+      expect(records.size).toBe(1);
+
+      // Second & third ticks while active: coalesced
+      vi.advanceTimersByTime(1_000);
+      vi.advanceTimersByTime(1_000);
+      expect(records.size).toBe(1);
+      expect(scheduler.list().find((j) => j.id === job.id)?.coalescedCount).toBe(2);
+
+      // Complete run 1: immediately triggers coalesced run 2
+      const r1 = [...records.values()][0];
+      r1.status = "completed";
+      r1.resolve();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(records.size).toBe(2);
+    });
   });
 });
 

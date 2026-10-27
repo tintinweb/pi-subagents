@@ -215,7 +215,16 @@ describe("status note reaches the parent through the real handlers", () => {
     expect(id, "background spawn should surface an agent id").toBeTruthy();
 
     // The user stops it — same path the viewer's stop key uses (manager.abort).
-    eventHandlers.get("subagents:rpc:stop")?.({ requestId: "r1", agentId: id });
+    // The run never settles on its own, so the stop reaches terminal "stopped"
+    // at grace expiry; the query below must see the settled stop, not the
+    // transient "stopping" window. 30_001 pins STOP_GRACE_MS's 30-second default.
+    vi.useFakeTimers();
+    try {
+      eventHandlers.get("subagents:rpc:stop")?.({ requestId: "r1", agentId: id });
+      await vi.advanceTimersByTimeAsync(30_001);
+    } finally {
+      vi.useRealTimers();
+    }
 
     const res = await tools.get("get_subagent_result").execute(
       "tc3", { agent_id: id }, undefined, undefined, ctx(),

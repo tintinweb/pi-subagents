@@ -301,7 +301,9 @@ describe("maxConcurrentForeground", () => {
       controller.abort();
       void fg(manager, "doomed", { signal: controller.signal });
 
-      expect(recordFor(manager, "doomed").status).toBe("stopped");
+      // A running attempt (the slot was charged) passes through "stopping";
+      // the never-settling mock keeps it there until the grace expiry.
+      expect(recordFor(manager, "doomed").status).toBe("stopping");
       expect(recordFor(manager, "doomed").abortController?.signal.aborted).toBe(true);
     });
 

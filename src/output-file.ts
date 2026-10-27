@@ -9,6 +9,17 @@ import { appendFileSync, chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentSession, AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { ActivitySnapshot } from "./agent-activity.js";
+
+/** Transcript entry representing a subagent activity transition. */
+export interface OutputActivityEntry {
+  isSidechain: true;
+  agentId: string;
+  type: "subagent_activity";
+  activity: ActivitySnapshot;
+  timestamp: string;
+  cwd: string;
+}
 
 /**
  * Project/global default for writing a subagent's `.output` transcript; a custom
@@ -91,6 +102,28 @@ export function writeInitialEntry(path: string, agentId: string, prompt: string,
     cwd,
   };
   writeFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
+}
+
+/** Write a subagent activity transition entry to the output transcript. */
+export function writeActivityEntry(
+  path: string,
+  agentId: string,
+  activity: ActivitySnapshot,
+  cwd: string,
+): void {
+  const entry: OutputActivityEntry = {
+    isSidechain: true,
+    agentId,
+    type: "subagent_activity",
+    activity,
+    timestamp: new Date().toISOString(),
+    cwd,
+  };
+  try {
+    appendFileSync(path, JSON.stringify(entry) + "\n", "utf-8");
+  } catch {
+    /* ignore write errors */
+  }
 }
 
 /**

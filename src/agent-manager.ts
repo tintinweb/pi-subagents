@@ -23,7 +23,26 @@ import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
+import { RunSupervisor } from "./run-supervisor.js";
+import {
+  getInactivityTimeoutMs,
+  getStalledWarningMs,
+  getToolCallTimeoutMs,
+} from "./settings.js";
+import type {
+  ActivitySnapshot,
+  AgentInvocation,
+  AgentRecord,
+  AgentTombstone,
+  AttemptTerminationReason,
+  IsolationMode,
+  MentionResolution,
+  Pool,
+  StopMode,
+  StopReason,
+  SubagentType,
+  ThinkingLevel,
+} from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -37,6 +56,7 @@ export type OnAgentStart = (record: AgentRecord) => void;
  */
 export type OnAgentSteered = (record: AgentRecord, message: string) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
+export type OnAgentActivity = (record: AgentRecord, activity: ActivitySnapshot) => void;
 /**
  * Fired once per assistant `message_end`, for EVERY agent this manager owns —
  * top-level and nested alike, spawns and resumes. The one place where each
@@ -79,6 +99,36 @@ const DEFAULT_MAX_CONCURRENT_FOREGROUND = 0;
  * far above the handful anyone keeps in their head.
  */
 const MAX_TOMBSTONES = 100;
+
+/**
+ * Grace period granted to a stopping attempt before the manager settles it as
+ * forced. Configurable via `stopGraceMs` (persistent setting). The value is
+ * captured when an attempt starts — changing it does not retime an attempt
+ * already in its grace window. The default is the approved 30-second grace.
+ */
+let stopGraceMs = 30_000;
+
+export function getStopGraceMs(): number { return stopGraceMs; }
+export function setStopGraceMs(n: number): void {
+  stopGraceMs = Math.max(1_000, Math.min(600_000, n));
+}
+
+/**
+ * One execution attempt's supervision state: the `RunSupervisor` whose
+ * exactly-once settlement token every settle path (natural completion,
+ * startup failure, explicit stop, grace expiry, late promise settlement)
+ * must claim, bound to the pool the attempt charged at start.
+ *
+ * Created BEFORE asynchronous startup begins, so a stop during startup is
+ * already supervised. The entry OUTLIVES settlement — a late promise
+ * settlement after a forced stop must still find it and lose — and is
+ * dropped with the record (`removeRecord`, `dispose`) or when a startup
+ * exit guarantees no tail will ever settle it. Manager-private — never
+ * exposed on `AgentRecord`.
+ */
+interface AttemptState {
+  supervisor: RunSupervisor;
+}
 
 /**
  * Validate a caller-supplied SpawnOptions.cwd. `undefined`/`null` mean "unset"
@@ -380,11 +430,17 @@ export class AgentManager {
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private onSteered?: OnAgentSteered;
+  private onActivity?: OnAgentActivity;
   private maxConcurrent: number;
   private maxConcurrentForeground = DEFAULT_MAX_CONCURRENT_FOREGROUND;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
+
+  /**
+   * Execution attempt supervision, keyed by agent id. See `AttemptState`.
+   */
+  private attempts = new Map<string, AttemptState>();
 
   /**
    * Startup phases, keyed by agent id. `spawn()` still returns synchronously,
@@ -432,12 +488,14 @@ export class AgentManager {
     onCompact?: OnAgentCompact,
     onUsage?: OnAgentUsage,
     onSteered?: OnAgentSteered,
+    onActivity?: OnAgentActivity,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
     this.onCompact = onCompact;
     this.onUsage = onUsage;
     this.onSteered = onSteered;
+    this.onActivity = onActivity;
     this.maxConcurrent = maxConcurrent;
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
@@ -663,6 +721,12 @@ export class AgentManager {
       () => { this.startups.delete(id); },
       (err) => {
         this.startups.delete(id);
+        // If no run promise was wired, no tail will ever settle the attempt —
+        // drop its supervisor (and any grace timer a stop armed during startup)
+        // so no late timer can "settle" an already-failed attempt. If a run IS
+        // in flight (e.g. onSpawned threw), the tails still need the attempt's
+        // exactly-once guard; the entry then goes with the record.
+        if (!record.promise) this.dropAttempt(id);
         if (queuedPool !== undefined) {
           // Mirrors settleRun: an inline caller gets this failure as a throw
           // out of spawnAndWait, so an unconsumed record would ALSO nudge the
@@ -732,6 +796,38 @@ export class AgentManager {
     // changes it afterwards, moving the counters with it. The two startup exits
     // below never reach `settleRun`, so they hand the slot back themselves.
     record.chargedPool = this.poolFor(record);
+
+    // One supervisor per charged attempt, created BEFORE the first await so a
+    // stop during startup is already supervised. Bound to the exact pool
+    // charged here, so settle time can't disagree with acquire time (see
+    // below) — and to the manager-owned run signal, per the supervisor
+    // contract (the manager keeps its own controller; the supervisor's
+    // exactly-once token arbitrates settlement between the promise tails and
+    // the grace expiry).
+    const agentConfig = getAgentConfig(record.type);
+    const toolCallTimeoutMs = agentConfig?.toolCallTimeoutMs ?? getToolCallTimeoutMs();
+    const inactivityTimeoutMs = agentConfig?.inactivityTimeoutMs ?? getInactivityTimeoutMs();
+    const stalledWarningMs = getStalledWarningMs();
+
+    const supervisor = new RunSupervisor({
+      signal: record.abortController!.signal,
+      stopGraceMs: getStopGraceMs(),
+      stalledWarningMs,
+      toolCallTimeoutMs,
+      inactivityTimeoutMs,
+      model: record.invocation?.modelName ?? record.invocation?.modelId,
+      onForceDispose: () =>
+        this.applySettlement(record, true, "forced", supervisor.terminationReason),
+      onTimeout: () => {
+        record.abortController?.abort();
+      },
+    });
+    this.attempts.set(id, { supervisor });
+    supervisor.subscribeActivity((snapshot) => {
+      record.activity = snapshot;
+      this.onActivity?.(record, snapshot);
+    });
+    record.activity = supervisor.activity;
     record.status = "running";
     record.startedAt = Date.now();
     record.startGate = undefined;
@@ -754,6 +850,10 @@ export class AgentManager {
     if (isolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = await createWorktree(pi, baseCwd, id);
       if (!wt) {
+        // The stop's grace timer, if one was armed during the copy, must die
+        // with the attempt — otherwise it fires later, "settles" the already
+        // failed attempt, and double-releases the slot this exit just gave back.
+        this.dropAttempt(id);
         this.chargePool(record.chargedPool, -1);
         throw new Error(
           'Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. ' +
@@ -780,7 +880,22 @@ export class AgentManager {
       // burn tokens on work nobody is waiting for: discard the fresh (and by
       // definition unchanged) worktree instead.
       if (record.status !== "running") {
-        this.chargePool(record.chargedPool, -1);
+        // A stop during the copy left the record "stopping" with its grace
+        // timer armed and no promise tail that will ever settle it — the run
+        // is discarded here, so this is the only claimant. Settle gracefully;
+        // the fresh (and by definition unchanged) worktree is disposed below.
+        if (record.status === "stopping") {
+          const attempt = this.attempts.get(id);
+          if (attempt?.supervisor.settle().first) {
+            this.terminalizeStopping(record, attempt.supervisor.terminationReason);
+            this.dropAttempt(id);
+            this.chargePool(record.chargedPool, -1);
+          }
+          // !first: the grace timer settled "forced" during the copy — slot
+          // release and terminal state were already handled by that path.
+        }
+        // A "stopped" record here means the grace expiry won the race during
+        // the copy; discard the copy below without touching slot or status.
         record.worktreeResult = await cleanupWorktree(pi, baseCwd, wt, options.description);
         this.drainQueue();
         return;
@@ -823,6 +938,9 @@ export class AgentManager {
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
+      },
+      onActivity: (event) => {
+        supervisor.recordActivity(event);
       },
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
@@ -892,7 +1010,16 @@ export class AgentManager {
         // this is a machine-readable payload one caller asked for by schema.
         record.structuredJson = structuredJson;
         record.structuredRetried = structuredRetried;
-        record.session = session;
+        // A late tail after a forced stop must not resurrect the session the
+        // forced path already disposed and nulled: hand the live session back
+        // only while this tail is the genuine settler. Entry absence means
+        // settled-and-removed, so the assignment is also skipped then.
+        const attempt = this.attempts.get(id);
+        if (attempt && !attempt.supervisor.settled) {
+          record.session = session;
+        } else if (!attempt) {
+          record.session = session;
+        }
 
         detach();
 
@@ -932,11 +1059,11 @@ export class AgentManager {
         return responseText;
       })
       .catch(async (err) => {
-        // Don't overwrite status if externally stopped via abort()
-        if (record.status !== "stopped") {
+        // Don't overwrite the terminal mapping for an externally stopped run.
+        if (!this.externallyStopped(record)) {
           record.status = "error";
+          record.error = err instanceof Error ? err.message : String(err);
         }
-        record.error = err instanceof Error ? err.message : String(err);
         record.completedAt ??= Date.now();
 
         detach();
@@ -972,8 +1099,53 @@ export class AgentManager {
   }
 
   /**
-   * The shared tail of both settle paths: release whatever pool slot the run
-   * held, notify, and let the queue drain into the freed slot.
+   * Drop one attempt's supervision state: dispose the supervisor (releasing
+   * any armed grace timer) and remove the entry. For exits where no promise
+   * tail exists that could ever settle the attempt.
+   */
+  private dropAttempt(id: string): void {
+    this.attempts.get(id)?.supervisor.dispose();
+    this.attempts.delete(id);
+  }
+
+  /**
+   * Whether an external stop is in flight ("stopping") or terminal ("stopped")
+   * for this record. Method, not an inline comparison: the manager mutates
+   * `record.status` from `abort()`/`abortAll()` while a run is awaiting, so
+   * flow-narrowed status checks at settle time are unsound.
+   */
+  private externallyStopped(record: AgentRecord): boolean {
+    return record.status === "stopped" || record.status === "stopping";
+  }
+
+  /**
+   * Terminal state for a stop whose attempt settled (gracefully here, forced
+   * via applySettlement): "stopped" with the completion stamped. Method, not
+   * an inline comparison, for the same flow-narrowing reason as above.
+   */
+  private terminalizeStopping(record: AgentRecord, stopReason?: AttemptTerminationReason): void {
+    if (record.status !== "stopping") return;
+    record.completedAt ??= Date.now();
+    if (stopReason === "tool_timeout") {
+      record.status = "error";
+      record.error = "Tool execution timed out";
+    } else if (stopReason === "inactivity_timeout") {
+      record.status = "error";
+      record.error = "Execution timed out due to inactivity";
+    } else {
+      record.status = "stopped";
+      record.stopMetadata = { reason: (stopReason as StopReason) ?? "user", mode: "graceful" };
+    }
+  }
+
+  /**
+   * Claim an attempt's exactly-once settlement token, then apply settlement.
+   *
+   * Every settle path (promise tails, a second stop) competes here, and a
+   * losing caller performs no terminal mutation, cleanup, pool release, or
+   * completion callback. The attempt entry itself OUTLIVES settlement — a
+   * late promise settlement after a forced stop must still find it and lose —
+   * and is removed with the record (removeRecord) or manager disposal.
    *
    * The decrement lives HERE and nowhere else. `abort()` on a running record
    * only fires its controller and leaves the run to settle normally, so
@@ -992,6 +1164,58 @@ export class AgentManager {
    * the acquire.
    */
   private settleRun(record: AgentRecord, guardCallback: boolean): void {
+    // A late tail for a record already evicted (removeRecord/cleanup 10min,
+    // dispose) must do nothing: entry absence means settled-and-removed.
+    if (this.agents.get(record.id) !== record) return;
+    const attempt = this.attempts.get(record.id);
+    if (attempt && !attempt.supervisor.settle().first) return;
+    this.applySettlement(record, guardCallback, undefined, attempt?.supervisor.terminationReason);
+  }
+
+  /**
+   * The unconditional half of settlement, after the token has been claimed
+   * (settleRun) or is known to be claimed already (the grace callback settles
+   * "forced" BEFORE invoking onForceDispose — a reentrancy guard from the
+   * supervisor contract — so the forced path cannot re-claim; it applies).
+   */
+  private applySettlement(
+    record: AgentRecord,
+    guardCallback: boolean,
+    mode?: StopMode,
+    stopReason?: AttemptTerminationReason,
+  ): void {
+    // A stop that reaches settlement here — a run that wound down while
+    // "stopping", or a grace expiry — is terminal as "stopped" with the
+    // first stop reason preserved.
+    if (mode === "forced") {
+      record.completedAt ??= Date.now();
+      if (stopReason === "tool_timeout") {
+        record.status = "error";
+        record.error = "Tool execution timed out";
+      } else if (stopReason === "inactivity_timeout") {
+        record.status = "error";
+        record.error = "Execution timed out due to inactivity";
+      } else {
+        record.status = "stopped";
+        record.stopMetadata = { reason: (stopReason as StopReason) ?? "shutdown", mode: "forced" };
+      }
+      // The forced path exists because the promise tail will never run — so
+      // its tail-only work must happen here: abort the attempt's own children
+      // (idempotent — a losing late tail's abortOwnedChildren is a no-op on
+      // already-stopping children) and dispose the session. Same fire-and-
+      // forget shutdown (session_shutdown emit + dispose) the eviction path
+      // uses. The worktree is deliberately NOT reclaimed here: it matches
+      // today's never-settling-run behaviour and pruneWorktrees sweeps it at
+      // manager disposal (see dispose()).
+      this.abortOwnedChildren(record.id);
+      const session = record.session;
+      if (session) {
+        record.session = undefined;
+        void shutdownChildSession(session);
+      }
+    } else {
+      this.terminalizeStopping(record, stopReason);
+    }
     if (!record.isBackground) record.resultConsumed = true;
     // Nobody waits on a settled run; a later foreground resume must not look
     // like a spawn `sendToBackground` could hand off.
@@ -1022,7 +1246,7 @@ export class AgentManager {
    */
   private abortOwnedChildren(parentId: string): void {
     for (const [id, record] of this.agents) {
-      if (record.parentAgentId === parentId) this.abort(id);
+      if (record.parentAgentId === parentId) this.abort(id, "owner");
     }
   }
 
@@ -1238,13 +1462,47 @@ export class AgentManager {
     record.completedAt = undefined;
     record.result = undefined;
     record.error = undefined;
-    // Fresh controller, as on the detached path: `abort()` fires whatever
-    // `record.abortController` holds, and the spawn's has long settled — so a
-    // stop from `/agents` or the caller's Esc would mark the record stopped
-    // while the resumed prompt ran on to completion.
+    // Fresh controller so /agents stop targets THIS run; the inline caller's
+    // own signal aborts the run exactly as the old direct forwarding did. One
+    // supervised attempt so a stop settles exactly once — the same contract
+    // every other charged attempt carries (full resume parity lands later).
     const abortController = new AbortController();
     record.abortController = abortController;
     this.armParentAbort(record, signal);
+    let detachCallerSignal: (() => void) | undefined;
+    if (signal) {
+      if (signal.aborted) abortController.abort(signal.reason);
+      else {
+        const onCallerAbort = () => abortController.abort(signal.reason);
+        signal.addEventListener("abort", onCallerAbort, { once: true });
+        detachCallerSignal = () => signal.removeEventListener("abort", onCallerAbort);
+      }
+    }
+    const agentConfig = getAgentConfig(record.type);
+    const toolCallTimeoutMs = agentConfig?.toolCallTimeoutMs ?? getToolCallTimeoutMs();
+    const inactivityTimeoutMs = agentConfig?.inactivityTimeoutMs ?? getInactivityTimeoutMs();
+    const stalledWarningMs = getStalledWarningMs();
+
+    const supervisor = new RunSupervisor({
+      signal: abortController.signal,
+      stopGraceMs: getStopGraceMs(),
+      stalledWarningMs,
+      toolCallTimeoutMs,
+      inactivityTimeoutMs,
+      model: record.invocation?.modelName ?? record.invocation?.modelId,
+      onForceDispose: () =>
+        this.applySettlement(record, true, "forced", supervisor.terminationReason),
+      onTimeout: () => {
+        abortController.abort();
+      },
+    });
+    this.attempts.set(id, { supervisor });
+    supervisor.subscribeActivity((snapshot) => {
+      record.activity = snapshot;
+      this.onActivity?.(record, snapshot);
+    });
+    record.activity = supervisor.activity;
+
     // `addEventListener` never fires on a signal that is already aborted, and
     // the runner skips the prompt only when ITS signal is — stop now, so that
     // holds for a resume issued on a call that was cancelled first.
@@ -1269,12 +1527,23 @@ export class AgentManager {
           this.onCompact?.(record, info);
           options?.onCompaction?.(info);
         },
+        onActivity: (event) => {
+          supervisor.recordActivity(event);
+        },
         signal: abortController.signal,
       }));
     } catch (err) {
       this.failResume(record, err);
     }
     this.detachParentAbort(record);
+
+    detachCallerSignal?.();
+    const inlineAttempt = this.attempts.get(id);
+    if (inlineAttempt) {
+      if (!inlineAttempt.supervisor.settle().first) return record;
+      this.attempts.delete(id);
+    }
+    this.terminalizeStopping(record, inlineAttempt?.supervisor.terminationReason);
 
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
@@ -1295,7 +1564,7 @@ export class AgentManager {
     record: AgentRecord,
     { text, failure, aborted, steered }: Awaited<ReturnType<typeof resumeAgent>>,
   ): void {
-    if (record.status !== "stopped") {
+    if (!this.externallyStopped(record)) {
       if (aborted) {
         record.status = "aborted";
       } else if (failure) {
@@ -1311,7 +1580,7 @@ export class AgentManager {
 
   /** A resume whose runner rejected: an error, unless an external stop got there first. */
   private failResume(record: AgentRecord, err: unknown): void {
-    if (record.status !== "stopped") {
+    if (!this.externallyStopped(record)) {
       record.status = "error";
       record.error = err instanceof Error ? err.message : String(err);
     }
@@ -1337,12 +1606,40 @@ export class AgentManager {
     record.status = "running";
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
-    this.onStart?.(record);
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
     // than the previous one's settled controller.
     const abortController = new AbortController();
     record.abortController = abortController;
+    // One supervised attempt, bound to the pool charged above and to this
+    // run's fresh controller — the same exactly-once settlement contract a
+    // spawn attempt carries. Armed before onStart so a synchronous stop out
+    // of the callback is already supervised.
+    const agentConfig = getAgentConfig(record.type);
+    const toolCallTimeoutMs = agentConfig?.toolCallTimeoutMs ?? getToolCallTimeoutMs();
+    const inactivityTimeoutMs = agentConfig?.inactivityTimeoutMs ?? getInactivityTimeoutMs();
+    const stalledWarningMs = getStalledWarningMs();
+
+    const supervisor = new RunSupervisor({
+      signal: abortController.signal,
+      stopGraceMs: getStopGraceMs(),
+      stalledWarningMs,
+      toolCallTimeoutMs,
+      inactivityTimeoutMs,
+      model: record.invocation?.modelName ?? record.invocation?.modelId,
+      onForceDispose: () =>
+        this.applySettlement(record, true, "forced", supervisor.terminationReason),
+      onTimeout: () => {
+        abortController.abort();
+      },
+    });
+    this.attempts.set(id, { supervisor });
+    supervisor.subscribeActivity((snapshot) => {
+      record.activity = snapshot;
+      this.onActivity?.(record, snapshot);
+    });
+    record.activity = supervisor.activity;
+    this.onStart?.(record);
     // Optional, and NOT what the Agent tool passes for a detached resume: a
     // parent signal aborts on the parent's own interrupt (user Esc), which is
     // right for a foreground run whose result the caller is awaiting, and wrong
@@ -1359,6 +1656,13 @@ export class AgentManager {
     try { options.onStarted?.(); } catch { /* ignore caller wiring errors */ }
 
     const settle = () => {
+      // Exactly-once claim through the attempt's supervisor token; a losing
+      // late settlement (grace expiry, a second call) performs nothing.
+      const attempt = this.attempts.get(id);
+      if (attempt) {
+        if (!attempt.supervisor.settle().first) return;
+      }
+      this.terminalizeStopping(record, attempt?.supervisor.terminationReason);
       detachParentSignal?.();
       detachParentSignal = undefined;
       // Final flush of streaming output file
@@ -1390,6 +1694,9 @@ export class AgentManager {
         record.compactionCount++;
         this.onCompact?.(record, info);
         options.onCompaction?.(info);
+      },
+      onActivity: (event) => {
+        supervisor.recordActivity(event);
       },
       signal: abortController.signal,
     })
@@ -1507,7 +1814,7 @@ export class AgentManager {
     );
   }
 
-  abort(id: string): boolean {
+  abort(id: string, reason: StopReason = "user"): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
 
@@ -1522,9 +1829,14 @@ export class AgentManager {
     }
 
     if (record.status !== "running") return false;
+    // A running attempt passes through "stopping": the first stop reason wins,
+    // the run aborts so it can wind down naturally within the grace period,
+    // and settlement (graceful or forced) does the terminal work exactly once
+    // through the attempt's supervisor token.
+    const attempt = this.attempts.get(id);
+    if (!attempt?.supervisor.beginStopping(reason)) return false;
+    record.status = "stopping";
     record.abortController?.abort();
-    record.status = "stopped";
-    record.completedAt = Date.now();
     return true;
   }
 
@@ -1536,6 +1848,9 @@ export class AgentManager {
     // nothing can observe a session that is half torn down.
     record.session = undefined;
     this.agents.delete(id);
+    // The record is terminal, so its attempt settled long ago; drop the
+    // (already-spent) supervision state with it.
+    this.dropAttempt(id);
     // A failed startup keeps its (rejected) entry so a late awaitStartup still
     // sees it; drop it with the record so the map can't grow unbounded.
     this.startups.delete(id);
@@ -1573,7 +1888,7 @@ export class AgentManager {
   private cleanup() {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (record.status === "running" || record.status === "stopping" || record.status === "queued") continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -1587,7 +1902,7 @@ export class AgentManager {
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (record.status === "running" || record.status === "stopping" || record.status === "queued") continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
@@ -1600,15 +1915,15 @@ export class AgentManager {
     this.tombstones.clear();
   }
 
-  /** Whether any agents are still running or queued. */
+  /** Whether any agents are still running, stopping, or queued. */
   hasRunning(): boolean {
     return [...this.agents.values()].some(
-      r => r.status === "running" || r.status === "queued",
+      r => r.status === "running" || r.status === "stopping" || r.status === "queued",
     );
   }
 
-  /** Abort all running and queued agents immediately. */
-  abortAll(): number {
+  /** Abort all running and queued agents (already-stopping records keep their first reason). */
+  abortAll(reason: StopReason = "shutdown"): number {
     let count = 0;
     // Clear queued agents first
     for (const queued of this.queue) {
@@ -1620,14 +1935,15 @@ export class AgentManager {
       }
     }
     this.dequeue(() => true);
-    // Abort running agents
+    // Abort running agents — through "stopping", so the grace machinery
+    // settles each one exactly once (gracefully, or forced at expiry).
     for (const record of this.agents.values()) {
-      if (record.status === "running") {
-        record.abortController?.abort();
-        record.status = "stopped";
-        record.completedAt = Date.now();
-        count++;
-      }
+      if (record.status !== "running") continue;
+      const attempt = this.attempts.get(record.id);
+      if (!attempt?.supervisor.beginStopping(reason)) continue;
+      record.status = "stopping";
+      record.abortController?.abort();
+      count++;
     }
     return count;
   }
@@ -1640,7 +1956,7 @@ export class AgentManager {
       this.drainQueue();
       const pending: Promise<unknown>[] = [];
       for (const record of this.agents.values()) {
-        if (record.status !== "running" && record.status !== "queued") continue;
+        if (record.status !== "running" && record.status !== "stopping" && record.status !== "queued") continue;
         // An agent whose worktree is still being created is "running" with no
         // `promise` yet — without its startup the wait would return too early.
         const startup = this.startups.get(record.id);
@@ -1662,6 +1978,10 @@ export class AgentManager {
     // Clear queue — via dequeue, so anyone blocked in spawnAndWait is woken
     // rather than left awaiting a gate nothing will ever resolve.
     this.dequeue(() => true);
+    // Drop every attempt's supervisor — this releases any grace timer armed
+    // by a stop that raced shutdown, and invalidates the attempt state the
+    // disposed manager can no longer settle.
+    for (const [attemptId] of this.attempts) this.dropAttempt(attemptId);
     const sessions = [...this.agents.values()].map(record => record.session);
     this.agents.clear();
     this.startups.clear();

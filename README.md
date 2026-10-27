@@ -628,6 +628,7 @@ A resumed agent gets a fresh budget: `max_turns` is counted from the resume prom
 | `completed` | Finished naturally | `✓` green |
 | `steered` | Hit limit, wrapped up in time | `✓` yellow |
 | `aborted` | Grace period exceeded | `✗` red |
+| `stopping` | Stop requested; waiting to wind down (grace period) | `■` dim |
 | `stopped` | User-initiated abort | `■` dim |
 
 ## Concurrency
@@ -685,12 +686,12 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, stop grace, result wait timeout, stalled warning, tool call timeout, inactivity timeout, notification delivery, schedule overlap, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, stop grace `30000`ms, result wait timeout `30000`ms, stalled warning `300000`ms, tool timeout disabled `0`, inactivity timeout disabled `0`, notification delivery `steer`, schedule overlap `skip`, nested depth `2`, join mode `smart`, defaults enabled).
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
@@ -1039,7 +1040,10 @@ src/
   # Execution
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
+  agent-activity.ts   # Canonical activity snapshot, progress tracking, and formatting
+  notification-coordinator.ts # Session-scoped completion delivery and grouping
   nested-tools.ts     # Delegation tools handed to subagents (nested spawn/collect/steer)
+  run-supervisor.ts   # Per-attempt lifecycle primitive: stopping/grace, exactly-once settlement
   child-context.ts    # AsyncLocalStorage flag marking work done for a child session
   abortable.ts        # Race a wait against Esc without cancelling the background child
   completion-outbox.ts # Deliver completion notifications at the parent's next boundary, coalesced

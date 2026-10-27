@@ -187,6 +187,7 @@ function createSession(finalText: string) {
     },
     setSessionName: vi.fn(),
     bindExtensions: vi.fn(async () => {}),
+    dispose: vi.fn(),
   };
   lastSession = session;
   return { session, listeners };
@@ -415,6 +416,27 @@ describe("agent-runner final output capture", () => {
 
     expect(result.text).toBe("RESUMED");
     expect(result.failure).toBeUndefined();
+  });
+
+  it("resumeAgent enforces maxTurns soft limit steering and hard limit abort", async () => {
+    const { session, listeners } = createSession("RESUMED");
+    session.prompt = vi.fn(async () => {
+      for (const l of listeners) l({ type: "turn_end" }); // turn 1 -> steer
+      for (const l of listeners) l({ type: "turn_end" }); // turn 2
+      for (const l of listeners) l({ type: "turn_end" }); // turn 3 -> abort
+    }) as any;
+
+    const result = await resumeAgent(session as any, "Continue", {
+      maxTurns: 1,
+      graceTurns: 2,
+    });
+
+    expect(session.steer).toHaveBeenCalledWith(
+      expect.stringContaining("reached your turn limit"),
+    );
+    expect(session.abort).toHaveBeenCalledTimes(1);
+    expect(result.aborted).toBe(true);
+    expect(result.steered).toBe(true);
   });
 
   it("sets the agent name as session name before binding extensions", async () => {

@@ -107,6 +107,13 @@ describe("AgentWidget", () => {
       .join("\n");
   }
 
+  it("renders a stopping agent in the live section with the stop grace", () => {
+    const record = makeRecord("slow");
+    (record as { status: string }).status = "stopping";
+    const manager = { listAgents: () => [record] };
+    expect(renderLines(manager, "slow")).toContain("stopping");
+  });
+
   // "all" (and the no-policy constructor default) shows every agent.
   it("shows foreground agents in 'all' mode (and by default)", () => {
     const manager = { listAgents: () => [makeRecord("foreground", { isBackground: false })] };
