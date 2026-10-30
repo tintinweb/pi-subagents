@@ -87,8 +87,8 @@ function finishedRun(session: any) {
 }
 
 /** Boot the real extension. `outputTranscript: false` keeps the run off disk. */
-function boot(settings: Record<string, unknown> = {}) {
-  hermetic = hermeticDir({ settings: { outputTranscript: false, ...settings } });
+function boot(settings: Record<string, unknown> = {}, agentFiles?: Record<string, string>) {
+  hermetic = hermeticDir({ settings: { outputTranscript: false, ...settings }, agentFiles });
   const b = makePi();
   subagentsExtension(b.pi);
   booted = b.lifecycle;
@@ -101,8 +101,8 @@ function boot(settings: Record<string, unknown> = {}) {
  * direct in either mode, so only the tests that START an agent by mention need
  * this — every other `boot()` below is on the default `model` mode.
  */
-function bootDirect(settings: Record<string, unknown> = {}) {
-  return boot({ agentMentions: "direct", ...settings });
+function bootDirect(settings: Record<string, unknown> = {}, agentFiles?: Record<string, string>) {
+  return boot({ agentMentions: "direct", ...settings }, agentFiles);
 }
 
 async function spawnBackground(tools: Map<string, any>, subagent_type = "Explore"): Promise<string> {
@@ -553,6 +553,70 @@ describe("mentioning an agent that has never run", () => {
       "error",
     );
 
+  });
+});
+
+describe("an agent file's inherit_context on a mention start (#300)", () => {
+  // A mention is the user starting the agent from this session, so the file
+  // decides in either mode — unlike RPC, where the caller does. Model mode's
+  // clone spawn goes through the Agent tool, which already applies it; these
+  // pin the two paths that spawn directly.
+  const memo = { memo: "---\ndescription: summarizes the session\ninherit_context: true\n---\nbody" };
+
+  it("hands the conversation to a direct-mode start", async () => {
+    const { lifecycle } = bootDirect({}, memo);
+    heldRun(fakeSession());
+
+    await send(lifecycle, "@memo summarize what we did");
+
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.anything(),
+      "memo",
+      "summarize what we did",
+      expect.objectContaining({ inheritContext: true }),
+    );
+  });
+
+  it("hands the conversation to the fallback when the clone cannot start it", async () => {
+    const { lifecycle } = boot({}, memo);
+    heldRun(fakeSession());
+    vi.mocked(runMentionClone).mockResolvedValue({ spawned: false, error: "no session file" });
+
+    await send(lifecycle, "@memo summarize what we did");
+    await flush();
+
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.anything(),
+      "memo",
+      "summarize what we did",
+      expect.objectContaining({ inheritContext: true }),
+    );
+  });
+
+  it("reads the agent file as it is now, not as it was at boot", async () => {
+    // The spawn reloads agent files before resolving model, thinking and max
+    // turns; inherit_context must not be the one field read from the old copy.
+    const { lifecycle } = bootDirect({}, { memo: "---\ndescription: summarizes the session\n---\nbody" });
+    heldRun(fakeSession());
+    writeFileSync(join(process.cwd(), ".pi", "agents", "memo.md"), memo.memo);
+
+    await send(lifecycle, "@memo summarize what we did");
+
+    expect(runAgent).toHaveBeenCalledWith(
+      expect.anything(),
+      "memo",
+      "summarize what we did",
+      expect.objectContaining({ inheritContext: true }),
+    );
+  });
+
+  it("forces nothing for an agent whose file does not ask", async () => {
+    const { lifecycle } = bootDirect();
+    heldRun(fakeSession());
+
+    await send(lifecycle, "@explore go");
+
+    expect((vi.mocked(runAgent).mock.calls[0][3] as any).inheritContext).toBeUndefined();
   });
 });
 

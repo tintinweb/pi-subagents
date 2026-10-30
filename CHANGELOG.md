@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **ℹ️ Behavior change — `direct`-mode mentions of an `inherit_context: true` agent now carry the conversation** ([#300](https://github.com/tintinweb/pi-subagents/issues/300)). Such an agent started with only the typed text; it now gets the whole conversation prepended, so its prompt is larger and slower to start. The model-mode fallback changes the same way. Remove `inherit_context` from the agent file to restore the previous behaviour.
+
+### Changed
+- **An agent file's `inherit_context` applies to every `@handle` mention** (fixes [#300](https://github.com/tintinweb/pi-subagents/issues/300) — thanks [@vlamai](https://github.com/vlamai)). Direct-mode mentions, and the fallback when model mode's clone cannot start the agent, began with only the typed text, so an agent written to read the conversation summarized one it never saw. Such agents now get the conversation on those paths too, which makes their prompts larger. Cross-extension RPC still leaves the choice to its caller.
+
 ### Fixed
 - **Claude Code tool names work in agent files** (fixes [#396](https://github.com/tintinweb/pi-subagents/issues/396)). `tools: Read, Glob, Bash` gave an agent none of pi's built-ins; names now match in any case, `Glob` means `find`, and the `disallowedTools` key is read as `disallowed_tools`, so an agent that ignored its `disallowedTools` loses those tools. As in Claude Code, an agent whose `tools:` resolve to nothing is refused instead of started with no usable tool.
 - **Bare `mcp__<server>__<tool>` entries in `tools:` select MCP tools** (part of [#370](https://github.com/tintinweb/pi-subagents/issues/370)). They were dropped as unknown built-ins, leaving every MCP tool reachable; they now narrow MCP tools as pi's `--tools` does and keep the `codemode`/`tool_search` bridges in scope. A server-level `mcp__<server>` selects the whole server, as in Claude Code.

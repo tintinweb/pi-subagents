@@ -902,6 +902,20 @@ export default function (pi: ExtensionAPI) {
     runWorkflowFlag(ctx);
   });
 
+  // Start a mentioned agent the direct way. runAgent resolves model, thinking,
+  // max turns and `isolated` from the agent's own config when the spawn omits
+  // them, but not `inherit_context`: an RPC caller decides that one itself. A
+  // mention is the user starting the agent from this session, so the file does —
+  // reloaded first, as the spawn reloads it, so a mid-session edit is not missed.
+  const startMentioned = (ctx: ExtensionContext, type: string, message: string) => {
+    reloadCustomAgents();
+    return spawnTopLevel(pi, ctx, type, message, {
+      description: describeMention(message),
+      isBackground: true,
+      inheritContext: getAgentConfig(type)?.inheritContext,
+    });
+  };
+
   /** Agent types `@` can start, in the shape the roster wants. */
   const mentionTypes = (): TypeInfo[] =>
     getAvailableTypes().map(name => ({ name, description: getAgentConfig(name)?.description ?? name }));
@@ -1098,10 +1112,7 @@ export default function (pi: ExtensionAPI) {
           // agent the direct way rather than leaving the user with a toast and
           // nothing running.
           try {
-            const id = spawnTopLevel(pi, ctx, type, mention.message, {
-              description: describeMention(mention.message),
-              isBackground: true,
-            });
+            const id = startMentioned(ctx, type, mention.message);
             // Same reason as the direct path below: the agent may still be
             // starting, and a failure there must reach this catch.
             await manager.awaitStartup(id);
@@ -1117,15 +1128,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      // Nothing else to pass: runAgent resolves model, thinking, max turns and
-      // `isolated` from the agent's own config when the spawn omits them, and the
-      // manager's onStart/onComplete callbacks own the widget, the fleet list
+      // The manager's onStart/onComplete callbacks own the widget, the fleet list
       // and the completion notification — the same contract the scheduler and
       // cross-extension RPC spawns run under.
-      const id = spawnTopLevel(pi, ctx, type, mention.message, {
-        description: describeMention(mention.message),
-        isBackground: true,
-      });
+      const id = startMentioned(ctx, type, mention.message);
       // The agent may still be starting (a worktree copy is an awaited git
       // call) — report a failure that lands there as a failed start, not as a
       // "Started" toast for an agent that never ran.
