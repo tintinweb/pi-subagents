@@ -1079,6 +1079,14 @@ Prompt.`);
       expect(agent.mcpToolPatterns).toEqual(["mcp__github__search_code", "mcp__radius__*"]);
     });
 
+    it("reads a server-level mcp__<server> entry as the whole server, as Claude Code does", () => {
+      writeAgent("cc", `---
+tools: read, mcp__radius, mcp__a__b, mcp__c__*
+---
+Prompt.`);
+      expect(loadCustomAgents(tmpDir).get("cc")!.mcpToolPatterns).toEqual(["mcp__radius__*", "mcp__a__b", "mcp__c__*"]);
+    });
+
     it("reads Claude Code's disallowedTools key and maps its names", () => {
       writeAgent("cc", `---
 disallowedTools: Write, Glob

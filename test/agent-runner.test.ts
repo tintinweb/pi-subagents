@@ -1843,6 +1843,30 @@ describe("agent-runner bare mcp__ entries in tools:", () => {
     expect(active).not.toContain("bridge_sibling"); // the opt-in still applies to everything else
   });
 
+  it("narrows MCP tools that register after spawn, as pi's MCP does once its servers connect", async () => {
+    setup({ mcpToolPatterns: ["mcp__srv__keep"] });
+    withExtensions({ "/ext/mcp.ts": [] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    const mcp = loaderExtensionsRef.current.extensions.find((e) => e.path === "/ext/mcp.ts")!;
+    mcp.tools.set("mcp__srv__keep", {});
+    mcp.tools.set("mcp__srv__drop", {});
+    for (const l of listeners) l({ type: "turn_end" });
+
+    expect(session.getActiveToolNames()).toContain("mcp__srv__keep");
+    expect(session.getActiveToolNames()).not.toContain("mcp__srv__drop");
+    // codemode reaches MCP tools without activating them, so the call gate must agree.
+    await expect(
+      session.agent.beforeToolCall?.({ toolCall: { name: "mcp__srv__drop" } }),
+    ).resolves.toMatchObject({ block: true });
+    await expect(
+      session.agent.beforeToolCall?.({ toolCall: { name: "mcp__srv__keep" } }),
+    ).resolves.toBeUndefined();
+  });
+
   it("disallowed_tools wins over a bridge and a named MCP tool", async () => {
     setup({
       mcpToolPatterns: ["mcp__srv__keep"],

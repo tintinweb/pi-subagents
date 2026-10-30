@@ -393,7 +393,11 @@ function parseToolsField(val: unknown): {
     ...new Set(entries.filter(e => !isWildcard(e) && !e.startsWith("ext:") && !isMcp(e)).map(normalizeToolName)),
   ];
   const extEntries = entries.filter(e => e.startsWith("ext:"));
-  const mcpEntries = entries.filter(isMcp);
+  // A server-level `mcp__<server>` means every tool of that server, as in Claude Code.
+  const mcpEntries = entries.filter(isMcp).map(e => {
+    const server = e.slice("mcp__".length);
+    return server && !server.includes("__") ? `${e}__*` : e;
+  });
   return {
     builtinToolNames: hasWildcard ? [...new Set([...BUILTIN_TOOL_NAMES, ...plain])] : plain,
     extSelectors: extEntries.length > 0 ? extEntries : undefined,
