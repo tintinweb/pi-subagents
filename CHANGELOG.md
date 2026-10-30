@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Steering from the conversation viewer or the fleet list now emits `subagents:steered`.** Only the `steer_subagent` tool and an `@handle` steer did before, so an extension watching the event missed every steer typed into a viewer. The event now fires from `AgentManager.steer`, which every path except the steer tools goes through.
 - **Resumed agents are bounded by `max_turns` again, and their turn counter moves** (fixes [#368](https://github.com/tintinweb/pi-subagents/issues/368) — thanks [@mratsim](https://github.com/mratsim)). The steer → grace → abort machine ran only over a spawn's first prompt, so a resume — from the `Agent` tool, an `@handle`, a nested agent or a workflow — had no turn limit at all and its widget row stayed at `↻1`. A resumed run now gets a fresh budget counted from the resume prompt, resolved as for a spawn, and can end `steered` or `aborted` like the first run.
+- **Subagents inherit the parent session's thinking level** (fixes [#305](https://github.com/tintinweb/pi-subagents/issues/305), [#306](https://github.com/tintinweb/pi-subagents/pull/306) — thanks [@luongnv89](https://github.com/luongnv89)). When neither the call nor the agent file set `thinking`, a subagent ran at pi's `defaultThinkingLevel` (e.g. `max`) instead of the level the parent session was using, contrary to the documented `inherit` default. A level from the call or the agent file still wins; `@handle` mentions already inherited.
 
 ## [0.22.0] - 2026-10-13
 
