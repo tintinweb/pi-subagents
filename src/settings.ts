@@ -290,6 +290,20 @@ export interface SubagentsSettings {
    */
   showModel?: boolean;
   /**
+   * Whether the built-in Explore drops to a cheaper model instead of running on
+   * the session's own. Defaults to `true`; `false` is plain inherit, Claude
+   * Code's `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`.
+   */
+  exploreModelCap?: boolean;
+  /**
+   * Where the cap may drop to, tried in order on the session's own provider.
+   * `"auto"` is Claude Code's rule (a Claude model above Opus runs on the newest
+   * Opus); any other entry names a cheap worker (`"haiku"`, `"luna"`), used only
+   * when it is cheaper than the session's model. Defaults to `["auto"]`; an
+   * empty list means plain inherit.
+   */
+  exploreCapModels?: string[];
+  /**
    * Whether agents declared by installed pi packages load, and from which
    * packages. Defaults to `true`.
    *
@@ -366,6 +380,8 @@ export interface SettingsAppliers {
   setReportUsage: (b: boolean) => void;
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
+  setExploreModelCap: (b: boolean) => void;
+  setExploreCapModels: (models: string[]) => void;
   setViewerMarkdown: (mode: ViewerMarkdownMode) => void;
   setPackageAgents: (gate: boolean | string[]) => void;
   setPackageWorkflows: (gate: boolean | string[]) => void;
@@ -501,6 +517,12 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.showModel === "boolean") {
     out.showModel = r.showModel;
   }
+  if (typeof r.exploreModelCap === "boolean") {
+    out.exploreModelCap = r.exploreModelCap;
+  }
+  if (Array.isArray(r.exploreCapModels)) {
+    out.exploreCapModels = r.exploreCapModels.filter((m): m is string => typeof m === "string" && m.trim() !== "");
+  }
   if (typeof r.viewerMarkdown === "string" && VALID_VIEWER_MARKDOWN_MODES.has(r.viewerMarkdown)) {
     out.viewerMarkdown = r.viewerMarkdown as ViewerMarkdownMode;
   }
@@ -595,6 +617,8 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.reportUsage === "boolean") appliers.setReportUsage(s.reportUsage);
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
   if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
+  if (typeof s.exploreModelCap === "boolean") appliers.setExploreModelCap(s.exploreModelCap);
+  if (s.exploreCapModels) appliers.setExploreCapModels(s.exploreCapModels);
   if (s.viewerMarkdown) appliers.setViewerMarkdown(s.viewerMarkdown);
   if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
   if (s.packageAgents !== undefined) appliers.setPackageAgents(s.packageAgents);

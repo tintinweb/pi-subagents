@@ -19,7 +19,7 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getExploreCapModels, getExploreModelCap, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setExploreCapModels, setExploreModelCap, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -1598,6 +1598,8 @@ export default function (pi: ExtensionAPI) {
       setReportUsage,
       setShowCost,
       setShowModel,
+      setExploreModelCap,
+      setExploreCapModels,
       setViewerMarkdown,
       setPackageAgents: setPackageAgentsGate,
       setPackageWorkflows: setPackageWorkflowsGate,
@@ -3737,6 +3739,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
       reportUsage: isReportUsageEnabled(),
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
+      exploreModelCap: getExploreModelCap(),
+      exploreCapModels: [...getExploreCapModels()],
       viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
@@ -3954,6 +3958,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
+          id: "exploreModelCap",
+          label: "Explore model cap",
+          description:
+            "Let the built-in Explore drop to a cheaper model on the session's own provider instead of inheriting it, as Claude Code caps Explore at Opus. Where it may drop to is `exploreCapModels` in subagents.json (default [\"auto\"]: a Claude model above Opus runs Explore on the newest Opus). off = Explore always runs on the session's model.",
+          currentValue: getExploreModelCap() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "viewerMarkdown",
           label: "Viewer markdown",
           description:
@@ -4149,6 +4161,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         setShowModel(enabled);
         notifyApplied(ctx, `Model display ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "exploreModelCap") {
+        const enabled = value === "on";
+        setExploreModelCap(enabled);
+        notifyApplied(ctx, `Explore model cap ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "viewerMarkdown") {
         setViewerMarkdown(value as ViewerMarkdownMode);
         notifyApplied(ctx, `Viewer markdown set to ${value}`);

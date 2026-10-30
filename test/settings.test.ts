@@ -268,6 +268,25 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("round-trips exploreModelCap; drops non-boolean", () => {
+    saveSettings({ exploreModelCap: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ exploreModelCap: false });
+    writeProject({ exploreModelCap: "off" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("round-trips exploreCapModels; keeps only non-empty strings", () => {
+    saveSettings({ exploreCapModels: ["haiku", "auto"] }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ exploreCapModels: ["haiku", "auto"] });
+    // An empty list is a real value: no candidates, so Explore plain-inherits.
+    saveSettings({ exploreCapModels: [] }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ exploreCapModels: [] });
+    writeProject({ exploreCapModels: ["luna", 3, "", " "] } as any);
+    expect(loadSettings(projectDir)).toEqual({ exploreCapModels: ["luna"] });
+    writeProject({ exploreCapModels: "haiku" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips workflowsEnabled; drops non-boolean", () => {
     saveSettings({ workflowsEnabled: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: true });
@@ -602,6 +621,8 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
+        setExploreModelCap: vi.fn(),
+        setExploreCapModels: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };
@@ -652,6 +673,12 @@ describe("settings persistence", () => {
 
       applySettings({ showModel: false }, appliers);
       expect(appliers.setShowModel).toHaveBeenCalledWith(false);
+    });
+
+    it("applies exploreModelCap and exploreCapModels, including an empty list", () => {
+      applySettings({ exploreModelCap: false, exploreCapModels: [] }, appliers);
+      expect(appliers.setExploreModelCap).toHaveBeenCalledWith(false);
+      expect(appliers.setExploreCapModels).toHaveBeenCalledWith([]);
     });
 
     it("is a no-op on an empty settings object", () => {
@@ -871,6 +898,8 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
+        setExploreModelCap: vi.fn(),
+        setExploreCapModels: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };

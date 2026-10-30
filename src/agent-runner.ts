@@ -27,6 +27,7 @@ import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
+import { resolveExploreCap } from "./model-resolver.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
@@ -415,6 +416,16 @@ export function normalizeMaxTurns(n: number | undefined): number | undefined {
 export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurns; }
 /** Set the default max turns value. undefined or 0 = unlimited, otherwise minimum 1. */
 export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = normalizeMaxTurns(n); }
+
+/** Whether the built-in Explore drops to a cheaper model instead of inheriting (`resolveExploreCap`). */
+let exploreModelCap = true;
+/** Where the cap may drop to, tried in order: `"auto"` or a cheap worker model. */
+let exploreCapModels: readonly string[] = ["auto"];
+
+export function getExploreModelCap(): boolean { return exploreModelCap; }
+export function setExploreModelCap(b: boolean): void { exploreModelCap = b; }
+export function getExploreCapModels(): readonly string[] { return exploreCapModels; }
+export function setExploreCapModels(models: readonly string[]): void { exploreCapModels = [...models]; }
 
 /**
  * The turn limit a run of `type` will actually enforce: an explicit value if the
@@ -1040,8 +1051,14 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
+  // Resolve model: explicit option > config.model > parent model. The built-in
+  // Explore inherits as in Claude Code, but may drop to a cheaper model on the
+  // parent's provider rather than run on a top-tier one (#175, #350).
+  const exploreCap = options.model === undefined && agentConfig?.model === undefined
+    && agentConfig?.isDefault && type === "Explore" && exploreModelCap
+    ? resolveExploreCap(ctx.model, ctx.modelRegistry, exploreCapModels)
+    : undefined;
+  const model = options.model ?? exploreCap ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
 

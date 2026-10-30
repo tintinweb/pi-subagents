@@ -141,6 +141,8 @@ import {
   runAgent,
   SUBAGENT_TOOL_NAMES,
   setDefaultMaxTurns,
+  setExploreCapModels,
+  setExploreModelCap,
   setGraceTurns,
   setRememberAgents,
 } from "../src/agent-runner.js";
@@ -3232,5 +3234,62 @@ describe("resolveDefaultModel", () => {
 
   it("returns undefined when neither a config model nor a parent model exists", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
+  });
+});
+
+describe("the built-in Explore's model cap (#175, #350)", () => {
+  const priced = (provider: string, id: string, input: number, output: number) =>
+    ({ provider, id, name: id, cost: { input, output } });
+  const fable = priced("anthropic", "claude-fable-5-1", 10, 50);
+  const opus = priced("anthropic", "claude-opus-5-5", 4, 20);
+  const capCtx = {
+    ...ctx,
+    model: fable,
+    modelRegistry: {
+      find: (provider: string, id: string) => [fable, opus].find(m => m.provider === provider && m.id === id),
+      getAvailable: () => [fable, opus],
+      getAll: () => [fable, opus],
+    },
+  } as any;
+  const modelPassed = () => createAgentSession.mock.calls[0][0].model;
+
+  afterEach(() => {
+    setExploreModelCap(true);
+    setExploreCapModels(["auto"]);
+    vi.mocked(getAgentConfig).mockReset();
+  });
+
+  async function runExplore(config: Record<string, unknown>, options: Record<string, unknown> = {}) {
+    vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig(config) as any);
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(capCtx, "Explore", "find it", { pi, ...options });
+  }
+
+  it("runs the built-in Explore on the newest Opus under a Fable session", async () => {
+    await runExplore({ name: "Explore", isDefault: true });
+    expect(modelPassed()).toBe(opus);
+  });
+
+  it("inherits when the cap is off", async () => {
+    setExploreModelCap(false);
+    await runExplore({ name: "Explore", isDefault: true });
+    expect(modelPassed()).toBe(fable);
+  });
+
+  it("leaves a user's Explore override on the session model", async () => {
+    await runExplore({ name: "Explore" });
+    expect(modelPassed()).toBe(fable);
+  });
+
+  it("never caps another built-in agent", async () => {
+    vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ name: "Plan", isDefault: true }) as any);
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+    await runAgent(capCtx, "Plan", "plan it", { pi });
+    expect(modelPassed()).toBe(fable);
+  });
+
+  it("lets a model chosen for the run win", async () => {
+    await runExplore({ name: "Explore", isDefault: true }, { model: fable });
+    expect(modelPassed()).toBe(fable);
   });
 });

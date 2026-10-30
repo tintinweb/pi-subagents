@@ -272,7 +272,7 @@ Group completions render each agent as a separate block. The LLM receives struct
 | Type | Tools | Model | Prompt Mode | Description |
 |------|-------|-------|-------------|-------------|
 | `general-purpose` | all 7 | inherit | `append` (parent twin) | Inherits the parent's full system prompt — same rules, CLAUDE.md, project conventions |
-| `Explore` | read, bash, grep, find, ls | haiku (falls back to inherit) | `replace` (standalone) | Fast codebase exploration (read-only) |
+| `Explore` | read, bash, grep, find, ls | inherit, capped (see [Explore model cap](#persistent-settings)) | `replace` (standalone) | Fast codebase exploration (read-only) |
 | `Plan` | read, bash, grep, find, ls | inherit | `replace` (standalone) | Software architect for implementation planning (read-only) |
 
 The `general-purpose` agent is a **parent twin** — it receives the parent's system prompt plus a sub-agent context bridge, so it follows the same rules the parent does. The parent's skill list, cwd and extension sections are left out: the subagent's own session adds them for itself, so its skills follow its `skills` setting. Explore and Plan use standalone prompts tailored to their read-only roles.
@@ -690,12 +690,12 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, Explore model cap on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled, Explore model cap on with `["auto"]`).
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
@@ -749,6 +749,13 @@ Both places report what the run *actually* used, read back from the child sessio
 ```
 
 Toggle via `/agents → Settings → Show model`; applied live.
+
+**Explore model cap** (`exploreModelCap`, default `true`; `exploreCapModels`, default `["auto"]`): the built-in Explore runs on the session's model, as in Claude Code, but may drop to a cheaper one. `exploreCapModels` is tried in order, always on the session's own provider:
+
+- `"auto"` is Claude Code's rule: a Claude model above Opus (Fable, Mythos) runs Explore on the newest Opus that provider offers. It works on any provider serving Claude models, and has nothing to say about other model families.
+- Any other entry names a cheap worker, fuzzy like an agent's `model:` — `"haiku"`, `"luna"`. It is used only when that provider has it and it is cheaper than the session's model, so Explore is never moved to a pricier model and a local model is never capped.
+
+The first entry that yields a model decides. `["haiku", "luna"]` runs Explore on Haiku in a Claude session and on Luna in a Codex one; `["luna", "auto"]` adds Opus for Claude sessions above it. An empty list, or `exploreModelCap: false` (Claude Code's `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`), is plain inherit. A `model` passed on the call and an `Explore.md` override are never capped. Toggle the cap via `/agents → Settings → Explore model cap`; the list lives in `subagents.json`.
 
 **Viewer markdown** (`viewerMarkdown`, default `"assistant"`): how much of the [conversation viewer](#ui)'s transcript is rendered as Markdown rather than shown verbatim.
 
