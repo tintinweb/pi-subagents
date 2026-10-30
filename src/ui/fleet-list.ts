@@ -16,6 +16,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
+import { pickAgentView } from "./agent-views.js";
 import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./conversation-viewer.js";
 
@@ -407,13 +408,30 @@ export class FleetList {
       );
       return;
     }
-    const record = entry.record;
+    void this.openAgent(entry.record);
+  }
+
+  /**
+   * Open an agent's overlay via the view picker. `viewerClose` is set during
+   * the picker so the list does not treat the dialog as "user left" and reset.
+   */
+  private async openAgent(record: AgentRecord): Promise<void> {
     if (!this.ui) return;
-    if (!record.session) {
-      this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
+    this.viewerClose = () => {};
+    let chosen: Awaited<ReturnType<typeof pickAgentView>>;
+    try {
+      chosen = await pickAgentView(this.ui);
+    } finally {
+      this.viewerClose = undefined;
+    }
+    if (!chosen) {
+      this.update();
       return;
     }
-    const session = record.session;
+    if (chosen === "transcript" && !record.session) {
+      this.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
+      return;
+    }
     const activity = this.agentActivity.get(record.id);
     this.viewingAgentId = record.id;
     let overlayOptions = getConversationOverlayOptions({ mode: "regular" });
@@ -424,7 +442,7 @@ export class FleetList {
         this.viewerClose = () => done(undefined);
         return new ConversationViewer(
           tui,
-          session,
+          record.session,
           record,
           activity,
           theme,
@@ -439,6 +457,7 @@ export class FleetList {
           this.onViewerMarkdown,
           this.scrollbarMode(),
           this.backgroundAction?.(record, message => this.ui?.notify(message, "info")),
+          chosen,
         );
       },
       {

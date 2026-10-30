@@ -1,8 +1,9 @@
 /**
- * conversation-viewer.ts — Live conversation overlay for viewing agent sessions.
+ * conversation-viewer.ts — Overlay for viewing one agent.
  *
- * Displays a scrollable, live-updating view of an agent's conversation.
- * Subscribes to session events for real-time streaming updates.
+ * Four views (Transcript / Info / Prompt / Output), switched with t/i/p/o.
+ * Transcript is the live conversation; the others are static bodies from the record.
+ * Subscribes to session events so Transcript auto-updates while the agent runs.
  */
 
 import { type AgentSession, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
@@ -11,6 +12,7 @@ import { renderAgentName } from "../agent-color.js";
 import { extractText } from "../context.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent } from "../usage.js";
+import { type AgentViewerView, buildInfoLines, VIEW_LABELS, viewFromKey } from "./agent-views.js";
 import type { Theme } from "./agent-widget.js";
 import { type AgentActivity, buildInvocationTags, describeActivity, fgPreservingNestedStyles, formatCost, formatDuration, formatSessionTokens, getPromptModeLabel } from "./agent-widget.js";
 import { createViewerKeys, type ViewerKeybindings, type ViewerKeys } from "./viewer-keys.js";
@@ -154,6 +156,8 @@ function truncationNote(elided: number): string {
 export class ConversationViewer implements Component, Focusable {
   private scrollOffset = 0;
   private autoScroll = true;
+  private view: AgentViewerView;
+  private scrollByView: Record<AgentViewerView, { offset: number; auto: boolean }>;
   focused = false;
   private readonly fullscreen: boolean;
   private viewport: { width: number; top: number; height: number; maxScroll: number; thumbTop: number; thumbHeight: number } | undefined;
@@ -184,7 +188,7 @@ export class ConversationViewer implements Component, Focusable {
 
   constructor(
     private tui: TUI,
-    private session: AgentSession,
+    private session: AgentSession | undefined,
     private record: AgentRecord,
     private activity: AgentActivity | undefined,
     private theme: Theme,
@@ -220,7 +224,17 @@ export class ConversationViewer implements Component, Focusable {
      * affordance (history views).
      */
     private onBackground?: ViewerBackgroundAction,
+    /** Which of the four views to show first. Omitted → Transcript. */
+    initialView: AgentViewerView = "transcript",
   ) {
+    this.view = initialView;
+    this.autoScroll = initialView === "transcript";
+    this.scrollByView = {
+      transcript: { offset: 0, auto: true },
+      info: { offset: 0, auto: false },
+      prompt: { offset: 0, auto: false },
+      output: { offset: 0, auto: false },
+    };
     this.fullscreen = tui.mode === "fullscreen";
     this.markdownTheme = resolveMarkdownTheme(theme);
     this.keys = createViewerKeys(keybindings);
@@ -228,9 +242,11 @@ export class ConversationViewer implements Component, Focusable {
       render: width => this.buildContentLines(width),
       invalidate: () => {},
     }, { follow: "end", scrollbar: this.fullscreen ? scrollbarMode : "hidden" });
-    this.unsubscribe = session.subscribe(event => {
+    if (!this.autoScroll) this.scrollView.scrollTo(0, { disableFollow: true });
+    this.unsubscribe = session?.subscribe(event => {
       if (this.closed) return;
-      if (this.fullscreen && !this.scrollView.isFollowingEnd && event.type === "message_start" && ["user", "assistant", "toolResult", "bashExecution"].includes(event.message.role)) {
+      const followingTranscript = this.view === "transcript" ? this.scrollView.isFollowingEnd : this.scrollByView.transcript.auto;
+      if (this.fullscreen && !followingTranscript && event.type === "message_start" && ["user", "assistant", "toolResult", "bashExecution"].includes(event.message.role)) {
         this.newMessages++;
       }
       this.tui.requestRender();
@@ -294,12 +310,19 @@ export class ConversationViewer implements Component, Focusable {
     // Cycle raw → assistant-only → everything. The escape hatch that makes
     // Markdown rendering safe to default on: a result the renderer reshapes
     // (a diff, an indented log, a `#`-commented script) is one key from verbatim.
-    if (matchesKey(data, "m")) {
+    // Transcript-only: Info/Prompt/Output are not Markdown transcripts.
+    if (matchesKey(data, "m") && this.view === "transcript") {
       this.stopArmed = false;
       const next = MARKDOWN_MODES[(MARKDOWN_MODES.indexOf(this.markdownMode()) + 1) % MARKDOWN_MODES.length];
       this.markdownModeOverride = next;
       this.onMarkdownMode?.(next);
       this.tui.requestRender();
+      return;
+    }
+
+    const nextView = viewFromKey(data);
+    if (nextView) {
+      this.setView(nextView);
       return;
     }
     if (this.stopArmed) this.stopArmed = false;
@@ -342,7 +365,7 @@ export class ConversationViewer implements Component, Focusable {
 
   private jumpToLatest(): void {
     this.scrollView.scrollToEnd();
-    this.newMessages = 0;
+    if (this.view === "transcript") this.newMessages = 0;
     this.stopArmed = false;
     this.tui.requestRender();
   }
@@ -465,7 +488,7 @@ export class ConversationViewer implements Component, Focusable {
     if (cost) headerParts.push(cost);
 
     lines.push(row(
-      `${statusIcon} ${renderAgentName(this.record.type, th, { bold: true })}${modeTag}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
+      `${statusIcon} ${renderAgentName(this.record.type, th, { bold: true })}${modeTag}  ${th.fg("accent", VIEW_LABELS[this.view])}  ${th.fg("muted", this.record.description)} ${th.fg("dim", "·")} ${fgPreservingNestedStyles(th, "dim", headerParts.join(" · "))}`,
     ));
     const invocationLine = this.invocationLine();
     if (invocationLine) lines.push(row(invocationLine));
@@ -479,7 +502,7 @@ export class ConversationViewer implements Component, Focusable {
       this.scrollView.updateLayout(contentLines.length, viewportHeight, () => {
         if (!this.closed) this.tui.requestRender();
       });
-      if (this.scrollView.isFollowingEnd) this.newMessages = 0;
+      if (this.view === "transcript" && this.scrollView.isFollowingEnd) this.newMessages = 0;
     } else if (this.autoScroll) {
       this.scrollOffset = maxScroll;
     }
@@ -506,7 +529,7 @@ export class ConversationViewer implements Component, Focusable {
 
     // Keep the divider pinned above the footer, with the jump control centered
     // inside it. Neither scrolling nor new messages change its position.
-    if (this.fullscreen && !this.scrollView.isFollowingEnd && maxScroll > 0 && rows >= this.chromeLines()) {
+    if (this.fullscreen && this.view === "transcript" && !this.scrollView.isFollowingEnd && maxScroll > 0 && rows >= this.chromeLines()) {
       const text = this.newMessages > 0
         ? `${this.newMessages} new message${this.newMessages === 1 ? "" : "s"}`
         : "Jump to latest message";
@@ -541,21 +564,29 @@ export class ConversationViewer implements Component, Focusable {
       // Abbreviated (`raw`/`md`/`md+`) because the idle footer is already full
       // at 80 columns with steer + stop present, and this group has no
       // degradation step below "drop the line-count readout".
-      footerActions.push({ label: `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`, key: "m" });
+      if (this.view === "transcript") {
+        footerActions.push({ label: `m ${MARKDOWN_MODE_LABELS[this.markdownMode()]}`, key: "m" });
+      }
       const actions = footerActions.map(a => th.fg(a.key === "x" && this.stopArmed ? "error" : "dim", a.label));
+      const viewKeys = th.fg("dim", "t/i/p/o");
       footerActions.push({ label: "Esc close", key: "\x1b" });
       const footerRight = th.fg("dim", "↑↓ scroll · PgUp/PgDn or Shift+↑↓ · Esc close");
 
       // Prepend the line-count/scroll-% readout only when there's spare width —
-      // it's the first thing dropped so it never crowds out the hints.
+      // it's the first thing dropped so it never crowds out the hints. View
+      // keys come next: they are in the header as the view name, so they can
+      // leave the footer when 80 columns is already full.
       const scrollPct = contentLines.length <= viewportHeight
         ? "100%"
         : `${Math.round(((visibleStart + viewportHeight) / contentLines.length) * 100)}%`;
       const count = th.fg("dim", `${contentLines.length} lines · ${scrollPct}`);
-      const withCount = [count, ...actions].join(sep);
+      const withViews = [...actions, viewKeys].join(sep);
+      const withCount = [count, ...actions, viewKeys].join(sep);
       const footerLeft = visibleWidth(withCount) + visibleWidth(footerRight) + 1 <= innerW
         ? withCount
-        : actions.join(sep);
+        : visibleWidth(withViews) + visibleWidth(footerRight) + 1 <= innerW
+          ? withViews
+          : actions.join(sep);
 
       const footerGap = Math.max(1, innerW - visibleWidth(footerLeft) - visibleWidth(footerRight));
       lines.push(row(footerLeft + " ".repeat(footerGap) + footerRight));
@@ -683,6 +714,34 @@ export class ConversationViewer implements Component, Focusable {
 
   // ---- Private ----
 
+  private setView(next: AgentViewerView): void {
+    this.stopArmed = false;
+    if (next === this.view) {
+      this.tui.requestRender();
+      return;
+    }
+    this.scrollByView[this.view] = this.fullscreen
+      ? { offset: this.scrollView.scrollTop, auto: this.scrollView.isFollowingEnd }
+      : { offset: this.scrollOffset, auto: this.autoScroll };
+    this.view = next;
+    const saved = this.scrollByView[next];
+    this.scrollOffset = saved.offset;
+    this.autoScroll = saved.auto;
+    if (this.fullscreen) {
+      // ScrollView clamps against its current layout, so load the new view first.
+      this.scrollView.updateLayout(this.buildContentLines(this.lastInnerW).length, this.viewportHeight(), () => {
+        if (!this.closed) this.tui.requestRender();
+      });
+      if (saved.auto) this.scrollView.scrollToEnd();
+      else this.scrollView.scrollTo(saved.offset, { disableFollow: true });
+      this.scrollbarGrabOffset = undefined;
+      this.viewport = undefined;
+      this.footerTargets = [];
+      this.latestTarget = undefined;
+    }
+    this.tui.requestRender();
+  }
+
   private viewportHeight(): number {
     if (this.fullscreen) return Math.max(0, this.tui.terminal.rows - this.chromeLines());
     // Cap mirrors the overlay's maxHeight — otherwise the viewer would render
@@ -709,8 +768,45 @@ export class ConversationViewer implements Component, Focusable {
 
   private buildContentLines(width: number): string[] {
     if (width <= 0) return [];
+    if (this.view === "info") return this.buildInfoViewLines(width);
+    if (this.view === "prompt") return this.buildPromptLines(width);
+    if (this.view === "output") return this.buildOutputLines(width);
+    return this.buildTranscriptLines(width);
+  }
 
+  private buildPromptLines(width: number): string[] {
     const th = this.theme;
+    const prompt = this.record.prompt;
+    if (!prompt) return [th.fg("dim", "No prompt stored.")];
+    const { text, elided } = capResult(prompt);
+    const lines = this.rawLines(text, width, false);
+    if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
+    return lines.map(l => truncateToWidth(l, width));
+  }
+
+  private buildInfoViewLines(width: number): string[] {
+    const lines: string[] = [];
+    for (const line of buildInfoLines(this.record, this.showCost)) {
+      lines.push(...this.rawLines(line, width, false));
+    }
+    return lines.map(l => truncateToWidth(l, width));
+  }
+
+  private buildOutputLines(width: number): string[] {
+    const th = this.theme;
+    const result = this.record.result;
+    if (!result) return [th.fg("dim", "No output yet.")];
+    const { text, elided } = capResult(result);
+    const lines = this.rawLines(text, width, false);
+    if (elided) lines.push(truncateToWidth(th.fg("dim", truncationNote(elided)), width));
+    return lines.map(l => truncateToWidth(l, width));
+  }
+
+  private buildTranscriptLines(width: number): string[] {
+    const th = this.theme;
+    if (!this.session) {
+      return [th.fg("dim", "No session available.")];
+    }
     const messages = this.session.messages;
     const lines: string[] = [];
 

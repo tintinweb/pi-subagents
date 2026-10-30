@@ -432,24 +432,30 @@ describe("Agent tool — foreground run sent to the background", () => {
 
     let viewer: { handleInput(data: string): void } | undefined;
     let closeViewer: (() => void) | undefined;
-    const picks = [(o: string[]) => o.find(x => x.startsWith("Running agents (")), (o: string[]) => o[0]];
+    const picks = [(o: string[]) => o.find(x => x.startsWith("Running agents ("))];
     const ui = {
       setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn(),
       select: vi.fn(async (_title: string, options: string[]) => picks.shift()?.(options)),
-      custom: vi.fn((factory: any) => new Promise<undefined>(resolve => {
-        const done = () => resolve(undefined);
-        closeViewer = done;
+      custom: vi.fn((factory: any) => new Promise<unknown>(resolve => {
+        const done = (result: unknown) => resolve(result);
+        closeViewer = () => done(undefined);
         viewer = factory({ mode: "regular", requestRender() {}, terminal: { columns: 120, rows: 40 } }, theme, undefined, done);
       })),
     };
     const menu = commands.get("agents").handler("", ctx({ hasUI: true, ui }));
-    await vi.waitFor(() => expect(viewer).toBeDefined());
+    await vi.waitFor(() => expect(ui.custom).toHaveBeenCalledTimes(1));
+    viewer!.handleInput("\r"); // Running-agent list → view picker.
+    await vi.waitFor(() => expect(ui.custom).toHaveBeenCalledTimes(2));
+    viewer!.handleInput("t"); // View picker → Transcript.
+    await vi.waitFor(() => expect(ui.custom).toHaveBeenCalledTimes(3));
 
     viewer!.handleInput("b");
     expect(ui.notify).toHaveBeenCalledWith('Sent "long job" to the background.', "info");
     expect(textOf(await execution)).toContain("Agent started in background.");
 
     closeViewer!();
+    await vi.waitFor(() => expect(ui.custom).toHaveBeenCalledTimes(4));
+    viewer!.handleInput("\x1b"); // Back at the running-agent list.
     await menu;
     runs.finish("long job", "DONE");
   });

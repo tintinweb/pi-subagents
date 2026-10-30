@@ -32,6 +32,7 @@ Read the file that covers a surface before changing its behavior; update it in t
 | `README.md` | User-facing reference: features, install, tool parameter tables, commands, settings and defaults, the event table, the RPC channel list, and the `src/` file map (`## Architecture`). Source of truth for defaults and setting names. |
 | `docs/workflows.md` | `SubagentWorkflow` in depth — how the model writes a script, editing and re-running it, saving a named workflow, `agent()` options, recipes, troubleshooting. Examples in `examples/workflows/`. |
 | `docs/rpc.md` | Calling this extension from another pi extension — `pi.events` lifecycle events (`subagents:completed`, `subagents:ready`, …), the `subagents:rpc:*` channels (`ping`, `spawn`, `stop`, `consume`), spawn options, error strings, and the `Symbol.for("pi-subagents:manager")` registry. Source: `src/cross-extension-rpc.ts`. |
+| `docs/agent-viewer-modes.md` | Transcript / Info / Prompt / Output overlay: picker, `t` `i` `p` `o` keys, spawn-prompt storage. Source: `src/ui/agent-views.ts`, `src/ui/conversation-viewer.ts`. |
 | `CONTRIBUTING.md` | Contributor guidelines and quality bar. |
 | `SECURITY.md` | Vulnerability reporting. |
 

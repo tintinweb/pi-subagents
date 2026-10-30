@@ -2,9 +2,10 @@ import type { AgentSession, AgentSessionEventListener } from "@earendil-works/pi
 import { Input, ScrollView, type ScrollViewScrollbar, type Terminal, Text, type TUI, TuiAltScreen, type TuiMode, type TuiMouseEvent, VStack, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
+import type { AgentViewerView } from "../src/ui/agent-views.js";
 import { ConversationViewer, getConversationOverlayOptions } from "../src/ui/conversation-viewer.js";
 
-function setup(rows = 20, columns = 100, host?: TUI, scrollbar: ScrollViewScrollbar = "always", mode: TuiMode = "fullscreen") {
+function setup(rows = 20, columns = 100, host?: TUI, scrollbar: ScrollViewScrollbar = "always", mode: TuiMode = "fullscreen", initialView: AgentViewerView = "transcript") {
   const terminal = { rows, columns };
   const tui = host ?? { mode, terminal, requestRender: vi.fn(), handleMouse: () => undefined } as unknown as TUI;
   const messages = [{ role: "user", content: Array.from({ length: 100 }, (_, i) => `row-${i.toString().padStart(3, "0")}`).join("\n") }];
@@ -18,7 +19,7 @@ function setup(rows = 20, columns = 100, host?: TUI, scrollbar: ScrollViewScroll
   const viewer = new ConversationViewer(tui, session, record, undefined, {
     fg: (_color: string, text: string) => text,
     bold: (text: string) => text,
-  }, done, stop, undefined, steer, false, undefined, undefined, scrollbar);
+  }, done, stop, undefined, steer, false, undefined, undefined, scrollbar, undefined, initialView);
   const render = () => viewer.render(terminal.columns);
   const mouse = (event: Partial<TuiMouseEvent>) => viewer.handleMouse({
     type: "wheel", button: "none", x: 10, y: 8, screenX: 10, screenY: 8,
@@ -32,7 +33,7 @@ function setup(rows = 20, columns = 100, host?: TUI, scrollbar: ScrollViewScroll
     return mouse({ type: "press", button: "left", x: lines[y].indexOf(label), y });
   };
   const emit: AgentSessionEventListener = event => listener(event);
-  return { viewer, tui, terminal, messages, render, mouse, click, done, stop, steer, unsubscribe, emit };
+  return { viewer, tui, terminal, messages, record, render, mouse, click, done, stop, steer, unsubscribe, emit };
 }
 
 function firstRow(lines: string[]): string | undefined {
@@ -309,6 +310,115 @@ describe("fullscreen conversation observer", () => {
     expect(done).not.toHaveBeenCalled();
     expect(stop).not.toHaveBeenCalled();
     expect(steer).not.toHaveBeenCalled();
+  });
+});
+
+describe("fullscreen agent views", () => {
+  it("restores each view's scroll position and keeps unread messages on Transcript", () => {
+    const { viewer, record, render, mouse, emit, messages, terminal } = setup();
+    try {
+      record.prompt = Array.from({ length: 100 }, (_, i) => `prompt-${i}`).join("\n");
+      render();
+      mouse({ wheelDelta: -30 });
+      const paused = firstRow(render());
+      viewer.handleInput("p");
+      expect(render().join("\n")).toContain("prompt-0");
+      mouse({ wheelDelta: 10 });
+      const promptStart = render().join("\n").match(/prompt-\d+/)?.[0];
+      expect(promptStart).toBe("prompt-10");
+      expect(render().join("\n")).not.toContain("Ctrl+End");
+      viewer.handleInput("p");
+      expect(render().join("\n").match(/prompt-\d+/)?.[0]).toBe(promptStart);
+      viewer.handleInput("i");
+      render(); // A short view must not enable Transcript's follow state.
+      const message = { role: "user" as const, content: "new while away", timestamp: 1 };
+      messages.push(message);
+      emit({ type: "message_start", message });
+      terminal.rows = 24;
+      render();
+      viewer.handleInput("t");
+      expect(firstRow(render())).toBe(paused);
+      expect(render().join("\n")).toContain("1 new message");
+      viewer.handleInput("p");
+      expect(render().join("\n").match(/prompt-\d+/)?.[0]).toBe(promptStart);
+      expect(render().join("\n")).not.toContain("new message");
+      viewer.handleInput("\x1b[1;5F"); // Going to Prompt's end must not clear Transcript's count.
+      render();
+      viewer.handleInput("t");
+      expect(render().join("\n")).toContain("1 new message");
+    } finally {
+      viewer.dispose();
+    }
+  });
+
+  it("keeps Transcript following when messages arrive in another view", () => {
+    const { viewer, render, messages, emit } = setup();
+    try {
+      render();
+      viewer.handleInput("i");
+      render();
+      const message = { role: "user" as const, content: "latest while away", timestamp: 1 };
+      messages.push(message);
+      emit({ type: "message_start", message });
+      viewer.handleInput("t");
+      expect(render().join("\n")).toContain("latest while away");
+      expect(render().join("\n")).not.toContain("Ctrl+End");
+    } finally {
+      viewer.dispose();
+    }
+  });
+
+  it.each([true, false])("keeps newly populated Output at its start (initial view: %s)", initial => {
+    const { viewer, record, render } = setup(20, 100, undefined, "always", "fullscreen", initial ? "output" : "transcript");
+    try {
+      render();
+      if (!initial) viewer.handleInput("o");
+      expect(render().join("\n")).toContain("No output yet.");
+      record.result = Array.from({ length: 100 }, (_, i) => `result-${i}`).join("\n");
+      expect(render().join("\n")).toContain("result-0");
+      expect(render().join("\n")).not.toContain("result-99");
+    } finally {
+      viewer.dispose();
+    }
+  });
+
+  it("keeps the Markdown mouse action exclusive to Transcript", () => {
+    const { viewer, render, click } = setup();
+    try {
+      click("m md");
+      expect(render().join("\n")).toContain("m md+");
+      viewer.handleInput("p");
+      expect(render().join("\n")).not.toContain("m md");
+      viewer.handleInput("m");
+      viewer.handleInput("t");
+      expect(render().join("\n")).toContain("m md+");
+      click("m md+");
+      expect(render().join("\n")).toContain("m raw");
+    } finally {
+      viewer.dispose();
+    }
+  });
+
+  it.each(["regular", "fullscreen"] as const)("opens record-only views without a session in %s mode", mode => {
+    for (const initialView of ["info", "prompt", "output"] as const) {
+      const tui = { mode, terminal: { rows: 30, columns: 100 }, requestRender: vi.fn() } as unknown as TUI;
+      const record = { type: "Explore", description: "Queued", status: "queued", toolUses: 0, startedAt: 0, prompt: "stored prompt", result: "stored output" } as AgentRecord;
+      const done = vi.fn();
+      const viewer = new ConversationViewer(tui, undefined, record, undefined, {
+        fg: (_color: string, text: string) => text, bold: (text: string) => text,
+      }, done, undefined, undefined, undefined, false, undefined, undefined, "hidden", undefined, initialView);
+      try {
+        const expected = { info: "Tools:", prompt: "stored prompt", output: "stored output" };
+        expect(viewer.render(100).join("\n")).toContain(expected[initialView]);
+        viewer.handleInput("\x1b[B");
+        viewer.handleInput("t");
+        expect(viewer.render(100).join("\n")).toContain("No session available.");
+        viewer.handleInput("\x1b");
+        expect(done).toHaveBeenCalledExactlyOnceWith(undefined);
+      } finally {
+        viewer.dispose();
+      }
+    }
   });
 });
 
