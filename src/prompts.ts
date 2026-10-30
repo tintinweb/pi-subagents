@@ -139,8 +139,8 @@ ${envBlock}`;
  * The part of the parent's rendered system prompt that an append-mode child inherits.
  *
  * Pi renders a prompt as the preamble followed by tagged sections in a fixed order:
- * `addendum`, `project_context`, `skills`, `cwd`, then the sections extensions add
- * during a turn. The child session renders its own `skills` (from its `skills:`
+ * `tools`, `rules`, `docs` (default preamble only), `addendum`, `project_context`,
+ * `skills`, `cwd`, then the sections extensions add during a turn. The child session renders its own `skills` (from its `skills:`
  * setting), its own `cwd` and its own extension sections after the inherited text.
  * Inheriting the parent's copies too listed them twice, showed the parent's skills to
  * children configured with `skills: false` or a preload list, and left copies that
