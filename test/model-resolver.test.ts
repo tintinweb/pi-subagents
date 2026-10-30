@@ -282,17 +282,32 @@ describe("resolveExploreCap", () => {
     m("anthropic", "claude-opus-4-5-20251101", 5, 25),
     m("anthropic", "claude-sonnet-5-5", 2, 10),
     m("anthropic", "claude-haiku-5-5", 0.1, 0.5),
-    m("openrouter", "anthropic/claude-fable-5-1", 10, 50),
-    m("openrouter", "anthropic/claude-opus-5-5", 4, 20),
-    m("openrouter", "anthropic/claude-haiku-5-5", 0.1, 0.5),
+    // Real ids from pi's catalog: OpenRouter and Copilot write versions with a
+    // dot, list endpoint variants beside the model, and Bedrock repeats each
+    // model per region profile under one provider.
+    m("openrouter", "anthropic/claude-fable-5.1", 10, 50),
+    m("openrouter", "anthropic/claude-opus-5", 5, 25),
+    m("openrouter", "anthropic/claude-opus-5.5:batch", 2, 10),
+    m("openrouter", "anthropic/claude-opus-5.5", 4, 20),
+    m("openrouter", "~anthropic/claude-opus-latest", 4, 20),
+    m("openrouter", "anthropic/claude-haiku-5.5", 0.1, 0.5),
+    m("github-copilot", "claude-fable-5.1", 10, 50),
+    m("github-copilot", "claude-opus-5", 5, 25),
+    m("github-copilot", "claude-opus-5.5", 4, 20),
+    m("amazon-bedrock", "anthropic.claude-opus-5-5", 4, 20),
+    m("amazon-bedrock", "anthropic.claude-haiku-5-5", 0.1, 0.5),
+    m("amazon-bedrock", "us.anthropic.claude-fable-5-1", 11, 55),
+    m("amazon-bedrock", "us.anthropic.claude-opus-5-5", 4.4, 22),
+    m("amazon-bedrock", "eu.anthropic.claude-opus-5", 5.5, 27.5),
+    m("amazon-bedrock", "eu.anthropic.claude-haiku-5-5", 0.11, 0.55),
     m("openai-codex", "gpt-6-sol", 2, 10),
     m("openai-codex", "gpt-6-luna", 0.1, 0.5),
     m("llamacpp", "qwen3-coder", 0, 0),
   ];
   const registry = makeRegistry(CAP_MODELS as any);
   const model = (provider: string, id: string) => CAP_MODELS.find(x => x.provider === provider && x.id === id)!;
-  const cap = (provider: string, id: string, entries: string[]) =>
-    resolveExploreCap(model(provider, id), registry, entries);
+  const cap = (provider: string, id: string, entries: string[], blocked?: ReadonlySet<string>) =>
+    resolveExploreCap(model(provider, id), registry, entries, blocked);
 
   describe('"auto" — Claude Code\'s rule: a family above Opus drops to the newest Opus', () => {
     it("caps an Anthropic Fable session at the newest undated Opus", () => {
@@ -300,8 +315,21 @@ describe("resolveExploreCap", () => {
     });
 
     it("works on any provider serving Claude models, staying on that provider", () => {
-      expect(cap("openrouter", "anthropic/claude-fable-5-1", ["auto"]))
-        .toBe(model("openrouter", "anthropic/claude-opus-5-5"));
+      // Dotted versions: 5.5 outranks 5. Not the :batch variant, not the ~latest alias.
+      expect(cap("openrouter", "anthropic/claude-fable-5.1", ["auto"]))
+        .toBe(model("openrouter", "anthropic/claude-opus-5.5"));
+      expect(cap("github-copilot", "claude-fable-5.1", ["auto"]))
+        .toBe(model("github-copilot", "claude-opus-5.5"));
+    });
+
+    it("keeps a Bedrock session in its region profile", () => {
+      expect(cap("amazon-bedrock", "us.anthropic.claude-fable-5-1", ["auto"]))
+        .toBe(model("amazon-bedrock", "us.anthropic.claude-opus-5-5"));
+    });
+
+    it("skips a cap model that already failed, falling back to the next newest", () => {
+      expect(cap("anthropic", "claude-fable-5-1", ["auto"], new Set(["anthropic/claude-opus-5-5"])))
+        .toBe(model("anthropic", "claude-opus-5-5-20260101"));
     });
 
     it("leaves Opus and Sonnet sessions alone", () => {
@@ -326,6 +354,13 @@ describe("resolveExploreCap", () => {
       expect(cap("llamacpp", "qwen3-coder", ["haiku"])).toBeUndefined();
     });
 
+    it("stays in the session's Bedrock region unless the entry names an exact id", () => {
+      expect(cap("amazon-bedrock", "eu.anthropic.claude-opus-5", ["haiku"]))
+        .toBe(model("amazon-bedrock", "eu.anthropic.claude-haiku-5-5"));
+      expect(cap("amazon-bedrock", "eu.anthropic.claude-opus-5", ["anthropic.claude-haiku-5-5"]))
+        .toBe(model("amazon-bedrock", "anthropic.claude-haiku-5-5"));
+    });
+
     it("never moves Explore to a model that is not cheaper", () => {
       expect(cap("openai-codex", "gpt-6-luna", ["luna"])).toBeUndefined();
       expect(cap("anthropic", "claude-haiku-5-5", ["sonnet"])).toBeUndefined();
@@ -335,6 +370,11 @@ describe("resolveExploreCap", () => {
       expect(cap("anthropic", "claude-fable-5-1", ["luna", "auto"])).toBe(model("anthropic", "claude-opus-5-5"));
       expect(cap("anthropic", "claude-fable-5-1", ["haiku", "auto"])).toBe(model("anthropic", "claude-haiku-5-5"));
     });
+  });
+
+  it('stops at "inherit", whatever follows it', () => {
+    expect(cap("anthropic", "claude-fable-5-1", ["inherit"])).toBeUndefined();
+    expect(cap("anthropic", "claude-fable-5-1", ["inherit", "auto"])).toBeUndefined();
   });
 
   it("inherits with an empty list or no parent model", () => {

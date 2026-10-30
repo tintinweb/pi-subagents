@@ -135,13 +135,13 @@ import {
   getGraceTurns,
   parseExtensionsSpec,
   parseExtSelectors,
+  resetFailedCapModels,
   resolveDefaultModel,
   resolveEffectiveMaxTurns,
   resumeAgent,
   runAgent,
   SUBAGENT_TOOL_NAMES,
   setDefaultMaxTurns,
-  setExploreCapModels,
   setExploreModelCap,
   setGraceTurns,
   setRememberAgents,
@@ -3254,8 +3254,7 @@ describe("the built-in Explore's model cap (#175, #350)", () => {
   const modelPassed = () => createAgentSession.mock.calls[0][0].model;
 
   afterEach(() => {
-    setExploreModelCap(true);
-    setExploreCapModels(["auto"]);
+    setExploreModelCap("auto");
     vi.mocked(getAgentConfig).mockReset();
   });
 
@@ -3270,8 +3269,8 @@ describe("the built-in Explore's model cap (#175, #350)", () => {
     expect(modelPassed()).toBe(opus);
   });
 
-  it("inherits when the cap is off", async () => {
-    setExploreModelCap(false);
+  it("inherits when the cap is set to inherit", async () => {
+    setExploreModelCap("inherit");
     await runExplore({ name: "Explore", isDefault: true });
     expect(modelPassed()).toBe(fable);
   });
@@ -3291,5 +3290,94 @@ describe("the built-in Explore's model cap (#175, #350)", () => {
   it("lets a model chosen for the run win", async () => {
     await runExplore({ name: "Explore", isDefault: true }, { model: fable });
     expect(modelPassed()).toBe(fable);
+  });
+
+  describe("when the cap model is refused", () => {
+    const refused = { role: "assistant", content: [], stopReason: "error", errorMessage: "403 no access to model" };
+    const toolTurn = { role: "assistant", content: [{ type: "toolCall", id: "t1", name: "read", arguments: {} }], stopReason: "toolUse" };
+
+    // A session whose first prompt ends in `firstTurn`, and whose later prompts answer.
+    function refusingSession(firstTurn: unknown[]) {
+      const { session } = createSession("OK");
+      const s = session as any;
+      s.thinkingLevel = "high";
+      s.setModel = vi.fn(async () => { s.thinkingLevel = "medium"; });
+      s.setThinkingLevel = vi.fn((level: string) => { s.thinkingLevel = level; });
+      s.prompt = vi.fn(async () => {
+        s.messages.push(...(s.prompt.mock.calls.length === 1
+          ? firstTurn
+          : [{ role: "assistant", content: [{ type: "text", text: "found it" }], stopReason: "stop" }]));
+      });
+      return s;
+    }
+
+    async function runRefused(firstTurn: unknown[], options: Record<string, unknown> = {}) {
+      vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ name: "Explore", isDefault: true }) as any);
+      const session = refusingSession(firstTurn);
+      createAgentSession.mockResolvedValue({ session });
+      const result = await runAgent(capCtx, "Explore", "find it", { pi, ...options });
+      return { session, result };
+    }
+
+    afterEach(() => resetFailedCapModels());
+
+    it("reruns on the session's model, keeping the thinking level", async () => {
+      const { session, result } = await runRefused([refused]);
+      expect(session.setModel).toHaveBeenCalledWith(fable);
+      expect(session.prompt).toHaveBeenCalledTimes(2);
+      expect(session.thinkingLevel).toBe("high");
+      expect(result.responseText).toBe("found it");
+      expect(result.failure).toBeUndefined();
+    });
+
+    it("reports the switch, so the run is labelled with the model that answered", async () => {
+      const onModelChanged = vi.fn();
+      const { session } = await runRefused([refused], { onModelChanged });
+      expect(onModelChanged).toHaveBeenCalledWith(session);
+    });
+
+    it("keeps the cap model when the session's model fails too: the cap was not the cause", async () => {
+      vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ name: "Explore", isDefault: true }) as any);
+      const session = refusingSession([refused]);
+      session.prompt = vi.fn(async () => { session.messages.push(refused); });
+      createAgentSession.mockResolvedValue({ session });
+      await runAgent(capCtx, "Explore", "find it", { pi });
+      createAgentSession.mockClear();
+      await runExplore({ name: "Explore", isDefault: true });
+      expect(modelPassed()).toBe(opus);
+    });
+
+    it("skips that cap model on the next spawn", async () => {
+      await runRefused([refused]);
+      createAgentSession.mockClear();
+      await runExplore({ name: "Explore", isDefault: true });
+      expect(modelPassed()).toBe(fable);
+    });
+
+    it("does not rerun once a tool has run", async () => {
+      const { session, result } = await runRefused([toolTurn, refused]);
+      expect(session.setModel).not.toHaveBeenCalled();
+      expect(result.failure).toBe("403 no access to model");
+    });
+
+    it("does not rerun an aborted run", async () => {
+      const controller = new AbortController();
+      vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ name: "Explore", isDefault: true }) as any);
+      const session = refusingSession([refused]);
+      session.prompt = vi.fn(async () => {
+        session.messages.push(refused);
+        controller.abort();
+      });
+      createAgentSession.mockResolvedValue({ session });
+      await runAgent(capCtx, "Explore", "find it", { pi, signal: controller.signal });
+      expect(session.setModel).not.toHaveBeenCalled();
+    });
+
+    it("does not rerun a run that was not capped", async () => {
+      setExploreModelCap("inherit");
+      const { session, result } = await runRefused([refused]);
+      expect(session.setModel).not.toHaveBeenCalled();
+      expect(result.failure).toBe("403 no access to model");
+    });
   });
 });

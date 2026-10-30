@@ -417,15 +417,25 @@ export function getDefaultMaxTurns(): number | undefined { return defaultMaxTurn
 /** Set the default max turns value. undefined or 0 = unlimited, otherwise minimum 1. */
 export function setDefaultMaxTurns(n: number | undefined): void { defaultMaxTurns = normalizeMaxTurns(n); }
 
-/** Whether the built-in Explore drops to a cheaper model instead of inheriting (`resolveExploreCap`). */
-let exploreModelCap = true;
-/** Where the cap may drop to, tried in order: `"auto"` or a cheap worker model. */
-let exploreCapModels: readonly string[] = ["auto"];
+/**
+ * Where the built-in Explore may drop to instead of inheriting, as configured:
+ * `"auto"`, `"inherit"`, a cheap worker model, or a list tried in order
+ * (`resolveExploreCap`).
+ */
+let exploreModelCap: string | readonly string[] = "auto";
 
-export function getExploreModelCap(): boolean { return exploreModelCap; }
-export function setExploreModelCap(b: boolean): void { exploreModelCap = b; }
-export function getExploreCapModels(): readonly string[] { return exploreCapModels; }
-export function setExploreCapModels(models: readonly string[]): void { exploreCapModels = [...models]; }
+export function getExploreModelCap(): string | readonly string[] { return exploreModelCap; }
+export function setExploreModelCap(cap: string | readonly string[]): void {
+  exploreModelCap = typeof cap === "string" ? cap : [...cap];
+}
+/**
+ * Cap models (`provider/id`) a provider refused, skipped for the rest of the
+ * process. The catalog lists what a provider serves, not what the account may
+ * call (Bedrock grants access per model, Copilot per plan and org policy).
+ */
+const failedCapModels = new Set<string>();
+/** For tests: forget the refused cap models. */
+export function resetFailedCapModels(): void { failedCapModels.clear(); }
 
 /**
  * The turn limit a run of `type` will actually enforce: an explicit value if the
@@ -563,6 +573,8 @@ export interface RunOptions {
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
+  /** Called when the run switches the session to another model (the Explore cap's fallback). */
+  onModelChanged?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
   /**
@@ -1055,8 +1067,9 @@ export async function runAgent(
   // Explore inherits as in Claude Code, but may drop to a cheaper model on the
   // parent's provider rather than run on a top-tier one (#175, #350).
   const exploreCap = options.model === undefined && agentConfig?.model === undefined
-    && agentConfig?.isDefault && type === "Explore" && exploreModelCap
-    ? resolveExploreCap(ctx.model, ctx.modelRegistry, exploreCapModels)
+    && agentConfig?.isDefault && type === "Explore"
+    ? resolveExploreCap(ctx.model, ctx.modelRegistry,
+      typeof exploreModelCap === "string" ? [exploreModelCap] : exploreModelCap, failedCapModels)
     : undefined;
   const model = options.model ?? exploreCap ?? resolveDefaultModel(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
@@ -1334,6 +1347,25 @@ export async function runAgent(
     // pi's `session.abort()` is a no-op until a run is active — so a child whose
     // parent is already gone is not prompted at all.
     if (options.signal?.aborted !== true) await session.prompt(effectivePrompt);
+
+    // The cap must never be why Explore fails. pi has already retried transient
+    // errors, so a first turn that still failed means the account may not call
+    // the cap model: rerun on the session's model. Nothing has run yet, and pi
+    // drops errored turns from the context, so a short nudge carries the task.
+    const firstTurn = session.messages.slice(startLen).find(m => m.role === "assistant");
+    if (exploreCap && ctx.model && !run.aborted && options.signal?.aborted !== true
+      && firstTurn?.stopReason === "error") {
+      // setModel re-derives the thinking level for the new model; keep the run's.
+      const level = session.thinkingLevel;
+      await session.setModel(ctx.model);
+      session.setThinkingLevel(level);
+      options.onModelChanged?.(session);
+      const rerunFrom = session.messages.length;
+      await session.prompt("Continue with the task above.");
+      // If the session's model failed too, the cap model was not the cause.
+      const rerun = session.messages.slice(rerunFrom).find(m => m.role === "assistant");
+      if (rerun?.stopReason !== "error") failedCapModels.add(`${exploreCap.provider}/${exploreCap.id}`);
+    }
 
     // One more prompt when a schema was asked for and nothing usable came back
     // — the model answered in prose, or only ever called the tool invalidly.

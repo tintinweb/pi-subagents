@@ -119,7 +119,8 @@ export function resolveModel(
 
 /** Claude Code's family ranking (`$hr`): the cap applies above Opus. */
 const CLAUDE_FAMILY_RANK: Record<string, number> = { haiku: 0, sonnet: 1, opus: 2, fable: 3, mythos: 3 };
-const CLAUDE_ID = /claude-([a-z]+)-(\d{1,2})(?!\d)(?:-(\d{1,2})(?!\d))?/;
+// Versions are dashed on Anthropic and Bedrock, dotted on OpenRouter and Copilot.
+const CLAUDE_ID = /claude-([a-z]+)-(\d{1,2})(?!\d)(?:[-.](\d{1,2})(?!\d))?/;
 
 interface PricedModel extends ModelEntry {
   cost?: { input?: number; output?: number };
@@ -131,9 +132,11 @@ const price = (m: PricedModel) => (m.cost?.input ?? 0) + (m.cost?.output ?? 0);
 function newestOpus(models: PricedModel[]): PricedModel | undefined {
   let best: { model: PricedModel; rank: number } | undefined;
   for (const model of models) {
+    // An endpoint variant (OpenRouter's `:batch`, `:free`) ties with the model itself.
+    if (/:[a-z]+$/.test(model.id)) continue;
     const match = CLAUDE_ID.exec(model.id.toLowerCase());
     if (match?.[1] !== "opus") continue;
-    const dated = /-\d{8}$/.test(model.id);
+    const dated = /-\d{8}(?:-v\d+:\d+)?$/.test(model.id);
     const rank = Number(match[2]) * 10_000 + Number(match[3] ?? 0) * 10 + (dated ? 0 : 1);
     if (!best || rank > best.rank) best = { model, rank };
   }
@@ -144,29 +147,43 @@ function newestOpus(models: PricedModel[]): PricedModel | undefined {
  * The model the built-in Explore should drop to instead of inheriting `parent`,
  * or undefined to inherit. Entries are tried in order, always on the parent's
  * own provider: `"auto"` is Claude Code's rule (a Claude family above Opus runs
- * on the newest Opus); any other entry names a cheap worker, used only when it
- * is cheaper than the parent. The first entry that yields a model decides.
+ * on the newest Opus); `"inherit"` stops there; any other entry names a cheap
+ * worker, used only when it is cheaper than the parent. The first entry that
+ * yields a model decides.
+ *
+ * Candidates share the parent id's prefix (`us.anthropic.`, `anthropic/`), so a
+ * Bedrock session stays in its region profile and OpenRouter's `~anthropic/`
+ * aliases are left out; an entry naming an exact id is the one way past that.
+ * `blocked` (`provider/id`) holds cap models that were already refused.
  */
 export function resolveExploreCap(
   parent: PricedModel | undefined,
   registry: ModelRegistry,
   entries: readonly string[],
+  blocked: ReadonlySet<string> = new Set(),
 ): any | undefined {
   if (!parent) return undefined;
   const sameProvider = ((registry.getAvailable?.() ?? registry.getAll()) as PricedModel[])
-    .filter(m => m.provider === parent.provider);
+    .filter(m => m.provider === parent.provider && !blocked.has(`${m.provider}/${m.id}`));
+  const claudeAt = parent.id.toLowerCase().indexOf("claude-");
+  const prefix = claudeAt === -1 ? "" : parent.id.slice(0, claudeAt).toLowerCase();
+  const preferred = sameProvider.filter(m => m.id.toLowerCase().startsWith(prefix));
   for (const entry of entries) {
+    if (entry === "inherit") return undefined;
     if (entry === "auto") {
       const family = CLAUDE_ID.exec(parent.id.toLowerCase())?.[1];
       if (family === undefined || (CLAUDE_FAMILY_RANK[family] ?? -1) <= CLAUDE_FAMILY_RANK.opus) continue;
-      const opus = newestOpus(sameProvider);
+      const opus = newestOpus(preferred);
       if (opus) return registry.find(opus.provider, opus.id);
       continue;
     }
+    const exact = sameProvider.find(m => m.id === entry);
     // A provider-scoped view, so neither the fuzzy pass nor the provider
     // fallback in resolveModel can reach another provider's key.
-    const found = resolveModel(entry, { ...registry, getAll: () => sameProvider, getAvailable: () => sameProvider });
-    if (typeof found === "string") continue;
+    const found = exact
+      ? registry.find(exact.provider, exact.id)
+      : resolveModel(entry, { ...registry, getAll: () => preferred, getAvailable: () => preferred });
+    if (!found || typeof found === "string") continue;
     return price(found) > 0 && price(found) < price(parent) ? found : undefined;
   }
   return undefined;

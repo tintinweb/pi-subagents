@@ -690,12 +690,12 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, Explore model cap on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, Explore model cap auto/inherit/custom, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled, Explore model cap on with `["auto"]`).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max concurrency `10`, max foreground concurrency `0` = unlimited, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled, Explore model cap `auto`).
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nesting project-wide regardless of any agent's `allowed_subagents`. Read when a subagent session is built, so a change applies to agents started after it.
 
@@ -750,12 +750,15 @@ Both places report what the run *actually* used, read back from the child sessio
 
 Toggle via `/agents → Settings → Show model`; applied live.
 
-**Explore model cap** (`exploreModelCap`, default `true`; `exploreCapModels`, default `["auto"]`): the built-in Explore runs on the session's model, as in Claude Code, but may drop to a cheaper one. `exploreCapModels` is tried in order, always on the session's own provider:
+**Explore model cap** (`exploreModelCap`, default `"auto"`): the built-in Explore runs on the session's model, as in Claude Code, but may drop to a cheaper one. The value is one entry or a list tried in order, always on the session's own provider:
 
-- `"auto"` is Claude Code's rule: a Claude model above Opus (Fable, Mythos) runs Explore on the newest Opus that provider offers. It works on any provider serving Claude models, and has nothing to say about other model families.
-- Any other entry names a cheap worker, fuzzy like an agent's `model:` — `"haiku"`, `"luna"`. It is used only when that provider has it and it is cheaper than the session's model, so Explore is never moved to a pricier model and a local model is never capped.
+- `"auto"` is Claude Code's rule: a Claude model above Opus (Fable, Mythos) runs Explore on the newest Opus that provider offers. It works on any provider serving Claude models (Anthropic, OpenRouter, Copilot; a Bedrock region profile stays in its region), and has nothing to say about other model families.
+- `"inherit"` turns the cap off: Explore always runs on the session's model (Claude Code's `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`).
+- Any other entry names a cheap worker, fuzzy like an agent's `model:` — `"haiku"`, `"luna"`. It is used only when that provider has it and it is cheaper than the session's model, so Explore is never moved to a pricier model and a local model is never capped. A fuzzy name picks the shortest matching id; write the exact id (`"claude-opus-5.5"`) to pin a version.
 
-The first entry that yields a model decides. `["haiku", "luna"]` runs Explore on Haiku in a Claude session and on Luna in a Codex one; `["luna", "auto"]` adds Opus for Claude sessions above it. An empty list, or `exploreModelCap: false` (Claude Code's `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`), is plain inherit. A `model` passed on the call and an `Explore.md` override are never capped. Toggle the cap via `/agents → Settings → Explore model cap`; the list lives in `subagents.json`.
+If the provider refuses the cap model (no access, not found), Explore reruns on the session's model, and that cap model is skipped for the rest of the session.
+
+The first entry that yields a model decides. `["haiku", "luna"]` runs Explore on Haiku in a Claude session and on Luna in a Codex one; `["luna", "auto"]` adds Opus for Claude sessions above it. A `model` passed on the call and an `Explore.md` override are never capped. Set it via `/agents → Settings → Explore model cap`: `auto`, `inherit`, or `custom…` to type models, comma-separated (an entry no logged-in provider offers is saved with a warning).
 
 **Viewer markdown** (`viewerMarkdown`, default `"assistant"`): how much of the [conversation viewer](#ui)'s transcript is rendered as Markdown rather than shown verbatim.
 

@@ -33,10 +33,9 @@ describe("documented defaults (README:441)", () => {
     expect(getDefaultMaxTurns()).toBeUndefined();
   }, HEAVY_REIMPORT_MS);
 
-  it("the Explore model cap is on, with Claude Code's automatic rule", async () => {
-    const { getExploreCapModels, getExploreModelCap } = await import("../src/agent-runner.js");
-    expect(getExploreModelCap()).toBe(true);
-    expect(getExploreCapModels()).toEqual(["auto"]);
+  it("the Explore model cap is Claude Code's automatic rule", async () => {
+    const { getExploreModelCap } = await import("../src/agent-runner.js");
+    expect(getExploreModelCap()).toBe("auto");
   }, HEAVY_REIMPORT_MS);
 
   it("nested subagent depth defaults to 2", async () => {

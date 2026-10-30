@@ -19,7 +19,7 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
-import { getAgentConversation, getDefaultMaxTurns, getExploreCapModels, getExploreModelCap, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setExploreCapModels, setExploreModelCap, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getExploreModelCap, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setExploreModelCap, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -37,7 +37,7 @@ import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, ses
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import { applyAndEmitLoaded, askExploreModelCap, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
@@ -1599,7 +1599,6 @@ export default function (pi: ExtensionAPI) {
       setShowCost,
       setShowModel,
       setExploreModelCap,
-      setExploreCapModels,
       setViewerMarkdown,
       setPackageAgents: setPackageAgentsGate,
       setPackageWorkflows: setPackageWorkflowsGate,
@@ -3739,8 +3738,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       reportUsage: isReportUsageEnabled(),
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
-      exploreModelCap: getExploreModelCap(),
-      exploreCapModels: [...getExploreCapModels()],
+      exploreModelCap: exploreModelCapSetting(),
       viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
@@ -3786,7 +3784,20 @@ Write the file using the write tool. Only write the file, nothing else.`;
     "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
   ]);
 
+  /** The menu value that opens the typed `exploreModelCap` input. */
+  const EXPLORE_CAP_CUSTOM = "custom…";
+  const exploreCapEntries = (): readonly string[] => {
+    const cap = getExploreModelCap();
+    return typeof cap === "string" ? [cap] : cap;
+  };
+  const exploreModelCapSetting = (): string | string[] => {
+    const cap = getExploreModelCap();
+    return typeof cap === "string" ? cap : [...cap];
+  };
+
   async function showSettings(ctx: ExtensionCommandContext) {
+    const openedCap = exploreModelCapSetting();
+    const openedCapLabel = exploreCapEntries().join(", ");
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const mcf = manager.getMaxConcurrentForeground();
@@ -3961,9 +3972,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "exploreModelCap",
           label: "Explore model cap",
           description:
-            "Let the built-in Explore drop to a cheaper model on the session's own provider instead of inheriting it, as Claude Code caps Explore at Opus. Where it may drop to is `exploreCapModels` in subagents.json (default [\"auto\"]: a Claude model above Opus runs Explore on the newest Opus). off = Explore always runs on the session's model.",
-          currentValue: getExploreModelCap() ? "on" : "off",
-          values: ["on", "off"],
+            "Where the built-in Explore may drop to instead of running on the session's model, on the session's own provider. auto = a Claude model above Opus runs Explore on the newest Opus, as in Claude Code; inherit = always the session's model; custom = type models tried in order (e.g. haiku, luna, auto), each used only if cheaper.",
+          currentValue: openedCapLabel,
+          values: [...new Set(["auto", "inherit", openedCapLabel, EXPLORE_CAP_CUSTOM])],
         },
         {
           id: "viewerMarkdown",
@@ -4162,9 +4173,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
         setShowModel(enabled);
         notifyApplied(ctx, `Model display ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "exploreModelCap") {
-        const enabled = value === "on";
-        setExploreModelCap(enabled);
-        notifyApplied(ctx, `Explore model cap ${enabled ? "enabled" : "disabled"}`);
+        // The menu shows a typed list by its label; cycling back to it restores the list.
+        setExploreModelCap(value === openedCapLabel ? openedCap : value);
+        notifyApplied(ctx, `Explore model cap: ${value}`);
       } else if (id === "viewerMarkdown") {
         setViewerMarkdown(value as ViewerMarkdownMode);
         notifyApplied(ctx, `Viewer markdown set to ${value}`);
@@ -4206,6 +4217,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
         items.length + 2,
         getSettingsListTheme(),
         (id, newValue) => {
+          // A typed value needs pi's input dialog, so close the menu for it.
+          if (id === "exploreModelCap" && newValue === EXPLORE_CAP_CUSTOM) {
+            done(id);
+            return;
+          }
           applyValue(id, newValue);
         },
         () => done(undefined as undefined),
@@ -4236,6 +4252,19 @@ Write the file using the write tool. Only write the file, nothing else.`;
         },
       };
     });
+
+    if (result === "exploreModelCap") {
+      const typed = await askExploreModelCap(ctx.ui, ctx.modelRegistry, exploreCapEntries());
+      if (typed) {
+        setExploreModelCap(typed.cap);
+        notifyApplied(ctx, `Explore model cap: ${exploreCapEntries().join(", ")}`);
+        if (typed.unknown.length > 0) {
+          ctx.ui.notify(`Explore model cap: ${typed.unknown.map(e => `"${e}"`).join(", ")} matches no available model`, "warning");
+        }
+      }
+      await showSettings(ctx);
+      return;
+    }
 
     // If a numeric field ID was returned, prompt for typed input
     if (result && NUMERIC_IDS.has(result)) {

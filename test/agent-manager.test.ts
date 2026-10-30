@@ -2670,6 +2670,21 @@ describe("AgentManager — effective model and thinking write-back", () => {
     expect(record.invocation!.modelName).toBe("claude-haiku-4-5");
   });
 
+  it("relabels again when the run switches model (the Explore cap's fallback)", async () => {
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, _prompt: any, options: any) => {
+      const session: any = { dispose: vi.fn(), model: { provider: "anthropic", id: "claude-opus-5-5" }, thinkingLevel: "high" };
+      options.onSessionCreated?.(session);
+      session.model = { provider: "anthropic", id: "claude-fable-5-1" };
+      options.onModelChanged?.(session);
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false } as any;
+    });
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "Explore", "go", { description: "go", isBackground: true });
+    await manager.getRecord(id)!.promise;
+
+    expect(manager.getRecord(id)!.invocation!.modelId).toBe("anthropic/claude-fable-5-1");
+  });
+
   it("leaves the invocation alone when the session reports no model", async () => {
     const record = await spawnWithSession({ thinking: "max" }, {});
 
