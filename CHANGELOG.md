@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.1] - 2026-10-30
+
 ### Added
 - **`subagents:rpc:steer` lets a cross-extension caller message an agent it spawned** ([#292](https://github.com/tintinweb/pi-subagents/pull/292) — thanks [@efpiva](https://github.com/efpiva)). The bus-side half of `steer_subagent`: id only, the same ownership guard as `stop`, `Agent is not running` once the agent has settled, and it emits `subagents:steered` like the tool does. Outside the `ping` handshake like `consume`.
 - **Per-message `subagents:usage` event for every agent, and `subagents:disposed` at shutdown** (closes [#376](https://github.com/tintinweb/pi-subagents/issues/376), [#377](https://github.com/tintinweb/pi-subagents/pull/377) — thanks [@erikdarlingdata](https://github.com/erikdarlingdata)). Another extension could not keep a live, accurate ledger of subagent spend: the lifecycle events report top-level agents only, once, at the end, and the ancestor records fold a nested child's spend into every parent. `subagents:usage` now fires once per assistant message for every agent, nested and workflow children included, carrying `type`, `model`, the effective `thinking` level (plus `requestedThinking` when the agent did not get what it asked for), `depth`, `parentAgentId`, `workflowId` and that one message's spend as a pi `Usage`. It is not gated by `reportUsage`. `subagents:disposed` fires at the end of `session_shutdown`, after every agent is stopped, as the point after which a final synchronous flush is complete. See [Events](README.md#events).
