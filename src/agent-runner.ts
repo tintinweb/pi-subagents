@@ -209,6 +209,23 @@ export function parseExtSelectors(entries: string[]): {
   return { extNames, narrowing };
 }
 
+/** pi's MCP resource tools, which it counts as MCP tools alongside `mcp__<server>__<tool>`. */
+const MCP_RESOURCE_TOOL_NAMES = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+/** The tools that reach `codemode`/`deferred` MCP tools: neither is declared to the model. */
+const MCP_BRIDGE_TOOL_NAMES = new Set(["codemode", "tool_search"]);
+
+const isMcpToolName = (name: string) => name.startsWith("mcp__") || MCP_RESOURCE_TOOL_NAMES.has(name);
+
+/** Whether `name` matches one of the `tools:` `mcp__` entries: an exact name or a `*` pattern. */
+function matchesToolPattern(name: string, patterns: readonly string[]): boolean {
+  return patterns.some((p) =>
+    p.includes("*")
+      ? new RegExp(`^${p.split("*").map((s) => s.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`).test(name)
+      : p === name,
+  );
+}
+
 /**
  * Keep a subagent's tool scope correct as extensions register tools over time.
  *
@@ -242,6 +259,8 @@ export function installExtensionToolScope(
     disallowedSet: Set<string> | undefined;
     extNames: Set<string>;
     narrowing: Map<string, Set<string>>;
+    /** Bare `mcp__` entries from `tools:`; undefined leaves MCP tools to the rules above. */
+    mcpToolPatterns: string[] | undefined;
     /**
      * Injected `customTools` to keep active regardless of the built-in list.
      *
@@ -255,7 +274,8 @@ export function installExtensionToolScope(
     nestedCallGate: NestedCallGate;
   },
 ): void {
-  const { loader, toolNames, disallowedSet, extNames, narrowing, readmitToolNames, nestedCallGate } = ctx;
+  const { loader, toolNames, disallowedSet, extNames, narrowing, mcpToolPatterns, readmitToolNames, nestedCallGate } =
+    ctx;
 
   // The names allowed right now. Mirrors the `ext:` opt-in flip: when any `ext:`
   // selector is present, extension tools become an explicit allowlist — a loaded
@@ -276,6 +296,20 @@ export function installExtensionToolScope(
         keep.add(name);
       }
     }
+    // Bare `mcp__` entries, as in pi's `--tools`: only matching MCP tools stay, from
+    // whichever extension serves them (pi's MCP or an adapter), even one the `ext:`
+    // opt-in left out — and so do the bridges that reach them.
+    if (mcpToolPatterns) {
+      for (const name of keep) {
+        if (isMcpToolName(name) && !matchesToolPattern(name, mcpToolPatterns)) keep.delete(name);
+      }
+      for (const extension of loader.getExtensions().extensions) {
+        for (const name of extension.tools.keys()) {
+          if (disallowedSet?.has(name)) continue;
+          if (MCP_BRIDGE_TOOL_NAMES.has(name) || matchesToolPattern(name, mcpToolPatterns)) keep.add(name);
+        }
+      }
+    }
     for (const name of EXCLUDED_TOOL_NAMES) keep.delete(name);
     // Injected tools are legitimately active for this agent — re-admit them so
     // the renarrow keeps them in the active set and beforeToolCall doesn't
@@ -285,10 +319,15 @@ export function installExtensionToolScope(
     return keep;
   };
 
-  // Names this agent selects explicitly: its built-ins, injected tools, and
-  // `ext:foo/bar` narrowings. pi activates a named tool even when it is
+  // Names this agent selects explicitly: its built-ins, injected tools, `ext:foo/bar`
+  // narrowings and exact `mcp__` entries. pi activates a named tool even when it is
   // `defaultActive: false`, as `--tools` does.
-  const named = new Set([...toolNames, ...readmitToolNames, ...[...narrowing.values()].flatMap((s) => [...s])]);
+  const named = new Set([
+    ...toolNames,
+    ...readmitToolNames,
+    ...[...narrowing.values()].flatMap((s) => [...s]),
+    ...(mcpToolPatterns ?? []).filter((p) => !p.includes("*")),
+  ]);
 
   // Activate what pi itself would: only tools declared to the model (`direct`/
   // `model-only` exposure), and of those only named ones or ones not opted out
@@ -940,6 +979,13 @@ export async function runAgent(
       }
     }
   }
+  // MCP tools come from extensions, so with none loaded these entries cannot match.
+  if (agentConfig?.mcpToolPatterns && noExtensions) {
+    options.onToolActivity?.({
+      type: "end",
+      toolName: `tools-error:${agentConfig.mcpToolPatterns.join(", ")} requested by agent "${type}" need extensions, but it loads none`,
+    });
+  }
 
   // A subagent spawns mid-task, so a bad `extensions:`/`ext:` entry warns rather
   // than aborts. Two distinct misconfigurations to catch:
@@ -1055,6 +1101,40 @@ export async function runAgent(
     ...[...nestedToolNames].filter(name => !disallowedSet?.has(name)),
     ...structuredToolNames,
   ]);
+
+  // As in Claude Code, refuse an agent whose `tools:` list resolved to nothing: with
+  // no tool it can only narrate calls it cannot make. Extension tools register after
+  // spawn (MCP once its servers connect), so they count as possible whenever an
+  // extension they could come from loaded, or any `mcp__` entry can reach a bridge.
+  const loadedNames = new Set(
+    loader
+      .getExtensions()
+      .extensions.filter((e) => e.path !== `<inline:${SCOPE_GATE_NAME}>`)
+      .flatMap((e) => extensionCanonicalNames(e.path)),
+  );
+  const unrecognized = agentConfig?.builtinToolNames?.filter((n) => !BUILTIN_TOOL_NAMES.includes(n)) ?? [];
+  const unmatched = [...extNames].filter((n) => !loadedNames.has(n));
+  // `extensions: false` and `isolated` load nothing, so `loadedNames` is empty then.
+  const extensionToolsPossible =
+    loadedNames.size > 0 &&
+    (extNames.size === 0 || unmatched.length < extNames.size || !!agentConfig?.mcpToolPatterns);
+  if (
+    (unrecognized.length > 0 || unmatched.length > 0) &&
+    toolNames.every((n) => !BUILTIN_TOOL_NAMES.includes(n) || disallowedSet?.has(n)) &&
+    readmitToolNames.size === 0 &&
+    !extensionToolsPossible
+  ) {
+    const reasons = [
+      unrecognized.length > 0 ? `unrecognized [${unrecognized.join(", ")}]` : "",
+      unmatched.length > 0
+        ? `recognized but matched no tools in this session [${unmatched.map((n) => `ext:${n}`).join(", ")}]`
+        : "",
+    ].filter(Boolean);
+    throw new Error(
+      `Agent '${type}' would be spawned with zero tools — refusing. Its tools list resolved to nothing: ` +
+        `${reasons.join("; ")}. Fix the agent's tools frontmatter or pass a different subagent_type.`,
+    );
+  }
 
   // ─── Tool scoping ───────────────────────────────────────────────────────
   //
@@ -1206,6 +1286,7 @@ export async function runAgent(
       disallowedSet,
       extNames,
       narrowing,
+      mcpToolPatterns: isolated ? undefined : agentConfig?.mcpToolPatterns,
       readmitToolNames,
       nestedCallGate,
     });

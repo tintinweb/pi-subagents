@@ -1054,6 +1054,79 @@ Good body.`);
     }
   });
 
+  // Claude Code agent files name tools in PascalCase (`Read`, `Glob`), list MCP
+  // tools as bare `mcp__<server>__<tool>`, and deny with `disallowedTools`. Read
+  // literally, such a file got no built-in tools and an ignored denylist (#396).
+  describe("Claude Code tool names", () => {
+    it("maps built-in names case-insensitively and Glob/MultiEdit to their pi names", () => {
+      writeAgent("cc", `---
+tools: Read, Grep, glob, LS, Bash, Edit, MultiEdit, Write, WebFetch
+---
+Prompt.`);
+      const agent = loadCustomAgents(tmpDir).get("cc")!;
+      // WebFetch has no pi built-in: it passes through so runAgent still warns about it.
+      expect(agent.builtinToolNames).toEqual(["read", "grep", "find", "ls", "bash", "edit", "write", "WebFetch"]);
+      expect(agent.mcpToolPatterns).toBeUndefined();
+    });
+
+    it("routes bare mcp__ entries to mcpToolPatterns, not built-ins", () => {
+      writeAgent("cc", `---
+tools: Read, mcp__github__search_code, mcp__radius__*
+---
+Prompt.`);
+      const agent = loadCustomAgents(tmpDir).get("cc")!;
+      expect(agent.builtinToolNames).toEqual(["read"]);
+      expect(agent.mcpToolPatterns).toEqual(["mcp__github__search_code", "mcp__radius__*"]);
+    });
+
+    it("reads a server-level mcp__<server> entry as the whole server, as Claude Code does", () => {
+      writeAgent("cc", `---
+tools: read, mcp__radius, mcp__a__b, mcp__c__*
+---
+Prompt.`);
+      expect(loadCustomAgents(tmpDir).get("cc")!.mcpToolPatterns).toEqual(["mcp__radius__*", "mcp__a__b", "mcp__c__*"]);
+    });
+
+    it("reads Claude Code's disallowedTools key and maps its names", () => {
+      writeAgent("cc", `---
+disallowedTools: Write, Glob
+---
+Prompt.`);
+      expect(loadCustomAgents(tmpDir).get("cc")!.disallowedTools).toEqual(["Write", "write", "Glob", "find"]);
+    });
+
+    it("keeps the exact deny entry next to the built-in it maps to", () => {
+      // An extension tool named `glob` must stay denied, not turn into a deny of `find`.
+      writeAgent("cc", `---
+disallowed_tools: glob, read
+---
+Prompt.`);
+      expect(loadCustomAgents(tmpDir).get("cc")!.disallowedTools).toEqual(["glob", "find", "read"]);
+    });
+
+    it("prefers disallowed_tools when both keys are present", () => {
+      writeAgent("cc", `---
+disallowed_tools: bash
+disallowedTools: write
+---
+Prompt.`);
+      expect(loadCustomAgents(tmpDir).get("cc")!.disallowedTools).toEqual(["bash"]);
+    });
+
+    it("leaves pi-style entries unchanged", () => {
+      writeAgent("pi", `---
+tools: read, grep, ext:foo/bar
+disallowed_tools: write
+---
+Prompt.`);
+      const agent = loadCustomAgents(tmpDir).get("pi")!;
+      expect(agent.builtinToolNames).toEqual(["read", "grep"]);
+      expect(agent.extSelectors).toEqual(["ext:foo/bar"]);
+      expect(agent.mcpToolPatterns).toBeUndefined();
+      expect(agent.disallowedTools).toEqual(["write"]);
+    });
+  });
+
   // `/agents → Eject` writes an AgentConfig back out as frontmatter. That writer
   // and this loader are the two halves of one format, but nothing pinned them
   // together — so a field can serialize to something the loader reads back
@@ -1074,6 +1147,12 @@ Good body.`);
 
     it("preserves an explicitly narrowed tool list", () => {
       expect(roundTrip({ builtinToolNames: ["read", "grep"] }).builtinToolNames).toEqual(["read", "grep"]);
+    });
+
+    it("preserves bare mcp__ entries", () => {
+      const loaded = roundTrip({ builtinToolNames: ["read"], mcpToolPatterns: ["mcp__srv__tool", "mcp__other__*"] });
+      expect(loaded.builtinToolNames).toEqual(["read"]);
+      expect(loaded.mcpToolPatterns).toEqual(["mcp__srv__tool", "mcp__other__*"]);
     });
 
     it("preserves the full built-in set", () => {

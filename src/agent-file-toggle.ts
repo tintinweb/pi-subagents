@@ -235,20 +235,20 @@ ${input.systemPrompt}
 }
 
 /**
- * Rebuild the `tools:` CSV from the two halves the loader split it into.
+ * Rebuild the `tools:` CSV from the parts the loader split it into.
  *
- * `extSelectors` has to come back with the built-ins: `parseToolsField` splits
- * `tools: read, ext:mcp/github` into `["read"]` and `["ext:mcp/github"]`, so
- * writing only the first half hands the ejected copy a *narrower* toolset than
- * the file it came from. That was invisible while Eject only ever ran on
- * built-in defaults, which carry no selectors; a package agent can.
+ * `extSelectors` and `mcpToolPatterns` have to come back with the built-ins:
+ * `parseToolsField` splits `tools: read, ext:mcp/github` into `["read"]` and
+ * `["ext:mcp/github"]`, so writing only the first half hands the ejected copy a
+ * *narrower* toolset than the file it came from. That was invisible while Eject
+ * only ever ran on built-in defaults, which carry no selectors; a package agent can.
  *
  * Zero built-ins with selectors present is not `none` — `none` means no tools at
  * all, while `ext:` entries alone mean "extension tools only", which the loader
  * reads back from a `tools:` line carrying just those entries.
  */
-function formatToolsField(tools: string[] | undefined, extSelectors?: string[]): string {
-  const selectors = extSelectors ?? [];
+function formatToolsField(tools: string[] | undefined, extSelectors?: string[], mcpToolPatterns?: string[]): string {
+  const selectors = [...(extSelectors ?? []), ...(mcpToolPatterns ?? [])];
   if (tools === undefined) return selectors.length > 0 ? ["*", ...selectors].join(", ") : "all";
   if (tools.length === 0) return selectors.length > 0 ? selectors.join(", ") : "none";
   return [...tools, ...selectors].join(", ");
@@ -263,7 +263,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   // Absent means "all built-ins"; an EMPTY list means explicitly zero. Writing
   // `all` for both would hand a deliberately tool-less agent the whole toolbox
   // the first time it is ejected.
-  fmFields.push(`tools: ${formatToolsField(cfg.builtinToolNames, cfg.extSelectors)}`);
+  fmFields.push(`tools: ${formatToolsField(cfg.builtinToolNames, cfg.extSelectors, cfg.mcpToolPatterns)}`);
   if (cfg.model) fmFields.push(`model: ${cfg.model}`);
   if (cfg.thinking) fmFields.push(`thinking: ${cfg.thinking}`);
   if (cfg.maxTurns) fmFields.push(`max_turns: ${cfg.maxTurns}`);

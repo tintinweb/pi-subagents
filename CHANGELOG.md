@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Claude Code tool names work in agent files** (fixes [#396](https://github.com/tintinweb/pi-subagents/issues/396)). `tools: Read, Glob, Bash` gave an agent none of pi's built-ins; names now match in any case, `Glob` means `find`, and the `disallowedTools` key is read as `disallowed_tools`, so an agent that ignored its `disallowedTools` loses those tools. As in Claude Code, an agent whose `tools:` resolve to nothing is refused instead of started with no usable tool.
+- **Bare `mcp__<server>__<tool>` entries in `tools:` select MCP tools** (part of [#370](https://github.com/tintinweb/pi-subagents/issues/370)). They were dropped as unknown built-ins, leaving every MCP tool reachable; they now narrow MCP tools as pi's `--tools` does and keep the `codemode`/`tool_search` bridges in scope. A server-level `mcp__<server>` selects the whole server, as in Claude Code.
+
 ## [0.22.1] - 2026-10-30
 
 ### Added
