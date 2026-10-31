@@ -5,7 +5,8 @@
  * load/save, parse-error self-heal, stale-lock recovery.
  */
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -137,6 +138,62 @@ describe("ScheduleStore", () => {
     store.add(a);
     store.add(b);  // would hang if the lock from the first add wasn't released
     expect(store.list().map(j => j.id).sort()).toEqual(["a", "b"]);
+  });
+
+  it("reclaims a lock held by its own PID without blocking the event loop", async () => {
+    const file = join(tmp, "s.json");
+    const lockFile = file + ".lock";
+    // A same-process lock is necessarily stale: withLock() never awaits
+    // between acquire and release, so the single-threaded process cannot be
+    // mid-mutation while another call tries to acquire.
+    writeFileSync(lockFile, String(process.pid));
+
+    let timerFired = false;
+    setTimeout(() => { timerFired = true; }, 50);
+    const store = new ScheduleStore(file);
+    store.add(makeJob());
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(store.list()).toHaveLength(1);
+    expect(timerFired).toBe(true);  // event loop never blocked
+  });
+
+  it("fails fast on a lock held by a live foreign process", () => {
+    const file = join(tmp, "s.json");
+    const lockFile = file + ".lock";
+    // A live child stands in for a foreign holder (PID 1 is EPERM-invisible).
+    const holder = spawn("sleep", ["30"]);
+    writeFileSync(lockFile, String(holder.pid));
+    try {
+      const store = new ScheduleStore(file);
+      expect(() => store.add(makeJob())).toThrow(/locked by live process/);
+    } finally {
+      holder.kill();
+    }
+  });
+
+  it("fails fast on a lock whose content has no valid PID", () => {
+    const file = join(tmp, "s.json");
+    writeFileSync(file + ".lock", "");
+    const store = new ScheduleStore(file);
+    expect(() => store.add(makeJob())).toThrow(/no valid PID/);
+
+    writeFileSync(file + ".lock", "garbage");
+    expect(() => store.add(makeJob())).toThrow(/no valid PID/);
+  });
+
+  it("fails fast on an unreadable lock without unlinking it", () => {
+    const file = join(tmp, "s.json");
+    const lockFile = file + ".lock";
+    writeFileSync(lockFile, String(process.pid));
+    chmodSync(lockFile, 0o000);
+    try {
+      const store = new ScheduleStore(file);
+      expect(() => store.add(makeJob())).toThrow(/unreadable/);
+    } finally {
+      chmodSync(lockFile, 0o644);
+    }
+    expect(existsSync(lockFile)).toBe(true);
   });
 
   it("does not create the backing directory until a mutation persists", () => {
