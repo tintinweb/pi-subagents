@@ -82,6 +82,10 @@ describe("row formatters", () => {
   bench("describeActivity — streaming text", () => {
     describeActivity(new Map(), "a partial assistant response still streaming in");
   });
+
+  bench("describeActivity — streaming thinking", () => {
+    describeActivity(new Map(), "", "a partial thinking delta still streaming in");
+  });
 });
 
 describe("usage leaves", () => {

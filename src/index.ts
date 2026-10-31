@@ -119,6 +119,7 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     turnCount: 1,
     maxTurns,
     responseText: "",
+    thinkingText: "",
     session: undefined,
   };
 
@@ -136,6 +137,14 @@ function createActivityTracker(maxTurns?: number, onStreamUpdate?: () => void) {
     },
     onTextDelta: (_delta: string, fullText: string) => {
       state.responseText = fullText;
+      onStreamUpdate?.();
+    },
+    onThinkingDelta: (_delta: string, fullText: string) => {
+      state.thinkingText = fullText;
+      onStreamUpdate?.();
+    },
+    onThinkingEnd: () => {
+      state.thinkingText = "";
       onStreamUpdate?.();
     },
     onTurnEnd: (turnCount: number) => {
@@ -2375,7 +2384,7 @@ Terse command-style prompts produce shallow, generic work.
           // started and may not for minutes.
           status: "running",
           activity: queuedAhead === undefined
-            ? describeActivity(fgState.activeTools, fgState.responseText)
+            ? describeActivity(fgState.activeTools, fgState.responseText, fgState.thinkingText)
             : `queued — waiting for a foreground slot${queuedAhead > 0 ? ` (${queuedAhead} ahead)` : ""}`,
           spinnerFrame: spinnerFrame % SPINNER.length,
           // One hint per batch, as in Claude Code: on the earliest call still

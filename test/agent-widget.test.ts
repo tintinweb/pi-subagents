@@ -62,6 +62,7 @@ describe("AgentWidget", () => {
       activeTools: new Map(),
       toolUses: 0,
       responseText: "",
+      thinkingText: "",
       turnCount: 1,
     };
   }

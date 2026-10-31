@@ -735,14 +735,30 @@ export class ConversationViewer implements Component, Focusable {
       } else if (msg.role === "assistant") {
         const textParts: string[] = [];
         const toolCalls: string[] = [];
+        const thinkingParts: string[] = [];
         for (const c of msg.content) {
           if (c.type === "text" && c.text) textParts.push(c.text);
           else if (c.type === "toolCall") {
             toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
           }
+          else if (c.type === "thinking" && (c as any).thinking) {
+            thinkingParts.push((c as any).thinking);
+          }
         }
         if (needsSeparator) lines.push(th.fg("dim", "───"));
         lines.push(th.bold("[Assistant]"));
+        // Build thinking text from message parts, with live streaming override
+        let thinkingText = thinkingParts.join("\n").trim();
+        if (this.activity && this.record.status === "running" && msg === messages[messages.length - 1] && this.activity.thinkingText) {
+          const live = this.activity.thinkingText.trim();
+          if (live.length > thinkingText.length) {
+            thinkingText = live;
+          }
+        }
+        if (thinkingText) {
+          lines.push(th.fg("dim", "[Thinking]"));
+          lines.push(...this.rawLines(thinkingText, width, true));
+        }
         if (textParts.length > 0) {
           const text = textParts.join("\n").trim();
           lines.push(...(mode === "off"
@@ -776,6 +792,34 @@ export class ConversationViewer implements Component, Focusable {
         continue;
       }
       needsSeparator = true;
+    }
+    // Live streaming thinking/response when assistant message is not yet in messages
+    if (this.record.status === "running" && this.activity) {
+      const lastMsg = messages[messages.length - 1];
+      const lastIsAssistant = lastMsg?.role === "assistant";
+      if (!lastIsAssistant) {
+        const hasThinking = !!this.activity.thinkingText;
+        const hasResponse = !!this.activity.responseText?.trim();
+        if (hasThinking || hasResponse) {
+          if (needsSeparator) lines.push(th.fg("dim", "───"));
+          lines.push(th.bold("[Assistant]"));
+          needsSeparator = true;
+        }
+        if (hasThinking) {
+          lines.push(th.fg("dim", "[Thinking]"));
+          lines.push(...this.rawLines(this.activity.thinkingText.trim(), width, true));
+          needsSeparator = true;
+        }
+        if (hasResponse) {
+          const text = this.activity.responseText.trim();
+          if (text) {
+            lines.push(...(mode === "off"
+              ? this.rawLines(text, width, false)
+              : this.markdownLines({ role: "assistant", content: [] } as any, text, width, false)));
+            needsSeparator = true;
+          }
+        }
+      }
     }
 
     // Streaming indicator for running agents

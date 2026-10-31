@@ -551,6 +551,10 @@ export interface RunOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
+  /** Called on streaming thinking deltas from the assistant response. */
+  onThinkingDelta?: (delta: string, fullText: string) => void;
+  /** Called when thinking ends for the current assistant message. */
+  onThinkingEnd?: () => void;
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
   onTurnEnd?: (turnCount: number) => void;
@@ -685,7 +689,7 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
 }
 
 /** The per-run callbacks a spawn and a resume share, plus the resolved turn limit. */
-type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onToolActivity" | "onAssistantUsage" | "onCompaction"> & {
+type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onThinkingDelta" | "onThinkingEnd" | "onToolActivity" | "onAssistantUsage" | "onCompaction"> & {
   /** Already resolved: undefined = unlimited. */
   maxTurns?: number;
 };
@@ -701,6 +705,7 @@ type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onTool
 function observeRun(session: AgentSession, options: RunObserverOptions) {
   let turnCount = 0;
   let currentMessageText = "";
+  let currentMessageThinking = "";
   const run = {
     steered: false,
     aborted: false,
@@ -726,6 +731,14 @@ function observeRun(session: AgentSession, options: RunObserverOptions) {
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       currentMessageText += event.assistantMessageEvent.delta;
       options.onTextDelta?.(event.assistantMessageEvent.delta, currentMessageText);
+    }
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+      currentMessageThinking += event.assistantMessageEvent.delta;
+      options.onThinkingDelta?.(event.assistantMessageEvent.delta, currentMessageThinking);
+    }
+    if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
+      currentMessageThinking = "";
+      options.onThinkingEnd?.();
     }
     if (event.type === "tool_execution_start") {
       options.onToolActivity?.({ type: "start", toolName: event.toolName });

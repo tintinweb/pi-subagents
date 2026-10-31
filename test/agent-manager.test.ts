@@ -2675,6 +2675,47 @@ describe("AgentManager — effective model and thinking write-back", () => {
 
     expect(record.invocation).toEqual({ thinking: "max" });
   });
+  it("spawnAndWait forwards onThinkingDelta to runAgent", async () => {
+    const manager = new AgentManager();
+    const thinkingDeltas: string[] = [];
+    const fullTexts: string[] = [];
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onThinkingDelta?.("think", "think");
+      opts.onThinkingDelta?.("ing", "thinking");
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+    const { record } = await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      onThinkingDelta: (delta, full) => {
+        thinkingDeltas.push(delta);
+        fullTexts.push(full);
+      },
+    });
+    expect(record.status).toBe("completed");
+    expect(thinkingDeltas).toEqual(["think", "ing"]);
+    expect(fullTexts).toEqual(["think", "thinking"]);
+    manager.dispose();
+  });
+  it("spawnAndWait forwards onThinkingEnd to runAgent", async () => {
+    const manager = new AgentManager();
+    let thinkingEnded = false;
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onThinkingEnd?.();
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      onThinkingEnd: () => {
+        thinkingEnded = true;
+      },
+    });
+    const record = manager.getRecord(id)!;
+    await record.promise;
+    expect(record.status).toBe("completed");
+    expect(thinkingEnded).toBe(true);
+    manager.dispose();
+  });
 });
 
 // Frontmatter is authoritative (README "Frontmatter is authoritative"): the

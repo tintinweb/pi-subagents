@@ -602,6 +602,52 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
 
     expect(result.responseText).toBe("STREAMED");
   });
+  it("collector: thinking_delta is forwarded via onThinkingDelta", async () => {
+    const { session, listeners } = createSession("");
+    createAgentSession.mockResolvedValue({ session });
+    const thinkingDeltas: string[] = [];
+    const fullTexts: string[] = [];
+    session.prompt = vi.fn(async () => {
+      for (const l of listeners) {
+        l({ type: "message_start", message: { role: "assistant" } });
+        l({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "think" } });
+        l({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "ing" } });
+      }
+    }) as any;
+
+    const result = await runAgent(ctx, "Explore", "go", {
+      pi,
+      onThinkingDelta: (delta, fullText) => {
+        thinkingDeltas.push(delta);
+        fullTexts.push(fullText);
+      },
+    });
+
+    expect(thinkingDeltas).toEqual(["think", "ing"]);
+    expect(fullTexts).toEqual(["think", "thinking"]);
+    expect(result.responseText).toBe("");
+  });
+  it("collector: thinking_end is forwarded via onThinkingEnd", async () => {
+    const { session, listeners } = createSession("");
+    createAgentSession.mockResolvedValue({ session });
+    let thinkingEnded = false;
+    session.prompt = vi.fn(async () => {
+      for (const l of listeners) {
+        l({ type: "message_start", message: { role: "assistant" } });
+        l({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "think" } });
+        l({ type: "message_update", assistantMessageEvent: { type: "thinking_end" } });
+      }
+    }) as any;
+
+    const result = await runAgent(ctx, "Explore", "go", {
+      pi,
+      onThinkingDelta: () => {},
+      onThinkingEnd: () => { thinkingEnded = true; },
+    });
+
+    expect(thinkingEnded).toBe(true);
+    expect(result.responseText).toBe("");
+  });
 });
 
 // ─── message_end → onAssistantUsage wiring (issue #38) ─────────────────

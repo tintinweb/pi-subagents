@@ -70,6 +70,7 @@ function makeActivity(): AgentActivity {
     activeTools: new Map(),
     toolUses: 0,
     responseText: "",
+    thinkingText: "",
     turnCount: 1,
     lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 },
   };

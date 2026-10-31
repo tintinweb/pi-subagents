@@ -968,4 +968,197 @@ describe("ConversationViewer", () => {
       }
     });
   });
+  describe("ConversationViewer thinking streaming", () => {
+    it("renders thinking blocks from message parts", () => {
+      const messages = [
+        { role: "assistant", content: [{ type: "thinking", thinking: "I need to plan the next step" }] },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "running" }),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      expect(out).toContain("[Thinking]");
+      expect(out).toContain("I need to plan the next step");
+    });
+  
+    it("overrides thinking with live activity.thinkingText when longer", () => {
+      const messages = [
+        { role: "assistant", content: [{ type: "thinking", thinking: "short" }] },
+      ];
+      const activity = {
+        activeTools: new Map(),
+        toolUses: 0,
+        responseText: "",
+        thinkingText: "live streaming thought that is longer than the message part",
+        session: undefined,
+        turnCount: 0,
+      } as any;
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "running" }),
+        activity,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      expect(out).toContain("live streaming thought that is longer than the message part");
+      expect(out).not.toContain("short");
+    });
+  
+    it("does not override thinking when activity.thinkingText is shorter", () => {
+      const messages = [
+        { role: "assistant", content: [{ type: "thinking", thinking: "full thinking content from message" }] },
+      ];
+      const activity = {
+        activeTools: new Map(),
+        toolUses: 0,
+        responseText: "some response",
+        thinkingText: "short",
+        session: undefined,
+        turnCount: 0,
+      } as any;
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "running" }),
+        activity,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      expect(out).toContain("full thinking content from message");
+      expect(out).not.toContain("short");
+    });
+    it("renders live thinking when last message is user and activity is running", () => {
+      const messages = [
+        { role: "user", content: "hello" },
+      ];
+      const activity = {
+        activeTools: new Map(),
+        toolUses: 0,
+        responseText: "",
+        thinkingText: "live thinking while streaming",
+        session: undefined,
+        turnCount: 0,
+      } as any;
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "running" }),
+        activity,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      expect(out).toContain("[Assistant]");
+      expect(out).toContain("[Thinking]");
+      expect(out).toContain("live thinking while streaming");
+    });
+    it("clears thinking block after onThinkingEnd clears thinkingText", () => {
+      const messages = [
+        { role: "user", content: "hello" },
+      ];
+      const activity = {
+        activeTools: new Map(),
+        toolUses: 0,
+        responseText: "",
+        thinkingText: "",
+        session: undefined,
+        turnCount: 0,
+      } as any;
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "running" }),
+        activity,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      expect(out).not.toContain("[Thinking]");
+      expect(out).not.toContain("live thinking while streaming");
+    });
+
+    it("renders live response text when last message is user and activity is running", () => {
+      const messages = [
+        { role: "user", content: "hello" },
+      ];
+      const activity = {
+        activeTools: new Map(),
+        toolUses: 0,
+        responseText: "partial response",
+        thinkingText: "",
+        session: undefined,
+        turnCount: 0,
+      } as any;
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "running" }),
+        activity,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      expect(out).toContain("[Assistant]");
+      expect(out).toContain("partial response");
+    });
+
+    it("does not render live block when last message is assistant", () => {
+      const messages = [
+        { role: "user", content: "hello" },
+        { role: "assistant", content: [{ type: "text", text: "done" }] },
+      ];
+      const activity = {
+        activeTools: new Map(),
+        toolUses: 0,
+        responseText: "should not show",
+        thinkingText: "should not show",
+        session: undefined,
+        turnCount: 0,
+      } as any;
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "running" }),
+        activity,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      // Live block should not be rendered when last message is assistant; activity text may still appear in streaming indicator via tools/response, not thinking
+      const assistantCount = (out.match(/\[Assistant\]/g) || []).length;
+      expect(assistantCount).toBe(1);
+    });
+
+    it("does not render live block when record is not running", () => {
+      const messages = [
+        { role: "user", content: "hello" },
+      ];
+      const activity = {
+        activeTools: new Map(),
+        toolUses: 0,
+        responseText: "should not show",
+        thinkingText: "should not show",
+        session: undefined,
+        turnCount: 0,
+      } as any;
+      const viewer = new ConversationViewer(
+        mockTui(30, 200),
+        mockSession(messages),
+        mockRecord({ status: "completed" }),
+        activity,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(200).join("\n");
+      expect(out).not.toContain("should not show");
+    });
+  });
 });

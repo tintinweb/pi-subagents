@@ -55,6 +55,7 @@ export interface AgentActivity {
   activeTools: Map<string, string>;
   toolUses: number;
   responseText: string;
+  thinkingText: string;
   session?: SessionLike;
   /** Current turn count. */
   turnCount: number;
@@ -224,7 +225,7 @@ function truncateLine(text: string, len = 60): string {
 }
 
 /** Build a human-readable activity string from currently-running tools or response text. */
-export function describeActivity(activeTools: Map<string, string>, responseText?: string): string {
+export function describeActivity(activeTools: Map<string, string>, responseText?: string, thinkingText?: string): string {
   if (activeTools.size > 0) {
     const groups = new Map<string, number>();
     for (const toolName of activeTools.values()) {
@@ -246,6 +247,10 @@ export function describeActivity(activeTools: Map<string, string>, responseText?
   // No tools active — show truncated response text if available
   if (responseText && responseText.trim().length > 0) {
     return truncateLine(responseText);
+  }
+  // Fall back to live thinking if available
+  if (thinkingText && thinkingText.trim().length > 0) {
+    return truncateLine(thinkingText);
   }
 
   return "thinking…";
@@ -479,7 +484,7 @@ export class AgentWidget {
       parts.push(elapsed);
       const statsText = parts.join(" · ");
 
-      const activity = bg ? describeActivity(bg.activeTools, bg.responseText) : "thinking…";
+      const activity = bg ? describeActivity(bg.activeTools, bg.responseText, bg.thinkingText) : "thinking…";
 
       runningLines.push([
         truncate(theme.fg("dim", "├─") + ` ${theme.fg("accent", frame)} ${renderAgentName(a.type, theme, { bold: true })}${modeTag}  ${theme.fg("muted", a.description)} ${theme.fg("dim", "·")} ${fgPreservingNestedStyles(theme, "dim", statsText)}`),

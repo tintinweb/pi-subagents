@@ -287,6 +287,10 @@ interface SpawnOptions {
   onToolActivity?: (activity: ToolActivity) => void;
   /** Called on streaming text deltas from the assistant response. */
   onTextDelta?: (delta: string, fullText: string) => void;
+  /** Called on streaming thinking deltas from the assistant response. */
+  onThinkingDelta?: (delta: string, fullText: string) => void;
+  /** Called when thinking ends for the current assistant message. */
+  onThinkingEnd?: () => void;
   /** Called when the agent session is created (for accessing session stats). */
   onSessionCreated?: (session: AgentSession) => void;
   /** Called at the end of each agentic turn with the cumulative count. */
@@ -826,6 +830,8 @@ export class AgentManager {
       },
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
+      onThinkingDelta: options.onThinkingDelta,
+      onThinkingEnd: options.onThinkingEnd,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
         this.onUsage?.(record, usage);
