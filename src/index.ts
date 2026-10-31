@@ -1024,7 +1024,7 @@ export default function (pi: ExtensionAPI) {
       const target = `@${entry.alias ?? entry.handle}`;
 
       reloadCustomAgents();
-      const reopen = reopenTarget(entry.type, entry.sessionFile);
+      const reopen = reopenTarget(entry.type, entry.sessionFile, entry.worktreeLost);
       if (!reopen.ok) {
         // A session that is gone can only ever fail, so its row goes with it;
         // an unavailable agent stays, since re-enabling it makes the handle
@@ -1961,7 +1961,7 @@ Terse command-style prompts produce shallow, generic work.
         : undefined;
       let reopenOptions: { resumeSessionFile: string; reclaim: { id: string; handle?: string; alias?: string } } | undefined;
       if (saved !== undefined) {
-        const reopen = reopenTarget(saved.type, saved.sessionFile);
+        const reopen = reopenTarget(saved.type, saved.sessionFile, saved.worktreeLost);
         if (!reopen.ok) return textResult(`Agent "${saved.id}" cannot be resumed — ${reopen.reason}.`);
         reopenOptions = {
           resumeSessionFile: reopen.sessionFile,
@@ -2095,9 +2095,11 @@ Terse command-style prompts produce shallow, generic work.
         // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
-        inheritContext,
+        // Neither is applied to a reopened conversation (runAgent, the
+        // manager), so neither is shown.
+        inheritContext: reopenOptions ? undefined : inheritContext,
         runInBackground,
-        isolation,
+        isolation: reopenOptions ? undefined : isolation,
       };
       // Tool-result render shows the mode label too; viewer's header already does.
       const modeLabel = getPromptModeLabel(subagentType);

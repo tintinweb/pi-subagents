@@ -961,6 +961,24 @@ describe("AgentManager — isolation: worktree fails loud, no silent fallback", 
     expect(runAgent).not.toHaveBeenCalled();
   });
 
+  it("never builds a worktree for a reopened conversation", async () => {
+    // As in Claude Code: a fresh copy of HEAD would not hold the earlier run's
+    // edits, so a reopen runs where it is started instead.
+    const { createWorktree } = await import("../src/worktree.js");
+    vi.mocked(createWorktree).mockClear();
+    vi.mocked(runAgent).mockResolvedValue({ responseText: "done", session: mockSession(), aborted: false, steered: false } as never);
+
+    manager = new AgentManager();
+    await manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "continue", {
+      description: "reopen",
+      isolation: "worktree",
+      resumeSessionFile: "/sessions/child.jsonl",
+    });
+
+    expect(createWorktree).not.toHaveBeenCalled();
+    expect(vi.mocked(runAgent).mock.lastCall![3].cwd).toBeUndefined();
+  });
+
   it("a QUEUED foreground spawn rejects spawnAndWait too, not just the immediate one (#179)", async () => {
     // A queued start fails at drain time, when nobody awaits `startups`, so the
     // failure lands on the record. spawnAndWait must still throw it — otherwise

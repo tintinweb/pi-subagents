@@ -150,6 +150,8 @@ export interface AgentTombstone {
   /** Always set — a record with no session file is never tombstoned. */
   sessionFile: string;
   completedAt: number;
+  /** The agent's work lived in a worktree that is now gone; reopening is refused. */
+  worktreeLost?: boolean;
 }
 
 /**

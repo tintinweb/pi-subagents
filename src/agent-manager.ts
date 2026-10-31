@@ -19,6 +19,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { worktreeLost } from "./agent-record-entry.js";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
@@ -766,9 +767,14 @@ export class AgentManager {
     // mentions pass none, and RPC forwards only its caller's value. Workflow
     // children are the exception, as in Claude Code, whose workflow agent()
     // reads only the script's option and ignores the definition's.
-    const isolation = options.workflowId !== undefined
-      ? options.isolation
-      : getAgentConfig(type)?.isolation ?? options.isolation;
+    // A reopen never gets a worktree, as in Claude Code: a fresh copy of HEAD
+    // would not hold the earlier run's edits, and a reopen whose old worktree
+    // held any is refused before it gets here (`reopenTarget`).
+    const isolation = options.resumeSessionFile !== undefined
+      ? undefined
+      : options.workflowId !== undefined
+        ? options.isolation
+        : getAgentConfig(type)?.isolation ?? options.isolation;
     let worktreeCwd: string | undefined;
     if (isolation === "worktree" && isWorktreeIsolationEnabled()) {
       const wt = await createWorktree(pi, baseCwd, id);
@@ -1605,6 +1611,7 @@ export class AgentManager {
       description: record.description,
       sessionFile: record.sessionFile,
       completedAt: record.completedAt ?? Date.now(),
+      worktreeLost: worktreeLost(record) || undefined,
     });
     // Bound the memory a long session can accumulate. Oldest first, since the
     // agent someone still wants to reach is the one they used most recently.

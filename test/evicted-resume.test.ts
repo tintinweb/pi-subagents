@@ -18,6 +18,7 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 import { AgentManager } from "../src/agent-manager.js";
+import { agentRecordEntryData, worktreeLost } from "../src/agent-record-entry.js";
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
@@ -216,6 +217,18 @@ describe("Agent({ resume }) once the live record is gone", () => {
     expect(runAgent).toHaveBeenCalledTimes(1);
   });
 
+  it("refuses, starting nothing, when the agent's work lived in a worktree that is gone", async () => {
+    const branch: any[] = [];
+    const id = await finishedAgent(branch);
+    branch.at(-1).data.worktreeLost = true;
+
+    const { agent } = boot(branch);
+    const res = await agent({ prompt: "Continue.", resume: id });
+
+    expect(textOf(res)).toBe(`Agent "${id}" cannot be resumed — its worktree no longer exists.`);
+    expect(runAgent).toHaveBeenCalledTimes(1);
+  });
+
   it("still refuses to combine resume with schedule", async () => {
     const branch: any[] = [];
     const id = await finishedAgent(branch);
@@ -240,6 +253,24 @@ describe("Agent({ resume }) once the live record is gone", () => {
   });
 });
 
+describe("worktreeLost", () => {
+  const wt = { path: "/wt/a", branch: "pi-agent-a", baseSha: "abc", workPath: "/wt/a" };
+
+  it("is set only when a worktree held the agent's work", () => {
+    expect(worktreeLost({})).toBe(false);
+    expect(worktreeLost({ worktree: wt, worktreeResult: { hasChanges: false } })).toBe(false);
+    expect(worktreeLost({ worktree: wt, worktreeResult: { hasChanges: true, branch: "pi-agent-a" } })).toBe(true);
+    // Failed before cleanup reported anything: its edits may be anywhere.
+    expect(worktreeLost({ worktree: wt })).toBe(true);
+  });
+
+  it("is saved in the record entry only when set", () => {
+    const base = { id: "a", type: "Explore", description: "d", status: "completed", startedAt: 0 } as AgentRecord;
+    expect(agentRecordEntryData(base)).not.toHaveProperty("worktreeLost", expect.anything());
+    expect(agentRecordEntryData({ ...base, worktree: wt, worktreeResult: { hasChanges: true } }).worktreeLost).toBe(true);
+  });
+});
+
 describe("reclaiming an id", () => {
   it("refuses an id that is still live, rather than replacing its record", async () => {
     settleWith("FIRST-RUN", sessionFile);
@@ -256,7 +287,7 @@ describe("reclaiming an id", () => {
 
 describe("a workflow's resume once the manager evicted the child", () => {
   /** A stub manager whose resume finds nothing live, as after eviction. */
-  function evictingManager(file: string | undefined) {
+  function evictingManager(file: string | undefined, firstRun: Partial<AgentRecord> = {}) {
     const settled = (overrides: Partial<AgentRecord> = {}) =>
       ({
         id: "child-7",
@@ -272,7 +303,7 @@ describe("a workflow's resume once the manager evicted the child", () => {
         ...overrides,
       }) as AgentRecord;
     const spawnAndWait = vi.fn(async (_pi: any, _ctx: any, _type: string, _prompt: string, options: any, onSpawned?: (id: string) => void) => {
-      const record = settled(options.reclaim ? { result: "fixed" } : {});
+      const record = settled(options.reclaim ? { result: "fixed" } : firstRun);
       onSpawned?.(record.id);
       return { id: record.id, record };
     });
@@ -293,6 +324,29 @@ describe("a workflow's resume once the manager evicted the child", () => {
     expect(type).toBe("general-purpose");
     expect(prompt).toBe("fix the review findings");
     expect(options).toMatchObject({ resumeSessionFile: sessionFile, reclaim: { id: "child-7" }, workflowId: "wf-1" });
+    expect(resumed).toMatchObject({ ok: true, text: "fixed" });
+  });
+
+  const wt = { path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };
+
+  it("refuses, starting nothing, when the child's worktree held its work", async () => {
+    const stub = evictingManager(sessionFile, { worktree: wt, worktreeResult: { hasChanges: true, branch: "pi-agent-c" } });
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager, workflowId: "wf-1" });
+
+    await host.spawnAgent(request);
+    const resumed = await host.resumeAgent?.("wf-agent-0", "fix it");
+
+    expect(resumed).toEqual({ ok: false, error: "Agent child-7 cannot be resumed — its worktree no longer exists." });
+    expect(stub.spawnAndWait).toHaveBeenCalledTimes(1);
+  });
+
+  it("reopens a child whose worktree was removed clean", async () => {
+    const stub = evictingManager(sessionFile, { worktree: wt, worktreeResult: { hasChanges: false } });
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager, workflowId: "wf-1" });
+
+    await host.spawnAgent(request);
+    const resumed = await host.resumeAgent?.("wf-agent-0", "fix it");
+
     expect(resumed).toMatchObject({ ok: true, text: "fixed" });
   });
 

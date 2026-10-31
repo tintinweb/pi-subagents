@@ -35,7 +35,7 @@
 import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../agent-manager.js";
-import { reopenTarget } from "../agent-record-entry.js";
+import { reopenTarget, worktreeLost } from "../agent-record-entry.js";
 import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
 import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
@@ -169,9 +169,14 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
    * Lives exactly as long as the run, like `records`, so memory stays bounded
    * by the run itself; the manager keeps no tombstone for an owned child.
    */
-  const settled = new Map<string, Pick<AgentRecord, "type" | "description" | "sessionFile">>();
+  const settled = new Map<string, Pick<AgentRecord, "type" | "description" | "sessionFile"> & { worktreeLost: boolean }>();
   const remember = (record: AgentRecord): void => {
-    settled.set(record.id, { type: record.type, description: record.description, sessionFile: record.sessionFile });
+    settled.set(record.id, {
+      type: record.type,
+      description: record.description,
+      sessionFile: record.sessionFile,
+      worktreeLost: worktreeLost(record),
+    });
   };
   /**
    * scopeModels warnings already toasted, so a fan-out that pins one
@@ -218,7 +223,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
   ): Promise<WorkflowSpawnResult> {
     const kept = settled.get(id);
     if (kept === undefined) return { ok: false, error: `Agent ${id} cannot be resumed — it never finished a run to resume from.` };
-    const reopen = reopenTarget(kept.type, kept.sessionFile);
+    const reopen = reopenTarget(kept.type, kept.sessionFile, kept.worktreeLost);
     if (!reopen.ok) return { ok: false, error: `Agent ${id} cannot be resumed — ${reopen.reason}.` };
     const config = getAgentConfig(reopen.type);
     try {

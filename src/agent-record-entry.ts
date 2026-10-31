@@ -40,6 +40,21 @@ export interface AgentRecordEntryData {
   /** Names to give back to the reopened agent, as the `@handle` path does. */
   handle?: string;
   alias?: string;
+  /** Set when the agent's work lived in a worktree that is now gone — see {@link worktreeLost}. */
+  worktreeLost?: boolean;
+}
+
+/**
+ * Whether the agent ran in a worktree that held its work and has since been
+ * removed. Settling always removes the worktree, committing any changes to a
+ * branch first, so only a clean one (`hasChanges: false`) leaves nothing
+ * behind; a run that failed before cleanup reported nothing and counts as lost.
+ * Claude Code draws the same line: it resumes an isolated agent outside its
+ * worktree only when the worktree was removed clean, and never builds a fresh
+ * one on resume.
+ */
+export function worktreeLost(record: Pick<AgentRecord, "worktree" | "worktreeResult">): boolean {
+  return record.worktree !== undefined && record.worktreeResult?.hasChanges !== false;
 }
 
 /** Snapshot a finished record for {@link AGENT_RECORD_ENTRY_TYPE}. */
@@ -56,6 +71,7 @@ export function agentRecordEntryData(record: AgentRecord): AgentRecordEntryData 
     sessionFile: record.sessionFile,
     handle: record.handle,
     alias: record.alias,
+    worktreeLost: worktreeLost(record) || undefined,
   };
 }
 
@@ -97,16 +113,23 @@ export function findAgentRecordEntry(ctx: ExtensionContext, id: string): AgentRe
  * one. A resume must not inherit that: reopening this conversation under a
  * different agent's prompt and tools is not continuing it, and the new record
  * would re-tombstone under the substitute, so the handle would never find its
- * way back. Callers reload the agent files first.
+ * way back. `@handle` and the Agent tool reload the agent files first.
+ *
+ * `worktreeLost` refuses for good, as Claude Code does ("its worktree no
+ * longer exists"): the conversation's edits were made in a directory that is
+ * gone, and reopening it in the parent's checkout or a fresh worktree would
+ * continue that work somewhere it never happened.
  */
 export function reopenTarget(
   type: string,
   sessionFile: string | undefined,
+  worktreeLost?: boolean,
 ): { ok: true; type: SubagentType; sessionFile: string } | { ok: false; reason: string; gone: boolean } {
   if (sessionFile === undefined) {
     return { ok: false, reason: "its conversation was not saved (`rememberAgents` or `persist_session` was off)", gone: true };
   }
   if (!existsSync(sessionFile)) return { ok: false, reason: "its session is gone", gone: true };
+  if (worktreeLost) return { ok: false, reason: "its worktree no longer exists", gone: true };
   const dispatch = resolveSpawnType(type);
   if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
     return { ok: false, reason: `the ${type} agent is no longer available`, gone: false };
