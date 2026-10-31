@@ -546,6 +546,8 @@ Check status and retrieve results from a background agent.
 
 Cancelling a `wait: true` call (for example, with `Esc`) stops only the wait. The background agent keeps running, and its completion notification still arrives normally.
 
+A finished agent's result stays retrievable after its in-memory record is cleaned up (about ten minutes after it finishes) or lost to a reload: the final record is saved in the session as a `subagents:record` entry, and `get_subagent_result` answers from it, without the stats or the conversation (`verbose`).
+
 ### `steer_subagent`
 
 Send a steering message to a running agent. The message interrupts after the current tool execution.
@@ -1050,6 +1052,7 @@ src/
   completion-outbox.ts # Deliver completion notifications at the parent's next boundary, coalesced
   group-join.ts       # `group` join mode: one notification per turn's batch, with timeout
   status-note.ts      # Honest status note + salvaged partial output for non-normal outcomes
+  agent-record-entry.ts # The `subagents:record` session entry a finished agent leaves; get_subagent_result's fallback
   usage.ts            # Token usage shapes, accumulators, session-stats readers
 
   # Invocation surface
