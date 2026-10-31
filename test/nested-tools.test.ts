@@ -9,6 +9,8 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { encodeCwd } from "../src/output-file.js";
 
 let cwd: string;
+let agentDir: string;
+let previousAgentDir: string | undefined;
 let manager: NestedAgentManager;
 let records: Map<string, any>;
 let spawn: ReturnType<typeof vi.fn>;
@@ -60,6 +62,9 @@ async function execute(tool: any, params: Record<string, unknown>, executionCwd 
 
 beforeEach(() => {
   cwd = mkdtempSync(join(tmpdir(), "nested-tools-test-"));
+  agentDir = mkdtempSync(join(tmpdir(), "nested-tools-agent-"));
+  previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
   writeAgent("scout");
   writeAgent("reviewer");
   registerAgents(loadCustomAgents(cwd));
@@ -86,7 +91,10 @@ beforeEach(() => {
 
 afterEach(() => {
   setScopeModelsEnabled(false);
+  if (previousAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
   rmSync(cwd, { recursive: true, force: true });
+  rmSync(agentDir, { recursive: true, force: true });
 });
 
 describe("child-safe nested Agent tools", () => {
