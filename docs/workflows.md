@@ -99,15 +99,19 @@ Open the path from the `Script:` line, change it, and ask the model to run it ag
 
 Re-running normally re-pays for every agent. `resumeFromRunId` avoids that:
 
-> Its unchanged leading `agent()` calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live.
+> Calls match by structural position rather than arrival order. At the first missing, changed, failed or invalid answer, replay stops for the entire run and all subsequent calls run live.
 
-Every run journals each settled `agent()` call beside its script as `<run id>.workflow.jsonl`, and the resume replays the **unchanged prefix** of that journal. It is a prefix and not a lookup table on purpose: a later call that still matches came from a run whose earlier stages no longer exist, so its recorded answer was produced downstream of work that has changed.
+Each settled `agent()` call is journaled beside the script as `<run id>.workflow.jsonl`. The root, each `parallel` thunk, each `pipeline` item's full stage chain, and each nested workflow body number their own calls. An unchanged pipeline can replay even when its items finish in a different order.
+
+Invalidation is deliberately broader than matching: a changed child or sibling can rewrite a file that an unchanged prompt reads, so a miss stops all further replay, not just that branch. Already replayed answers are not revoked.
+
+**Replay caches answers, not their effects.** It does not rerun tools, restore files or recheck gates. Use a fresh run after external inputs, agent definitions, models or workspace state change. Journals written before structural paths were introduced are ignored and the work runs live.
 
 Four things it will not do:
 
 - **Cross sessions.** The journal is keyed to the session that wrote it. Restart pi and the run id is dead — you get `No workflow run "<id>" in this session.`
 - **Resume a live run.** Stop it from `/agents → Workflows` first; while it is running you get `Workflow "<id>" is still running.`
-- **Replay a failure.** A journaled failure ends the prefix, so resuming a run that died at agent 5 retries exactly agent 5. That is the point.
+- **Replay a failure.** A journaled failure is retried live and stops further replay across the run.
 - **Replay a run that used `agent({ resume })` at all.** A replayed agent is text from a file rather than a live child, so there would be no conversation left for a later `resume` to continue.
 
 Replayed rows are annotated `from resume journal` on the card and in the inspector, and the completion notification counts them — a resume never quietly looks like a run that was simply fast. Passing only `resumeFromRunId`, with no script of its own, re-runs that run's own script.
@@ -189,7 +193,7 @@ const findings = await pipeline(
 return findings.filter(Boolean).filter(f => f.holds)
 ```
 
-Only the second stage changed, so re-running with `resumeFromRunId` replays the whole `Scan` phase and every `audit:` call from the journal, and pays only for the verify agents. The notification says so: `… , 7 replayed from wf_9f3ab21c04de`.
+Only the second stage changed. Re-running with `resumeFromRunId` replays `Scan` and any unchanged audits reached before the first changed verify call. From that miss onward, all work runs live, including unchanged sibling audits. The notification reports how many calls actually replayed.
 
 Then it earns its keep — copy it to `.pi/workflows/auth-audit.js`, swap `src/routes/` for `args?.root ?? 'src/routes/'`, and from then on it is *"run auth-audit against src/api"*.
 

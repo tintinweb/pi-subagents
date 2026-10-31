@@ -40,9 +40,9 @@
  * whose zero-argument constructor throws. Lexical shadowing rather than a global
  * assignment because a `const` in the IIFE scope cannot be reached around.
  *
- * Determinism is enforced because a workflow's journal is replayed by prefix on
- * resume: a script that reads the clock produces a different prefix on the
- * second run and the replay silently diverges.
+ * Determinism is enforced because a workflow's journal identifies calls by
+ * structural position. Reading the clock changes the work at that position
+ * on every run and makes cached answers unreliable.
  */
 
 /**
@@ -68,6 +68,7 @@ const DETERMINISM_PRELUDE =
 
 export const WORKER_SOURCE = `"use strict";
 
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { parentPort, workerData } = require("node:worker_threads");
 const vm = require("node:vm");
 
@@ -127,6 +128,21 @@ port.on("message", function (message) {
 
 function isFatal(error) {
   return !!(error && typeof error === "object" && error.workflowFatal === true);
+}
+
+/* Each sequential chain numbers its own calls, irrespective of sibling timing. */
+const frames = new AsyncLocalStorage();
+const ROOT_FRAME = { path: "", next: 0 };
+// A lost async context must miss the cache, never collide with the root.
+// The journal reader rejects this path, so it cannot replay on a later run.
+const LOST_FRAME = { path: "\\0lost", next: 0 };
+
+function currentFrame() {
+  return frames.getStore() || LOST_FRAME;
+}
+
+function childFrame(frame, slot, branch) {
+  return { path: frame.path + "/" + slot + ":" + branch, next: 0 };
 }
 
 /* ------------------------------------------------------------------ *
@@ -517,6 +533,10 @@ async function agentIn(scope, prompt, opts) {
     }
   }
 
+  // Allocate only after validation, before the first await.
+  const frame = currentFrame();
+  const callPath = frame.path + "#" + frame.next++;
+
   // An explicit opts.phase files this agent under that phase without moving
   // the ambient one, so a stray verify step does not re-point the phases that
   // follow it.
@@ -524,6 +544,7 @@ async function agentIn(scope, prompt, opts) {
   const phaseTitle = phaseName !== undefined ? scopedTitle(scope, phaseName) : scope.ambientPhaseTitle;
 
   const result = await callHost("agent", {
+    path: callPath,
     prompt: text,
     label: label,
     model: model,
@@ -555,16 +576,18 @@ async function agentIn(scope, prompt, opts) {
  * failing its siblings — the script filters, it does not try/catch.
  */
 async function parallel(thunks) {
+  const frame = currentFrame();
   const list = toList(thunks, "parallel(thunks)");
   for (let i = 0; i < list.length; i++) {
     if (typeof list[i] !== "function") {
       throw new Error("parallel(thunks) expects an array of functions; item " + i + " is not one.");
     }
   }
+  const slot = frame.next++;
   const settled = await Promise.all(
-    list.map(async function (thunk) {
+    list.map(async function (thunk, index) {
       try {
-        return await thunk();
+        return await frames.run(childFrame(frame, slot, "p:" + index), thunk);
       } catch (error) {
         if (isFatal(error)) throw error;
         return null;
@@ -584,24 +607,29 @@ async function parallel(thunks) {
  * Every stage sees (previousResult, originalItem, index).
  */
 async function pipeline(items, ...stages) {
+  const frame = currentFrame();
   const list = toList(items, "pipeline(items, ...stages)");
   for (let i = 0; i < stages.length; i++) {
     if (typeof stages[i] !== "function") {
       throw new Error("pipeline(items, ...stages) expects stages to be functions; stage " + i + " is not one.");
     }
   }
+  const slot = frame.next++;
   const settled = await Promise.all(
-    list.map(async function (item, index) {
-      let value = item;
-      for (let s = 0; s < stages.length; s++) {
-        try {
-          value = await stages[s](value, item, index);
-        } catch (error) {
-          if (isFatal(error)) throw error;
-          return null;
+    list.map(function (item, index) {
+      // One frame for the item's entire chain, not a new frame per stage.
+      return frames.run(childFrame(frame, slot, "l:" + index), async function () {
+        let value = item;
+        for (let s = 0; s < stages.length; s++) {
+          try {
+            value = await stages[s](value, item, index);
+          } catch (error) {
+            if (isFatal(error)) throw error;
+            return null;
+          }
         }
-      }
-      return value;
+        return value;
+      });
     })
   );
   return toRealmArray(settled);
@@ -621,6 +649,7 @@ async function pipeline(items, ...stages) {
  * \`workflow is not defined\`.
  */
 async function workflowIn(scope, nameOrRef, args) {
+  const frame = currentFrame();
   if (scope.depth > 0) {
     throw new Error(
       "workflow() cannot be nested more than one level deep — you are already inside the workflow '" +
@@ -655,6 +684,7 @@ async function workflowIn(scope, nameOrRef, args) {
     error.workflowFatal = true;
     throw error;
   }
+  const slot = frame.next++;
   nestedCount++;
 
   let loaded;
@@ -689,7 +719,9 @@ async function workflowIn(scope, nameOrRef, args) {
     throw new Error('workflow("' + label + '"): ' + describe(error));
   }
 
-  const value = await run(child.agent, child.phase, child.log, child.workflow, child.console, args);
+  const value = await frames.run(childFrame(frame, slot, "w"), function () {
+    return run(child.agent, child.phase, child.log, child.workflow, child.console, args);
+  });
   checkBoundary(value, 'the result of workflow("' + label + '")');
   return value;
 }
@@ -761,7 +793,9 @@ async function main() {
     lineOffset: -1,
   });
 
-  const value = await script.runInContext(context);
+  const value = await frames.run(ROOT_FRAME, function () {
+    return script.runInContext(context);
+  });
   checkBoundary(value, "the workflow result");
   flushProgress();
   port.postMessage({
