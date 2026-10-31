@@ -31,24 +31,14 @@ import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager
 import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
+import { SUBAGENT_TOOL_NAMES } from "./tool-names.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
 import type { LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
-/**
- * Tool names registered by THIS extension. Single source of truth so the
- * registration sites (index.ts) and the subagent exclusion list below can't
- * drift apart. These are our own tools, not pi built-ins, so they can't be
- * derived from pi — but they only need defining once.
- */
-export const SUBAGENT_TOOL_NAMES = {
-  AGENT: "Agent",
-  WORKFLOW: "SubagentWorkflow",
-  GET_RESULT: "get_subagent_result",
-  STEER: "steer_subagent",
-} as const;
+export { SUBAGENT_TOOL_NAMES } from "./tool-names.js";
 
-/** Names of tools registered by this extension that subagents must NOT inherit. */
+/** Extension-owned tools are denied from the inherited registry, then selectively re-admitted. */
 const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
 /**
@@ -1075,30 +1065,28 @@ export async function runAgent(
     ? new Set(agentConfig.disallowedTools)
     : undefined;
 
-  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
-  // set `allowed_subagents` and a nestedRuntime was provided — and never when
-  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
-  // scoping below re-admits them explicitly (registry deny + active-set narrow).
+  // Subagent tools are built together so their names have one scoping path.
+  // ask_parent is always available to a spawned agent; delegation remains
+  // opt-in, ownership-scoped, and disabled when isolated or at the depth cap.
+  // Their names collide with EXCLUDED_TOOL_NAMES by design, so the scoping
+  // below re-admits only the tools this agent is allowed to use.
   const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
   // At (or past) the cap this agent can never spawn, so it can never own a child
-  // to fetch from or steer either — inject nothing rather than three tools whose
-  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
-  // "nesting off" instead of "nesting always fails".
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
-    ? options.nestedRuntime
-    : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
+  // to fetch from or steer either. The shared factory keeps only ask_parent in
+  // that case, so `maxSubagentDepth` 0/1 still means delegation is off.
+  const injectedTools = options.nestedRuntime
     ? createNestedSubagentTools({
-        manager: nestedRuntime.manager,
+        manager: options.nestedRuntime.manager,
         pi: options.pi,
-        parentAgentId: nestedRuntime.parentAgentId,
-        depth: nestedRuntime.depth,
+        parentAgentId: options.nestedRuntime.parentAgentId,
+        depth: options.nestedRuntime.depth,
         maxSubagentDepth: effectiveMaxDepth,
-        allowedSubagents: agentConfig.allowedSubagents,
+        allowedSubagents: agentConfig?.allowedSubagents,
+        isolated,
         configCwd,
       })
     : [];
-  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
+  const nestedToolNames = new Set(injectedTools.map(tool => tool.name));
 
   // The `agent({ schema })` contract: this child reports its answer by calling
   // StructuredOutput, and `structuredJson` below is what the caller reads. The
@@ -1188,8 +1176,8 @@ export async function runAgent(
   let sessionTools: string[] | undefined;
   let sessionExcludeTools: string[] | undefined;
   if (noExtensions) {
-    // Strict allowlist: built-ins the agent asked for, plus any opt-in nested
-    // tools (whose names would otherwise be dropped as EXCLUDED_TOOL_NAMES).
+    // Strict allowlist: built-ins the agent asked for, plus its injected
+    // subagent tools (whose names would otherwise be dropped as EXCLUDED_TOOL_NAMES).
     sessionTools = [
       ...toolNames.filter(
         (t) => !EXCLUDED_TOOL_NAMES.includes(t) && !disallowedSet?.has(t),
@@ -1264,7 +1252,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...structuredTools],
+    customTools: [...injectedTools, ...structuredTools],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {

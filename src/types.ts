@@ -292,6 +292,8 @@ export interface AgentRecord {
   workflowId?: string;
   /** Effective inherited nesting cap for this branch. */
   maxSubagentDepth?: number;
+  /** A clarification request this agent wants surfaced to its immediate parent. */
+  parentQuestion?: { question: string; context?: string };
   /**
    * Session id of the root (main) session this branch descends from. Nested
    * spawns inherit it so their transcripts file under the same session

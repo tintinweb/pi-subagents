@@ -7,6 +7,7 @@ import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager, setMaxSubagentDepth } from "../src/nested-tools.js";
 import { encodeCwd } from "../src/output-file.js";
+import { SUBAGENT_TOOL_NAMES } from "../src/tool-names.js";
 
 let cwd: string;
 let manager: NestedAgentManager;
@@ -90,6 +91,24 @@ afterEach(() => {
 });
 
 describe("child-safe nested Agent tools", () => {
+  it("records a clarification request on the asking agent for its parent", async () => {
+    const record = { id: "parent-1", type: "scout", status: "running", parentAgentId: "root" };
+    records.set(record.id, record);
+    const tool = tools().find((candidate) => candidate.name === SUBAGENT_TOOL_NAMES.ASK_PARENT)!;
+
+    expect(tool.name).toBe(SUBAGENT_TOOL_NAMES.ASK_PARENT);
+    const result = await execute(tool, {
+      question: "Which format should I use?",
+      context: "The output format is not specified.",
+    });
+
+    expect(result.isError).toBe(false);
+    expect(record.parentQuestion).toEqual({
+      question: "Which format should I use?",
+      context: "The output format is not specified.",
+    });
+  });
+
   it("allows any enabled agent when allowed_subagents is omitted", async () => {
     const [agent] = tools();
     const result = await execute(agent, {
@@ -223,15 +242,8 @@ describe("child-safe nested Agent tools", () => {
   });
 
   it("blocks delegation at the inherited depth cap", async () => {
-    const [agent] = tools("all", 2, 2);
-    const result = await execute(agent, {
-      subagent_type: "scout",
-      description: "find files",
-      prompt: "Find them",
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("depth=2, max=2");
+    const atCapTools = tools("all", 2, 2);
+    expect(atCapTools.map((tool) => tool.name)).toEqual([SUBAGENT_TOOL_NAMES.ASK_PARENT]);
     expect(spawnAndWait).not.toHaveBeenCalled();
   });
 

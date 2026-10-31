@@ -26,6 +26,7 @@ import {
   writeInitialEntry,
 } from "./output-file.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { SUBAGENT_TOOL_NAMES } from "./tool-names.js";
 import type {
   AgentConfig,
   AgentInvocation,
@@ -47,7 +48,11 @@ let maxSubagentDepth = 2;
 export function getMaxSubagentDepth(): number { return maxSubagentDepth; }
 export function setMaxSubagentDepth(n: number): void { maxSubagentDepth = Math.max(0, Math.floor(n)); }
 
-const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
+const NESTED_TOOL_NAMES = [
+  SUBAGENT_TOOL_NAMES.AGENT,
+  SUBAGENT_TOOL_NAMES.GET_RESULT,
+  SUBAGENT_TOOL_NAMES.STEER,
+] as const;
 
 interface NestedSpawnOptions {
   description: string;
@@ -99,7 +104,8 @@ export interface NestedToolContext {
   depth: number;
   maxSubagentDepth: number;
   /** "all" = any enabled agent; string[] = only those types. Never empty. */
-  allowedSubagents: "all" | string[];
+  allowedSubagents?: "all" | string[];
+  isolated?: boolean;
   /** Root used for agent/config discovery; may differ from the agent's working directory. */
   configCwd: string;
 }
@@ -142,16 +148,26 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   return note ? `Nested agent${note}.\n\n${text}` : text;
 }
 
-/** Build child-safe orchestration tools scoped to one parent agent instance. */
+/** Build clarification and permitted delegation tools for one subagent. */
 export function createNestedSubagentTools(context: NestedToolContext): ToolDefinition[] {
+  const askParentTool = createAskParentTool(context.manager, context.parentAgentId);
+  if (
+    !context.allowedSubagents ||
+    context.isolated ||
+    context.depth >= context.maxSubagentDepth
+  ) {
+    return [askParentTool];
+  }
+  const allowedSubagents = context.allowedSubagents;
+
   // Agents resolve from a registry built for THIS branch's config root (under
   // worktree isolation, the copy). Never via registerAgents — that is
   // process-global state shared with the main session and every other agent.
   const loadRegistry = () => buildAgentRegistry(loadCustomAgents(context.configCwd));
   const allowedTypesIn = (registry: Map<string, AgentConfig>): Set<string> | undefined =>
-    context.allowedSubagents === "all"
+    allowedSubagents === "all"
       ? undefined
-      : new Set(context.allowedSubagents.map(name => resolveTypeIn(registry, name) ?? name));
+      : new Set(allowedSubagents.map(name => resolveTypeIn(registry, name) ?? name));
   const availableIn = (registry: Map<string, AgentConfig>): string[] => {
     const allowed = allowedTypesIn(registry);
     return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
@@ -422,5 +438,29 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     },
   });
 
-  return [agentTool, resultTool, steerTool];
+  return [agentTool, resultTool, steerTool, askParentTool];
+}
+
+/** Create a scoped clarification tool for an agent spawned by this manager. */
+function createAskParentTool(manager: NestedAgentManager, agentId: string): ToolDefinition {
+  return defineTool({
+    name: SUBAGENT_TOOL_NAMES.ASK_PARENT,
+    label: "Ask parent",
+    description:
+      "Request clarification from your immediate parent. The request is surfaced with your final result; " +
+      "finish your current turn after asking. Your parent can then resume you with its answer.",
+    parameters: Type.Object({
+      question: Type.String({ description: "The specific information or decision you need from your parent." }),
+      context: Type.Optional(Type.String({ description: "Brief context explaining why this blocks or affects the task." })),
+    }),
+    execute: async (_toolCallId, params) => {
+      const record = manager.getRecord(agentId);
+      if (!record) return textResult("Could not route question: this agent is no longer available.", true);
+      record.parentQuestion = { question: params.question, ...(params.context ? { context: params.context } : {}) };
+      return textResult(
+        "Question recorded for your immediate parent. Stop and report that you are waiting for an answer; " +
+        "the parent can resume you with the answer.",
+      );
+    },
+  });
 }
