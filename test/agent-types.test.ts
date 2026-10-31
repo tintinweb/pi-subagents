@@ -98,7 +98,7 @@ describe("agent type registry", () => {
 
     it("Explore inherits the session model, as in Claude Code", () => {
       // A pin outranks the caller and resolves across providers, which ran every
-      // Explore on another provider's Haiku (#175, #350). The runner caps it instead.
+      // Explore on another provider's Haiku (#175, #350).
       expect(getAgentConfig("Explore")?.model).toBeUndefined();
     });
 

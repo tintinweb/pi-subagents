@@ -6,7 +6,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
-import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
@@ -291,16 +290,6 @@ export interface SubagentsSettings {
    */
   showModel?: boolean;
   /**
-   * Where the built-in Explore may drop to instead of running on the session's
-   * model, tried in order on the session's own provider. `"auto"` (default) is
-   * Claude Code's rule: a Claude model above Opus runs on the newest Opus.
-   * `"inherit"` turns the cap off (Claude Code's
-   * `CLAUDE_CODE_DISABLE_EXPLORE_INHERIT_CAP`). Any other entry names a cheap
-   * worker (`"haiku"`, `"luna"`), used only when it is cheaper than the session's
-   * model. A cap model the provider refuses falls back to the session's model.
-   */
-  exploreModelCap?: string | string[];
-  /**
    * Whether agents declared by installed pi packages load, and from which
    * packages. Defaults to `true`.
    *
@@ -377,7 +366,6 @@ export interface SettingsAppliers {
   setReportUsage: (b: boolean) => void;
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
-  setExploreModelCap: (cap: string | string[]) => void;
   setViewerMarkdown: (mode: ViewerMarkdownMode) => void;
   setPackageAgents: (gate: boolean | string[]) => void;
   setPackageWorkflows: (gate: boolean | string[]) => void;
@@ -417,38 +405,6 @@ function sanitizePackageGate(val: unknown): boolean | string[] | undefined {
   if (typeof val === "string") return val.trim() ? [val.trim()] : [];
   if (!Array.isArray(val)) return undefined;
   return val.filter((e): e is string => typeof e === "string").map(e => e.trim()).filter(Boolean);
-}
-
-/**
- * `exploreModelCap` entries as stored: trimmed, non-empty strings; one entry is
- * saved as a plain string, several as a list, none as undefined (dropped). Shared
- * by the loader and the `/agents` input, which splits the typed text on commas.
- */
-export function normalizeExploreModelCap(entries: readonly unknown[]): string | string[] | undefined {
-  const kept = entries.filter((e): e is string => typeof e === "string").map(e => e.trim()).filter(Boolean);
-  return kept.length > 1 ? kept : kept[0];
-}
-
-/**
- * Ask for the Explore cap's models in `/agents → Settings`, comma-separated.
- * Empty input asks again; Esc returns undefined (keep the current value).
- * `unknown` lists entries no logged-in provider offers: saved anyway, since the
- * cap resolves on the session's provider at spawn, but worth a warning.
- */
-export async function askExploreModelCap(
-  ui: { input(title: string, placeholder?: string): Promise<string | undefined> },
-  registry: ModelRegistry,
-  current: readonly string[],
-): Promise<{ cap: string | string[]; unknown: string[] } | undefined> {
-  const title = "Explore model cap — models tried in order, comma-separated (e.g. haiku, luna, auto)";
-  for (let input = await ui.input(title, current.join(", ")); input != null; input = await ui.input(title, input)) {
-    const cap = normalizeExploreModelCap(input.split(","));
-    if (cap === undefined) continue;
-    const unknown = (typeof cap === "string" ? [cap] : cap)
-      .filter(e => e !== "auto" && e !== "inherit" && typeof resolveModel(e, registry) === "string");
-    return { cap, unknown };
-  }
-  return undefined;
 }
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
@@ -545,10 +501,6 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.showModel === "boolean") {
     out.showModel = r.showModel;
   }
-  const exploreModelCap = normalizeExploreModelCap(
-    Array.isArray(r.exploreModelCap) ? r.exploreModelCap : [r.exploreModelCap],
-  );
-  if (exploreModelCap !== undefined) out.exploreModelCap = exploreModelCap;
   if (typeof r.viewerMarkdown === "string" && VALID_VIEWER_MARKDOWN_MODES.has(r.viewerMarkdown)) {
     out.viewerMarkdown = r.viewerMarkdown as ViewerMarkdownMode;
   }
@@ -643,7 +595,6 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.reportUsage === "boolean") appliers.setReportUsage(s.reportUsage);
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
   if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
-  if (s.exploreModelCap !== undefined) appliers.setExploreModelCap(s.exploreModelCap);
   if (s.viewerMarkdown) appliers.setViewerMarkdown(s.viewerMarkdown);
   if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
   if (s.packageAgents !== undefined) appliers.setPackageAgents(s.packageAgents);

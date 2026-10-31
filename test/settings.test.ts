@@ -5,9 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyAndEmitLoaded,
   applySettings,
-  askExploreModelCap,
   loadSettings,
-  normalizeExploreModelCap,
   persistToastFor,
   type SettingsAppliers,
   saveAndEmitChanged,
@@ -268,52 +266,6 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ showModel: false });
     writeProject({ showModel: "on" } as any);
     expect(loadSettings(projectDir)).toEqual({});
-  });
-
-  it("round-trips exploreModelCap as a mode, a model or a list; drops anything else", () => {
-    saveSettings({ exploreModelCap: "inherit" }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ exploreModelCap: "inherit" });
-    saveSettings({ exploreModelCap: ["haiku", "auto"] }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ exploreModelCap: ["haiku", "auto"] });
-    writeProject({ exploreModelCap: " haiku " } as any);
-    expect(loadSettings(projectDir)).toEqual({ exploreModelCap: "haiku" });
-    writeProject({ exploreModelCap: ["luna", 3, "", " "] } as any);
-    expect(loadSettings(projectDir)).toEqual({ exploreModelCap: "luna" });
-    for (const bad of [true, "", " ", [], [3, ""]]) {
-      writeProject({ exploreModelCap: bad } as any);
-      expect(loadSettings(projectDir)).toEqual({});
-    }
-  });
-
-  describe("askExploreModelCap (the /agents custom input)", () => {
-    const registry = {
-      find: (provider: string, id: string) => ({ provider, id, name: id }),
-      getAll: () => [{ provider: "anthropic", id: "claude-haiku-5-5", name: "Claude Haiku 5.5" }],
-    };
-    const ui = (...answers: (string | undefined)[]) => ({ input: vi.fn(async () => answers.shift()) });
-
-    it("pre-fills the current value and saves several entries as a list", async () => {
-      const dialog = ui("haiku, auto");
-      expect(await askExploreModelCap(dialog, registry, ["auto"])).toEqual({ cap: ["haiku", "auto"], unknown: [] });
-      expect(dialog.input).toHaveBeenCalledWith(expect.any(String), "auto");
-    });
-
-    it("asks again on empty input, and Esc keeps the current value", async () => {
-      const dialog = ui(" , ", undefined);
-      expect(await askExploreModelCap(dialog, registry, ["auto"])).toBeUndefined();
-      expect(dialog.input).toHaveBeenCalledTimes(2);
-    });
-
-    it("names entries no provider offers, and saves them anyway", async () => {
-      expect(await askExploreModelCap(ui("lunaa"), registry, ["auto"])).toEqual({ cap: "lunaa", unknown: ["lunaa"] });
-      expect(await askExploreModelCap(ui("inherit"), registry, ["auto"])).toEqual({ cap: "inherit", unknown: [] });
-    });
-  });
-
-  it("normalizeExploreModelCap: one entry is a string, several a list, none undefined", () => {
-    expect(normalizeExploreModelCap("haiku, luna ,auto".split(","))).toEqual(["haiku", "luna", "auto"]);
-    expect(normalizeExploreModelCap([" inherit "])).toBe("inherit");
-    expect(normalizeExploreModelCap(["", " "])).toBeUndefined();
   });
 
   it("round-trips workflowsEnabled; drops non-boolean", () => {
@@ -650,7 +602,6 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
-        setExploreModelCap: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };
@@ -701,11 +652,6 @@ describe("settings persistence", () => {
 
       applySettings({ showModel: false }, appliers);
       expect(appliers.setShowModel).toHaveBeenCalledWith(false);
-    });
-
-    it("applies exploreModelCap", () => {
-      applySettings({ exploreModelCap: ["haiku", "auto"] }, appliers);
-      expect(appliers.setExploreModelCap).toHaveBeenCalledWith(["haiku", "auto"]);
     });
 
     it("is a no-op on an empty settings object", () => {
@@ -925,7 +871,6 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
-        setExploreModelCap: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };
