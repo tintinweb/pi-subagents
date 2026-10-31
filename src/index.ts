@@ -442,6 +442,49 @@ export default function (pi: ExtensionAPI) {
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
   function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  /** Large subagent results (>500 chars) saved out-of-band to protect prompt cache. */
+  let compactSubagentResults = false;
+  function isCompactSubagentResultsEnabled(): boolean { return compactSubagentResults; }
+  function setCompactSubagentResults(b: boolean): void { compactSubagentResults = b; }
+
+  /**
+   * Helper: formats subagent result string. If compactSubagentResults is enabled
+   * and the result is large (>500 chars), writes the full report to disk and
+   * returns a concise executive summary + link to the file to preserve prompt cache.
+   */
+  function formatSubagentResultText(
+    rawText: string | undefined,
+    record: AgentRecord,
+    baseCwd?: string,
+  ): string {
+    const text = rawText?.trim() || "No output.";
+    if (!compactSubagentResults || text.length <= 500) {
+      return text;
+    }
+    try {
+      const targetCwd = baseCwd || currentCtx?.cwd || process.cwd();
+      const reportDir = join(targetCwd, ".pi", "subagent-reports");
+      if (!existsSync(reportDir)) {
+        mkdirSync(reportDir, { recursive: true });
+      }
+      const reportFile = join(reportDir, `${record.type || "agent"}-${record.id}.md`);
+      writeFileSync(reportFile, text, "utf-8");
+      const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+      const previewLines: string[] = [];
+      let currentLen = 0;
+      for (const line of lines) {
+        if (currentLen + line.length > 400 || previewLines.length >= 6) break;
+        previewLines.push(line);
+        currentLen += line.length + 1;
+      }
+      return (
+        `${previewLines.join("\n")}\n\n` +
+        `[Full report saved to: ${reportFile} — use read tool if full details needed]`
+      );
+    } catch {
+      return text;
+    }
+  }
   /**
    * How much of the conversation viewer renders as Markdown. Read through a
    * getter by the viewer rather than captured like `showCost`, because the
@@ -1591,6 +1634,7 @@ export default function (pi: ExtensionAPI) {
       setViewerMarkdown,
       setPackageAgents: setPackageAgentsGate,
       setPackageWorkflows: setPackageWorkflowsGate,
+      setCompactSubagentResults,
     },
     (event, payload) => pi.events.emit(event, payload),
   );
@@ -2543,9 +2587,10 @@ Terse command-style prompts produce shallow, generic work.
         const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
         if (costText) statsParts.push(costText);
       }
+      const formattedResult = formatSubagentResultText(record.result, record, ctx.cwd);
       return textResult(
         `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output."),
+        formattedResult,
         details,
       );
     },
@@ -3085,7 +3130,7 @@ Terse command-style prompts produce shallow, generic work.
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
       } else {
-        output += record.result?.trim() || "No output.";
+        output += formatSubagentResultText(record.result, record, _ctx?.cwd);
       }
 
       // Mark result as consumed — suppresses the completion notification
@@ -3790,6 +3835,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
+      compactSubagentResults: isCompactSubagentResultsEnabled(),
     } satisfies SubagentsSettings;
   }
 
@@ -3969,6 +4015,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
           label: "Output transcript",
           description: "Write each subagent's .output transcript by default. A custom agent's output_transcript frontmatter overrides this.",
           currentValue: getOutputTranscriptDefault() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "compactSubagentResults",
+          label: "Compact subagent results",
+          description:
+            "Save large subagent outputs (>500 chars) to .pi/subagent-reports/ and return an executive preview in the parent session. Protects the prompt cache and prevents context bloat on local and pay-per-token models.",
+          currentValue: isCompactSubagentResultsEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4153,6 +4207,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         setOutputTranscriptDefault(enabled);
         notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
+      } else if (id === "compactSubagentResults") {
+        const enabled = value === "on";
+        setCompactSubagentResults(enabled);
+        notifyApplied(
+          ctx,
+          `Compact subagent results ${enabled ? "enabled" : "disabled"} (reports saved out-of-band to preserve prompt cache)`,
+        );
       } else if (id === "worktreeIsolation") {
         const enabled = value === "on";
         setWorktreeIsolationEnabled(enabled);

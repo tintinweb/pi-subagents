@@ -338,6 +338,12 @@ export interface SubagentsSettings {
    * `ViewerMarkdownMode` for the specific rewrites — so `all` is opt-in.
    */
   viewerMarkdown?: ViewerMarkdownMode;
+  /**
+   * Whether large subagent outputs (>500 chars) are automatically saved to
+   * `.pi/subagent-reports/<type>-<id>.md` and summarized concisely in the parent
+   * session to preserve prompt cache and prevent context bloat. Defaults to `false`.
+   */
+  compactSubagentResults?: boolean;
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
@@ -370,6 +376,7 @@ export interface SettingsAppliers {
   setViewerMarkdown: (mode: ViewerMarkdownMode) => void;
   setPackageAgents: (gate: boolean | string[]) => void;
   setPackageWorkflows: (gate: boolean | string[]) => void;
+  setCompactSubagentResults: (b: boolean) => void;
 }
 
 /** Emit callback — a subset of `pi.events.emit` to keep helpers testable. */
@@ -508,6 +515,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.workflowsEnabled === "boolean") {
     out.workflowsEnabled = r.workflowsEnabled;
   }
+  if (typeof r.compactSubagentResults === "boolean") {
+    out.compactSubagentResults = r.compactSubagentResults;
+  }
   const packageAgents = sanitizePackageGate(r.packageAgents);
   if (packageAgents !== undefined) out.packageAgents = packageAgents;
   const packageWorkflows = sanitizePackageGate(r.packageWorkflows);
@@ -600,6 +610,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
   if (s.packageAgents !== undefined) appliers.setPackageAgents(s.packageAgents);
   if (s.packageWorkflows !== undefined) appliers.setPackageWorkflows(s.packageWorkflows);
+  if (typeof s.compactSubagentResults === "boolean") appliers.setCompactSubagentResults(s.compactSubagentResults);
 }
 
 /**
