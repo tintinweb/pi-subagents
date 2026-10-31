@@ -320,6 +320,8 @@ A run's concurrency limit is its own, independent of the session's `maxConcurren
 
 `pi --subagents-workflow-file=<path>` runs a workflow at startup, including headless under `pi -p`. Use the `=` form — the bare `--flag value` spelling swallows the next argument. See [CLI flags](../README.md#cli-flags).
 
+Print and JSON modes await the workflow before the model's one turn; interactive and RPC modes detach it so startup remains responsive. Completion delivery after a session replacement or reload is best-effort: stale session APIs produce a warning, not an unhandled rejection.
+
 ## Recipes
 
 The orchestration patterns themselves — adversarial verification, judge panels, loop-until-dry — live in exactly one place: the tool description the model reads on every turn. It already knows them. So these are not instructions for writing scripts by hand; they are **what to ask for**, and what the resulting script looks like so you can recognize it in the file.

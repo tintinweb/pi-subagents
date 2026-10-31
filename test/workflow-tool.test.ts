@@ -1168,6 +1168,24 @@ describe("--subagents-workflow-file", () => {
     expect(String(sent![0].content)).toContain("<result>all clear</result>");
   });
 
+  it.each(["print", "json"] as const)("finishes a real flag-launched worker before %s startup returns", async mode => {
+    const path = join(hermetic.dir, "flow.js");
+    writeFileSync(path, `${fileScript}return "all clear";\n`);
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    subagentsExtension(booted.pi);
+
+    await booted.lifecycle.get("session_start")?.({}, ctx({ cwd: hermetic.dir, mode }));
+
+    // No polling: one-shot startup must wait for the actual worker and delivery.
+    expect(booted.pi.appendEntry).toHaveBeenCalledWith(
+      WORKFLOW_ENTRY_TYPE, expect.objectContaining({ status: "completed" }),
+    );
+    expect(booted.pi.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ customType: "workflow-result", content: expect.stringContaining("<result>all clear</result>") }),
+      { deliverAs: "nextTurn" },
+    );
+  });
+
   it("renders the persisted entry through the shared workflow card layout", async () => {
     const booted = makePi();
     subagentsExtension(booted.pi);

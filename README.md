@@ -600,6 +600,8 @@ Skipping is immediate for a running agent and for one held at a pause; an agent 
 
 Use the `=` form. The bare `--flag value` spelling consumes the next argument, so `pi --subagents-workflow-file review.js "do the thing"` would take the prompt as the flag's value. Composes with headless mode: `pi -p --subagents-workflow-file=review.js`. With no tool call to attach to, the run renders as a session entry and its result is handed to the model as context for its next turn.
 
+In one-shot print and JSON modes, startup waits for the workflow before the model's turn. Interactive and RPC modes remain detached. If the originating session is replaced or reloaded before completion, delivery is best-effort: a stale session API is warned about rather than crashing the process.
+
 The `/agents` command opens an interactive menu:
 
 ```
