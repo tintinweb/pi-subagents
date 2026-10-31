@@ -738,7 +738,13 @@ export class ConversationViewer implements Component, Focusable {
         for (const c of msg.content) {
           if (c.type === "text" && c.text) textParts.push(c.text);
           else if (c.type === "toolCall") {
-            toolCalls.push((c as any).name ?? (c as any).toolName ?? "unknown");
+            let tool = (c as any).name ?? (c as any).toolName;
+            if (tool) {
+              if (c.arguments)
+                tool += ' ' + JSON.stringify(c.arguments);
+            } else
+              tool = "unknown";
+            toolCalls.push(tool);
           }
         }
         if (needsSeparator) lines.push(th.fg("dim", "───"));

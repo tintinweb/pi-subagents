@@ -344,6 +344,27 @@ describe("ConversationViewer", () => {
         assertAllLinesFit(viewer.render(w), w);
       }
     });
+    it("renders tool call with arguments", () => {
+      const messages = [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Checking" },
+            { type: "toolCall", name: "search", arguments: { query: "test" } },
+          ],
+        },
+      ];
+      const viewer = new ConversationViewer(
+        mockTui(30, 80),
+        mockSession(messages),
+        mockRecord(),
+        undefined,
+        ansiTheme(),
+        vi.fn(),
+      );
+      const out = viewer.render(80).join("\n");
+      expect(out).toContain("[Tool: search {\"query\":\"test\"}]");
+    });
 
     it("no line exceeds width at narrow terminal", () => {
       const messages = [
