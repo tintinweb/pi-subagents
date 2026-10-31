@@ -81,6 +81,8 @@ beforeEach(() => {
     awaitStartup: vi.fn(async () => {}),
     getRecord: (id: string) => records.get(id),
     resume: vi.fn(),
+    wakeIfStranded: vi.fn(),
+    releaseInline: vi.fn(),
   } as any;
 });
 
@@ -290,6 +292,7 @@ describe("child-safe nested Agent tools", () => {
   it("passes max_turns through on a nested resume", async () => {
     const [agent] = tools(["scout"]);
     await execute(agent, { subagent_type: "scout", description: "find files", prompt: "Find them", run_in_background: true });
+    records.get("child-1")!.status = "completed";
 
     await execute(agent, { resume: "child-1", subagent_type: "scout", description: "continue", prompt: "Continue", max_turns: 3 });
 
@@ -424,6 +427,70 @@ describe("child-safe nested Agent tools", () => {
     expect(result.content[0].text).not.toContain("output is partial");
     // The warning leads, so it can't read as part of the child's own answer.
     expect(result.content[0].text.indexOf("half an answer")).toBeGreaterThan(0);
+  });
+
+  it("reads an agent it woke with SendMessage, which now reports to it, but not someone else's", async () => {
+    records.set("woken", { id: "woken", status: "completed", result: "second pass", handbackRecipient: "parent-1" });
+    records.set("other", { id: "other", status: "completed", result: "not yours", handbackRecipient: "parent-2" });
+    const [, getResult] = tools();
+    expect((await execute(getResult, { agent_id: "woken" })).content[0].text).toContain("second pass");
+    expect((await execute(getResult, { agent_id: "other" })).isError).toBe(true);
+  });
+
+  it("wakes a foreground child for a stranded steer only after reading its result", async () => {
+    // Waking resets the record, as the real manager does.
+    vi.mocked(manager.releaseInline).mockImplementation((id: string) => { records.get(id)!.result = undefined; });
+    const [agent] = tools(["scout"]);
+    const spawned = await execute(agent, { subagent_type: "scout", description: "find", prompt: "Find" });
+    expect(spawned.content[0].text).toContain("done");
+    expect(manager.releaseInline).toHaveBeenCalledWith("child-1");
+
+    vi.mocked(manager.resume).mockImplementation(async (id: string) => {
+      const r = records.get(id)!;
+      r.result = "again";
+      return r;
+    });
+    const resumed = await execute(agent, { resume: "child-1", subagent_type: "scout", description: "more", prompt: "More" });
+    expect(resumed.content[0].text).toContain("again");
+    expect(manager.releaseInline).toHaveBeenCalledTimes(2);
+  });
+
+  it("only reads an agent it woke: resume and steer stay with its owner, behind the wake budget and opt-out", async () => {
+    records.set("woken", {
+      id: "woken", status: "running", result: "x", handbackRecipient: "parent-1", session: { steer: vi.fn() },
+    });
+    const [agent, , steer] = tools(["scout"]);
+    expect((await execute(steer, { agent_id: "woken", message: "go" })).isError).toBe(true);
+    records.get("woken")!.status = "completed";
+    expect((await execute(agent, { resume: "woken", subagent_type: "scout", description: "again", prompt: "Again" })).isError).toBe(true);
+    expect(manager.resume).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resume a child that is still running, e.g. one another agent woke", async () => {
+    records.set("child-1", { id: "child-1", status: "running", parentAgentId: "parent-1", handbackRecipient: "peer" });
+    const [agent] = tools(["scout"]);
+    const result = await execute(agent, { resume: "child-1", subagent_type: "scout", description: "more", prompt: "More" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("is still running");
+    expect(manager.resume).not.toHaveBeenCalled();
+  });
+
+  it("a parent's resume takes back a child another agent woke", async () => {
+    records.set("child-1", { id: "child-1", type: "scout", status: "completed", parentAgentId: "parent-1", handbackRecipient: "peer" });
+    vi.mocked(manager.resume).mockImplementation(async (id: string) => records.get(id));
+    const [agent] = tools(["scout"]);
+    await execute(agent, { resume: "child-1", subagent_type: "scout", description: "more", prompt: "More" });
+    expect(records.get("child-1")!.handbackRecipient).toBeUndefined();
+  });
+
+  it("releases a resumed child even when its result cannot be formatted", async () => {
+    const broken = { id: "child-1", type: "scout", status: "completed", parentAgentId: "parent-1" };
+    records.set("child-1", broken);
+    vi.mocked(manager.resume).mockImplementation(async () =>
+      Object.defineProperty({ ...broken }, "result", { get() { throw new Error("unreadable"); } }));
+    const [agent] = tools(["scout"]);
+    await expect(execute(agent, { resume: "child-1", subagent_type: "scout", description: "more", prompt: "More" })).rejects.toThrow("unreadable");
+    expect(manager.releaseInline).toHaveBeenCalledWith("child-1");
   });
 
   it("uses the fetchable wording when the parent polls a background child by id", async () => {

@@ -142,6 +142,27 @@ You are a security auditor.`);
     expect(agent.systemPrompt).toBe("You are a security auditor.");
   });
 
+  it("parses agent_messaging; absent stays unset", () => {
+    writeAgent("loner", `---
+agent_messaging: false
+---
+
+Prompt.`);
+    writeAgent("talker", `---
+agent_messaging: true
+---
+
+Prompt.`);
+    writeAgent("plain", `---
+---
+
+Prompt.`);
+    const result = loadCustomAgents(tmpDir);
+    expect(result.get("loner")!.agentMessaging).toBe(false);
+    expect(result.get("talker")!.agentMessaging).toBe(true);
+    expect(result.get("plain")!.agentMessaging).toBeUndefined();
+  });
+
   it("uses sensible defaults when frontmatter is empty", () => {
     writeAgent("minimal", `---
 ---
@@ -1260,6 +1281,10 @@ Prompt.`);
       expect(roundTrip({ persistSession: true, sessionDir: "/tmp/sessions" }))
         .toMatchObject({ persistSession: true, sessionDir: "/tmp/sessions" });
       expect(roundTrip({ persistSession: false }).persistSession).toBe(false);
+    });
+
+    it("preserves an agent_messaging opt-out", () => {
+      expect(roundTrip({ agentMessaging: false }).agentMessaging).toBe(false);
     });
 
     it("preserves a tool-less agent as none, not as the whole toolbox", () => {

@@ -33,6 +33,12 @@ describe("documented defaults (README:441)", () => {
     expect(getDefaultMaxTurns()).toBeUndefined();
   }, HEAVY_REIMPORT_MS);
 
+  it("agent messaging is off by default, with a peer-wake budget of 5", async () => {
+    const { isAgentMessagingEnabled, getAgentMessagingMaxWakes } = await import("../src/send-message.js");
+    expect(isAgentMessagingEnabled()).toBe(false);
+    expect(getAgentMessagingMaxWakes()).toBe(5);
+  });
+
   it("nested subagent depth defaults to 2", async () => {
     const { getMaxSubagentDepth } = await import("../src/nested-tools.js");
     expect(getMaxSubagentDepth()).toBe(2);

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CompletionOutbox, NOTIFICATION_HOLD_MS, type OutboxItem } from "../src/completion-outbox.js";
+import { CompletionOutbox, combineNotifications, NOTIFICATION_HOLD_MS, type OutboxItem } from "../src/completion-outbox.js";
 import type { NotificationDetails } from "../src/types.js";
 
 function details(id: string, others?: NotificationDetails[]): NotificationDetails {
@@ -21,7 +21,7 @@ describe("CompletionOutbox", () => {
     vi.useFakeTimers();
     running = false;
     send = vi.fn();
-    outbox = new CompletionOutbox(send, () => running);
+    outbox = new CompletionOutbox(send, () => running, combineNotifications);
   });
 
   afterEach(() => {
@@ -148,5 +148,29 @@ describe("CompletionOutbox", () => {
     outbox.dispose();
     vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
     expect(send).not.toHaveBeenCalled();
+  });
+
+  describe("message instances", () => {
+    it("drops pending ids a predicate matches, and combines with the given function", () => {
+      const sent = vi.fn();
+      const messages = new CompletionOutbox<{ n: string[] }>(
+        sent,
+        () => false,
+        ms => ({ content: ms.map(m => m.content).join("|"), details: { n: ms.flatMap(m => m.details.n) } }),
+      );
+      const msg = (id: string) => ({ ids: [id], build: () => ({ content: id, details: { n: [id] } }) });
+      messages.add(msg("a1:1"));
+      messages.add(msg("b1:2"));
+      messages.add(msg("a1:3"));
+      messages.dropWhere(id => id.startsWith("a1:"));
+      vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
+      expect(sent).toHaveBeenCalledExactlyOnceWith({ content: "b1:2", details: { n: ["b1:2"] } });
+
+      messages.add(msg("c1:4"));
+      messages.add(msg("d1:5"));
+      vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
+      expect(sent).toHaveBeenLastCalledWith({ content: "c1:4|d1:5", details: { n: ["c1:4", "d1:5"] } });
+      messages.dispose();
+    });
   });
 });

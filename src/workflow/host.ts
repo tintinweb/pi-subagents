@@ -244,6 +244,9 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         () => onResolved?.({ recordId: id }),
       );
       remember(record);
+      // A workflow's agent is never woken: releasing it drops a steer stranded in its queue,
+      // so it cannot ride along with the next resume.
+      manager.releaseInline(record.id);
       const info = resolvedInfo(record);
       if (info !== undefined) onResolved?.(info);
       return toSpawnResult(record);
@@ -410,6 +413,9 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
           },
         );
         remember(record);
+        // A workflow's agent is never woken: releasing it drops a steer stranded in its queue,
+        // so it cannot ride along with the next resume.
+        manager.releaseInline(record.id);
         return { ...toSpawnResult(record), ...(gate !== undefined ? { gate } : {}) };
       } catch (error) {
         // Strict worktree isolation rejects out of `awaitStartup` — the child
@@ -431,12 +437,22 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       if (id === undefined) {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
       }
+      // Checked here, not left to the manager: its undefined for a run in
+      // flight would read as "evicted" below and reopen a second agent on the
+      // session the live run is still writing.
+      const live = manager.getRecord(id);
+      if (live?.status === "running" || live?.status === "queued") {
+        return { ok: false, error: `Cannot resume "${agentId}" — it is still ${live.status}; resume it once its current run finishes.` };
+      }
       const record = await manager.resume(id, prompt, deps.signal);
       // No live session: the manager evicted the child, or it never got as far
       // as having one. `reopenAgent` refuses the second with the reason — and a
       // record still in memory without a session is refused by the manager,
       // which never reopens an id that is still live.
       if (record === undefined) return reopenAgent(id, prompt, onResolved);
+      // A workflow's agent is never woken: releasing it drops a steer stranded in its queue,
+      // so it cannot ride along with the next resume.
+      manager.releaseInline(record.id);
       // The resumed row is built from scratch, so it has to be told the same
       // thing the first one was — the child's session already exists, so this is
       // simply read back rather than waited for. The id goes first for the same

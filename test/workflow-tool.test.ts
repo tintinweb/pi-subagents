@@ -70,7 +70,7 @@ function stubManager(
       return { id: settled.id, record: settled };
     },
   );
-  return { manager: { spawnAndWait, abort, resume } as unknown as AgentManager, spawnAndWait, abort, resume };
+  return { manager: { spawnAndWait, abort, resume, getRecord: vi.fn(), releaseInline: vi.fn() } as unknown as AgentManager, spawnAndWait, abort, resume };
 }
 
 const request = (overrides: Partial<WorkflowSpawnRequest> = {}): WorkflowSpawnRequest => ({
@@ -536,10 +536,13 @@ describe("createWorkflowHost — abort, resume and gate", () => {
     const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
 
     await host.spawnAgent(request({ agentId: "wf-agent-0" }));
+    // Each settle drops a steer stranded in the queue, so it cannot ride along.
+    expect(stub.manager.releaseInline).toHaveBeenCalledTimes(1);
     const resumed = await host.resumeAgent?.("wf-agent-0", "and now this");
 
     expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined);
     expect(resumed).toMatchObject({ ok: true, text: "resumed" });
+    expect(stub.manager.releaseInline).toHaveBeenCalledTimes(2);
   });
 
   it("refuses to resume an agent the run never spawned", async () => {

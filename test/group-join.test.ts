@@ -150,4 +150,42 @@ describe("GroupJoinManager", () => {
     expect(mgr.isGrouped("a")).toBe(false);
     expect(mgr.isGrouped("b")).toBe(false);
   });
+  describe("leave", () => {
+    it("delivers a group that was waiting only for the agent that left", () => {
+      const deliver = vi.fn();
+      const mgr = new GroupJoinManager(deliver, 30_000);
+      mgr.registerGroup("g", ["a", "b"]);
+      const b = makeRecord("b");
+      expect(mgr.onAgentComplete(b)).toBe("held");
+
+      mgr.leave("a");
+      expect(deliver).toHaveBeenCalledExactlyOnceWith([b], false);
+      expect(mgr.isGrouped("a")).toBe(false);
+      expect(mgr.isGrouped("b")).toBe(false);
+      vi.advanceTimersByTime(30_000);
+      expect(deliver).toHaveBeenCalledTimes(1);
+    });
+
+    it("drops a held completion of the agent that left, and its later one passes", () => {
+      const deliver = vi.fn();
+      const mgr = new GroupJoinManager(deliver, 30_000);
+      mgr.registerGroup("g", ["a", "b"]);
+      expect(mgr.onAgentComplete(makeRecord("a"))).toBe("held");
+
+      mgr.leave("a");
+      expect(mgr.onAgentComplete(makeRecord("a"))).toBe("pass");
+      const b = makeRecord("b");
+      expect(mgr.onAgentComplete(b)).toBe("delivered");
+      expect(deliver).toHaveBeenCalledExactlyOnceWith([b], false);
+    });
+
+    it("removes a group whose last agent left", () => {
+      const deliver = vi.fn();
+      const mgr = new GroupJoinManager(deliver, 30_000);
+      mgr.registerGroup("g", ["a"]);
+      mgr.leave("a");
+      expect(mgr.onAgentComplete(makeRecord("a"))).toBe("pass");
+      expect(deliver).not.toHaveBeenCalled();
+    });
+  });
 });

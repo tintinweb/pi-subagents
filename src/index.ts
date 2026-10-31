@@ -24,7 +24,7 @@ import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAge
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
-import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
+import { CompletionOutbox, combineNotifications, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
 import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
@@ -38,10 +38,29 @@ import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, ses
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
+import {
+  admitStrandedWake,
+  combineAgentMessages,
+  createSendMessageTool,
+  getAgentMessagingMaxWakes,
+  handBack,
+  isAgentMessagingEnabled,
+  type MessagingHost,
+  reportsToMain,
+  resetPeerWakes,
+  SEND_MESSAGE_TOOL_NAME,
+  senderName,
+  setAgentMessagingEnabled,
+  setAgentMessagingMaxWakes,
+  setMessagingHost,
+  strandedDropped,
+  strandedWakeFailed,
+} from "./send-message.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
+import { AGENT_MESSAGE_TYPE, type AgentMessageDetails, AgentMessageRow } from "./ui/agent-message.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -176,6 +195,10 @@ function getStatusLabel(status: string, error?: string): string {
 }
 
 /** Format a structured task notification matching Claude Code's <task-notification> XML. */
+/** Claude Code's note on a completion whose agent is being resumed with messages that came too late for it. */
+const LATE_MESSAGES_NOTE = "One or more messages sent to this agent arrived after this run's last step, too late for the result below. " +
+  "The agent is being resumed with them and will notify again. Wait for that notification before resending.";
+
 function formatTaskNotification(record: AgentRecord, resultMaxLen: number, showCost = false): string {
   const status = getStatusLabel(record.status, record.error);
   const durationMs = record.completedAt ? record.completedAt - record.startedAt : 0;
@@ -201,6 +224,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number, showC
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
     `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    record.lateMessages ? `<note>${LATE_MESSAGES_NOTE}</note>` : null,
     `<result>${escapeXml(resultPreview)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}${costXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
@@ -377,6 +401,13 @@ export default function (pi: ExtensionAPI) {
     }
   );
 
+  // ---- An agent's SendMessage to the main session (see ui/agent-message.ts) ----
+  pi.registerMessageRenderer<AgentMessageDetails>(AGENT_MESSAGE_TYPE, (message, { expanded }, theme) => {
+    const d = message.details;
+    if (!d?.messages.length) return undefined;
+    return new AgentMessageRow(`${message.timestamp}:${d.messages[0].fromId}`, d, expanded, theme);
+  });
+
   // ---- Workflow run rendered as a session entry ----
   // A workflow launched from the CLI flag has no tool call to hang its result
   // card on, so it renders here instead — through the SAME layout the tool
@@ -475,6 +506,22 @@ export default function (pi: ExtensionAPI) {
       details: message.details,
     }, { deliverAs: "steer", triggerTurn: true }),
     () => currentCtx?.signal !== undefined,
+    combineNotifications,
+  );
+  // Agents' SendMessage to the main session: the same boundary rules, in an
+  // outbox of their own so reading an agent's result never cancels a message.
+  // Ids are `<sender>:<n>`, unique per message, so stopping a sender can drop
+  // what it queued (Claude Code clears a killed agent's queued messages).
+  let messageSeq = 0;
+  const messageOutbox = new CompletionOutbox<AgentMessageDetails>(
+    (message) => pi.sendMessage<AgentMessageDetails>({
+      customType: AGENT_MESSAGE_TYPE,
+      content: message.content,
+      display: true,
+      details: message.details,
+    }, { deliverAs: "steer", triggerTurn: true }),
+    () => currentCtx?.signal !== undefined,
+    combineAgentMessages,
   );
   // A queued result wait must observe completion before its held notification
   // can fire, so successful waits can still suppress that redundant nudge.
@@ -492,9 +539,21 @@ export default function (pi: ExtensionAPI) {
         content: formatTaskNotification(record, 500, showCost) + footer,
         details: buildNotificationDetails(record, 500, agentActivity.get(record.id)),
       };
-      outbox.add({ ids: [record.id], build: () => message });
+      outbox.add({ ids: [record.id], build: () => message }, { replace: !record.strandedWake });
     } catch { /* ignore stale completion side-effect errors */ }
     widget.update();
+  }
+
+  /**
+   * Take `record` out of its `group` join before a resume rewrites it: a group
+   * reads its records when it is sent, and would report the next run instead
+   * of this one. True if a completion was waiting there.
+   */
+  function leaveGroup(record: AgentRecord): boolean {
+    const waiting = turnGroupSpawns.includes(record.id) || groupJoin.isGrouped(record.id);
+    turnGroupSpawns = turnGroupSpawns.filter(id => id !== record.id);
+    groupJoin.leave(record.id);
+    return waiting && record.completedAt != null && !record.resultConsumed;
   }
 
   // ---- Group join manager (`group` join mode only) ----
@@ -572,11 +631,17 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: route through group join or send individual nudge
   const manager = new AgentManager((record) => {
+    // A stopped agent's messages to the main session that have not gone out yet are dropped.
+    if (record.status === "stopped") messageOutbox.dropWhere(id => id.startsWith(`${record.id}:`));
+    // To the agent that woke it with SendMessage, if that agent still runs.
+    handBack(messagingHost, record, () => formatTaskNotification(record, 500, showCost));
+
     // Owned children — nested, or a workflow's — report only through their
     // owner: the parent's scoped tools, or the workflow's card, notification
     // and dialog. Keep them out of top-level lifecycle, transcript,
-    // notification, and UI channels.
-    if (!isTopLevelAgent(record)) return;
+    // notification, and UI channels — unless a woken nested agent's owner is
+    // gone, which leaves the main session as its owner.
+    if (!isTopLevelAgent(record) && !reportsToMain(id => manager.getRecord(id), record)) return;
 
     // Emit lifecycle event based on terminal status
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
@@ -596,6 +661,14 @@ export default function (pi: ExtensionAPI) {
       agentActivity.delete(record.id);
       widget.markFinished(record.id);
       fleet.onAgentFinished(record.id);
+      widget.update();
+      return;
+    }
+
+    // A completion that announces a resume reports on its own; see `leaveGroup`.
+    if (record.lateMessages) {
+      leaveGroup(record);
+      sendIndividualNudge(record);
       widget.update();
       return;
     }
@@ -683,6 +756,64 @@ export default function (pi: ExtensionAPI) {
   }, (record, message) => {
     if (!isTopLevelAgent(record)) return;
     pi.events.emit("subagents:steered", { id: record.id, message });
+  });
+  // A top-level agent woken by a stranded steer resumes like an
+  // `Agent({ resume })`: transcript, widget and fleet follow it. Owned children
+  // have none of those, so the manager's bare resume is right for them.
+  const wakeAgent = async (record: AgentRecord, prompt: string): Promise<AgentRecord | undefined> => {
+    // Set before the run starts, so a run that settles at once is already
+    // marked; undone when no run starts.
+    // A completion still waiting in its group goes out now, on its own.
+    if (leaveGroup(record)) sendIndividualNudge(record);
+    const wasWoken = record.wokenByMessage;
+    record.wokenByMessage = true;
+    let woken: AgentRecord | undefined;
+    try {
+      woken = !isTopLevelAgent(record) || !currentCtx
+        ? await manager.resume(record.id, prompt, undefined, { isBackground: true })
+        : await startBackgroundResume(currentCtx, record, prompt, {
+          outputTranscript: getAgentConfig(record.type)?.outputTranscript ?? getOutputTranscriptDefault(),
+          maxTurns: resumeTurnLimit(record),
+        });
+    } finally {
+      if (!woken) record.wokenByMessage = wasWoken;
+    }
+    return woken;
+  };
+  // SendMessage's view of this session, for the main tool and every subagent's.
+  const messagingHost: MessagingHost = {
+    getRecord: (id) => manager.getRecord(id),
+    listAgents: () => manager.listAgents(),
+    listTombstones: () => manager.listTombstones(),
+    steer: (id, message) => manager.steer(id, message),
+    wake: wakeAgent,
+    deliverToMain: (sender, wrapped, body) => {
+      messageOutbox.add({
+        ids: [`${sender.id}:${++messageSeq}`],
+        build: () => ({ content: wrapped, details: { messages: [{ fromId: sender.id, fromName: senderName(sender), text: body }] } }),
+      });
+    },
+    tell: (agentId, text) => {
+      if (agentId !== undefined) { manager.steer(agentId, text); return; }
+      // For the model's next turn, not a turn of its own: nothing to act on.
+      try {
+        pi.sendMessage({ customType: "subagent-handback", content: text, display: false }, { deliverAs: "nextTurn" });
+      } catch { /* stale context */ }
+    },
+    hasSendMessage: (agentId) => {
+      try {
+        const names = agentId === undefined ? pi.getActiveTools() : manager.getRecord(agentId)?.session?.getActiveToolNames();
+        return names?.includes(SEND_MESSAGE_TOOL_NAME) === true;
+      } catch { return false; /* stale context */ }
+    },
+    warn: (text) => { currentCtx?.ui.notify(text, "warning"); },
+  };
+  setMessagingHost(messagingHost);
+  manager.setWaker({
+    admit: (record, messages) => admitStrandedWake(messagingHost, record, messages),
+    wake: wakeAgent,
+    notWoken: (record, messages, delivered) => strandedWakeFailed(messagingHost, record, messages, delivered),
+    dropped: (record, messages) => strandedDropped(messagingHost, record, messages),
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -939,6 +1070,9 @@ export default function (pi: ExtensionAPI) {
    * notification either way.
    */
   pi.on("input", async (event, ctx) => {
+    // Whatever else the input is, a person spoke: agents may wake each other
+    // again (the SendMessage peer-wake budget).
+    if (event.source !== "extension") resetPeerWakes();
     // Never hijack text the extension layer itself submitted (pi.sendMessage,
     // scheduled prompts) — only something a person typed can be a mention.
     if (event.source === "extension" || !isAgentMentionsEnabled()) return { action: "continue" };
@@ -1168,6 +1302,7 @@ export default function (pi: ExtensionAPI) {
     groupJoin.dispose();
     widget.dispose();
     outbox.dispose();
+    messageOutbox.dispose();
     fleet.dispose();
     unsubHandoffKey?.();
     unsubHandoffKey = undefined;
@@ -1522,10 +1657,12 @@ export default function (pi: ExtensionAPI) {
   // boundary where completions are delivered, as in Claude Code.
   pi.on("turn_end", (event) => {
     registerTurnGroup();
-    outbox.onTurnEnd(event.message.role === "assistant" ? event.message.stopReason : undefined);
+    const stopReason = event.message.role === "assistant" ? event.message.stopReason : undefined;
+    outbox.onTurnEnd(stopReason);
+    messageOutbox.onTurnEnd(stopReason);
   });
-  pi.on("agent_end", () => outbox.onAgentEnd());
-  pi.on("agent_settled", () => outbox.onAgentEnd());
+  pi.on("agent_end", () => { outbox.onAgentEnd(); messageOutbox.onAgentEnd(); });
+  pi.on("agent_settled", () => { outbox.onAgentEnd(); messageOutbox.onAgentEnd(); });
 
   /** Build the full type list text dynamically from available agents only. */
   const buildTypeListText = () => {
@@ -1583,6 +1720,8 @@ export default function (pi: ExtensionAPI) {
       setOutputTranscript: setOutputTranscriptDefault,
       setWorktreeIsolation: setWorktreeIsolationEnabled,
       setWorkflowsEnabled: setWorkflowsEnabled,
+      setAgentMessaging: setAgentMessagingEnabled,
+      setAgentMessagingMaxWakes,
       setMaxSubagentDepth: setMaxSubagentDepth,
       setFallbackSubagent: setFallbackSubagent,
       setReportUsage,
@@ -2196,6 +2335,17 @@ Terse command-style prompts produce shallow, generic work.
         // Not `effectiveMaxTurns`: that was resolved for `subagent_type`, which
         // a resume ignores, so it may describe another agent.
         const resumeMaxTurns = resumeTurnLimit(existing, params.max_turns);
+        // A detached run hands control back while the record stays "running",
+        // so nothing stops the model from resuming the same agent again
+        // mid-run. A second prompt on a busy session would fail, and a detached
+        // one would orphan the live run's abort controller; say why here, where
+        // the model can act on it, instead of letting it read as a generic failure.
+        if (existing.status === "running" || existing.status === "queued") {
+          return textResult(
+            `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+            `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
+          );
+        }
 
         // Background resume: detached run that notifies on completion, mirroring
         // a background spawn. Previously run_in_background was silently ignored
@@ -2203,18 +2353,6 @@ Terse command-style prompts produce shallow, generic work.
         // so a resumed agent always blocked the main loop until it finished.
         if (runInBackground) {
           const id = existing.id;
-          // A detached resume hands control back while the record stays
-          // "running", so nothing stops the model from resuming the same agent
-          // again mid-run. manager.resume() refuses that (it would orphan the
-          // live run's abort controller); say why here, where the model can act
-          // on it, instead of letting it read as a generic failure.
-          if (existing.status === "running" || existing.status === "queued") {
-            return textResult(
-              `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
-              `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
-            );
-          }
-
           const record = await startBackgroundResume(ctx, existing, params.prompt, {
             outputTranscript,
             maxTurns: resumeMaxTurns,
@@ -2262,19 +2400,20 @@ Terse command-style prompts produce shallow, generic work.
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
-        // A foreground resume settles inline, never through the completion
-        // callback, so persist its outcome here: get_subagent_result must find
-        // this run's result, not the earlier run's, once the live record is gone.
-        pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
-        // A failed resume surfaces the error, plus any partial output THIS
-        // resume produced (never the previous turn's answer, #144).
-        if (record.status === "error") {
-          return textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record, resumeState));
+        // Released once the result is read, even if building it throws: waking resets the record.
+        try {
+          // A foreground resume settles inline, never through the completion
+          // callback, so persist its outcome here: get_subagent_result must find
+          // this run's result, not the earlier run's, once the live record is gone.
+          pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
+          // A failed resume surfaces the error, plus any partial output THIS
+          // resume produced (never the previous turn's answer, #144).
+          return record.status === "error"
+            ? textResult(`Agent failed: ${record.error}${partialOutputSuffix(record)}`, buildDetails(detailBaseFor(record), record, resumeState))
+            : textResult(record.result?.trim() || "No output.", buildDetails(detailBaseFor(record), record, resumeState));
+        } finally {
+          manager.releaseInline(record.id);
         }
-        return textResult(
-          record.result?.trim() || "No output.",
-          buildDetails(detailBaseFor(record), record, resumeState),
-        );
       }
 
       // What the model sees for a run it no longer waits on — spawned in the
@@ -2524,30 +2663,37 @@ Terse command-style prompts produce shallow, generic work.
 
       if (fgResult === undefined) return backgroundResult(handoffId!, manager.getRecord(handoffId!));
       const record = fgResult.record;
+      // Released once the result is read, even if building it throws: waking resets the record.
+      try {
 
-      // Get final token count — from the record, like the cost below it, so the
-      // two describe the same work when the agent delegated to nested children.
-      const tokenText = formatLifetimeTokens(record);
+        // Get final token count — from the record, like the cost below it, so the
+        // two describe the same work when the agent delegated to nested children.
+        const tokenText = formatLifetimeTokens(record);
 
-      const details = buildDetails(detailBaseFor(record), record, fgState, { tokens: tokenText });
+        const details = buildDetails(detailBaseFor(record), record, fgState, { tokens: tokenText });
 
-      if (record.status === "error") {
-        // Error headline + any partial output the run produced before failing.
-        return textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+        let spawnResult: ReturnType<typeof textResult>;
+        if (record.status === "error") {
+          // Error headline + any partial output the run produced before failing.
+          spawnResult = textResult(`${fallbackNote}Agent failed: ${record.error}${partialOutputSuffix(record)}`, details);
+        } else {
+          const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
+          const statsParts = [`${record.toolUses} tool uses`];
+          if (tokenText) statsParts.push(tokenText);
+          if (showCost) {
+            const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
+            if (costText) statsParts.push(costText);
+          }
+          spawnResult = textResult(
+            `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
+            (record.result?.trim() || "No output."),
+            details,
+          );
+        }
+        return spawnResult;
+      } finally {
+        manager.releaseInline(record.id);
       }
-
-      const durationMs = (record.completedAt ?? Date.now()) - record.startedAt;
-      const statsParts = [`${record.toolUses} tool uses`];
-      if (tokenText) statsParts.push(tokenText);
-      if (showCost) {
-        const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
-        if (costText) statsParts.push(costText);
-      }
-      return textResult(
-        `${fallbackNote}Agent completed in ${formatMs(durationMs)} (${statsParts.join(", ")})${getForegroundOutcomeNote(record.status)}.\n\n` +
-        (record.result?.trim() || "No output."),
-        details,
-      );
     },
   });
   /**
@@ -3042,7 +3188,7 @@ Terse command-style prompts produce shallow, generic work.
           return textResult(formatSavedAgentRecord(saved));
         }
       }
-      if (!record || !isTopLevelAgent(record)) {
+      if (!record || (!isTopLevelAgent(record) && !reportsToMain(id => manager.getRecord(id), record))) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
 
@@ -3141,6 +3287,7 @@ Terse command-style prompts produce shallow, generic work.
 
       try {
         await steerAgent(record.session, params.message);
+        manager.wakeIfStranded(record.id);
         pi.events.emit("subagents:steered", { id: record.id, message: params.message });
         const tokens = formatLifetimeTokens(record);
         const contextPercent = getSessionContextPercent(record.session);
@@ -3162,6 +3309,10 @@ Terse command-style prompts produce shallow, generic work.
       }
     },
   }));
+
+  // ---- SendMessage tool (agentMessaging) ----
+  // Read once, here, like workflowsEnabled: a tool spec is fixed once pi has it.
+  if (isAgentMessagingEnabled()) pi.registerTool(createSendMessageTool(messagingHost));
 
   // ---- /agents interactive menu ----
 
@@ -3649,9 +3800,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // is what the limit exists to bound. It still counts once started.
       bypassQueue: true,
     });
+    const generationError = record.status === "error" ? record.error : undefined;
+    manager.releaseInline(record.id);
 
-    if (record.status === "error") {
-      ctx.ui.notify(`Generation failed: ${record.error}`, "warning");
+    if (generationError !== undefined) {
+      ctx.ui.notify(`Generation failed: ${generationError}`, "warning");
       return;
     }
 
@@ -3790,6 +3943,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
       viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
+      agentMessaging: isAgentMessagingEnabled(),
+      agentMessagingMaxWakes: getAgentMessagingMaxWakes(),
     } satisfies SubagentsSettings;
   }
 
@@ -3912,6 +4067,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
             "Scripted workflows, on unless another extension provides a workflow tool "
             + "(off keeps the SubagentWorkflow tool out of the tool spec; applies on next pi session)",
           currentValue: isWorkflowsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "agentMessaging",
+          label: "Agent messaging",
+          description:
+            "SendMessage between agents and to the main session (off keeps the tool out of every tool spec; "
+            + "new subagents follow at once, the main session on next pi session)",
+          currentValue: isAgentMessagingEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4113,6 +4277,17 @@ Write the file using the write tool. Only write the file, nothing else.`;
           notifyApplied(
             ctx,
             `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
+          );
+        }
+      } else if (id === "agentMessaging") {
+        const enabled = value === "on";
+        if (enabled === isAgentMessagingEnabled()) {
+          ctx.ui.notify(`Agent messaging already ${enabled ? "enabled" : "disabled"}.`, "info");
+        } else {
+          setAgentMessagingEnabled(enabled);
+          notifyApplied(
+            ctx,
+            `Agent messaging ${enabled ? "enabled" : "disabled"}. New subagents follow now; the main session's tool spec changes on next pi session.`,
           );
         }
       } else if (id === "workflowsEnabled") {
