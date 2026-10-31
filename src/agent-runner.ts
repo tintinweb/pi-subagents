@@ -768,6 +768,26 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+/**
+ * Open an agent's saved session to continue it — or a copy of it, when the
+ * session belongs to another parent.
+ *
+ * pi's `/fork` and `/clone` copy the parent's entries, saved agent records
+ * included, so two parent sessions can each resume the same agent. Appending
+ * both continuations to one file would interleave two histories in it. The
+ * child's header names the parent that spawned it; a resume from any other
+ * parent forks the child alongside, exactly as pi forked the parent, and the
+ * copy is that parent's from then on. A header with no parent (a child
+ * spawned from a context without a session file) gives nothing to compare,
+ * so it opens in place as before.
+ */
+function reopenSession(file: string, parentSessionFile: string | undefined, sessionDir: string | undefined): SessionManager {
+  const opened = SessionManager.open(file, sessionDir);
+  const owner = opened.getHeader()?.parentSession;
+  if (owner === undefined || owner === parentSessionFile) return opened;
+  return SessionManager.forkFrom(file, opened.getCwd(), sessionDir, { parentSession: parentSessionFile });
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -1207,11 +1227,12 @@ export async function runAgent(
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  const parentSessionFile = ctx.sessionManager?.getSessionFile?.();
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
-    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
+    ? reopenSession(options.resumeSessionFile, parentSessionFile, configuredSessionDir ?? defaultSessionDir)
     : persistSession
       ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
           // Optional metadata — it only nests the subagent under its spawner in
@@ -1219,7 +1240,7 @@ export async function runAgent(
           // `persist_session: true` agent; now it runs for every spawn, so a
           // context without a session manager (a bare programmatic ctx) must
           // still persist rather than take the whole spawn down.
-          parentSession: ctx.sessionManager?.getSessionFile?.(),
+          parentSession: parentSessionFile,
         })
       : SessionManager.inMemory(effectiveCwd);
 
@@ -1299,9 +1320,11 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  // Build the effective prompt: optionally prepend parent context
+  // Build the effective prompt: optionally prepend parent context. Only for a
+  // fresh conversation — a reopened one already holds its history, and a live
+  // resume never re-sends the parent's either.
   let effectivePrompt = prompt;
-  if (options.inheritContext) {
+  if (options.inheritContext && !options.resumeSessionFile) {
     const parentContext = buildParentContext(ctx);
     if (parentContext) {
       effectivePrompt = parentContext + prompt;

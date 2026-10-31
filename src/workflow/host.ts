@@ -35,6 +35,7 @@
 import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../agent-manager.js";
+import { reopenTarget, worktreeLost } from "../agent-record-entry.js";
 import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
 import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
@@ -162,6 +163,22 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
   /** Runtime agent id → the manager record it spawned. Never pruned mid-run. */
   const records = new Map<string, string>();
   /**
+   * Manager record id → what reopening that child needs once the manager has
+   * evicted it, ten minutes after it finished. A long review or a merge queue
+   * outlasts that easily, and `resume` must still reach the child (#385).
+   * Lives exactly as long as the run, like `records`, so memory stays bounded
+   * by the run itself; the manager keeps no tombstone for an owned child.
+   */
+  const settled = new Map<string, Pick<AgentRecord, "type" | "description" | "sessionFile"> & { worktreeLost: boolean }>();
+  const remember = (record: AgentRecord): void => {
+    settled.set(record.id, {
+      type: record.type,
+      description: record.description,
+      sessionFile: record.sessionFile,
+      worktreeLost: worktreeLost(record),
+    });
+  };
+  /**
    * scopeModels warnings already toasted, so a fan-out that pins one
    * out-of-scope agent file raises one notification rather than one per child.
    * Kept for the whole run: the same message is the same warning at agent 200
@@ -190,6 +207,49 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       return { ok: false, output: output || `Gate command timed out: ${command}` };
     }
     return { ok: result.code === 0, output };
+  }
+
+  /**
+   * Resume a child the manager has evicted: reopen its saved session under the
+   * same id, still owned by this run, as `Agent({ resume })` does for a
+   * top-level agent. The continuation runs under the agent type's current
+   * definition, like every reopen — the script's model, schema and isolation
+   * for the first run are not replayed.
+   */
+  async function reopenAgent(
+    id: string,
+    prompt: string,
+    onResolved: Parameters<NonNullable<WorkflowHost["resumeAgent"]>>[2],
+  ): Promise<WorkflowSpawnResult> {
+    const kept = settled.get(id);
+    if (kept === undefined) return { ok: false, error: `Agent ${id} cannot be resumed — it never finished a run to resume from.` };
+    const reopen = reopenTarget(kept.type, kept.sessionFile, kept.worktreeLost);
+    if (!reopen.ok) return { ok: false, error: `Agent ${id} cannot be resumed — ${reopen.reason}.` };
+    const config = getAgentConfig(reopen.type);
+    try {
+      const { record } = await manager.spawnAndWait(
+        pi,
+        ctx,
+        reopen.type,
+        prompt,
+        {
+          description: kept.description,
+          resumeSessionFile: reopen.sessionFile,
+          reclaim: { id },
+          ...(config?.isolated !== undefined ? { isolated: config.isolated } : {}),
+          ...(deps.workflowId !== undefined ? { workflowId: deps.workflowId } : {}),
+          ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
+          ...(deps.rootSessionId !== undefined ? { rootSessionId: deps.rootSessionId } : {}),
+        },
+        () => onResolved?.({ recordId: id }),
+      );
+      remember(record);
+      const info = resolvedInfo(record);
+      if (info !== undefined) onResolved?.(info);
+      return toSpawnResult(record);
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   return {
@@ -349,6 +409,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             reportResolved();
           },
         );
+        remember(record);
         return { ...toSpawnResult(record), ...(gate !== undefined ? { gate } : {}) };
       } catch (error) {
         // Strict worktree isolation rejects out of `awaitStartup` — the child
@@ -371,12 +432,11 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
       }
       const record = await manager.resume(id, prompt, deps.signal);
-      if (record === undefined) {
-        return {
-          ok: false,
-          error: `Agent ${id} has no session left to resume — records are dropped ten minutes after they finish.`,
-        };
-      }
+      // No live session: the manager evicted the child, or it never got as far
+      // as having one. `reopenAgent` refuses the second with the reason — and a
+      // record still in memory without a session is refused by the manager,
+      // which never reopens an id that is still live.
+      if (record === undefined) return reopenAgent(id, prompt, onResolved);
       // The resumed row is built from scratch, so it has to be told the same
       // thing the first one was — the child's session already exists, so this is
       // simply read back rather than waited for. The id goes first for the same

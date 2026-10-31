@@ -11,6 +11,7 @@ const {
   sessionManagerInMemory,
   sessionManagerCreate,
   sessionManagerOpen,
+  sessionManagerForkFrom,
   settingsManagerCreate,
   settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
@@ -26,7 +27,14 @@ const {
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
-  sessionManagerOpen: vi.fn(() => ({ kind: "reopened-session-manager" })),
+  // A child session this parent spawned: its header names the parent's file
+  // (`ctx` below), so a resume reopens it in place.
+  sessionManagerOpen: vi.fn((_path: string, _dir?: string) => ({
+    kind: "reopened-session-manager",
+    getHeader: () => ({ parentSession: "/sessions/parent.jsonl" }),
+    getCwd: () => "/child-cwd",
+  })),
+  sessionManagerForkFrom: vi.fn(() => ({ kind: "forked-session-manager" })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
@@ -69,7 +77,12 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
   },
   getAgentDir,
-  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate, open: sessionManagerOpen },
+  SessionManager: {
+    inMemory: sessionManagerInMemory,
+    create: sessionManagerCreate,
+    open: sessionManagerOpen,
+    forkFrom: sessionManagerForkFrom,
+  },
   SettingsManager: { create: settingsManagerCreate },
 }));
 
@@ -214,6 +227,7 @@ beforeEach(() => {
   sessionManagerInMemory.mockClear();
   sessionManagerCreate.mockClear();
   sessionManagerOpen.mockClear();
+  sessionManagerForkFrom.mockClear();
   // The setting is process-global; a test that flips it must not leak the
   // flip into the next one.
   setRememberAgents(true);
@@ -1012,6 +1026,83 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerCreate).not.toHaveBeenCalled();
     expect(sessionManagerInMemory).not.toHaveBeenCalled();
     expect(sessionManagerOpen).toHaveBeenCalledWith("/sessions/explore.jsonl", "/normal/pi/sessions");
+  });
+
+  it("reopens the child in place when this parent spawned it", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(sessionManagerForkFrom).not.toHaveBeenCalled();
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: expect.objectContaining({ kind: "reopened-session-manager" }),
+    }));
+  });
+
+  it("forks the child when another parent resumes it, leaving the original file to its own parent", async () => {
+    // pi's /fork and /clone copy the parent's saved agent records, so a second
+    // parent can resume the same child. Opening the file in place would
+    // interleave two histories in it.
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    sessionManagerOpen.mockReturnValueOnce({
+      kind: "reopened-session-manager",
+      getHeader: () => ({ parentSession: "/sessions/original-parent.jsonl" }),
+      getCwd: () => "/child-cwd",
+    });
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(sessionManagerForkFrom).toHaveBeenCalledWith(
+      "/sessions/explore.jsonl",
+      "/child-cwd",
+      "/normal/pi/sessions",
+      { parentSession: "/sessions/parent.jsonl" },
+    );
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "forked-session-manager" },
+    }));
+  });
+
+  it("does not prepend the parent's conversation to a reopened one", async () => {
+    // A reopened session already holds its own history; `inherit_context` is a
+    // property of the agent type and must only seed a fresh conversation, or a
+    // cold resume would paste the parent's whole transcript into this turn.
+    const parentCtx = {
+      ...ctx,
+      sessionManager: {
+        ...ctx.sessionManager,
+        getBranch: vi.fn(() => [{ type: "message", message: { role: "user", content: "PARENT-TURN" } }]),
+      },
+    };
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const fresh = createSession("OK").session;
+    createAgentSession.mockResolvedValueOnce({ session: fresh });
+    await runAgent(parentCtx, "Explore", "go", { pi, inheritContext: true });
+    expect(String(fresh.prompt.mock.calls[0][0])).toContain("PARENT-TURN");
+
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const reopened = createSession("OK").session;
+    createAgentSession.mockResolvedValueOnce({ session: reopened });
+    await runAgent(parentCtx, "Explore", "carry on", { pi, inheritContext: true, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(reopened.prompt).toHaveBeenCalledWith("carry on");
+  });
+
+  it("reopens in place a child whose header names no parent", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    sessionManagerOpen.mockReturnValueOnce({
+      kind: "reopened-session-manager",
+      getHeader: () => ({}),
+      getCwd: () => "/child-cwd",
+    } as any);
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(sessionManagerForkFrom).not.toHaveBeenCalled();
   });
 
   it("uses pi's normal persistent session location and links to the parent session", async () => {
