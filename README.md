@@ -1,7 +1,10 @@
 # @tintinweb/pi-subagents
 
 <p align="center">
-  <img src="https://github.com/tintinweb/pi-subagents/raw/master/media/logo.svg" alt="@tintinweb/pi-subagents" width="520">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/tintinweb/pi-subagents/raw/master/media/logo-dark.svg">
+    <img src="https://github.com/tintinweb/pi-subagents/raw/master/media/logo-light.svg" alt="@tintinweb/pi-subagents" width="520">
+  </picture>
 </p>
 
 <p align="center">
@@ -21,11 +24,15 @@
 <p align="center">
   <a href="#install"><b>Install</b></a> ·
   <a href="#quick-start"><b>Quick Start</b></a> ·
+  <a href="#ui"><b>UI</b></a> ·
+  <a href="#custom-agents"><b>Custom Agents</b></a> ·
+  <a href="#tools"><b>Tools</b></a> ·
+  <a href="#persistent-settings"><b>Settings</b></a> ·
   <a href="https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md"><b>Workflows</b></a> ·
-  <a href="https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md"><b>RPC</b></a> ·
-  <a href="https://github.com/tintinweb/pi-subagents/blob/master/docs/packages.md"><b>Packages</b></a> ·
   <a href="https://github.com/tintinweb/pi-subagents/blob/master/CHANGELOG.md"><b>Changelog</b></a>
 </p>
+
+<p align="center"><code>pi install npm:@tintinweb/pi-subagents</code></p>
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in the background (the default) or block on them, steer them mid-run, resume completed sessions, and define your own custom agent types. When the orchestration shouldn't be improvised, hand a deterministic JavaScript script to the `SubagentWorkflow` tool — `agent()`, `parallel()`, `pipeline()` — and scripts written for Claude Code's `Workflow` tool run here unchanged.
 
