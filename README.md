@@ -1,5 +1,32 @@
 # @tintinweb/pi-subagents
 
+<p align="center">
+  <img src="https://github.com/tintinweb/pi-subagents/raw/master/media/logo.svg" alt="@tintinweb/pi-subagents" width="520">
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@tintinweb/pi-subagents"><img src="https://img.shields.io/npm/v/@tintinweb/pi-subagents?color=cb3837&logo=npm" alt="npm version"></a>
+  <a href="https://www.npmjs.com/package/@tintinweb/pi-subagents"><img src="https://img.shields.io/npm/dm/@tintinweb/pi-subagents" alt="npm downloads"></a>
+  <a href="https://github.com/tintinweb/pi-subagents/actions/workflows/ci.yml"><img src="https://github.com/tintinweb/pi-subagents/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/tintinweb/pi-subagents/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/@tintinweb/pi-subagents" alt="License: MIT"></a>
+</p>
+<p align="center">
+  <a href="https://pi.dev"><img src="https://img.shields.io/badge/pi-%E2%89%A5%201.1.0-6f42c1" alt="Requires pi >= 1.1.0"></a>
+  <img src="https://img.shields.io/badge/Claude%20Code-compatible%20tools%20%26%20workflows-d97757" alt="Claude Code compatible">
+  <a href="https://github.com/tintinweb/pi-subagents/commits/master"><img src="https://img.shields.io/github/last-commit/tintinweb/pi-subagents" alt="Last commit"></a>
+</p>
+
+<h3 align="center">Claude Code-style sub-agents and workflow orchestration for pi.</h3>
+
+<p align="center">
+  <a href="#install"><b>Install</b></a> ·
+  <a href="#quick-start"><b>Quick Start</b></a> ·
+  <a href="https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md"><b>Workflows</b></a> ·
+  <a href="https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md"><b>RPC</b></a> ·
+  <a href="https://github.com/tintinweb/pi-subagents/blob/master/docs/packages.md"><b>Packages</b></a> ·
+  <a href="https://github.com/tintinweb/pi-subagents/blob/master/CHANGELOG.md"><b>Changelog</b></a>
+</p>
+
 A [pi](https://pi.dev) extension that brings **Claude Code-style autonomous sub-agents and workflow orchestration** to pi. Spawn specialized agents that run in isolated sessions — each with its own tools, system prompt, model, and thinking level. Run them in the background (the default) or block on them, steer them mid-run, resume completed sessions, and define your own custom agent types. When the orchestration shouldn't be improvised, hand a deterministic JavaScript script to the `SubagentWorkflow` tool — `agent()`, `parallel()`, `pipeline()` — and scripts written for Claude Code's `Workflow` tool run here unchanged.
 
 <img width="600" alt="pi-subagents screenshot" src="https://github.com/tintinweb/pi-subagents/raw/master/media/screenshot.png" />
