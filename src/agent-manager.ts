@@ -24,7 +24,7 @@ import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
+import { type AgentInvocation, type AgentRecord, type AgentTombstone, type IsolationMode, isBusy, type MentionResolution, type Pool, type SubagentType, type ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -947,6 +947,10 @@ export class AgentManager {
     })
       .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
         this.settleOutcome(record, { text: responseText, failure, aborted, steered });
+        // Final, but the cleanup below still awaits: busy until it is done. Only
+        // a completed run, as Claude Code marks only a completion `finalizing`:
+        // nothing else is woken, so a message to it must be refused, not queued.
+        if (record.status === "completed") record.settling = true;
         // Kept beside `result`, never inside it: `result` is prose meant for a
         // reader — it is previewed, transcribed, and appended to below — while
         // this is a machine-readable payload one caller asked for by schema.
@@ -1074,6 +1078,7 @@ export class AgentManager {
    * goes out, so it can say a resume follows. Every settle path ends here.
    */
   private completeAndWake(record: AgentRecord, guardCallback: boolean, drain: boolean): void {
+    record.settling = undefined;
     const stranded = this.takeStranded(record);
     if (stranded !== undefined) record.lateMessages = true;
     try {
@@ -1285,7 +1290,9 @@ export class AgentManager {
       // whose settle path would abort the LIVE run's children and report a
       // failure for a run that is still going. Refuse instead, leaving the
       // record untouched; the caller decides whether to wait or steer.
-      if (record.status === "running" || record.status === "queued") return undefined;
+      // Nor one still settling: waking it would reset the record under its
+      // settle. A message meanwhile is steered and woken once it is done.
+      if (isBusy(record)) return undefined;
 
       record.isBackground = true;
       record.resultConsumed = false;
@@ -1325,7 +1332,7 @@ export class AgentManager {
 
     // Foreground resume: run inline and return the settled record. Never
     // re-enter a run in flight, for the reasons the detached path gives.
-    if (record.status === "running" || record.status === "queued") return undefined;
+    if (isBusy(record)) return undefined;
     record.inlinePending = true;
     record.status = "running";
     record.startedAt = Date.now();
@@ -1508,7 +1515,7 @@ export class AgentManager {
    * current tool execution and appears as a user message. If the session isn't
    * ready yet, the message is queued on `pendingSteers` and flushed when the
    * session is created. Returns false if the agent can't accept steering
-   * (unknown id, or no longer running/queued). Fires `onSteered` on either
+   * (unknown id, or no longer busy — see `isBusy`). Fires `onSteered` on either
    * accepted path, so the UI viewers, an `@handle` and the RPC all report
    * the steer the same way without each emitting by hand. The steer tools
    * bypass this method because they await delivery.
@@ -1516,7 +1523,7 @@ export class AgentManager {
   steer(id: string, message: string): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
-    if (record.status !== "running" && record.status !== "queued") return false;
+    if (!isBusy(record)) return false;
     if (record.session) {
       // pi queues the steer only after its input handlers ran, so it can land
       // after the run settled: look for it once it is actually queued.
@@ -1558,7 +1565,7 @@ export class AgentManager {
    * dropped).
    */
   private takeStranded(record: AgentRecord): Stranded | undefined {
-    if (record.inlinePending || record.status === "running" || record.status === "queued") return undefined;
+    if (record.inlinePending || isBusy(record)) return undefined;
     const queued = record.session?.clearQueue?.();
     const messages = queued ? [...queued.steering, ...queued.followUp] : [];
     if (messages.length === 0) return undefined;
@@ -1765,7 +1772,7 @@ export class AgentManager {
   private cleanup() {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (isBusy(record)) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -1779,7 +1786,7 @@ export class AgentManager {
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (isBusy(record)) continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
@@ -1792,11 +1799,9 @@ export class AgentManager {
     this.tombstones.clear();
   }
 
-  /** Whether any agents are still running or queued. */
+  /** Whether any agents are still running, queued, or settling. */
   hasRunning(): boolean {
-    return [...this.agents.values()].some(
-      r => r.status === "running" || r.status === "queued",
-    );
+    return [...this.agents.values()].some(isBusy);
   }
 
   /** Abort all running and queued agents immediately. */
@@ -1814,6 +1819,9 @@ export class AgentManager {
     this.dequeue(() => true);
     // Abort running agents
     for (const record of this.agents.values()) {
+      // A settling one has finished; only drop what was steered into it, so
+      // its settle wakes nothing after everything was stopped.
+      if (record.settling) record.session?.clearQueue?.();
       if (record.status === "running") {
         record.abortController?.abort();
         record.status = "stopped";
@@ -1832,7 +1840,7 @@ export class AgentManager {
       this.drainQueue();
       const pending: Promise<unknown>[] = [];
       for (const record of this.agents.values()) {
-        if (record.status !== "running" && record.status !== "queued") continue;
+        if (!isBusy(record)) continue;
         // An agent whose worktree is still being created is "running" with no
         // `promise` yet — without its startup the wait would return too early.
         const startup = this.startups.get(record.id);

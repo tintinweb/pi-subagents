@@ -58,7 +58,7 @@ import {
 } from "./send-message.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, isBusy, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import { AGENT_MESSAGE_TYPE, type AgentMessageDetails, AgentMessageRow } from "./ui/agent-message.js";
 import {
@@ -794,7 +794,12 @@ export default function (pi: ExtensionAPI) {
       });
     },
     tell: (agentId, text) => {
-      if (agentId !== undefined) { manager.steer(agentId, text); return; }
+      if (agentId !== undefined) {
+        // Never wakes an agent: one that has finished, or is still settling, is not told.
+        const status = manager.getRecord(agentId)?.status;
+        if (status === "running" || status === "queued") manager.steer(agentId, text);
+        return;
+      }
       // For the model's next turn, not a turn of its own: nothing to act on.
       try {
         pi.sendMessage({ customType: "subagent-handback", content: text, display: false }, { deliverAs: "nextTurn" });
@@ -1002,7 +1007,7 @@ export default function (pi: ExtensionAPI) {
             // to consume, and its notification is still the caller's only
             // signal that it finished.
             if (!record || record.parentAgentId) return false;
-            if (record.status === "running" || record.status === "queued") return false;
+            if (isBusy(record)) return false;
             record.resultConsumed = true;
             outbox.cancel(record.id);
             return true;
@@ -1119,7 +1124,7 @@ export default function (pi: ExtensionAPI) {
       const record = resolved.record;
       const target = `@${record.alias ?? record.handle ?? mention.handle}`;
 
-      if (record.status === "running" || record.status === "queued") {
+      if (isBusy(record)) {
         // Steering interrupts after the current tool call, exactly like the
         // steer_subagent tool. Un-consume the result so the agent's reply to
         // this message is still relayed even if the LLM read its last answer.
@@ -2340,9 +2345,9 @@ Terse command-style prompts produce shallow, generic work.
         // mid-run. A second prompt on a busy session would fail, and a detached
         // one would orphan the live run's abort controller; say why here, where
         // the model can act on it, instead of letting it read as a generic failure.
-        if (existing.status === "running" || existing.status === "queued") {
+        if (isBusy(existing)) {
           return textResult(
-            `Agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.\n` +
+            `Agent "${params.resume}" is still ${existing.settling ? "finishing" : existing.status} — it can only be resumed once its current run finishes.\n` +
             `Use steer_subagent to send it a message mid-run, or get_subagent_result to wait for it.`,
           );
         }
@@ -3197,7 +3202,7 @@ Terse command-style prompts produce shallow, generic work.
       // completion notification can still be delivered.
       // Queued agents have no promise yet (it's created when the queue starts
       // them), so poll until they leave the queue, then await like a running one.
-      if (params.wait && (record.status === "running" || record.status === "queued")) {
+      if (params.wait && isBusy(record)) {
         while (record.status === "queued") {
           await abortable(
             new Promise<void>((resolve) => setTimeout(resolve, QUEUE_WAIT_POLL_MS)),
@@ -3226,7 +3231,8 @@ Terse command-style prompts produce shallow, generic work.
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
         `Description: ${record.description}\n\n`;
 
-      if (record.status === "running") {
+      // A settling agent's result is not final yet: its worktree's branch note is still to come.
+      if (record.status === "running" || record.settling) {
         output += "Agent is still running. Use wait: true or check back later.";
       } else if (record.status === "error") {
         output += `Error: ${record.error}${partialOutputSuffix(record)}`;
@@ -3235,7 +3241,7 @@ Terse command-style prompts produce shallow, generic work.
       }
 
       // Mark result as consumed — suppresses the completion notification
-      if (record.status !== "running" && record.status !== "queued") {
+      if (!isBusy(record)) {
         record.resultConsumed = true;
         outbox.cancel(record.id);
       }
@@ -3274,7 +3280,8 @@ Terse command-style prompts produce shallow, generic work.
       if (!record || !isTopLevelAgent(record)) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
-      if (record.status !== "running") {
+      // A settling agent takes it too: it is woken with it once its settle is done.
+      if (record.status !== "running" && !record.settling) {
         return textResult(`Agent "${params.agent_id}" is not running (status: ${record.status}). Cannot steer a non-running agent.`);
       }
       if (!record.session) {

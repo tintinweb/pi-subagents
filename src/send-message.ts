@@ -23,7 +23,7 @@ import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { getAgentConfig } from "./agent-types.js";
 import type { OutboxMessage } from "./completion-outbox.js";
-import type { AgentRecord, AgentTombstone } from "./types.js";
+import { type AgentRecord, type AgentTombstone, isBusy } from "./types.js";
 import type { AgentMessageDetails } from "./ui/agent-message.js";
 
 export const SEND_MESSAGE_TOOL_NAME = "SendMessage";
@@ -239,6 +239,10 @@ export function reportsToMain(getRecord: (id: string) => AgentRecord | undefined
 export function handBack(host: MessagingHost, record: AgentRecord, notification: () => string): void {
   const to = record.handbackRecipient ?? (record.wokenByMessage ? record.parentAgentId : undefined);
   if (to === undefined || record.resultConsumed) return;
+  // Only an owner whose run is live takes it, as `completionRecipient` decides:
+  // one still settling has finished, and must not be woken just to relay this.
+  const recipient = host.getRecord(to);
+  if (recipient === undefined || !LIVE.has(recipient.status)) return;
   try {
     if (host.steer(to, notification())) record.resultConsumed = true;
   } catch { /* a record that cannot be formatted falls back */ }
@@ -339,11 +343,12 @@ export async function sendMessage(host: MessagingHost, senderId: string | undefi
   // A workflow's agents answer only to their script, running or finished.
   if (record.workflowId !== undefined) return `Agent "${name}" belongs to a workflow run and does not accept messages.`;
 
-  // Running, or queued behind the concurrency limit: its next tool round.
+  // Busy (running, queued, or still settling): its next tool round, or the
+  // resume that follows its settle.
   const midTurn = sender
     ? wrapPeerMessage(senderName(sender), message, { midTurn: true, receiverCanReply: host.hasSendMessage(record.id) })
     : wrapCoordinatorMessage(message);
-  if (LIVE.has(record.status)) {
+  if (isBusy(record)) {
     if (host.steer(record.id, midTurn)) {
       return `Message queued for delivery to ${name} at its next tool round. ` +
         "If it finishes first, it is resumed with the message and notifies again, so wait for that notification before resending.";

@@ -26,12 +26,13 @@ import {
   writeInitialEntry,
 } from "./output-file.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import type {
-  AgentConfig,
-  AgentInvocation,
-  AgentRecord,
-  IsolationMode,
-  ThinkingLevel,
+import {
+  type AgentConfig,
+  type AgentInvocation,
+  type AgentRecord,
+  type IsolationMode,
+  isBusy,
+  type ThinkingLevel,
 } from "./types.js";
 import { addUsage } from "./usage.js";
 import { isWorktreeIsolationEnabled } from "./worktree.js";
@@ -141,8 +142,8 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   if (record.status === "error") {
     return `Agent failed: ${record.error ?? "unknown error"}${partialOutputSuffix(record)}`;
   }
-  if (record.status === "queued" || record.status === "running") {
-    return `Agent ${record.id} is ${record.status}.`;
+  if (isBusy(record)) {
+    return `Agent ${record.id} is ${record.settling ? "finishing" : record.status}.`;
   }
   // A truncated run must not read as a finished one. The top-level path carries
   // this in its result headline; a nested result has no headline, so the note
@@ -200,9 +201,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         // Woken by another agent's SendMessage, a child can be running while its
         // parent resumes it; a second prompt on a busy session would fail.
-        if (existing.status === "running" || existing.status === "queued") {
+        if (isBusy(existing)) {
           return textResult(
-            `Nested agent "${params.resume}" is still ${existing.status} — it can only be resumed once its current run finishes.`,
+            `Nested agent "${params.resume}" is still ${existing.settling ? "finishing" : existing.status} — it can only be resumed once its current run finishes.`,
             true,
           );
         }
@@ -414,7 +415,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // call is aborted) stops only this wait; the nested child keeps running and
       // stays unconsumed. Queued records have no promise until the manager starts
       // them, so poll — abortably — until they leave the queue, then await.
-      if (params.wait && (record.status === "queued" || record.status === "running")) {
+      if (params.wait && isBusy(record)) {
         while (record.status === "queued") {
           await abortable(new Promise<void>(resolve => setTimeout(resolve, 250)), signal);
         }
@@ -434,7 +435,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     }),
     execute: async (_toolCallId, params) => {
       const record = context.manager.getRecord(params.agent_id);
-      if (!ownsRecord(record, context.parentAgentId) || record.status !== "running") {
+      // A settling agent takes it too: it is woken with it once its settle is done.
+      if (!ownsRecord(record, context.parentAgentId) || (record.status !== "running" && !record.settling)) {
         return textResult(`Running nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
       }
       // Session not ready yet — queue the steer. The manager flushes pending

@@ -20,6 +20,7 @@ vi.mock("../src/worktree.js", () => ({
 }));
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { cleanupWorktree, createWorktree } from "../src/worktree.js";
 
 const mockPi = {} as any;
 const mockCtx = { cwd: "/tmp" } as any;
@@ -490,6 +491,125 @@ describe("stranded steers", () => {
     await new Promise(r => setTimeout(r, 0));
     manager.abort(id);
     expect(target.queued).toEqual([]);
+  });
+});
+
+describe("an agent whose worktree is still being cleaned up", () => {
+  let manager: AgentManager;
+  afterEach(() => {
+    manager?.dispose();
+    vi.mocked(resumeAgent).mockReset();
+    vi.mocked(runAgent).mockReset();
+    vi.mocked(createWorktree).mockReset();
+    vi.mocked(cleanupWorktree).mockReset().mockImplementation(() => ({ hasChanges: false }) as any);
+  });
+
+  /** A finished run whose worktree cleanup waits for `cleaned()`. */
+  function heldCleanup() {
+    const { session } = queueingSession();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      opts.onSessionCreated(session);
+      return { responseText: "first", session, aborted: false, steered: false };
+    });
+    vi.mocked(resumeAgent).mockResolvedValue({ text: "second", aborted: false, steered: false });
+    vi.mocked(createWorktree).mockResolvedValue({ path: "/wt", branch: "b", baseSha: "s", workPath: "/wt" } as any);
+    const held = { cleaned: () => {} };
+    vi.mocked(cleanupWorktree).mockImplementation(() => new Promise(resolve => {
+      held.cleaned = () => resolve({ hasChanges: true, branch: "b" });
+    }) as any);
+    return held;
+  }
+
+  it("is completed but busy: not resumed, not stopped, and a message waits for the settle", async () => {
+    const held = heldCleanup();
+    const completions: string[] = [];
+    manager = new AgentManager(r => { completions.push(r.result ?? ""); });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "go", { description: "d", isBackground: true, isolation: "worktree" });
+    await vi.waitFor(() => expect(cleanupWorktree).toHaveBeenCalled());
+    const record = manager.getRecord(id)!;
+    // Claude Code's `finalizing`: the outcome is final, the settle is not.
+    expect(record.status).toBe("completed");
+    expect(record.settling).toBe(true);
+
+    // A wake (SendMessage, Agent resume) during the cleanup await must not start a run.
+    expect(await manager.resume(id, "too soon", undefined, { isBackground: true })).toBeUndefined();
+    // Nor can a stop undo a run that finished.
+    expect(manager.abort(id)).toBe(false);
+    expect(record.status).toBe("completed");
+    // A message is accepted and delivered once the settle is done.
+    expect(manager.steer(id, "late news")).toBe(true);
+    expect(resumeAgent).not.toHaveBeenCalled();
+
+    held.cleaned();
+    await record.promise;
+    await vi.waitFor(() => expect(completions).toHaveLength(2));
+    // The first run's completion, with its branch note, then the resumed run's.
+    expect(completions[0]).toContain("first");
+    expect(completions[0]).toContain("Changes saved to branch `b`");
+    expect(completions[1]).toBe("second");
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(resumeAgent).mock.calls[0][1]).toBe("late news");
+  });
+
+  it("in the foreground: a message waits until the caller has read the result", async () => {
+    const held = heldCleanup();
+    manager = new AgentManager();
+    let id!: string;
+    const waiting = manager.spawnAndWait(mockPi, mockCtx, "general-purpose", "go", { description: "d", isolation: "worktree" },
+      spawnedId => { id = spawnedId; });
+    await vi.waitFor(() => expect(cleanupWorktree).toHaveBeenCalled());
+    expect(manager.steer(id, "late news")).toBe(true);
+
+    held.cleaned();
+    const { record } = await waiting;
+    expect(record.result).toContain("first");
+    await new Promise(r => setTimeout(r, 0));
+    expect(resumeAgent).not.toHaveBeenCalled();
+
+    manager.releaseInline(record.id);
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(resumeAgent).mock.calls[0][1]).toBe("late news");
+  });
+
+  it("only a completed run settles: a failed one refuses a message instead of dropping it later", async () => {
+    const held = heldCleanup();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      const { session } = queueingSession();
+      opts.onSessionCreated(session);
+      return { responseText: "", session, aborted: false, steered: false, failure: "provider error" };
+    });
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "go", { description: "d", isBackground: true, isolation: "worktree" });
+    await vi.waitFor(() => expect(cleanupWorktree).toHaveBeenCalled());
+    expect(manager.getRecord(id)!.status).toBe("error");
+    expect(manager.getRecord(id)!.settling).toBeUndefined();
+    expect(manager.steer(id, "late news")).toBe(false);
+    held.cleaned();
+  });
+
+  it("stopping everything drops what was steered into a settling agent, so its settle wakes nothing", async () => {
+    const held = heldCleanup();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "go", { description: "d", isBackground: true, isolation: "worktree" });
+    await vi.waitFor(() => expect(cleanupWorktree).toHaveBeenCalled());
+    expect(manager.steer(id, "late news")).toBe(true);
+    await new Promise(r => setTimeout(r, 0)); // pi queues the steer
+
+    manager.abortAll();
+    held.cleaned();
+    await manager.getRecord(id)!.promise;
+    await new Promise(r => setTimeout(r, 0));
+    expect(resumeAgent).not.toHaveBeenCalled();
+  });
+
+  it("is not cleared at a session boundary while it settles", async () => {
+    const held = heldCleanup();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "go", { description: "d", isBackground: true, isolation: "worktree" });
+    await vi.waitFor(() => expect(cleanupWorktree).toHaveBeenCalled());
+    manager.clearCompleted();
+    expect(manager.getRecord(id)).toBeDefined();
+    held.cleaned();
   });
 });
 

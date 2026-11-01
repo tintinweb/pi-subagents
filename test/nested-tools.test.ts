@@ -343,6 +343,27 @@ describe("child-safe nested Agent tools", () => {
     expect(result.content[0].text).toBe("queued done");
   });
 
+  it("waits for a settling child's settle, which adds its worktree's branch note", async () => {
+    const [, getResult] = tools();
+    const record = {
+      id: "settling-child",
+      status: "completed",
+      settling: true as boolean | undefined,
+      parentAgentId: "parent-1",
+      result: "done",
+      promise: undefined as Promise<unknown> | undefined,
+    };
+    record.promise = new Promise(r => setTimeout(r, 10)).then(() => {
+      record.result = "done + branch";
+      record.settling = undefined;
+    });
+    records.set(record.id, record);
+
+    const result = await execute(getResult, { agent_id: record.id, wait: true });
+
+    expect(result.content[0].text).toBe("done + branch");
+  });
+
   it("aborts a nested result wait without aborting the owned child", async () => {
     const [, getResult] = tools();
     let settleChild: (() => void) | undefined;
@@ -472,6 +493,15 @@ describe("child-safe nested Agent tools", () => {
     const result = await execute(agent, { resume: "child-1", subagent_type: "scout", description: "more", prompt: "More" });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("is still running");
+    expect(manager.resume).not.toHaveBeenCalled();
+  });
+
+  it("refuses to resume a child still settling (worktree cleanup)", async () => {
+    records.set("child-1", { id: "child-1", status: "completed", settling: true, parentAgentId: "parent-1" });
+    const [agent] = tools(["scout"]);
+    const result = await execute(agent, { resume: "child-1", subagent_type: "scout", description: "more", prompt: "More" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("is still finishing");
     expect(manager.resume).not.toHaveBeenCalled();
   });
 

@@ -20,7 +20,7 @@ import {
   wrapCoordinatorMessage,
   wrapPeerMessage,
 } from "../src/send-message.js";
-import type { AgentRecord, AgentTombstone } from "../src/types.js";
+import { type AgentRecord, type AgentTombstone, isBusy } from "../src/types.js";
 
 function rec(over: Partial<AgentRecord> & { id: string }): AgentRecord {
   return {
@@ -50,8 +50,9 @@ function fakeHost(records: AgentRecord[], tombstones: AgentTombstone[] = []) {
     listAgents: () => [...map.values()],
     listTombstones: () => tombstones,
     steer: (id, message) => {
+      // As the manager: a busy agent takes a steer.
       const r = map.get(id);
-      if (!r || (r.status !== "running" && r.status !== "queued")) return false;
+      if (!r || !isBusy(r)) return false;
       steered.push({ id, message });
       return true;
     },
@@ -183,6 +184,13 @@ describe("running target", () => {
     expect(await sendMessage(host, undefined, "explore", "hi")).toContain("belongs to a workflow run");
     expect(await sendMessage(host, "s1", "explore", "hi")).toContain("belongs to a workflow run");
     expect(steered).toEqual([]);
+  });
+
+  it("a finished target still settling is steered, never resumed", async () => {
+    const { host, steered, woken } = fakeHost([rec({ id: "a1", handle: "explore", status: "completed", settling: true })]);
+    expect(await sendMessage(host, undefined, "explore", "hi")).toContain("Message queued for delivery to explore");
+    expect(steered).toHaveLength(1);
+    expect(woken).toEqual([]);
   });
 
   it("a queued target is steered too, never resumed", async () => {
@@ -483,5 +491,13 @@ describe("handBack", () => {
     handBack(host, woken, () => "done");
     expect(steered).toEqual([{ id: "p1", message: "done" }]);
     expect(woken.resultConsumed).toBe(true);
+  });
+
+  it("never hands a completion to an owner still settling: it has finished, so the main session gets it", () => {
+    const { host, steered } = fakeHost([rec({ id: "p1", status: "completed", settling: true })]);
+    const child = rec({ id: "c1", status: "completed", parentAgentId: "p1", wokenByMessage: true });
+    handBack(host, child, () => "done");
+    expect(steered).toEqual([]);
+    expect(child.resultConsumed).toBeUndefined();
   });
 });

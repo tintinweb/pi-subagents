@@ -217,6 +217,12 @@ export interface AgentRecord {
    */
   inlinePending?: boolean;
   /**
+   * Claude Code's `finalizing`: the status is final, but the spawn's settle
+   * path still awaits worktree cleanup. Busy until `completeAndWake` clears
+   * it — see {@link isBusy}.
+   */
+  settling?: boolean;
+  /**
    * Set only while this run's completion is being delivered, when messages
    * reached it after its last step and it is about to be resumed with them.
    * The notification says so (Claude Code's wording).
@@ -435,4 +441,14 @@ export interface ScheduleStoreData {
   /** For future migrations. */
   version: 1;
   jobs: ScheduledSubagent[];
+}
+
+/**
+ * Whether `record` is busy: running, queued, or finished but still settling.
+ * The one test for "a message to this agent is a steer, and it cannot be
+ * resumed now" — a steer to a settling agent is woken once its settle is done,
+ * as Claude Code defers a finalizing agent's queued messages.
+ */
+export function isBusy(record: Pick<AgentRecord, "status" | "settling">): boolean {
+  return record.status === "running" || record.status === "queued" || record.settling === true;
 }

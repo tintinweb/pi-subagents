@@ -39,7 +39,7 @@ import { reopenTarget, worktreeLost } from "../agent-record-entry.js";
 import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
 import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
-import type { AgentRecord, ThinkingLevel } from "../types.js";
+import { type AgentRecord, isBusy, type ThinkingLevel } from "../types.js";
 import { getLifetimeTotal } from "../usage.js";
 import type { WorkflowGateResult, WorkflowHost, WorkflowSpawnResult } from "./runtime.js";
 import { resolveWorkflowSource } from "./saved.js";
@@ -441,8 +441,8 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       // flight would read as "evicted" below and reopen a second agent on the
       // session the live run is still writing.
       const live = manager.getRecord(id);
-      if (live?.status === "running" || live?.status === "queued") {
-        return { ok: false, error: `Cannot resume "${agentId}" — it is still ${live.status}; resume it once its current run finishes.` };
+      if (live !== undefined && isBusy(live)) {
+        return { ok: false, error: `Cannot resume "${agentId}" — it is still ${live.settling ? "finishing" : live.status}; resume it once its current run finishes.` };
       }
       const record = await manager.resume(id, prompt, deps.signal);
       // No live session: the manager evicted the child, or it never got as far
