@@ -79,11 +79,12 @@ export function extensionCanonicalName(extPath: string): string {
  *   - a `node_modules` directory: a package never spans one (it's where OTHER
  *     packages live), so reaching it means we've climbed out of the package —
  *     stop before reading a consumer's or parent package's manifest.
- * The name is then taken only when that root's `pi.extensions` manifest actually
- * lists this entry. That "declares this entry" check is deliberate: our own test
- * fixtures live under this repo, whose root manifest declares `./src/index.ts`
- * as `@tintinweb/pi-subagents`, so a looser rule would misattribute every
- * co-located file to `pi-subagents`.
+ * The name is then taken only when that root's `pi.extensions` manifest declares
+ * this entry, either as the file itself or as a directory containing it (pi
+ * expands `"./dist"` to `dist/index.js`). That "declares this entry" check is
+ * deliberate: our own test fixtures live under this repo, whose root manifest
+ * declares `./src/index.ts` as `@tintinweb/pi-subagents`, so a looser rule would
+ * misattribute every co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
   // `builtin:<name>` names no file; climbing from it would read the process cwd's manifest.
