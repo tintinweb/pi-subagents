@@ -150,6 +150,7 @@ import {
   parseExtSelectors,
   resolveDefaultModel,
   resolveEffectiveMaxTurns,
+  resolveResumeTurnLimit,
   resumeAgent,
   runAgent,
   SUBAGENT_TOOL_NAMES,
@@ -3057,6 +3058,43 @@ describe("resolveEffectiveMaxTurns", () => {
   });
 });
 
+// The precedence a resume applies before the run starts. Nested and top-level
+// resumes both call this; they differ only in which registry supplies
+// `configMaxTurns`. `undefined` is unlimited and already resolved.
+describe("resolveResumeTurnLimit", () => {
+  let prevDefault: number | undefined;
+
+  beforeEach(() => {
+    prevDefault = getDefaultMaxTurns();
+    setDefaultMaxTurns(undefined);
+  });
+
+  afterEach(() => {
+    setDefaultMaxTurns(prevDefault);
+  });
+
+  it("lets the agent file outrank the call, the spawn budget and the default", () => {
+    setDefaultMaxTurns(20);
+    expect(resolveResumeTurnLimit(7, 3, 4)).toBe(7);
+  });
+
+  it("uses the call when the file sets none, then the spawn budget, then the default", () => {
+    setDefaultMaxTurns(20);
+    expect(resolveResumeTurnLimit(undefined, 3, 4)).toBe(3);
+    expect(resolveResumeTurnLimit(undefined, undefined, 4)).toBe(4);
+    expect(resolveResumeTurnLimit(undefined, undefined, undefined)).toBe(20);
+  });
+
+  it("treats an explicit 0 on the file as unlimited, not as a missing value", () => {
+    setDefaultMaxTurns(20);
+    expect(resolveResumeTurnLimit(0, 3, 4)).toBeUndefined();
+  });
+
+  it("is unlimited when nothing sets a limit", () => {
+    expect(resolveResumeTurnLimit(undefined, undefined, undefined)).toBeUndefined();
+  });
+});
+
 // The soft-limit → grace → hard-abort machine (agent-runner.ts, the `turn_end`
 // branch) has never executed in a test: every consumer of the `steered`/`aborted`
 // flags mocks `runAgent` outright, so the flags are asserted but never produced.
@@ -3217,6 +3255,31 @@ describe("agent-runner turn limits", () => {
       const onTurnEnd = vi.fn();
       await resumeWithTurns(3, { maxTurns: 10, onTurnEnd });
       expect(onTurnEnd.mock.calls.map(c => c[0])).toEqual([1, 2, 3]);
+    });
+
+    it("does not apply the global agent's max_turns when the budget is already resolved as unlimited", async () => {
+      // A missing explicit value normally means "look the type up". An already
+      // resolved unlimited must not do that — the lookup is the process-global
+      // registry, which a nested resume is not allowed to consult.
+      vi.mocked(getAgentConfig).mockClear();
+      vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ maxTurns: 2 }) as any);
+      setGraceTurns(1);
+      const { session, result } = await resumeWithTurns(6, { maxTurns: undefined, maxTurnsResolved: true });
+      expect(getAgentConfig).not.toHaveBeenCalled();
+      expect(session.steer).not.toHaveBeenCalled();
+      expect(session.abort).not.toHaveBeenCalled();
+      expect(result.steered).toBe(false);
+      expect(result.aborted).toBe(false);
+    });
+
+    it("treats an already-resolved 0 as unlimited rather than looking up the global agent", async () => {
+      vi.mocked(getAgentConfig).mockClear();
+      vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ maxTurns: 2 }) as any);
+      setGraceTurns(1);
+      const { session } = await resumeWithTurns(6, { maxTurns: 0, maxTurnsResolved: true });
+      expect(getAgentConfig).not.toHaveBeenCalled();
+      expect(session.steer).not.toHaveBeenCalled();
+      expect(session.abort).not.toHaveBeenCalled();
     });
   });
 });

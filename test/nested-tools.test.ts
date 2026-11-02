@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getDefaultMaxTurns, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
@@ -293,7 +294,104 @@ describe("child-safe nested Agent tools", () => {
 
     await execute(agent, { resume: "child-1", subagent_type: "scout", description: "continue", prompt: "Continue", max_turns: 3 });
 
-    expect(manager.resume).toHaveBeenCalledWith("child-1", "Continue", undefined, expect.objectContaining({ maxTurns: 3 }));
+    expect(manager.resume).toHaveBeenCalledWith(
+      "child-1", "Continue", undefined,
+      { maxTurns: 3, maxTurnsResolved: true },
+    );
+  });
+
+  // The branch's registry is the only agent config a nested resume may read.
+  // Falling through to the process-global one lets a same-named agent in the
+  // main session cap the child, and collapsing "unlimited" to a missing value
+  // lets the spawn budget replace a file that locked `max_turns: 0`.
+  describe("resume turn budget stays on the branch registry", () => {
+    function pinGlobalScout(maxTurns: number) {
+      const agents = loadCustomAgents(cwd);
+      const scout = agents.get("scout");
+      if (!scout) throw new Error("scout missing from cwd registry");
+      agents.set("scout", { ...scout, maxTurns });
+      registerAgents(agents);
+    }
+
+    function resumable(invocation?: { maxTurns?: number }) {
+      records.set("child-1", {
+        id: "child-1",
+        type: "scout",
+        status: "completed",
+        parentAgentId: "parent-1",
+        session: {},
+        invocation,
+      });
+    }
+
+    async function resume(maxTurns?: number) {
+      const [agent] = tools(["scout"]);
+      await execute(agent, {
+        resume: "child-1",
+        subagent_type: "scout",
+        description: "continue",
+        prompt: "Continue",
+        ...(maxTurns !== undefined ? { max_turns: maxTurns } : {}),
+      });
+    }
+
+    function handedBudget() {
+      const opts = vi.mocked(manager.resume).mock.calls.at(-1)?.[3];
+      return opts;
+    }
+
+    it("does not inherit a same-named agent's max_turns from the global registry", async () => {
+      pinGlobalScout(11);
+      resumable();
+
+      await resume();
+
+      expect(handedBudget()).toEqual({ maxTurns: undefined, maxTurnsResolved: true });
+    });
+
+    it("keeps a branch file's max_turns: 0 unlimited against the spawn budget and the global registry", async () => {
+      writeAgent("scout", "max_turns: 0\n");
+      pinGlobalScout(11);
+      resumable({ maxTurns: 4 });
+
+      await resume();
+
+      expect(handedBudget()).toEqual({ maxTurns: undefined, maxTurnsResolved: true });
+    });
+
+    it("uses the spawn budget when the branch file sets none, not the global registry", async () => {
+      pinGlobalScout(11);
+      resumable({ maxTurns: 4 });
+
+      await resume();
+
+      expect(handedBudget()).toEqual({ maxTurns: 4, maxTurnsResolved: true });
+    });
+
+    it("uses the project default when the branch file, the call and the spawn set none", async () => {
+      const prev = getDefaultMaxTurns();
+      setDefaultMaxTurns(6);
+      try {
+        pinGlobalScout(11);
+        resumable();
+
+        await resume();
+
+        expect(handedBudget()).toEqual({ maxTurns: 6, maxTurnsResolved: true });
+      } finally {
+        setDefaultMaxTurns(prev);
+      }
+    });
+
+    it("lets the branch file's max_turns outrank the call and the global registry", async () => {
+      writeAgent("scout", "max_turns: 7\n");
+      pinGlobalScout(11);
+      resumable({ maxTurns: 4 });
+
+      await resume(3);
+
+      expect(handedBudget()).toEqual({ maxTurns: 7, maxTurnsResolved: true });
+    });
   });
 
   it("reports a background child that fails to start as a tool error", async () => {

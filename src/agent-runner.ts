@@ -439,6 +439,26 @@ export function resolveEffectiveMaxTurns(type: string, explicit?: number): numbe
 }
 
 /**
+ * Turn budget for one resumed run. Same precedence as a spawn, frontmatter
+ * authoritative: the agent file's `max_turns`, else the call's, else the limit
+ * the agent was spawned with, else the project default. `undefined` is
+ * unlimited and already resolved.
+ *
+ * `configMaxTurns` comes from whichever registry owns the agent. A nested
+ * resume passes the branch's config-cwd registry (`getAgentConfigIn`); a
+ * top-level resume passes the process-global one. Callers hand the result to
+ * `resumeAgent` with `maxTurnsResolved`, so a missing value is not looked up
+ * again — `resolveEffectiveMaxTurns` would read the process-global registry.
+ */
+export function resolveResumeTurnLimit(
+  configMaxTurns: number | undefined,
+  explicit: number | undefined,
+  spawnedMaxTurns: number | undefined,
+): number | undefined {
+  return normalizeMaxTurns(configMaxTurns ?? explicit ?? spawnedMaxTurns ?? defaultMaxTurns);
+}
+
+/**
  * Project default for `persist_session`, from the `rememberAgents` setting.
  * On by default: a persisted session is what lets `@handle` reopen an agent's
  * conversation after its record has been evicted, which is the whole point of
@@ -1396,8 +1416,15 @@ export async function resumeAgent(
   session: AgentSession,
   prompt: string,
   options: Pick<RunOptions, "maxTurns" | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onCompaction" | "signal"> & {
-    /** The agent's type, for its own `max_turns`. */
+    /** The agent's type, for its own `max_turns` when the budget is not already resolved. */
     type: SubagentType;
+    /**
+     * `maxTurns` is already the limit to enforce. `undefined` means unlimited
+     * and must not be re-resolved: `resolveEffectiveMaxTurns` treats a missing
+     * explicit value as "look up the process-global registry", which would
+     * leak a same-named agent's `max_turns` into a nested resume.
+     */
+    maxTurnsResolved?: boolean;
   },
 ): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">> {
   // Boundary for the history fallback: the session already holds prior turns,
@@ -1406,7 +1433,12 @@ export async function resumeAgent(
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
-  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(options.type, options.maxTurns) });
+  // Already resolved: `undefined` is unlimited. Looking it up again would
+  // consult the process-global registry and ignore the caller's.
+  const maxTurns = options.maxTurnsResolved
+    ? normalizeMaxTurns(options.maxTurns)
+    : resolveEffectiveMaxTurns(options.type, options.maxTurns);
+  const run = observeRun(session, { ...options, maxTurns });
 
   try {
     // Already aborted: not prompted, as in `runAgent`.
