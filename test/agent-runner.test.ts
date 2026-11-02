@@ -2037,6 +2037,36 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
     expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents"]);
   });
 
+  it("aliases a directory-style entry to the package name even though pi registers dist/index.js", () => {
+    // A manifest may name a directory (`pi.extensions: ["./dist"]`); pi resolves
+    // it to `dist/index.js` when registering, so an exact-equality check never
+    // fires and the package alias is lost — `ext:<pkg>` silently matches nothing
+    // and the path-derived fallback (`ext:dist`) breaks on a folder rename.
+    const dir = pkgDir("pi-web-access", ["./dist"]);
+    mkdirSync(join(dir, "dist"));
+    writeFileSync(join(dir, "dist", "index.js"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "dist", "index.js"))).toEqual(["dist", "pi-web-access"]);
+  });
+
+  it("a directory-style entry lends its alias to every file inside that directory", () => {
+    // The directory arm matches by path prefix, so a sibling loaded by its own
+    // path answers to the same package alias — it lives under the package's
+    // declared directory either way. A file outside the declaration gets no
+    // alias, and the separator in the prefix test keeps a longer sibling
+    // directory name (`dist-v2`) from matching the `./dist` declaration.
+    const dir = pkgDir("@scope/dir-pkg", ["./dist"]);
+    mkdirSync(join(dir, "dist"));
+    writeFileSync(join(dir, "dist", "index.js"), "export default () => {};");
+    writeFileSync(join(dir, "dist", "other.js"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "dist", "index.js"))).toEqual(["dist", "dir-pkg"]);
+    expect(extensionCanonicalNames(join(dir, "dist", "other.js"))).toEqual(["other", "dir-pkg"]);
+    writeFileSync(join(dir, "root-level.ts"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "root-level.ts"))).toEqual(["root-level"]);
+    mkdirSync(join(dir, "dist-v2"));
+    writeFileSync(join(dir, "dist-v2", "index.js"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "dist-v2", "index.js"))).toEqual(["dist-v2"]);
+  });
+
   it("adds no alias for a loose file with no enclosing package.json", () => {
     const dir = mkdtempSync(join(tmpdir(), "subagents-loose-"));
     tmpDirs.push(dir);
