@@ -1,5 +1,5 @@
-import { initTheme } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { createBashToolDefinition, createEditToolDefinition, initTheme, type ToolRenderers } from "@earendil-works/pi-coding-agent";
+import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
 import { ConversationViewer } from "../src/ui/conversation-viewer.js";
@@ -46,11 +46,25 @@ function tui(rows = 40, columns = 120) {
   return { terminal: { rows, columns }, requestRender: vi.fn() } as never;
 }
 
-function session(messages: unknown[]) {
+/**
+ * A session stub whose tool registry holds pi's builtin definitions, plus any
+ * `extra` ones, resolved through a pass-through extension runner, as pi does.
+ */
+function session(messages: unknown[], extra: Record<string, ToolRenderers> = {}) {
+  const cwd = process.cwd();
+  const tools: Record<string, ToolRenderers> = {
+    bash: createBashToolDefinition(cwd),
+    edit: createEditToolDefinition(cwd),
+    ...extra,
+  };
   return {
     messages,
     subscribe: vi.fn(() => vi.fn()),
-    sessionManager: { getCwd: () => process.cwd() },
+    sessionManager: { getCwd: () => cwd },
+    getToolDefinition: (name: string) => tools[name],
+    extensionRunner: {
+      resolveToolRenderers: (_name: string, base: () => ToolRenderers | undefined) => base(),
+    },
   } as never;
 }
 
@@ -87,8 +101,8 @@ function resultMessage(id: string, name: string, text: string, overrides: Record
 const CTRL_O = "";
 
 /** The viewer's visible rows, ANSI stripped. */
-function rows(messages: unknown[], viewer?: ConversationViewer): string[] {
-  const v = viewer ?? new ConversationViewer(tui(), session(messages), record(), undefined, theme, vi.fn());
+function rows(messages: unknown[], extra: Record<string, ToolRenderers> = {}): string[] {
+  const v = new ConversationViewer(tui(), session(messages, extra), record(), undefined, theme, vi.fn());
   return v.render(120).map(stripTerminalSequences);
 }
 
@@ -133,8 +147,8 @@ describe("ConversationViewer tool blocks", () => {
   describe("expansion", () => {
     const longOutput = Array.from({ length: 30 }, (_, i) => `line-${i}`).join("\n");
 
-    // `bash` because its renderer is the one that elides output and names the
-    // key: a tool with no renderer prints its whole output and ignores the flag.
+    // `bash` because its renderer keeps the tail of the output; the bounded
+    // fallback for a tool without a renderer is covered further down.
     // Tall enough that the expanded block is on screen rather than scrolled past.
     function viewer(): ConversationViewer {
       return new ConversationViewer(
@@ -170,5 +184,71 @@ describe("ConversationViewer tool blocks", () => {
       v.handleInput(CTRL_O);
       expect(v.render(120).map(stripTerminalSequences).join("\n")).not.toContain("line-0");
     });
+  });
+
+  function viewerFor(messages: unknown[], extra: Record<string, ToolRenderers> = {}): ConversationViewer {
+    return new ConversationViewer(tui(80), session(messages, extra), record(), undefined, theme, vi.fn());
+  }
+
+  // Blocks are built inside render(), so building one must not schedule another
+  // frame. pi's replay of a saved session builds settled calls the same way: no
+  // setArgsComplete() / markExecutionStarted(), both of which request a render
+  // (and the former makes the edit renderer re-read the file from disk).
+  it("builds tool blocks without requesting another render", () => {
+    const t = tui(80);
+    const v = new ConversationViewer(
+      t,
+      session([
+        { role: "assistant", content: [callPart("e1", "edit", { path: "a.txt", edits: [{ oldText: "old", newText: "new" }] })] },
+        resultMessage("e1", "edit", "Edited a.txt", { details: { diff: "-1 old\n+1 new" } }),
+      ]),
+      record(),
+      undefined,
+      theme,
+      vi.fn(),
+    );
+    const requestRender = (t as unknown as { requestRender: ReturnType<typeof vi.fn> }).requestRender;
+    requestRender.mockClear();
+    const out = v.render(120).map(stripTerminalSequences).join("\n");
+    expect(out).toContain("+1 new");
+    expect(requestRender).not.toHaveBeenCalled();
+  });
+
+  // A tool no registry knows still renders bounded: the viewer capped tool
+  // output before tool blocks existed, and the expand key must reach it.
+  it("bounds an unregistered tool's output and expands it on the expand key", () => {
+    const output = Array.from({ length: 30 }, (_, i) => `row-${i}`).join("\n");
+    const v = viewerFor([
+      { role: "assistant", content: [callPart("u1", "mcp__demo__dump", { query: "all" })] },
+      resultMessage("u1", "mcp__demo__dump", output),
+    ]);
+    const collapsed = v.render(120).map(stripTerminalSequences).join("\n");
+    expect(collapsed).toContain("row-0");
+    expect(collapsed).not.toContain("row-29");
+    expect(collapsed).toContain("more lines");
+    v.handleInput(CTRL_O);
+    expect(v.render(120).map(stripTerminalSequences).join("\n")).toContain("row-29");
+  });
+
+  // An aborted or failed response never runs its tool calls, so no result ever
+  // arrives. pi's session replay marks such a call failed rather than leaving it
+  // drawn as if it were still running; the viewer does the same.
+  it("marks a call from an aborted or failed response as not run", () => {
+    const out = rows([
+      { role: "assistant", stopReason: "aborted", content: [callPart("a1", "bash", { command: "sleep 100" })] },
+      { role: "assistant", stopReason: "error", errorMessage: "provider exploded", content: [callPart("a2", "bash", { command: "sleep 200" })] },
+    ]).join("\n");
+    expect(out).toContain("sleep 100");
+    expect(out).toContain("Operation aborted");
+    expect(out).toContain("provider exploded");
+  });
+
+  // Renderers come from the agent's own session, so an extension tool that ships
+  // a renderer is drawn by it, as in pi's main transcript.
+  it("draws an extension tool with the renderer its session registered", () => {
+    const out = rows([{ role: "assistant", content: [callPart("x1", "my_ext_tool", { q: 1 })] }], {
+      my_ext_tool: { renderCall: () => new Text("custom-renderer-marker", 0, 0) },
+    }).join("\n");
+    expect(out).toContain("custom-renderer-marker");
   });
 });
