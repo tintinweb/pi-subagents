@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
+import { resolveResumeTurnLimit } from "./agent-runner.js";
 import {
   buildAgentRegistry,
   formatAgentTypeList,
@@ -91,7 +92,12 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
-  resume(id: string, prompt: string, signal?: AbortSignal, options?: { maxTurns?: number }): Promise<AgentRecord | undefined>;
+  resume(
+    id: string,
+    prompt: string,
+    signal?: AbortSignal,
+    options?: { maxTurns?: number; maxTurnsResolved?: boolean },
+  ): Promise<AgentRecord | undefined>;
   /** The children `parentId` owns whose runs have settled. */
   settledChildren(parentId: string): AgentRecord[];
   /** Wait for one of `parentId`'s pending children to settle; false at once when none is pending. */
@@ -230,10 +236,20 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
-        // Frontmatter authoritative, as on the spawn path; the manager falls
-        // back to the limit the child was spawned with, then the default.
+        // Same precedence as a top-level resume, but the agent file comes from
+        // THIS branch's registry. The result is already resolved — `undefined`
+        // means unlimited — so the manager must not fill it from the spawn
+        // record and resumeAgent must not read the process-global registry.
+        // A same-named agent there would otherwise cap this child, and a file
+        // that locked unlimited (`max_turns: 0`) would lose to that cap or to
+        // the budget the child was spawned with.
         const resumed = await context.manager.resume(params.resume, params.prompt, signal, {
-          maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
+          maxTurns: resolveResumeTurnLimit(
+            getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns,
+            params.max_turns,
+            existing.invocation?.maxTurns,
+          ),
+          maxTurnsResolved: true,
         });
         return resumed
           ? textResult(readRecord(resumed, "inline", context), resumed.status === "error")
