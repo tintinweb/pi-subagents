@@ -335,4 +335,34 @@ describe("Agent tool — background resume wiring", () => {
 
     await lifecycle.get("session_shutdown")?.({}, ctx);
   });
+
+  // An agent file's `max_turns: 0` is unlimited, and that decision is final.
+  // The spawn recorded a numeric budget; collapsing "unlimited" to a missing
+  // value used to fill the resume back in from that budget.
+  it("keeps an agent file's max_turns: 0 unlimited on resume", async () => {
+    writeFileSync(join(agentDir, "agents", "capped.md"), "---\ndescription: Capped\nmax_turns: 30\n---\n\nCapped.\n");
+    const { pi, tools, lifecycle } = makePi();
+    subagentsExtension(pi);
+    const ctx = makeCtx(cwd);
+    const id = await spawnSettled(tools, ctx, "capped");
+    const spawned = (globalThis as any)[Symbol.for("pi-subagents:manager")].getRecord(id);
+    expect(spawned.type).toBe("capped");
+    expect(spawned.invocation.maxTurns).toBe(30);
+
+    writeFileSync(join(agentDir, "agents", "capped.md"), "---\ndescription: Capped\nmax_turns: 0\n---\n\nCapped.\n");
+    vi.mocked(resumeAgent).mockClear();
+    await tools.get("Agent").execute(
+      "resume-call",
+      { prompt: "keep going", description: "Keep going", subagent_type: "capped", resume: id, run_in_background: false },
+      undefined,
+      undefined,
+      ctx,
+    );
+
+    expect(resumeAgent).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(resumeAgent).mock.calls[0][2].maxTurns).toBeUndefined();
+    expect(vi.mocked(resumeAgent).mock.calls[0][2].maxTurnsResolved).toBe(true);
+
+    await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
 });
