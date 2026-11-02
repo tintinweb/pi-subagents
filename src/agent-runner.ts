@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
@@ -107,7 +107,15 @@ function extensionPackageName(extPath: string): string | undefined {
     if (
       typeof pkg.name === "string" &&
       Array.isArray(entries) &&
-      entries.some((e) => typeof e === "string" && resolve(dir, e) === entry)
+      entries.some((e) => {
+        if (typeof e !== "string") return false;
+        // A declaration may name a directory (`"./dist"`) that pi resolves to
+        // `dist/index.js`, so an entry belongs to this package when it equals the
+        // declaration or lives underneath it. The `${sep}` boundary keeps that
+        // prefix test platform-correct (`dist-v2` never matches `"./dist"`).
+        const declared = resolve(dir, e);
+        return declared === entry || entry.startsWith(`${declared}${sep}`);
+      })
     ) {
       const short = pkg.name.startsWith("@") ? pkg.name.slice(pkg.name.indexOf("/") + 1) : pkg.name;
       return short.toLowerCase();
