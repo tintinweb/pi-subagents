@@ -33,6 +33,15 @@ export interface SubagentsSettings {
    */
   maxConcurrentForeground?: number;
   /**
+   * Hard cap on running agents outside workflows — `0` = unlimited, default 20
+   * (Claude Code's `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`). It never queues: a
+   * NESTED spawn over it is refused, and the parent is told to do the work
+   * itself. Nested children cannot queue — their parent waits on them while
+   * holding a slot — so refusing is what bounds a parent's fan-out (#352).
+   * Top-level spawns are never refused; they keep queueing on `maxConcurrent`.
+   */
+  maxConcurrentTotal?: number;
+  /**
    * 0 = unlimited — the extension's single source of truth for that convention:
    * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
    * `/agents` → Settings input prompt explicitly says "0 = unlimited".
@@ -346,6 +355,7 @@ export type ToolDescriptionMode = "full" | "compact" | "custom";
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
   setMaxConcurrentForeground: (n: number) => void;
+  setMaxConcurrentTotal: (n: number) => void;
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
@@ -428,6 +438,14 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.maxConcurrentForeground as number) <= MAX_CONCURRENT_CEILING
   ) {
     out.maxConcurrentForeground = r.maxConcurrentForeground as number;
+  }
+  // Floor 0 for the same reason: 0 is the documented "unlimited".
+  if (
+    Number.isInteger(r.maxConcurrentTotal) &&
+    (r.maxConcurrentTotal as number) >= 0 &&
+    (r.maxConcurrentTotal as number) <= MAX_CONCURRENT_CEILING
+  ) {
+    out.maxConcurrentTotal = r.maxConcurrentTotal as number;
   }
   if (
     Number.isInteger(r.defaultMaxTurns) &&
@@ -576,6 +594,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.maxConcurrentForeground === "number") {
     appliers.setMaxConcurrentForeground(s.maxConcurrentForeground);
   }
+  if (typeof s.maxConcurrentTotal === "number") appliers.setMaxConcurrentTotal(s.maxConcurrentTotal);
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
