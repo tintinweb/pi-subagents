@@ -94,6 +94,8 @@ describe("Workflow end to end", () => {
     const childPrompts: string[] = [];
     /** System prompts those same subagent calls were given. */
     const childSystemPrompts: string[] = [];
+    /** Every context the parent model was called with, as text. */
+    const parentContexts: string[] = [];
 
     const cwd = workflowProject();
     const run = await runPrintMode({
@@ -108,6 +110,7 @@ describe("Workflow end to end", () => {
           childSystemPrompts.push(getCurrentSystemPrompt(context.messages));
           return fauxText("SUBAGENT-DONE");
         }
+        parentContexts.push(asText(context));
         return asText(context).includes("Task ID")
           ? fauxText("workflow launched")
           : workflowCall(script);
@@ -137,6 +140,14 @@ describe("Workflow end to end", () => {
       expect(recorded).toHaveLength(2);
       expect(recorded.every(entry => entry.ok && entry.key.length > 0)).toBe(true);
       expect(recorded.map(entry => entry.index)).toEqual([0, 1]);
+
+      // The completion notification is the model's only account of the run, and
+      // its count comes from the runtime's real progress log, which holds an
+      // entry per transition per agent. Counting entries reported "2/10 agents".
+      const notified = await waitFor(() => parentContexts.some(c => c.includes("<task-notification>")));
+      expect(notified, "the parent never received the workflow's completion notification").toBe(true);
+      const notification = parentContexts.find(c => c.includes("<task-notification>")) ?? "";
+      expect(notification).toMatch(/e2e-fanout\\" completed — 2\/2 agents/);
 
       // A workflow child's text is the value `agent()` resolves to, not a
       // report a person reads, and its prompt has to say so — otherwise the

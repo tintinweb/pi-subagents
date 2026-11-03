@@ -328,8 +328,9 @@ export function stats(progress: readonly WorkflowEntry[], agentCount = 0): Workf
   let started = 0;
   let anyLive = false;
 
-  for (const entry of progress) {
-    if (entry.type !== "workflow_agent") continue;
+  // The log holds an entry per transition (queued, started, progress, settled);
+  // only each agent's latest one describes it.
+  for (const entry of collapse(progress).agents) {
     seen++;
     if (entry.state === "done") {
       done++;

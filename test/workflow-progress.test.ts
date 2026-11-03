@@ -303,6 +303,19 @@ describe("stats", () => {
     expect(result.complete).toBe(false);
   });
 
+  it("counts each agent once across the entries the runtime appends for it", () => {
+    // The runtime appends an entry per transition — queued, started, progress,
+    // settled — so a two-agent run logs eight entries, not two.
+    const lifecycle = (index: number, settled: "done" | "error") => [
+      agentEntry({ index, queuedAt: 1 }),
+      agentEntry({ index, queuedAt: 1, startedAt: 2 }),
+      agentEntry({ index, queuedAt: 1, startedAt: 2, state: "progress", lastProgressAt: 3 }),
+      agentEntry({ index, queuedAt: 1, startedAt: 2, state: settled }),
+    ];
+    const result = stats([...lifecycle(0, "done"), ...lifecycle(1, "error")], 2);
+    expect(result).toEqual({ done: 1, failedCount: 1, started: 2, running: false, total: 2, complete: true });
+  });
+
   it("is not complete for an empty log", () => {
     expect(stats([]).complete).toBe(false);
   });
