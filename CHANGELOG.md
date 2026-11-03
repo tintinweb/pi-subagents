@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The conversation viewer draws tool calls the way pi's own transcript does** ([#413](https://github.com/tintinweb/pi-subagents/pull/413) — thanks [@pf-sjtu](https://github.com/pf-sjtu)). Each call renders through the renderer registered in the agent's session, with its result folded into the same block: bash shows its command and output, `read` its line numbers, `edit` its diff, and an extension tool its own view. The viewer used to show just the tool name and the result as dim plain text. `ctrl+o` (pi's `app.tools.expand`) unfolds shortened output, and the `viewerMarkdown` setting no longer applies to tool calls.
+
 ## [0.23.0] - 2026-11-03
 
 > **⚠️ Behavior change — `direct`-mode mentions of an `inherit_context: true` agent now carry the conversation** ([#300](https://github.com/tintinweb/pi-subagents/issues/300)). Such an agent started with only the typed text; it now gets the whole conversation prepended, so its prompt is larger and slower to start. The model-mode fallback changes the same way. Remove `inherit_context` from the agent file to restore the previous behaviour.
