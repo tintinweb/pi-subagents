@@ -278,6 +278,15 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("round-trips agentMessaging and agentMessagingMaxWakes; drops bad values", () => {
+    saveSettings({ agentMessaging: true, agentMessagingMaxWakes: 0 }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ agentMessaging: true, agentMessagingMaxWakes: 0 });
+    writeProject({ agentMessaging: "on", agentMessagingMaxWakes: -1 } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+    writeProject({ agentMessagingMaxWakes: 2.5 } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
     writeProject({ schedulingEnabled: "yes" } as any);
     expect(loadSettings(projectDir)).toEqual({});
@@ -605,6 +614,14 @@ describe("settings persistence", () => {
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };
+    });
+
+    it("applies agentMessaging and agentMessagingMaxWakes, including a 0 budget", () => {
+      appliers.setAgentMessaging = vi.fn();
+      appliers.setAgentMessagingMaxWakes = vi.fn();
+      applySettings({ agentMessaging: false, agentMessagingMaxWakes: 0 }, appliers);
+      expect(appliers.setAgentMessaging).toHaveBeenCalledWith(false);
+      expect(appliers.setAgentMessagingMaxWakes).toHaveBeenCalledWith(0);
     });
 
     // 0 is a real value here, so `if (s.x)` truthiness would silently skip it.

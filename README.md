@@ -57,6 +57,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Agent mentions** — subagents are first-class: type `@explore also check the RPC path` at the prompt and it goes to that agent instead of the main model, without a word of it entering the chat. One syntax covers the whole lifecycle — message it while it runs, resume it once it has finished, reopen its session from disk long after that, or start it if it never ran. Mentioning an agent that isn't running spawns it through an off-screen clone of the conversation, so it gets Claude Code's context-written prompt and a real `Agent` tool call without a word of it reaching the chat; `direct` mode starts it here from your text instead, with no model call at all. The orchestrator can `name` an agent so you address it as `@auth-audit`, and handles work in `steer_subagent`/`get_subagent_result` too. `@` completes live agents, resumable ones, and startable types alongside pi's file completion; `@main` forces text back to the main model. Toggle via `/agents → Settings → Agent mentions`
 - **Scripted workflows** — a `SubagentWorkflow` tool that runs a deterministic JavaScript script orchestrating many subagents: `agent()`, `parallel()`, `pipeline()`, `phase()`, `log()` and `args`, with a pure-literal `meta` block declaring the phases. `pipeline()` has no barrier between stages, so one item can be in a later stage while another is still in the first — unlike `parallel()`, which idles every fast agent until the slowest finishes. Runs in the background with a live card, inspectable via `/agents → Workflows` or by selecting the run in FleetView. `agent()` also takes `gate: "npm test"` to verify a child by running a command (inside its worktree, when isolated) rather than asking another model, and `resume: "<label>"` to continue a child instead of re-paying its context. Scripts run in a `node:vm` sandbox on a worker thread where `Date.now()`, `Math.random()` and `eval` throw. On by default, but it stands down for company: if another extension already provides a `Workflow` or `SubagentWorkflow` tool, this one warns and disables itself for the session rather than offering the model two orchestrators. Pin it either way with `"workflowsEnabled"` in `subagents.json` or `/agents → Settings → Workflows`. A script written for Claude Code's `Workflow` tool runs here unchanged: same globals, `schema` returns a validated object exactly as it does there, `budget` is present and always reports no token target (pi has no such directive) so its `budget.total`-guarded patterns still take the branch they were written for, and nested `workflow()` composes saved workflows one level deep. **[Full guide](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md)**
 - **Mid-run steering** — inject messages into running agents to redirect their work without restarting
+- **Agent messaging** (opt-in) — Claude Code's `SendMessage`: agents message each other and the main session by name. A running agent gets the message at its next tool round; a finished one is resumed with it, and reports back to the agent that woke it. Off by default (`agentMessaging`); see [`SendMessage`](#sendmessage)
 - **Session resume** — pick up where an agent left off, preserving full conversation context. Resumes detached by default and notifies you on completion, just like a fresh spawn; pass `run_in_background: false` to block and get the result inline
 - **Graceful turn limits** — agents get a "wrap up" warning before hard abort, producing clean partial results instead of cut-off output
 - **Case-insensitive agent types** — `"explore"`, `"Explore"`, `"EXPLORE"` all work. A type that doesn't resolve to exactly one *enabled* agent — unknown, disabled, or ambiguous between two agents differing only by case — falls back to general-purpose with a note, or is refused outright under [`fallbackSubagent: none`](#persistent-settings)
@@ -384,6 +385,7 @@ All fields are optional — sensible defaults for everything.
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
 | `inherit_context` | `false` | Fork parent conversation into agent |
 | `run_in_background` | — | Pin this agent to background (`true`) or foreground (`false`). Omit to follow `backgroundByDefault` |
+| `agent_messaging` | — | `false` opts this agent out of [`SendMessage`](#sendmessage): it gets no tool and refuses messages sent to it. Only meaningful while `agentMessaging` is on |
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
@@ -584,12 +586,38 @@ A finished agent's result stays retrievable after its in-memory record is cleane
 
 ### `steer_subagent`
 
-Send a steering message to a running agent. The message interrupts after the current tool execution.
+Send a steering message to a running agent. The message interrupts after the current tool execution. If the agent finishes before it reads the message, it is resumed with the message as its prompt, as Claude Code does; a run that was stopped, failed, or hit its turn limit drops it instead.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `agent_id` | string | yes | Agent ID to steer |
 | `message` | string | yes | Message to inject into agent conversation |
+
+### `SendMessage`
+
+Claude Code's agent-to-agent messaging. Registered only while `agentMessaging` is on (default off); then the main session has it, and so does every subagent except isolated ones and those whose file sets `agent_messaging: false` or lists `SendMessage` in `disallowed_tools`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `to` | string | yes | An agent's handle (`explore`, `explore-2`) or spawn `name`, its agent ID, or `"main"` (subagents only) |
+| `message` | string | yes | Plain text |
+| `summary` | string | no | A label for the sender's own transcript; not transmitted |
+
+What happens depends on the target:
+
+| Target | Effect |
+|--------|--------|
+| Running or queued, or finished and still cleaning up its worktree | Delivered at its next tool round, as a steer. All messages queued for an agent land in one round. An agent still cleaning up cannot be resumed until it is done, and is then resumed with the message. If it finishes first, it is resumed with them: its completion notification says so, and the resumed run notifies again. If that resume cannot start, the messages go to a run another caller started meanwhile, or the user gets a "Failed to deliver queued message" warning |
+| Finished (completed) | Resumed in the background with the message as its prompt. If a subagent sent it, the resumed run's completion goes to that subagent instead of its owner, and the old owner is told; a nested agent taken over this way keeps running when its original parent finishes. Ownership stays put when the owner has not read the previous result yet, or when the move would make an agent report to itself; the sender is told who gets the completion. Only an agent's resume moves ownership: the main session's sends and `Agent({ resume })` leave it with the agent that woke it, as in Claude Code, while a parent's nested resume takes its child back. A completion whose owner is no longer running goes to the main session, as in Claude Code. The main session cannot wake a finished nested agent while its owner is running |
+| `"main"` | Queued for the main session's next boundary, starting a turn if it is idle. Renders as `› Message from @handle`, expanded with the global expand key or a click (fullscreen mode) |
+| A workflow's agent | Refused, running or finished: it answers only to its script |
+| Stopped by the user, failed, or evicted | Not resumed; the result says why. An evicted agent's ID is given for `Agent({ resume })` |
+
+Messages carry Claude Code's framing: a subagent's message arrives as `<agent-message from="name">`, with an instruction to treat it as another agent's request within the receiver's own permissions, and, when the receiver has `SendMessage`, to reply by sending to the `from` name.
+
+A nested agent woken by a message that did not take it over, or by a steer that reached it after it finished, reports its completion to its parent while the parent runs. A subagent that woke an agent can read its result with its nested `get_subagent_result`; resuming or steering it again goes through `SendMessage`. One gap remains: if the subagent is cut off at its turn limit after the completion was handed to it but before it reads it, that completion is lost.
+
+Agents that keep waking each other are bounded by `agentMessagingMaxWakes` (default `5`): the number of times subagents' messages may resume a finished agent between two user inputs. That counts a send to a finished agent, and an agent resumed because the messages that reached it after its last step include one from a subagent: its message, or a note that another agent took over one of its agents. A completion handed back to it wakes it without counting, since its result is already marked read; one that reaches an agent that is not woken (budget spent, or the agent failed or was stopped) is passed to the main session instead. A wake that does not happen is given back. Past the limit, a send to a finished agent is refused, and late messages that include a subagent's are dropped with a note to the main session, until the user's next message; the agent's completion then announces no resume. Messages delivered to running agents and to the main session are unaffected, and so are the main session's own sends: a subagent and the main session messaging each other back and forth are not bounded. Claude Code has no such limit.
 
 ## Commands
 
@@ -696,7 +724,7 @@ When background agents complete, they notify the main agent. As in Claude Code, 
 | `smart` (default) | No waiting: each result is delivered at the parent's next boundary, as in Claude Code. `async` is accepted as an older name for it. |
 | `group` | The background agents spawned in one parent turn report together, in one notification once all of them have finished. Fewer parent turns, at the cost of an early result waiting for the slowest sibling. |
 
-**Timeout behavior (`group`):** a 30-second timeout starts after the first agent of a group completes. If not all agents finish in time, a partial notification is sent with completed results and remaining agents continue with a shorter 15-second re-batch window for stragglers.
+**Timeout behavior (`group`):** a 30-second timeout starts after the first agent of a group completes. If not all agents finish in time, a partial notification is sent with completed results and remaining agents continue with a shorter 15-second re-batch window for stragglers. An agent resumed by a message — a [`SendMessage`](#sendmessage), or a steer that reached it after its last step — leaves its group: its completion, and the resumed run's, are sent on their own.
 
 **Configuration:**
 - Configure join mode in `/agents` → Settings → Join mode
@@ -726,7 +754,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max concurrency, max foreground concurrency, default max turns, grace turns, nested depth, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all, agent messaging on/off) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
@@ -803,6 +831,8 @@ Turn `all` on for tools that genuinely emit Markdown, and off again for a diff o
 **Workflows** (`workflowsEnabled`, default `true`): the master switch for scripted workflows. Toggle it via `/agents → Settings → Workflows`, or set it in `subagents.json`. Off, the `SubagentWorkflow` tool is never registered — the model is not told the feature exists and cannot call it, so it costs no tool-spec context — the `/agents → Workflows` entry is hidden, and `--subagents-workflow-file` refuses with a pointer to the setting rather than doing nothing. Read at extension load, so it applies on the next pi session; runs already in flight are left alone.
 
 Leaving it unset is not quite the same as `true`. Unset means *auto*: on, unless another extension already provides a workflow tool, in which case this one warns and stands down for the session. Two orchestrators in one tool spec is a worse default than none — the model has to guess which to call and pays for both descriptions to find out — and the extension that was installed on purpose is the one that should survive. Setting `workflowsEnabled` explicitly pins the answer: `true` keeps ours whatever else is loaded, `false` is off regardless.
+
+**Agent messaging** (`agentMessaging`, default `false`): the master switch for [`SendMessage`](#sendmessage). Toggle it via `/agents → Settings → Agent messaging`, or set it in `subagents.json`. Off, no session has the tool. The main session's tool spec is fixed at extension load, so a toggle reaches it on the next pi session; subagents started after the toggle follow it at once. `agentMessagingMaxWakes` (default `5`, `0`–`1000`) caps how many finished agents subagents may resume with a message between two user inputs.
 
 The match is on the exact tool names `Workflow` (Claude Code's) and `SubagentWorkflow` (ours), never a substring, so a `list_workflows` or `github_workflow_run` from some CI integration does not silently take the feature down. The check runs at `session_start` and nowhere earlier, because `getAllTools` throws during extension loading and load order means a check at registration time could not see an extension that has not loaded yet — so the tool is registered first and withdrawn from the active set through `setActiveTools`, which rebuilds the system prompt before any turn runs. When the other extension took the `SubagentWorkflow` name itself, pi's first-registration-wins rule already dropped ours, so there is nothing to withdraw and only the menu and the CLI flag come down.
 
@@ -1083,6 +1113,7 @@ src/
   agent-runner.ts     # Session creation, execution, graceful max_turns, steer/resume
   agent-manager.ts    # Agent lifecycle, concurrency queue, completion notifications
   nested-tools.ts     # Delegation tools handed to subagents (nested spawn/collect/steer)
+  send-message.ts     # SendMessage: agent-to-agent and agent-to-main messaging, handback, wake budget
   child-context.ts    # AsyncLocalStorage flag marking work done for a child session
   abortable.ts        # Race a wait against Esc without cancelling the background child
   completion-outbox.ts # Deliver completion notifications at the parent's next boundary, coalesced
@@ -1128,6 +1159,7 @@ src/
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
     viewer-keys.ts        # Viewer scroll keys resolved through user keybindings
     agent-mention.ts      # `@` roster (running, resumable, and startable agents) + popup rows
+    agent-message.ts      # Chat row for an agent's SendMessage to the main session
     schedule-menu.ts      # /agents → Scheduled jobs submenu
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)

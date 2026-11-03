@@ -24,7 +24,7 @@ import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
-import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
+import { type AgentInvocation, type AgentRecord, type AgentTombstone, type IsolationMode, isBusy, type MentionResolution, type Pool, type SubagentType, type ThinkingLevel } from "./types.js";
 import { addUsage, type LifetimeUsage } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
@@ -38,6 +38,35 @@ export type OnAgentStart = (record: AgentRecord) => void;
  */
 export type OnAgentSteered = (record: AgentRecord, message: string) => void;
 export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void;
+/**
+ * How stranded steers are delivered (`wakeIfStranded`). The host installs one
+ * that applies the peer wake budget and wires transcript streaming and the UI
+ * the way an `Agent({ resume })` does; without it every wake is admitted and
+ * the manager resumes bare.
+ */
+export interface AgentWaker {
+  /**
+   * Whether these stranded messages may wake the agent; false drops them.
+   * Asked before the run's completion goes out, so it says a resume follows
+   * only when one does.
+   */
+  admit(record: AgentRecord, messages: readonly string[]): boolean;
+  /** Resume the settled agent in the background with `prompt`. */
+  wake(record: AgentRecord, prompt: string): Promise<AgentRecord | undefined>;
+  /**
+   * An admitted wake did not happen. `delivered`: the messages were steered
+   * into a run another caller had started meanwhile; otherwise they are lost.
+   */
+  notWoken?(record: AgentRecord, messages: readonly string[], delivered: boolean): void;
+  /** Stranded messages of an agent that may not be woken (stopped, failed, at its turn limit, a workflow's) are dropped. */
+  dropped?(record: AgentRecord, messages: readonly string[]): void;
+}
+
+/** Messages stranded in a settled agent that may wake it: the resume prompt, and what it was joined from. */
+interface Stranded {
+  prompt: string;
+  messages: readonly string[];
+}
 /**
  * Fired once per assistant `message_end`, for EVERY agent this manager owns —
  * top-level and nested alike, spawns and resumes. The one place where each
@@ -386,6 +415,7 @@ export class AgentManager {
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private onSteered?: OnAgentSteered;
+  private waker?: AgentWaker;
   private maxConcurrent: number;
   private maxConcurrentForeground = DEFAULT_MAX_CONCURRENT_FOREGROUND;
   /** Base repos worktrees were created from — so dispose() can prune them all,
@@ -448,6 +478,11 @@ export class AgentManager {
     // Cleanup completed agents after 10 minutes (but keep sessions for resume)
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000);
     this.cleanupInterval.unref();
+  }
+
+  /** Install how a stranded steer resumes its agent; see `AgentWaker`. */
+  setWaker(waker: AgentWaker | undefined): void {
+    this.waker = waker;
   }
 
   /** Update the max concurrent background agents limit. */
@@ -903,7 +938,7 @@ export class AgentManager {
         // Flush any steers that arrived before the session was ready
         if (record.pendingSteers?.length) {
           for (const msg of record.pendingSteers) {
-            session.steer(msg).catch(() => {});
+            session.steer(msg).then(() => this.wakeIfStranded(id), () => {});
           }
           record.pendingSteers = undefined;
         }
@@ -912,6 +947,10 @@ export class AgentManager {
     })
       .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
         this.settleOutcome(record, { text: responseText, failure, aborted, steered });
+        // Final, but the cleanup below still awaits: busy until it is done. Only
+        // a completed run, as Claude Code marks only a completion `finalizing`:
+        // nothing else is woken, so a message to it must be refused, not queued.
+        if (record.status === "completed") record.settling = true;
         // Kept beside `result`, never inside it: `result` is prose meant for a
         // reader — it is previewed, transcribed, and appended to below — while
         // this is a machine-readable payload one caller asked for by schema.
@@ -1024,19 +1063,36 @@ export class AgentManager {
     const pool = record.chargedPool;
     this.chargePool(pool, -1);
 
-    if (guardCallback) {
-      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-    } else {
-      this.onComplete?.(record);
-    }
-
     // The isBackground half reproduces the pre-pool condition exactly — a
     // background settle has always drained, even for a nested child that held
     // no slot — so that path is unchanged whether or not the foreground pool is
     // on. The `pool` half only adds the drain a freed FOREGROUND slot needs.
     // A drain with nothing freed is a no-op anyway, but "no-op" is a claim
     // about reachability, and matching the old condition needs no such claim.
-    if (record.isBackground || pool !== undefined) this.drainQueue();
+    this.completeAndWake(record, guardCallback, record.isBackground || pool !== undefined);
+  }
+
+  /**
+   * Send a settled run's completion, then wake the agent with what was steered
+   * into it too late. The stranded messages are taken before the completion
+   * goes out, so it can say a resume follows. Every settle path ends here.
+   */
+  private completeAndWake(record: AgentRecord, guardCallback: boolean, drain: boolean): void {
+    record.settling = undefined;
+    const stranded = this.takeStranded(record);
+    if (stranded !== undefined) record.lateMessages = true;
+    try {
+      if (guardCallback) {
+        try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
+      } else {
+        this.onComplete?.(record);
+      }
+    } finally {
+      record.lateMessages = undefined;
+      record.strandedWake = undefined;
+    }
+    if (drain) this.drainQueue();
+    if (stranded !== undefined) this.wakeStranded(record, stranded);
   }
 
   /**
@@ -1044,10 +1100,12 @@ export class AgentManager {
    * from the UI and only their owner can consume them, so a child outliving its
    * parent would burn tokens unseen with no way to reach it. Grandchildren are
    * covered transitively — each abort lands in that child's own settle path.
+   * A child another agent took over with SendMessage reports to that agent
+   * now, so it keeps running.
    */
   private abortOwnedChildren(parentId: string): void {
     for (const [id, record] of this.agents) {
-      if (record.parentAgentId === parentId) this.abort(id);
+      if (record.parentAgentId === parentId && (record.handbackRecipient ?? parentId) === parentId) this.abort(id);
     }
   }
 
@@ -1124,6 +1182,7 @@ export class AgentManager {
       onSpawned,
     });
     const record = this.agents.get(id)!;
+    record.inlinePending = true;
 
     // Queued: nothing to await yet — the promise appears when the drain starts
     // it. The gate resolves (never rejects) on every path out of the queue,
@@ -1131,6 +1190,16 @@ export class AgentManager {
     // tool `execute` and take down pi's whole Promise.all tool batch.
     if (record.status === "queued") await record.startGate;
 
+    try {
+      return await this.waitForRun(id, record);
+    } catch (err) {
+      // No result reaches a caller, so none will release it.
+      record.inlinePending = false;
+      throw err;
+    }
+  }
+
+  private async waitForRun(id: string, record: AgentRecord): Promise<{ id: string; record: AgentRecord }> {
     // The run promise only exists once startup is past its awaited repo copy —
     // without this the call would return before the agent had started at all.
     // A startup failure (strict worktree isolation) rejects here, which is what
@@ -1185,6 +1254,7 @@ export class AgentManager {
     record.chargedPool = "background";
     this.chargePool(record.chargedPool, 1);
     record.blocking = false;
+    record.inlinePending = false;
     record.isBackground = true;
     record.resultConsumed = false;
     // A freed foreground slot may have unblocked a queued blocking spawn.
@@ -1220,7 +1290,9 @@ export class AgentManager {
       // whose settle path would abort the LIVE run's children and report a
       // failure for a run that is still going. Refuse instead, leaving the
       // record untouched; the caller decides whether to wait or steer.
-      if (record.status === "running" || record.status === "queued") return undefined;
+      // Nor one still settling: waking it would reset the record under its
+      // settle. A message meanwhile is steered and woken once it is done.
+      if (isBusy(record)) return undefined;
 
       record.isBackground = true;
       record.resultConsumed = false;
@@ -1246,7 +1318,8 @@ export class AgentManager {
               record.status = "error";
               record.error = err instanceof Error ? err.message : String(err);
               record.completedAt = Date.now();
-              this.onComplete?.(record);
+              // A settle like any other, so a stranded wake's mark is cleared after it.
+              this.completeAndWake(record, false, false);
             }
           },
           release: () => {},
@@ -1257,7 +1330,10 @@ export class AgentManager {
       return record;
     }
 
-    // Foreground resume: run inline and return the settled record.
+    // Foreground resume: run inline and return the settled record. Never
+    // re-enter a run in flight, for the reasons the detached path gives.
+    if (isBusy(record)) return undefined;
+    record.inlinePending = true;
     record.status = "running";
     record.startedAt = Date.now();
     record.completedAt = undefined;
@@ -1304,6 +1380,8 @@ export class AgentManager {
     // Same contract as the spawn settle paths: children spawned during the
     // resumed turn must not outlive it — nothing else can see or reach them.
     this.abortOwnedChildren(id);
+    // No stranded-steer wake here: the caller reads the result, then calls
+    // `releaseInline`.
 
     return record;
   }
@@ -1394,8 +1472,7 @@ export class AgentManager {
       // Children spawned during the resumed turn must not outlive it.
       this.abortOwnedChildren(id);
       if (occupiesPoolSlot(record)) this.runningBackground--;
-      try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
-      this.drainQueue();
+      this.completeAndWake(record, true, true);
     };
 
     const promise = resumeAgent(record.session, prompt, {
@@ -1438,7 +1515,7 @@ export class AgentManager {
    * current tool execution and appears as a user message. If the session isn't
    * ready yet, the message is queued on `pendingSteers` and flushed when the
    * session is created. Returns false if the agent can't accept steering
-   * (unknown id, or no longer running/queued). Fires `onSteered` on either
+   * (unknown id, or no longer busy — see `isBusy`). Fires `onSteered` on either
    * accepted path, so the UI viewers, an `@handle` and the RPC all report
    * the steer the same way without each emitting by hand. The steer tools
    * bypass this method because they await delivery.
@@ -1446,15 +1523,82 @@ export class AgentManager {
   steer(id: string, message: string): boolean {
     const record = this.agents.get(id);
     if (!record) return false;
-    if (record.status !== "running" && record.status !== "queued") return false;
+    if (!isBusy(record)) return false;
     if (record.session) {
-      record.session.steer(message).catch(() => {});
+      // pi queues the steer only after its input handlers ran, so it can land
+      // after the run settled: look for it once it is actually queued.
+      record.session.steer(message).then(() => this.wakeIfStranded(id), () => {});
     } else {
       if (!record.pendingSteers) record.pendingSteers = [];
       record.pendingSteers.push(message);
     }
     this.onSteered?.(record, message);
     return true;
+  }
+
+  /**
+   * Deliver messages stranded in a settled agent's pi queue. pi polls its
+   * steering queue only after each turn, so a steer that lands after the last
+   * poll sits in the queue of a session that has stopped looping. As in Claude
+   * Code (`agentStrandedMessages`), the agent is resumed with them as its
+   * prompt — joined into one, so they arrive in a single round. Only a run that
+   * completed is woken; anything else (stopped by the user, failed, cut off at
+   * its turn limit, a workflow's agent) drops them, so they cannot ride along
+   * with whatever resumes the agent next.
+   *
+   * Safe to call at any time: a running or queued agent is left to its own
+   * loop. Every settle calls it, and so does every steer once pi has queued
+   * the message. While an inline caller has yet to read the result
+   * (`inlinePending`) it does nothing; `releaseInline` calls it once it has.
+   */
+  wakeIfStranded(id: string): void {
+    const record = this.agents.get(id);
+    if (!record) return;
+    const stranded = this.takeStranded(record);
+    if (stranded !== undefined) this.wakeStranded(record, stranded);
+  }
+
+  /**
+   * Drain a settled agent's stranded messages: the resume prompt when it may be
+   * woken, undefined otherwise (nothing queued, still running, its inline
+   * caller still reading, or not wakeable or not admitted — those messages are
+   * dropped).
+   */
+  private takeStranded(record: AgentRecord): Stranded | undefined {
+    if (record.inlinePending || isBusy(record)) return undefined;
+    const queued = record.session?.clearQueue?.();
+    const messages = queued ? [...queued.steering, ...queued.followUp] : [];
+    if (messages.length === 0) return undefined;
+    const wakeable = record.status === "completed" && record.workflowId === undefined;
+    if (!wakeable) {
+      this.waker?.dropped?.(record, messages);
+      return undefined;
+    }
+    return (this.waker?.admit(record, messages) ?? true) ? { prompt: messages.join("\n\n"), messages } : undefined;
+  }
+
+  private wakeStranded(record: AgentRecord, { prompt, messages }: Stranded): void {
+    // Its completion follows the one already sent or pending, never replaces it.
+    record.strandedWake = true;
+    const wake = this.waker?.wake ?? ((r: AgentRecord, p: string) => this.resume(r.id, p, undefined, { isBackground: true }));
+    // Not woken: most often another caller started it meanwhile, so its next
+    // tool round takes the messages (Claude Code requeues them the same way).
+    const notWoken = () => {
+      record.strandedWake = undefined;
+      this.waker?.notWoken?.(record, messages, this.steer(record.id, prompt));
+    };
+    wake(record, prompt).then(woken => { if (!woken) notWoken(); }, notWoken);
+  }
+
+  /**
+   * The inline caller of `spawnAndWait` or a foreground `resume` has read the
+   * result: deliver what was stranded meanwhile. Every inline caller calls it.
+   */
+  releaseInline(id: string): void {
+    const record = this.agents.get(id);
+    if (!record) return;
+    record.inlinePending = false;
+    this.wakeIfStranded(id);
   }
 
   getRecord(id: string): AgentRecord | undefined {
@@ -1566,8 +1710,12 @@ export class AgentManager {
     // done; a blocking caller learns of the stop from its own tool result.
     if (record.status === "queued") {
       this.dequeue(q => q.id === id);
+      // A queued resume has a session: what was steered into it must not ride along with the next run.
+      record.session?.clearQueue?.();
       record.status = "stopped";
       record.completedAt = Date.now();
+      // No `onComplete` follows to clear it, and a later run's completion must replace as usual.
+      record.strandedWake = undefined;
       return true;
     }
 
@@ -1624,7 +1772,7 @@ export class AgentManager {
   private cleanup() {
     const cutoff = Date.now() - 10 * 60_000;
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (isBusy(record)) continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
       this.removeRecord(id, record);
     }
@@ -1638,7 +1786,7 @@ export class AgentManager {
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
-      if (record.status === "running" || record.status === "queued") continue;
+      if (isBusy(record)) continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
       this.removeRecord(id, record);
     }
@@ -1651,11 +1799,9 @@ export class AgentManager {
     this.tombstones.clear();
   }
 
-  /** Whether any agents are still running or queued. */
+  /** Whether any agents are still running, queued, or settling. */
   hasRunning(): boolean {
-    return [...this.agents.values()].some(
-      r => r.status === "running" || r.status === "queued",
-    );
+    return [...this.agents.values()].some(isBusy);
   }
 
   /** Abort all running and queued agents immediately. */
@@ -1673,6 +1819,9 @@ export class AgentManager {
     this.dequeue(() => true);
     // Abort running agents
     for (const record of this.agents.values()) {
+      // A settling one has finished; only drop what was steered into it, so
+      // its settle wakes nothing after everything was stopped.
+      if (record.settling) record.session?.clearQueue?.();
       if (record.status === "running") {
         record.abortController?.abort();
         record.status = "stopped";
@@ -1691,7 +1840,7 @@ export class AgentManager {
       this.drainQueue();
       const pending: Promise<unknown>[] = [];
       for (const record of this.agents.values()) {
-        if (record.status !== "running" && record.status !== "queued") continue;
+        if (!isBusy(record)) continue;
         // An agent whose worktree is still being created is "running" with no
         // `promise` yet — without its startup the wait would return too early.
         const startup = this.startups.get(record.id);

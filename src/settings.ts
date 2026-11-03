@@ -220,6 +220,22 @@ export interface SubagentsSettings {
    */
   workflowsEnabled?: boolean;
   /**
+   * Agent-to-agent messaging: the `SendMessage` tool, for the main session and
+   * every non-isolated subagent. Defaults to `false`. On, an agent can message
+   * a running agent (delivered at its next tool round), resume a finished one,
+   * and message the main session. An agent file opts out with
+   * `agent_messaging: false`. Read once at extension init, like
+   * `workflowsEnabled`: the main session's tool spec is fixed once pi has it.
+   */
+  agentMessaging?: boolean;
+  /**
+   * How many finished agents subagents may wake with `SendMessage` between two
+   * user inputs. Defaults to `5`; `0` means a subagent can message running
+   * agents and the main session but never wake a finished one. Bounds agents
+   * that keep resuming each other.
+   */
+  agentMessagingMaxWakes?: number;
+  /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
    * disables nesting project-wide. Read when a subagent session is built, so a
@@ -362,6 +378,8 @@ export interface SettingsAppliers {
   setOutputTranscript: (b: boolean) => void;
   setWorktreeIsolation: (b: boolean) => void;
   setWorkflowsEnabled: (b: boolean) => void;
+  setAgentMessaging: (b: boolean) => void;
+  setAgentMessagingMaxWakes: (n: number) => void;
   setMaxSubagentDepth: (n: number) => void;
   setFallbackSubagent: (v: string | undefined) => void;
   setReportUsage: (b: boolean) => void;
@@ -388,6 +406,7 @@ const MAX_CONCURRENT_CEILING = 1024;
 const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
 const SUBAGENT_DEPTH_CEILING = 16;
+const MESSAGING_WAKES_CEILING = 1_000;
 
 /**
  * Normalize a package gate: a boolean passes through, an array is trimmed to its
@@ -508,6 +527,16 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (typeof r.workflowsEnabled === "boolean") {
     out.workflowsEnabled = r.workflowsEnabled;
   }
+  if (typeof r.agentMessaging === "boolean") {
+    out.agentMessaging = r.agentMessaging;
+  }
+  if (
+    Number.isInteger(r.agentMessagingMaxWakes) &&
+    (r.agentMessagingMaxWakes as number) >= 0 &&
+    (r.agentMessagingMaxWakes as number) <= MESSAGING_WAKES_CEILING
+  ) {
+    out.agentMessagingMaxWakes = r.agentMessagingMaxWakes as number;
+  }
   const packageAgents = sanitizePackageGate(r.packageAgents);
   if (packageAgents !== undefined) out.packageAgents = packageAgents;
   const packageWorkflows = sanitizePackageGate(r.packageWorkflows);
@@ -598,6 +627,8 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
   if (s.viewerMarkdown) appliers.setViewerMarkdown(s.viewerMarkdown);
   if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
+  if (typeof s.agentMessaging === "boolean") appliers.setAgentMessaging(s.agentMessaging);
+  if (typeof s.agentMessagingMaxWakes === "number") appliers.setAgentMessagingMaxWakes(s.agentMessagingMaxWakes);
   if (s.packageAgents !== undefined) appliers.setPackageAgents(s.packageAgents);
   if (s.packageWorkflows !== undefined) appliers.setPackageWorkflows(s.packageWorkflows);
 }

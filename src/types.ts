@@ -76,6 +76,12 @@ export interface AgentConfig {
   runInBackground?: boolean;
   /** Default for spawn: no extension tools. undefined = caller decides. */
   isolated?: boolean;
+  /**
+   * `agent_messaging: false` opts this agent out of `SendMessage`: it gets no
+   * tool and refuses messages sent to it. Only meaningful while the project's
+   * `agentMessaging` setting is on.
+   */
+  agentMessaging?: boolean;
   /** Persistent memory scope — agents with memory get a persistent directory and MEMORY.md */
   memory?: MemoryScope;
   /**
@@ -204,6 +210,31 @@ export interface AgentRecord {
    */
   blocking?: boolean;
   /**
+   * A caller awaiting this run inline (`spawnAndWait`, a foreground `resume`)
+   * has not read its result yet. Stranded steers wait until it has: waking
+   * resets the record. Claude Code's `finalizing`. Cleared by `releaseInline`
+   * and `sendToBackground`.
+   */
+  inlinePending?: boolean;
+  /**
+   * Claude Code's `finalizing`: the status is final, but the spawn's settle
+   * path still awaits worktree cleanup. Busy until `completeAndWake` clears
+   * it — see {@link isBusy}.
+   */
+  settling?: boolean;
+  /**
+   * Set only while this run's completion is being delivered, when messages
+   * reached it after its last step and it is about to be resumed with them.
+   * The notification says so (Claude Code's wording).
+   */
+  lateMessages?: boolean;
+  /**
+   * This run was woken by stranded messages: its completion is delivered
+   * alongside the previous run's, not in place of it. Cleared once its
+   * completion has gone out.
+   */
+  strandedWake?: boolean;
+  /**
    * The concurrency pool this run's slot is charged to, set once when it
    * starts. `settleRun` releases exactly this; `sendToBackground` is the only
    * thing that moves it, together with the counters.
@@ -228,6 +259,15 @@ export interface AgentRecord {
   resultConsumed?: boolean;
   /** Steering messages queued before the session was ready. */
   pendingSteers?: string[];
+  /**
+   * The agent this one's next completion goes to instead of its owner: set
+   * when another subagent woke it with `SendMessage`, as Claude Code moves
+   * `handbackRecipient` to the resumer. Unset means the usual owner — its
+   * parent agent, or the main session.
+   */
+  handbackRecipient?: string;
+  /** Resumed by a message — `SendMessage`, or a steer that arrived after it finished — at least once. */
+  wokenByMessage?: boolean;
   /** Worktree info if the agent is running in an isolated worktree. */
   worktree?: { path: string; branch: string; baseSha: string; workPath: string };
   /** Worktree cleanup result after agent completion. */
@@ -401,4 +441,14 @@ export interface ScheduleStoreData {
   /** For future migrations. */
   version: 1;
   jobs: ScheduledSubagent[];
+}
+
+/**
+ * Whether `record` is busy: running, queued, or finished but still settling.
+ * The one test for "a message to this agent is a steer, and it cannot be
+ * resumed now" — a steer to a settling agent is woken once its settle is done,
+ * as Claude Code defers a finalizing agent's queued messages.
+ */
+export function isBusy(record: Pick<AgentRecord, "status" | "settling">): boolean {
+  return record.status === "running" || record.status === "queued" || record.settling === true;
 }

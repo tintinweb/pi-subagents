@@ -292,6 +292,8 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   // its session, or write it somewhere else.
   if (cfg.persistSession !== undefined) fmFields.push(`persist_session: ${cfg.persistSession}`);
   if (cfg.sessionDir) fmFields.push(`session_dir: ${JSON.stringify(cfg.sessionDir)}`);
+  // An opt-out the ejected copy must keep, or the agent starts taking messages.
+  if (cfg.agentMessaging === false) fmFields.push("agent_messaging: false");
 
   return `---\n${fmFields.join("\n")}\n---\n\n${cfg.systemPrompt}\n`;
 }

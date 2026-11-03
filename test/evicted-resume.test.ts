@@ -308,7 +308,13 @@ describe("a workflow's resume once the manager evicted the child", () => {
       return { id: record.id, record };
     });
     const resume = vi.fn(async () => undefined);
-    return { manager: { spawnAndWait, resume, abort: vi.fn() } as unknown as AgentManager, spawnAndWait, resume };
+    const getRecord = vi.fn((_id: string): AgentRecord | undefined => undefined);
+    return {
+      manager: { spawnAndWait, resume, getRecord, abort: vi.fn(), releaseInline: vi.fn() } as unknown as AgentManager,
+      spawnAndWait,
+      resume,
+      getRecord,
+    };
   }
 
   const request = { agentId: "wf-agent-0", index: 0, prompt: "build it", label: "worker", agentType: "general-purpose" };
@@ -325,6 +331,22 @@ describe("a workflow's resume once the manager evicted the child", () => {
     expect(prompt).toBe("fix the review findings");
     expect(options).toMatchObject({ resumeSessionFile: sessionFile, reclaim: { id: "child-7" }, workflowId: "wf-1" });
     expect(resumed).toMatchObject({ ok: true, text: "fixed" });
+    // The reopened run's queue is drained like any other workflow settle.
+    expect(stub.manager.releaseInline).toHaveBeenCalledTimes(2);
+  });
+
+  it("refuses, starting nothing, while the child is still running", async () => {
+    const stub = evictingManager(sessionFile);
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager, workflowId: "wf-1" });
+    await host.spawnAgent(request);
+    stub.getRecord.mockReturnValue({ id: "child-7", status: "running" } as AgentRecord);
+
+    const resumed = await host.resumeAgent?.("wf-agent-0", "fix it");
+
+    expect(resumed).toMatchObject({ ok: false });
+    expect(resumed && !resumed.ok && resumed.error).toContain("still running");
+    expect(stub.resume).not.toHaveBeenCalled();
+    expect(stub.spawnAndWait).toHaveBeenCalledTimes(1);
   });
 
   const wt = { path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };

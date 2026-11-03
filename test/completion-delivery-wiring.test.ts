@@ -382,3 +382,109 @@ describe("`group` join mode — one notification per turn's batch", () => {
     expect(sentContents(b)).toEqual([expect.stringContaining("sibling done")]);
   });
 });
+
+describe("a stranded wake in group join mode", () => {
+  /** Runs settled by `settle(prompt)`; "one" has a session whose queue keeps late steers. */
+  function runsWithQueue() {
+    const queued: string[] = [];
+    const session = {
+      dispose: vi.fn(), messages: [], subscribe: vi.fn(() => () => {}), getActiveToolNames: vi.fn(() => []),
+      steer: vi.fn(async (text: string) => { queued.push(text); }),
+      clearQueue: vi.fn(() => ({ steering: queued.splice(0), followUp: [] })),
+    } as any;
+    const finishers = new Map<string, () => void>();
+    vi.mocked(runAgent).mockImplementation((_c: any, _t: any, prompt: any, opts: any) => {
+      const s = prompt === "one" ? session : { dispose: vi.fn(), messages: [] };
+      if (prompt === "one") opts.onSessionCreated?.(session);
+      return new Promise<any>(resolve => {
+        finishers.set(prompt, () => resolve({ responseText: `${prompt} done`, session: s, aborted: false, steered: false }));
+      }) as any;
+    });
+    vi.mocked(resumeAgent).mockImplementation((_s: any, prompt: string) =>
+      new Promise(resolve => { finishers.set(prompt, () => resolve({ text: `${prompt} done`, aborted: false, steered: false })); }),
+    );
+    return { session: Object.assign(session, { queued }), settle: (prompt: string) => finishers.get(prompt)!() };
+  }
+
+  it("delivers the first run's result of a member woken before its turn ended", async () => {
+    vi.useFakeTimers();
+    const runs = runsWithQueue();
+    const b = await boot({ defaultJoinMode: "group" });
+    await Promise.all([spawn(b, b.parentCtx, "one"), spawn(b, b.parentCtx, "two")]);
+
+    // Lands after "one"'s last poll; it settles before the spawning turn ends.
+    await runs.session.steer("late news");
+    runs.settle("one");
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledTimes(1));
+    runs.settle("two");
+    await vi.advanceTimersByTimeAsync(1_000);
+    turnEnd(b);
+
+    runs.settle("late news");
+    await vi.advanceTimersByTimeAsync(60_000);
+    turnEnd(b);
+
+    const sent = sentContents(b).join("\n");
+    expect(sent).toContain("one done");
+    expect(sent).toContain("arrived after this run's last step");
+    expect(sent).toContain("late news done");
+  });
+
+  it("delivers the first run's result of a member woken after its group was registered", async () => {
+    vi.useFakeTimers();
+    const runs = runsWithQueue();
+    const b = await boot({ defaultJoinMode: "group" });
+    await Promise.all([spawn(b, b.parentCtx, "one"), spawn(b, b.parentCtx, "two")]);
+    turnEnd(b);
+
+    // "one" finishes first, so the group holds it while its wake runs.
+    await runs.session.steer("late news");
+    runs.settle("one");
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledTimes(1));
+    runs.settle("two");
+    await vi.advanceTimersByTimeAsync(1_000);
+    turnEnd(b);
+
+    const before = sentContents(b).join("\n");
+    expect(before).toContain("one done");
+    expect(before).toContain("two done");
+    expect(before).toContain("arrived after this run's last step");
+
+    runs.settle("late news");
+    await vi.advanceTimersByTimeAsync(1_000);
+    turnEnd(b);
+    expect(sentContents(b).join("\n")).toContain("late news done");
+  });
+  it("delivers the first run's result of a deferred member a steer queued after it settled wakes", async () => {
+    vi.useFakeTimers();
+    const runs = runsWithQueue();
+    const b = await boot({ defaultJoinMode: "group" });
+    const [first] = await Promise.all([spawn(b, b.parentCtx, "one"), spawn(b, b.parentCtx, "two")]);
+
+    // pi runs its input handlers before queueing, so this enqueue lands after "one" settled.
+    let enqueue!: () => void;
+    runs.session.steer.mockImplementationOnce((text: string) => new Promise<void>(resolve => {
+      enqueue = () => { runs.session.queued.push(text); resolve(); };
+    }));
+    void b.tools.get("steer_subagent").execute(
+      "steer", { agent_id: agentIdOf(first), message: "late news" }, undefined, undefined, b.parentCtx,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runs.session.steer).toHaveBeenCalledWith("late news");
+    runs.settle("one");
+    await vi.advanceTimersByTimeAsync(0);
+    enqueue();
+    await vi.waitFor(() => expect(resumeAgent).toHaveBeenCalledTimes(1));
+    runs.settle("two");
+    await vi.advanceTimersByTimeAsync(1_000);
+    turnEnd(b);
+
+    runs.settle("late news");
+    await vi.advanceTimersByTimeAsync(60_000);
+    turnEnd(b);
+
+    const sent = sentContents(b).join("\n");
+    expect(sent).toContain("one done");
+    expect(sent).toContain("late news done");
+  });
+});

@@ -23,9 +23,9 @@ import type { NotificationDetails } from "./types.js";
 /** How long an idle parent's notification is held before it is sent. */
 export const NOTIFICATION_HOLD_MS = 200;
 
-export interface OutboxMessage {
+export interface OutboxMessage<D = NotificationDetails> {
   content: string;
-  details: NotificationDetails;
+  details: D;
 }
 
 /**
@@ -33,25 +33,36 @@ export interface OutboxMessage {
  * before the send must not rewrite it. Reading an agent's result cancels its
  * id, and an item left with none is dropped; `build` gets the ids still pending.
  */
-export interface OutboxItem {
+export interface OutboxItem<D = NotificationDetails> {
   ids: string[];
-  build(ids: readonly string[]): OutboxMessage;
+  build(ids: readonly string[]): OutboxMessage<D>;
 }
 
-export class CompletionOutbox {
-  private items: OutboxItem[] = [];
+/**
+ * Also carries agents' `SendMessage`s to the main session, in an instance of
+ * its own: the same boundary rules apply, and a burst of messages lands as one
+ * turn, as Claude Code drains its whole queue at once.
+ */
+export class CompletionOutbox<D = NotificationDetails> {
+  private items: OutboxItem<D>[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     /** Delivers one message as a steer that triggers a turn when the parent is idle. */
-    private send: (message: OutboxMessage) => void,
+    private send: (message: OutboxMessage<D>) => void,
     /** Whether the parent has a run in flight, so a `turn_end` is coming. */
     private parentRunning: () => boolean,
+    /** How several pending messages become the one that is sent. */
+    private combineMessages: (messages: OutboxMessage<D>[]) => OutboxMessage<D>,
   ) {}
 
-  /** A newer completion of the same agent (a resume) replaces its pending one. */
-  add(item: OutboxItem): void {
-    for (const id of item.ids) this.cancel(id);
+  /**
+   * A newer completion of the same agent (a resume) replaces its pending one,
+   * unless `replace` is false: a run woken by stranded messages follows the
+   * previous run's completion rather than superseding it.
+   */
+  add(item: OutboxItem<D>, { replace = true }: { replace?: boolean } = {}): void {
+    if (replace) for (const id of item.ids) this.cancel(id);
     this.items.push(item);
     if (!this.parentRunning()) this.arm();
   }
@@ -66,7 +77,12 @@ export class CompletionOutbox {
 
   /** The agent's result was read: it must not also be notified. */
   cancel(id: string): void {
-    for (const item of this.items) item.ids = item.ids.filter(i => i !== id);
+    this.dropWhere(i => i === id);
+  }
+
+  /** Drop every pending id `drop` matches; an item left with none is dropped too. */
+  dropWhere(drop: (id: string) => boolean): void {
+    for (const item of this.items) item.ids = item.ids.filter(i => !drop(i));
     this.items = this.items.filter(item => item.ids.length > 0);
   }
 
@@ -101,13 +117,12 @@ export class CompletionOutbox {
     if (messages.length === 0) return;
     // A send from a timer can outlive the session it was meant for (pi -p
     // tearing down): pi throws on the stale context, and nothing is left to tell.
-    try { this.send(combine(messages)); } catch { /* stale context */ }
+    try { this.send(messages.length === 1 ? messages[0] : this.combineMessages(messages)); } catch { /* stale context */ }
   }
 }
 
-/** One message stays as it was built; several become one message with every agent's details. */
-function combine(messages: OutboxMessage[]): OutboxMessage {
-  if (messages.length === 1) return messages[0];
+/** Several completion notifications as one message, carrying every agent's details. */
+export function combineNotifications(messages: OutboxMessage[]): OutboxMessage {
   const [first, ...rest] = messages.flatMap(({ details: { others, ...own } }) => [own, ...(others ?? [])]);
   return {
     content: `${messages.length} background tasks finished.\n\n${messages.map(m => m.content).join("\n\n")}`,

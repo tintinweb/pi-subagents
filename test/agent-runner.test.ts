@@ -157,6 +157,7 @@ import {
   setGraceTurns,
   setRememberAgents,
 } from "../src/agent-runner.js";
+import { setAgentMessagingEnabled, setMessagingHost } from "../src/send-message.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
@@ -2590,6 +2591,18 @@ describe("agent-runner zero-tool spawns", () => {
     expect(createAgentSession).not.toHaveBeenCalled();
   });
 
+  it("still refuses when the only tool left would be SendMessage", async () => {
+    setMessagingHost({} as any);
+    setAgentMessagingEnabled(true);
+    try {
+      setup({ builtinToolNames: ["Foo", "Bar"] });
+      await expect(run({ agentId: "agent-1" })).rejects.toThrow("would be spawned with zero tools");
+    } finally {
+      setAgentMessagingEnabled(false);
+      setMessagingHost(undefined);
+    }
+  });
+
   it.each<[string, Record<string, unknown>, boolean]>([
     ["isolated", { builtinToolNames: ["Foo"], isolated: true }, true],
     ["no extension loaded", { builtinToolNames: ["Foo"] }, true],
@@ -3353,5 +3366,86 @@ describe("resolveDefaultModel", () => {
 
   it("returns undefined when neither a config model nor a parent model exists", () => {
     expect(resolveDefaultModel(undefined, registry([haiku]), undefined)).toBeUndefined();
+  });
+});
+
+describe("agent-runner SendMessage injection", () => {
+  // The runner only needs a host to exist; the send path is send-message.test.ts's.
+  const host = {} as any;
+  afterEach(() => {
+    setAgentMessagingEnabled(false);
+    setMessagingHost(undefined);
+  });
+
+  async function run(agentConfig: Record<string, unknown>, opts: Record<string, unknown> = {}) {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: agentConfig.extensions ?? true }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig(agentConfig));
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    withExtensions({ "/ext/ok.ts": ["ok_ext"] });
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    await runAgent(ctx, "Explore", "go", { pi, agentId: "agent-1", ...opts });
+    return session;
+  }
+
+  it("injects nothing while agentMessaging is off", async () => {
+    setMessagingHost(host);
+    await run({ extensions: true });
+    expect(customToolNames()).not.toContain("SendMessage");
+  });
+
+  it("injects SendMessage and keeps it active when the setting is on", async () => {
+    setMessagingHost(host);
+    setAgentMessagingEnabled(true);
+    await run({ extensions: true });
+    expect(customToolNames()).toContain("SendMessage");
+    expect(lastToolsPassed()).toContain("SendMessage");
+  });
+
+  it("keeps it under the static allowlist (extensions: false)", async () => {
+    setMessagingHost(host);
+    setAgentMessagingEnabled(true);
+    await run({ extensions: false });
+    expect(lastToolsPassed()).toContain("SendMessage");
+  });
+
+  it("an agent file opts out with agent_messaging: false", async () => {
+    setMessagingHost(host);
+    setAgentMessagingEnabled(true);
+    await run({ extensions: true, agentMessaging: false });
+    expect(customToolNames()).not.toContain("SendMessage");
+  });
+
+  it("disallowed_tools: SendMessage takes it away", async () => {
+    setMessagingHost(host);
+    setAgentMessagingEnabled(true);
+    await run({ extensions: true, disallowedTools: ["SendMessage"] });
+    expect(customToolNames()).not.toContain("SendMessage");
+  });
+
+  it("an isolated agent never gets it", async () => {
+    setMessagingHost(host);
+    setAgentMessagingEnabled(true);
+    await run({ extensions: true }, { isolated: true });
+    expect(customToolNames()).not.toContain("SendMessage");
+  });
+
+  it("delivers every queued steer in one round while messaging is on", async () => {
+    setMessagingHost(host);
+    setAgentMessagingEnabled(true);
+    const session = await run({ extensions: true });
+    expect((session.agent as any).steeringMode).toBe("all");
+  });
+
+  it("keeps pi's steering mode for an agent file that opts out of messaging", async () => {
+    setMessagingHost(host);
+    setAgentMessagingEnabled(true);
+    const session = await run({ extensions: true, agentMessaging: false });
+    expect((session.agent as any).steeringMode).not.toBe("all");
+  });
+
+  it("keeps pi's steering mode while messaging is off", async () => {
+    const session = await run({ extensions: true });
+    expect((session.agent as any).steeringMode).not.toBe("all");
   });
 });

@@ -29,6 +29,7 @@ import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
+import { agentTakesPart, createSendMessageTool, getMessagingHost, SEND_MESSAGE_TOOL_NAME } from "./send-message.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -1118,6 +1119,15 @@ export async function runAgent(
     ? [createStructuredOutputTool(options.structuredOutput, structuredCapture)]
     : [];
   const structuredToolNames = new Set(structuredTools.map(tool => tool.name));
+
+  // SendMessage, as Claude Code gives it to every subagent — here only while the
+  // project's `agentMessaging` is on, never to an isolated agent, and not to one
+  // whose file opts out (`agent_messaging: false`) or denies the tool by name.
+  const messagingHost = getMessagingHost();
+  const messagingTools = messagingHost && options.agentId !== undefined && !isolated
+    && agentTakesPart(type, agentConfig) && !disallowedSet?.has(SEND_MESSAGE_TOOL_NAME)
+    ? [createSendMessageTool(messagingHost, options.agentId)]
+    : [];
   // Re-admitted together at every gate below. Kept as one set so a new injected
   // tool cannot be added to some of the three gates and forgotten at the rest.
   //
@@ -1129,6 +1139,7 @@ export async function runAgent(
   const readmitToolNames = new Set([
     ...[...nestedToolNames].filter(name => !disallowedSet?.has(name)),
     ...structuredToolNames,
+    ...messagingTools.map(tool => tool.name),
   ]);
 
   // As in Claude Code, refuse an agent whose `tools:` list resolved to nothing: with
@@ -1150,7 +1161,8 @@ export async function runAgent(
   if (
     (unrecognized.length > 0 || unmatched.length > 0) &&
     toolNames.every((n) => !BUILTIN_TOOL_NAMES.includes(n) || disallowedSet?.has(n)) &&
-    readmitToolNames.size === 0 &&
+    // SendMessage alone is no toolset: a misspelled `tools:` list must still be refused.
+    [...readmitToolNames].every(n => n === SEND_MESSAGE_TOOL_NAME) &&
     !extensionToolsPossible
   ) {
     const reasons = [
@@ -1209,6 +1221,8 @@ export async function runAgent(
       // satisfy it would make the request unsatisfiable by construction rather
       // than merely restricted.
       ...structuredToolNames,
+      // Already filtered through `disallowedSet` where it was built.
+      ...messagingTools.map(tool => tool.name),
     ];
   } else {
     // Deny the orchestration tools EXCEPT the nested ones this agent opted into —
@@ -1273,7 +1287,7 @@ export async function runAgent(
     ...(parentModelRuntime !== undefined && { modelRuntime: parentModelRuntime as never }),
     model,
     tools: sessionTools,
-    customTools: [...nestedTools, ...structuredTools],
+    customTools: [...nestedTools, ...structuredTools, ...messagingTools],
     resourceLoader: loader,
   };
   if (sessionExcludeTools) {
@@ -1321,6 +1335,15 @@ export async function runAgent(
       nestedCallGate,
     });
   }
+
+  // For an agent that accepts messages, every message queued for it lands in
+  // one round, as Claude Code drains an agent's whole queue at its next tool
+  // round. pi's default `one-at-a-time` would spend one model call per message.
+  // Otherwise steers keep pi's default. Gated like receipt (`agentTakesPart`),
+  // not like the tool: an isolated agent cannot send but still receives. Set on
+  // the agent, not through `setSteeringMode`, which would write the user's
+  // settings file.
+  if (agentTakesPart(type, agentConfig)) session.agent.steeringMode = "all";
 
   options.onSessionCreated?.(session);
 

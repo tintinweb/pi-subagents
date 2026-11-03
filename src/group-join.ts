@@ -82,6 +82,26 @@ export class GroupJoinManager {
     return 'held';
   }
 
+  /**
+   * Take an agent out of its group, so its completion reports on its own. A
+   * group that was waiting only for it is delivered now.
+   */
+  leave(agentId: string): void {
+    const groupId = this.agentToGroup.get(agentId);
+    if (!groupId) return;
+    this.agentToGroup.delete(agentId);
+    const group = this.groups.get(groupId);
+    if (!group || group.delivered) return;
+    group.agentIds.delete(agentId);
+    group.completedRecords.delete(agentId);
+    if (group.agentIds.size === 0) {
+      if (group.timeoutHandle) clearTimeout(group.timeoutHandle);
+      this.groups.delete(groupId);
+    } else if (group.completedRecords.size > 0 && group.completedRecords.size >= group.agentIds.size) {
+      this.deliver(group, false);
+    }
+  }
+
   private onTimeout(group: AgentGroup): void {
     if (group.delivered) return;
     group.timeoutHandle = undefined;
