@@ -3034,9 +3034,12 @@ Terse command-style prompts produce shallow, generic work.
       const record = resolveAgentRef(params.agent_id);
       if (!record) {
         // Evicted, or lost to a reload: answer from the record the session saved.
-        // An evicted handle still resolves to its id through its tombstone.
+        // An evicted handle still resolves to its id through its tombstone. After
+        // a reload there is no tombstone, so the saved entry's handle and alias
+        // have to match on their own.
         const tombstone = manager.resolveMention(params.agent_id);
-        const saved = findAgentRecordEntry(ctx, tombstone?.kind === "tombstone" ? tombstone.entry.id : params.agent_id);
+        const savedId = tombstone?.kind === "tombstone" ? tombstone.entry.id : params.agent_id;
+        const saved = findAgentRecordEntry(ctx, savedId, tombstone === undefined);
         if (saved) {
           outbox.cancel(saved.id);
           return textResult(formatSavedAgentRecord(saved));

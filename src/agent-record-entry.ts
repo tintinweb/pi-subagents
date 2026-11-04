@@ -82,18 +82,33 @@ function isAgentRecordEntryData(data: unknown): data is AgentRecordEntryData {
 }
 
 /**
- * The latest persisted record of agent `id` on the current branch. A resumed
- * agent appends a new entry on each finish, so the last one wins; an entry on
- * an abandoned branch is not this conversation's.
+ * The latest persisted record of `id` on the current branch. A resumed agent
+ * appends a new entry on each finish, so the last one wins; an entry on an
+ * abandoned branch is not this conversation's.
+ *
+ * When `matchHandle` is set, the handle and alias match too, case-insensitively
+ * like `@handle`, and only if no entry's id is `id`. Resume leaves it off: it
+ * reopens whatever this returns, and a handle would reopen a saved session
+ * while that agent's live record still exists.
  */
-export function findAgentRecordEntry(ctx: ExtensionContext, id: string): AgentRecordEntryData | undefined {
+export function findAgentRecordEntry(ctx: ExtensionContext, id: string, matchHandle = false): AgentRecordEntryData | undefined {
   const entries = ctx.sessionManager.getBranch();
+  const wanted = id.toLowerCase();
+  let named: AgentRecordEntryData | undefined;
   for (let i = entries.length - 1; i >= 0; i--) {
     const entry = entries[i];
     if (entry.type !== "custom" || entry.customType !== AGENT_RECORD_ENTRY_TYPE) continue;
-    if (isAgentRecordEntryData(entry.data) && entry.data.id === id) return entry.data;
+    if (!isAgentRecordEntryData(entry.data)) continue;
+    if (entry.data.id === id) return entry.data;
+    if (
+      matchHandle &&
+      named === undefined &&
+      (entry.data.handle?.toLowerCase() === wanted || entry.data.alias?.toLowerCase() === wanted)
+    ) {
+      named = entry.data;
+    }
   }
-  return undefined;
+  return named;
 }
 
 /**
