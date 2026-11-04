@@ -192,4 +192,35 @@ describe("get_subagent_result falls back to the saved record", () => {
     expect(byId).toContain("FIRST-RESULT");
     expect(byId).not.toContain("SECOND-RESULT");
   });
+
+  it("finds a disambiguated type handle (explore-2) after reload", async () => {
+    // Two Explores in one activation: the first keeps `explore`, so the second
+    // is numbered `explore-2`. Both persist a record; after reload the suffixed
+    // handle has to match the saved entry on its own.
+    const branch: any[] = [];
+    const { tools, lifecycle } = boot(branch);
+    const context = ctx({ sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => branch) } });
+    const spawn = (responseText: string) => {
+      vi.mocked(runAgent).mockResolvedValueOnce({ responseText, session: { dispose: vi.fn() } as any, aborted: false, steered: false });
+      return tools
+        .get("Agent")
+        .execute("tc-spawn", { prompt: "Review.", description: "Review", subagent_type: "Explore", run_in_background: false }, undefined, undefined, context)
+        .then((res) => (res as any).details.agentId as string);
+    };
+    await spawn("FIRST-RESULT");
+    const second = await spawn("SECOND-RESULT");
+    expect(branch.find((e) => e.customType === "subagents:record" && e.data.id === second)?.data.handle).toBe("explore-2");
+    await lifecycle.get("session_shutdown")?.();
+    booted = undefined;
+
+    const { tools: tools2 } = boot(branch);
+    const out = textOf(
+      await tools2
+        .get("get_subagent_result")
+        .execute("tc-read", { agent_id: "Explore-2" }, undefined, undefined, ctx({ sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => branch) } })),
+    );
+    expect(out).toContain(`Agent: ${second}`);
+    expect(out).toContain("SECOND-RESULT");
+    expect(out).not.toContain("FIRST-RESULT");
+  });
 });
