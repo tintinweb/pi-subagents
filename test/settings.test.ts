@@ -354,6 +354,20 @@ describe("settings persistence", () => {
       }
     });
 
+    it("keeps maxConcurrentTotal, including 0 (explicit unlimited)", () => {
+      writeProject({ maxConcurrentTotal: 0 });
+      expect(loadSettings(projectDir)).toEqual({ maxConcurrentTotal: 0 });
+      writeProject({ maxConcurrentTotal: 5 });
+      expect(loadSettings(projectDir)).toEqual({ maxConcurrentTotal: 5 });
+    });
+
+    it("drops out-of-range or non-integer maxConcurrentTotal", () => {
+      for (const bad of [-1, 1025, 1.5, "four", null]) {
+        writeProject({ maxConcurrentTotal: bad });
+        expect(loadSettings(projectDir).maxConcurrentTotal).toBeUndefined();
+      }
+    });
+
     it("accepts defaultMaxTurns: 0 (explicit unlimited)", () => {
       writeProject({ defaultMaxTurns: 0 });
       expect(loadSettings(projectDir)).toEqual({ defaultMaxTurns: 0 });
@@ -581,6 +595,7 @@ describe("settings persistence", () => {
       appliers = {
         setMaxConcurrent: vi.fn(),
         setMaxConcurrentForeground: vi.fn(),
+        setMaxConcurrentTotal: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
@@ -618,6 +633,18 @@ describe("settings persistence", () => {
       vi.mocked(appliers.setMaxConcurrentForeground).mockClear();
       applySettings({}, appliers);
       expect(appliers.setMaxConcurrentForeground).not.toHaveBeenCalled();
+    });
+
+    it("applies maxConcurrentTotal, including an explicit 0", () => {
+      applySettings({ maxConcurrentTotal: 5 }, appliers);
+      expect(appliers.setMaxConcurrentTotal).toHaveBeenCalledWith(5);
+
+      applySettings({ maxConcurrentTotal: 0 }, appliers);
+      expect(appliers.setMaxConcurrentTotal).toHaveBeenCalledWith(0);
+
+      vi.mocked(appliers.setMaxConcurrentTotal).mockClear();
+      applySettings({}, appliers);
+      expect(appliers.setMaxConcurrentTotal).not.toHaveBeenCalled();
     });
 
     it("applies packageAgents and packageWorkflows, including false and an empty list", () => {
@@ -850,6 +877,7 @@ describe("settings persistence", () => {
       appliers = {
         setMaxConcurrent: vi.fn(),
         setMaxConcurrentForeground: vi.fn(),
+        setMaxConcurrentTotal: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
