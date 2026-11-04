@@ -101,6 +101,26 @@ describe("AgentManager — Bug 1 race condition (resultConsumed vs onComplete)",
     expect(completedRecord!.resultConsumed).toBeFalsy();
   });
 
+  it("surfaces a clarification request in the completed agent result", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+    });
+    const record = manager.getRecord(id)!;
+    record.parentQuestion = {
+      question: "Which output format should I use?",
+      context: "The task does not specify a format.",
+    };
+    await record.promise;
+
+    expect(record.result).toContain("[PARENT QUESTION]");
+    expect(record.result).toContain("Which output format should I use?");
+    expect(record.result).toContain(`agent ID: ${id}`);
+  });
+
   it("onComplete IS called for foreground agents (lifecycle symmetry)", async () => {
     let completedRecord: AgentRecord | undefined;
     manager = new AgentManager((r) => {

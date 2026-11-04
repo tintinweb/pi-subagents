@@ -1225,6 +1225,7 @@ export class AgentManager {
       record.isBackground = true;
       record.resultConsumed = false;
       record.result = undefined;
+      record.parentQuestion = undefined;
       record.error = undefined;
       record.completedAt = undefined;
       record.status = "queued";
@@ -1262,6 +1263,7 @@ export class AgentManager {
     record.startedAt = Date.now();
     record.completedAt = undefined;
     record.result = undefined;
+    record.parentQuestion = undefined;
     record.error = undefined;
     // Fresh controller, as on the detached path: `abort()` fires whatever
     // `record.abortController` holds, and the spawn's has long settled — so a
@@ -1331,6 +1333,14 @@ export class AgentManager {
       }
     }
     record.result = text;
+    if (record.parentQuestion) {
+      const { question, context } = record.parentQuestion;
+      record.result +=
+        `\n\n[PARENT QUESTION]\nQuestion: ${question}` +
+        (context ? `\nContext: ${context}` : "") +
+        `\nTo continue this agent, resume it with the parent's answer (agent ID: ${record.id}). ` +
+        "If you cannot answer, relay this question in your own result.";
+    }
     record.completedAt ??= Date.now();
   }
 
