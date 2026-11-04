@@ -1,6 +1,9 @@
 // Persistence for pi-subagents operational settings.
-// - Global:  ~/.pi/agent/subagents.json (via getAgentDir()) — manual defaults, never written here
-// - Project: <cwd>/.pi/subagents.json — written by /agents → Settings; overrides global on load
+// - Global:  ~/.pi/agent/subagents.json (via getAgentDir()) — machine-wide defaults
+// - Project: <cwd>/.pi/subagents.json — per-project overrides; wins over global on load
+// /agents → Settings writes the project file when the project already has
+// one, and the global file otherwise — a settings change must not leave a
+// `.pi` directory in every repo the user happens to be in (#391).
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -555,12 +558,17 @@ export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
 }
 
 /**
- * Write project-local settings. Global is never touched from code.
+ * Persist settings. Writes the project file when the project already has
+ * one; otherwise writes the global file, so changing a setting in
+ * /agents → Settings does not create `.pi/subagents.json` in whatever repo
+ * the user happens to be in (#391). The caller passes the complete current
+ * snapshot, which replaces the target file's contents.
  * Returns `true` on success, `false` if the write (or mkdir) failed so the
  * caller can surface a warning — persistence isn't fatal but isn't silent.
  */
 export function saveSettings(s: SubagentsSettings, cwd: string = process.cwd()): boolean {
-  const path = projectPath(cwd);
+  const project = projectPath(cwd);
+  const path = existsSync(project) ? project : globalPath();
   try {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(s, null, 2), "utf-8");
