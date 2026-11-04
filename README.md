@@ -984,6 +984,8 @@ Memory uses a `MEMORY.md` index file and individual memory files with frontmatte
 
 The `disallowed_tools` field is respected when determining write capability — an agent with `tools: write` + `disallowed_tools: write` correctly gets read-only memory.
 
+`project` and `local` memory refuse a symlinked `.pi`, `agent-memory` or `agent-memory-local`, so a cloned repository can't point an agent's memory outside the project.
+
 ## Worktree Isolation
 
 Set `isolation: worktree` to run an agent in a temporary git worktree:
