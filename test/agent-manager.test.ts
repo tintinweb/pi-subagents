@@ -830,6 +830,24 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       expect(opts.onTurnEnd).toBe(onTurnEnd);
     });
 
+    it("does not replace an already-resolved unlimited budget with the spawn limit", async () => {
+      manager = new AgentManager();
+      vi.mocked(runAgent).mockResolvedValue({ responseText: "first", session: mockSession() as any, aborted: false, steered: false });
+      const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+        description: "test",
+        isBackground: true,
+        invocation: { maxTurns: 50 },
+      });
+      await manager.getRecord(id)!.promise;
+      vi.mocked(resumeAgent).mockResolvedValue({ text: "second", aborted: false, steered: false });
+
+      await manager.resume(id, "more", undefined, { maxTurns: undefined, maxTurnsResolved: true });
+      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]).toMatchObject({ maxTurns: undefined, maxTurnsResolved: true });
+
+      await (await manager.resume(id, "again", undefined, { isBackground: true, maxTurns: undefined, maxTurnsResolved: true }))!.promise;
+      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]).toMatchObject({ maxTurns: undefined, maxTurnsResolved: true });
+    });
+
     it("falls back to the limit the agent was spawned with when the caller passes none", async () => {
       manager = new AgentManager();
       vi.mocked(runAgent).mockResolvedValue({ responseText: "first", session: mockSession() as any, aborted: false, steered: false });
