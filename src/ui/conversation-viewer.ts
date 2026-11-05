@@ -26,6 +26,11 @@ interface ToolBlock {
   /** The result already handed to the component, if any. */
   result?: ToolResultPart;
   /**
+   * Abort or error text already handed to the component for a call that never
+   * produced a result. Recorded so a later render does not apply it again.
+   */
+  notRun?: string;
+  /**
    * The block's rendered rows and the width they were produced at.
    *
    * `ToolExecutionComponent` re-wraps and re-paints its whole subtree on every
@@ -904,10 +909,18 @@ export class ConversationViewer implements Component, Focusable {
         this.session.sessionManager.getCwd(),
       );
       component.setExpanded(this.toolsExpanded);
-      // The message is final, so this is decided once, when the block is built.
+      // Known immediately when the turn has already stopped. A block built
+      // while the turn is still running picks a later abort up on the cache path.
       if (notRun && !result) component.updateResult({ content: [{ type: "text", text: notRun }], isError: true });
-      block = { component };
+      block = { component, notRun: notRun && !result ? notRun : undefined };
       this.toolBlocks.set(call.id, block);
+      changed = true;
+    } else if (notRun && !result && block.notRun !== notRun) {
+      // Built while this assistant message was still running, so stopReason was
+      // unset and the call was cached as in progress. Apply the abort or error
+      // once; a repeat render leaves the cached rows alone.
+      block.notRun = notRun;
+      block.component.updateResult({ content: [{ type: "text", text: notRun }], isError: true });
       changed = true;
     }
     if (result && block.result !== result) {

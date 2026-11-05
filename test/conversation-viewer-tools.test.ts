@@ -1,4 +1,4 @@
-import { createBashToolDefinition, createEditToolDefinition, initTheme, type ToolRenderers } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, createEditToolDefinition, initTheme, ToolExecutionComponent, type ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, Text } from "@earendil-works/pi-tui";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentRecord } from "../src/types.js";
@@ -241,6 +241,60 @@ describe("ConversationViewer tool blocks", () => {
     expect(out).toContain("sleep 100");
     expect(out).toContain("Operation aborted");
     expect(out).toContain("provider exploded");
+  });
+
+  // The viewer is live: the block is often built while the assistant message is
+  // still running and stopReason is unset. A later abort or error hits the same
+  // cached call id and has to be applied then, not only when the block is created.
+  it("applies a later abort or error to a tool block built while the turn was still running", () => {
+    const aborted: { role: string; stopReason?: string; content: ReturnType<typeof callPart>[] } = {
+      role: "assistant",
+      content: [callPart("a1", "bash", { command: "sleep 100" })],
+    };
+    const failed: { role: string; stopReason?: string; errorMessage?: string; content: ReturnType<typeof callPart>[] } = {
+      role: "assistant",
+      errorMessage: "provider exploded",
+      content: [callPart("a2", "bash", { command: "sleep 200" })],
+    };
+    const v = viewerFor([aborted, failed]);
+    const running = v.render(120).map(stripTerminalSequences).join("\n");
+    expect(running).toContain("sleep 100");
+    expect(running).toContain("sleep 200");
+    expect(running).not.toContain("Operation aborted");
+    expect(running).not.toContain("provider exploded");
+
+    aborted.stopReason = "aborted";
+    failed.stopReason = "error";
+    const settled = v.render(120).map(stripTerminalSequences).join("\n");
+    expect(settled).toContain("Operation aborted");
+    expect(settled).toContain("provider exploded");
+
+    // Already shown: another render must not hand the same text to the component again.
+    const updateResult = vi.spyOn(ToolExecutionComponent.prototype, "updateResult");
+    try {
+      const again = v.render(120).map(stripTerminalSequences).join("\n");
+      expect(again).toContain("Operation aborted");
+      expect(again).toContain("provider exploded");
+      expect(updateResult).not.toHaveBeenCalled();
+    } finally {
+      updateResult.mockRestore();
+    }
+  });
+
+  // The create-time path records the text it showed, so a settled transcript
+  // does not call updateResult again on every redraw.
+  it("does not reapply an abort that was shown when the block was created", () => {
+    const v = viewerFor([
+      { role: "assistant", stopReason: "aborted", content: [callPart("a1", "bash", { command: "sleep 100" })] },
+    ]);
+    expect(v.render(120).map(stripTerminalSequences).join("\n")).toContain("Operation aborted");
+    const updateResult = vi.spyOn(ToolExecutionComponent.prototype, "updateResult");
+    try {
+      expect(v.render(120).map(stripTerminalSequences).join("\n")).toContain("Operation aborted");
+      expect(updateResult).not.toHaveBeenCalled();
+    } finally {
+      updateResult.mockRestore();
+    }
   });
 
   // Renderers come from the agent's own session, so an extension tool that ships
