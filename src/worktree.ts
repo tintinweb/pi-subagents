@@ -53,12 +53,14 @@ export function isWorktreeIsolationEnabled(): boolean {
 }
 
 export interface WorktreeCleanupResult {
-  /** Whether changes were found in the worktree. */
+  /** Whether changes were found or may remain after a cleanup failure. */
   hasChanges: boolean;
   /** Branch name if changes were committed. */
   branch?: string;
-  /** Worktree path if it was kept. */
+  /** Worktree path. On error, the agent's changes remain here for recovery. */
   path?: string;
+  /** Cleanup failure. When present, the worktree is deliberately preserved. */
+  error?: string;
 }
 
 /**
@@ -132,6 +134,7 @@ export async function cleanupWorktree(
     return { hasChanges: false };
   }
 
+  let preservedBranch: string | undefined;
   try {
     // Check for uncommitted changes in the worktree
     const status = await git(pi, worktree.path, ["status", "--porcelain"], 10000);
@@ -142,7 +145,7 @@ export async function cleanupWorktree(
       // Truncate description for commit message (no shell sanitization needed — pi.exec uses argv)
       const safeDesc = agentDescription.slice(0, 200);
       const commitMsg = `pi-agent: ${safeDesc}`;
-      await git(pi, worktree.path, ["commit", "--no-verify", "-m", commitMsg], 10000);
+      await git(pi, worktree.path, ["commit", "--no-verify", "--no-gpg-sign", "-m", commitMsg], 10000);
     } else {
       const currentSha = await git(pi, worktree.path, ["rev-parse", "HEAD"], 5000);
 
@@ -165,6 +168,7 @@ export async function cleanupWorktree(
     }
     // Update branch name in worktree info for the caller
     worktree.branch = branchName;
+    preservedBranch = branchName;
 
     // Remove the worktree (branch persists in main repo)
     await removeWorktree(pi, cwd, worktree.path);
@@ -174,10 +178,15 @@ export async function cleanupWorktree(
       branch: worktree.branch,
       path: worktree.path,
     };
-  } catch {
-    // Best effort cleanup on error
-    try { await removeWorktree(pi, cwd, worktree.path); } catch { /* ignore */ }
-    return { hasChanges: false };
+  } catch (error) {
+    // This may be the only copy of the agent's work. Keep it recoverable and
+    // report the path instead of turning a preservation failure into "no changes".
+    return {
+      hasChanges: true,
+      ...(preservedBranch ? { branch: preservedBranch } : {}),
+      path: worktree.path,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -187,11 +196,14 @@ export async function cleanupWorktree(
 async function removeWorktree(pi: ExtensionAPI, cwd: string, worktreePath: string): Promise<void> {
   try {
     await git(pi, cwd, ["worktree", "remove", "--force", worktreePath], 10000);
-  } catch {
-    // If git worktree remove fails, try pruning
+  } catch (removeError) {
+    // A concurrent remover may have deleted the directory while Git still
+    // returned an error. Prune stale metadata, but report failure if the copy
+    // still exists — callers must not mistake a leaked worktree for success.
     try {
       await git(pi, cwd, ["worktree", "prune"], 5000);
     } catch { /* ignore */ }
+    if (existsSync(worktreePath)) throw removeError;
   }
 }
 
