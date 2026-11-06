@@ -278,6 +278,32 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("round-trips both workflow exposure modes and preserves absence", () => {
+    for (const mode of ["direct", "deferred"] as const) {
+      saveSettings({ workflowToolExposure: mode }, projectDir);
+      expect(loadSettings(projectDir)).toEqual({ workflowToolExposure: mode });
+    }
+    saveSettings({}, projectDir);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
+  it("drops unsupported workflow exposure values", () => {
+    for (const value of ["hidden", "codemode", "DEFERRED", "", true, null, ["deferred"]]) {
+      writeProject({ workflowToolExposure: value });
+      expect(loadSettings(projectDir)).toEqual({});
+    }
+  });
+
+  it("merges workflow exposure with the project taking precedence", () => {
+    writeGlobal({ workflowToolExposure: "deferred" });
+    expect(loadSettings(projectDir)).toEqual({ workflowToolExposure: "deferred" });
+    writeProject({ workflowToolExposure: "direct" });
+    expect(loadSettings(projectDir)).toEqual({ workflowToolExposure: "direct" });
+    writeGlobal({ workflowToolExposure: "direct" });
+    writeProject({ workflowToolExposure: "deferred" });
+    expect(loadSettings(projectDir)).toEqual({ workflowToolExposure: "deferred" });
+  });
+
   it("sanitize drops non-boolean schedulingEnabled silently", async () => {
     writeProject({ schedulingEnabled: "yes" } as any);
     expect(loadSettings(projectDir)).toEqual({});

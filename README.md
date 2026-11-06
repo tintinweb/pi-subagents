@@ -807,7 +807,27 @@ Turn `all` on for tools that genuinely emit Markdown, and off again for a diff o
 
 Leaving it unset is not quite the same as `true`. Unset means *auto*: on, unless another extension already provides a workflow tool, in which case this one warns and stands down for the session. Two orchestrators in one tool spec is a worse default than none — the model has to guess which to call and pays for both descriptions to find out — and the extension that was installed on purpose is the one that should survive. Setting `workflowsEnabled` explicitly pins the answer: `true` keeps ours whatever else is loaded, `false` is off regardless.
 
-The match is on the exact tool names `Workflow` (Claude Code's) and `SubagentWorkflow` (ours), never a substring, so a `list_workflows` or `github_workflow_run` from some CI integration does not silently take the feature down. The check runs at `session_start` and nowhere earlier, because `getAllTools` throws during extension loading and load order means a check at registration time could not see an extension that has not loaded yet — so the tool is registered first and withdrawn from the active set through `setActiveTools`, which rebuilds the system prompt before any turn runs. When the other extension took the `SubagentWorkflow` name itself, pi's first-registration-wins rule already dropped ours, so there is nothing to withdraw and only the menu and the CLI flag come down.
+The match is on the exact tool names `Workflow` (Claude Code's) and `SubagentWorkflow` (ours), never a substring, so a `list_workflows` or `github_workflow_run` from some CI integration does not silently take the feature down. The check runs at `session_start` and nowhere earlier, because `getAllTools` throws during extension loading and load order means a check at registration time could not see an extension that has not loaded yet — so the tool is registered first and withdrawn from the active set through `setActiveTools`, which rebuilds the system prompt before any turn runs. A deferred tool is also hidden from discovery when it stands down. When the other extension took the `SubagentWorkflow` name itself, pi's first-registration-wins rule already dropped ours, so there is nothing to withdraw and only the menu and the CLI flag come down.
+
+**Workflow tool exposure** (`workflowToolExposure`, default `"direct"`): when the model is offered `SubagentWorkflow`. Set `"deferred"` in `subagents.json` to register it for discovery, normally inactive in a fresh session. Pi's native `tool_search` can discover and activate it; the next model request receives the same full description and schema, and the tool executes normally. This setting is JSON-only and read when the extension loads. It does not change the master switch, collision handling, or `--subagents-workflow-file`; deferral controls declaration, not permissions.
+
+After editing the setting, reload the extension. Pi can keep an activated Workflow active across `/reload`, and changing the setting does not erase earlier declarations from the transcript; a new or reopened session may need discovery again.
+
+For example, add this to `<cwd>/.pi/subagents.json` (or the global `subagents.json`):
+
+```json
+{ "workflowToolExposure": "deferred" }
+```
+
+Enable pi's native `tool_search`, which is off by default, in pi's **separate** `<cwd>/.pi/settings.json` (or `~/.pi/agent/settings.json`):
+
+```json
+{ "defaultTools": ["+tool_search"] }
+```
+
+If `defaultTools` already exists, append `"+tool_search"` to its list and keep the other entries and settings. Alternatively, start pi with `--tools +tool_search` to add it for that invocation. A plain `--tools` allowlist must include both `tool_search` and `SubagentWorkflow` alongside the other desired tools; naming Workflow there can activate it immediately. If pi's `extensions` selection disables `builtin:tool-search` (for example, with `-builtin:tool-search`), remove that exclusion first: `defaultTools` cannot load a disabled extension.
+
+The extension does not change pi's settings. Before model requests, it warns if an inactive Workflow is not registered or is excluded from pi's registry, or native `tool_search` is missing, inactive, or cannot be verified; it keeps the tool deferred. SDK hosts must load pi's native `createToolSearchExtension()` before activating `tool_search` via `defaultTools`, and may show the verification warning even when search works. See [workflow settings and troubleshooting](docs/workflows.md#settings-and-the-cli-flag).
 
 **Tool description** (`toolDescriptionMode`, default `"full"`): which Agent tool description the LLM sees. `"full"` is the rich Claude Code-style prompt (~1,400 tokens with the default agents); `"compact"` is ~75% smaller — one-line agent type list, terse usage notes — for small/local models where tool-spec tokens are expensive. Per-option details stay in the parameter descriptions in every mode (the parameter schema is never customizable). Applies on the next pi session.
 

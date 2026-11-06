@@ -63,6 +63,7 @@ import {
   createAgentSession,
   DefaultResourceLoader,
   getAgentDir,
+  type InlineExtension,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -135,6 +136,14 @@ export interface RunPrintModeOptions {
   signal?: AbortSignal;
   /** Additional extension paths loaded only for this test run. */
   extensionPaths?: string[];
+  /** Inline host extensions, such as Pi's native tool search. */
+  extensionFactories?: InlineExtension[];
+  /** Host tool selection, applied by Pi rather than manually activating tools. */
+  defaultTools?: string[];
+  /** Explicit host allowlist/modifiers, matching Pi's --tools selection. */
+  tools?: string[];
+  /** Use a persisted transcript to exercise Pi's native restore behavior. */
+  sessionManager?: SessionManager;
   /** Called once after the real parent session is created and extensions are bound. */
   onParentSession?: (session: AgentSession, manager: ManagerHandle | undefined) => void;
   /**
@@ -346,6 +355,7 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     cwd,
     agentDir,
     additionalExtensionPaths: [EXTENSION_PATH, ...(options.extensionPaths ?? [])],
+    extensionFactories: options.extensionFactories,
     systemPromptOverride: () => options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT,
     appendSystemPromptOverride: () => [],
     noPromptTemplates: true,
@@ -366,13 +376,18 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
     modelRegistry: modelRegistry as any,
     modelRuntime: modelRuntime as any,
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(cwd),
+    tools: options.tools,
+    sessionManager: options.sessionManager ?? SessionManager.inMemory(cwd),
     // Live: real settings so an omitted model resolves to your local default
     // (settingsManager.getDefaultModel) and retries/compaction match your config.
     // Faux: in-memory, deterministic, no disk.
     settingsManager: live
       ? SettingsManager.create(cwd, agentDir)
-      : SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
+      : SettingsManager.inMemory({
+          compaction: { enabled: false },
+          retry: { enabled: false },
+          ...(options.defaultTools ? { defaultTools: options.defaultTools } : {}),
+        }),
   });
   session.setSessionName("print-mode-host");
 
