@@ -180,7 +180,12 @@ export class SubagentScheduler {
           const t = setTimeout(() => {
             this.executeJob(job.id);
             // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
-            store.update(job.id, { enabled: false });
+            try {
+              store.update(job.id, { enabled: false });
+            } catch (err) {
+              this.emit({ type: "error", jobId: job.id, error: err instanceof Error ? err.message : String(err) });
+              return;
+            }
             const updated = store.get(job.id);
             if (updated) this.emit({ type: "updated", job: updated });
           }, delay);
@@ -227,7 +232,12 @@ export class SubagentScheduler {
     const job = store.get(id);
     if (!job?.enabled) return;
 
-    store.update(id, { lastStatus: "running" });
+    // status persistence is bookkeeping; a lock failure must not escape the tick
+    try {
+      store.update(id, { lastStatus: "running" });
+    } catch (err) {
+      this.emit({ type: "error", jobId: id, error: err instanceof Error ? err.message : String(err) });
+    }
 
     // Resolve model at fire time — registry contents may have changed since the
     // job was created (auth added/removed). Fall back silently to spawn-default
@@ -274,7 +284,9 @@ export class SubagentScheduler {
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      try {
+        store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
+      } catch { /* bookkeeping — the error event below is the durable signal */ }
       this.emit({ type: "error", jobId: id, error });
       return;
     }
@@ -282,14 +294,16 @@ export class SubagentScheduler {
     this.emit({ type: "fired", jobId: id, agentId, name: job.name });
 
     const finalize = (status: "success" | "error") => {
-      const next = this.getNextRun(id);
-      const current = store.get(id);
-      store.update(id, {
-        lastRun: new Date().toISOString(),
-        lastStatus: status,
-        runCount: (current?.runCount ?? 0) + 1,
-        nextRun: next,
-      });
+      try {
+        const next = this.getNextRun(id);
+        const current = store.get(id);
+        store.update(id, {
+          lastRun: new Date().toISOString(),
+          lastStatus: status,
+          runCount: (current?.runCount ?? 0) + 1,
+          nextRun: next,
+        });
+      } catch { /* bookkeeping — a failed persist must not surface as an unhandled rejection */ }
     };
 
     // AgentManager's promise resolves either way (its .catch returns ""), so we
