@@ -216,11 +216,14 @@ export function buildInvocationTags(
   };
 }
 
-/** Truncate text to a single line, max `len` chars. */
+/** Truncate text to a single line, max `len` chars. Collapses newlines to spaces and removes empty lines. */
 function truncateLine(text: string, len = 60): string {
-  const line = text.split("\n").find(l => l.trim())?.trim() ?? "";
-  if (line.length <= len) return line;
-  return line.slice(0, len) + "…";
+  const normalized = text.split("\n").map(l => l.trim()).filter(l => l.length > 0).join(" ");
+  if (normalized.length <= len) return normalized;
+  if (len <= 0) return "";
+  const startLen = Math.floor(len / 2);
+  const endLen = len - startLen;
+  return `${normalized.slice(0, startLen)}…${normalized.slice(normalized.length - endLen)}`;
 }
 
 /** Build a human-readable activity string from currently-running tools or response text. */
