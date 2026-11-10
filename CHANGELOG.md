@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Partial README translations in Simplified Chinese, Japanese and Korean** (`README.zh-CN.md`, `README.ja.md`, `README.ko.md`). They cover the intro, Features, Install, Quick Start and the `/agents` command, and link to the English `README.md` for everything else. A language switcher sits at the top of each README.
+
 ### Fixed
 
 - **Conversation viewer honors `tui.altScreen.top`/`tui.altScreen.bottom`.** The fullscreen observer's scroll-to-top and jump-to-latest keys, and the jump-to-latest divider label, now resolve through your keybindings the way its scroll and expand keys already did. Remapping those actions in `keybindings.json` no longer leaves the observer on the stock `Ctrl+Home`/`Ctrl+End` while the main transcript uses the remap. `Home`/`End` keep working as aliases, and `Ctrl+Home`/`Ctrl+End` now also scroll in the windowed viewer ([#438](https://github.com/tintinweb/pi-subagents/issues/438)).
