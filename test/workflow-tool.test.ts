@@ -1478,7 +1478,7 @@ describe("collisions with another extension", () => {
    * Drive `/agents → Settings` far enough to write the settings file.
    *
    * Any change writes the WHOLE snapshot, so which row is toggled does not
-   * matter — row 0 is `Max concurrency`, whose single-value list re-applies the
+   * matter — row 0 is `Max background concurrency`, whose single-value list re-applies the
    * value it already had. What matters is that the file gets written at all.
    */
   async function changeAnUnrelatedSetting(booted: ReturnType<typeof boot>) {
