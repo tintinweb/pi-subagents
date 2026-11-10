@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.2] - 2026-11-10
+
 ### Added
 - **Partial README translations in Simplified Chinese, Japanese and Korean** (`README.zh-CN.md`, `README.ja.md`, `README.ko.md`). They cover the intro, Features, Install, Quick Start and the `/agents` command, and link to the English `README.md` for everything else. A language switcher sits at the top of each README.
 
