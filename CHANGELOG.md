@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Conversation viewer honors `tui.altScreen.top`/`tui.altScreen.bottom`.** The fullscreen observer's scroll-to-top and jump-to-latest keys, and the jump-to-latest divider label, now resolve through your keybindings the way its scroll and expand keys already did. Remapping those actions in `keybindings.json` no longer leaves the observer on the stock `Ctrl+Home`/`Ctrl+End` while the main transcript uses the remap. `Home`/`End` keep working as aliases, and `Ctrl+Home`/`Ctrl+End` now also scroll in the windowed viewer ([#438](https://github.com/tintinweb/pi-subagents/issues/438)).
+
 ## [0.23.1] - 2026-11-04
 
 ### Added
