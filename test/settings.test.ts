@@ -354,17 +354,17 @@ describe("settings persistence", () => {
       }
     });
 
-    it("keeps maxConcurrentTotal, including 0 (explicit unlimited)", () => {
-      writeProject({ maxConcurrentTotal: 0 });
-      expect(loadSettings(projectDir)).toEqual({ maxConcurrentTotal: 0 });
-      writeProject({ maxConcurrentTotal: 5 });
-      expect(loadSettings(projectDir)).toEqual({ maxConcurrentTotal: 5 });
+    it("keeps maxConcurrentNested, including 0 (explicit unlimited)", () => {
+      writeProject({ maxConcurrentNested: 0 });
+      expect(loadSettings(projectDir)).toEqual({ maxConcurrentNested: 0 });
+      writeProject({ maxConcurrentNested: 5 });
+      expect(loadSettings(projectDir)).toEqual({ maxConcurrentNested: 5 });
     });
 
-    it("drops out-of-range or non-integer maxConcurrentTotal", () => {
+    it("drops out-of-range or non-integer maxConcurrentNested", () => {
       for (const bad of [-1, 1025, 1.5, "four", null]) {
-        writeProject({ maxConcurrentTotal: bad });
-        expect(loadSettings(projectDir).maxConcurrentTotal).toBeUndefined();
+        writeProject({ maxConcurrentNested: bad });
+        expect(loadSettings(projectDir).maxConcurrentNested).toBeUndefined();
       }
     });
 
@@ -595,7 +595,7 @@ describe("settings persistence", () => {
       appliers = {
         setMaxConcurrent: vi.fn(),
         setMaxConcurrentForeground: vi.fn(),
-        setMaxConcurrentTotal: vi.fn(),
+        setMaxConcurrentNested: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),
@@ -635,16 +635,16 @@ describe("settings persistence", () => {
       expect(appliers.setMaxConcurrentForeground).not.toHaveBeenCalled();
     });
 
-    it("applies maxConcurrentTotal, including an explicit 0", () => {
-      applySettings({ maxConcurrentTotal: 5 }, appliers);
-      expect(appliers.setMaxConcurrentTotal).toHaveBeenCalledWith(5);
+    it("applies maxConcurrentNested, including an explicit 0", () => {
+      applySettings({ maxConcurrentNested: 5 }, appliers);
+      expect(appliers.setMaxConcurrentNested).toHaveBeenCalledWith(5);
 
-      applySettings({ maxConcurrentTotal: 0 }, appliers);
-      expect(appliers.setMaxConcurrentTotal).toHaveBeenCalledWith(0);
+      applySettings({ maxConcurrentNested: 0 }, appliers);
+      expect(appliers.setMaxConcurrentNested).toHaveBeenCalledWith(0);
 
-      vi.mocked(appliers.setMaxConcurrentTotal).mockClear();
+      vi.mocked(appliers.setMaxConcurrentNested).mockClear();
       applySettings({}, appliers);
-      expect(appliers.setMaxConcurrentTotal).not.toHaveBeenCalled();
+      expect(appliers.setMaxConcurrentNested).not.toHaveBeenCalled();
     });
 
     it("applies packageAgents and packageWorkflows, including false and an empty list", () => {
@@ -877,7 +877,7 @@ describe("settings persistence", () => {
       appliers = {
         setMaxConcurrent: vi.fn(),
         setMaxConcurrentForeground: vi.fn(),
-        setMaxConcurrentTotal: vi.fn(),
+        setMaxConcurrentNested: vi.fn(),
         setDefaultMaxTurns: vi.fn(),
         setGraceTurns: vi.fn(),
         setDefaultJoinMode: vi.fn(),

@@ -1567,7 +1567,7 @@ export default function (pi: ExtensionAPI) {
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
-      setMaxConcurrentTotal: (n) => manager.setMaxConcurrentTotal(n),
+      setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
@@ -3757,7 +3757,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       maxConcurrent: manager.getMaxConcurrent(),
       // 0 = unlimited, and the default — see SubagentsSettings.
       maxConcurrentForeground: manager.getMaxConcurrentForeground(),
-      maxConcurrentTotal: manager.getMaxConcurrentTotal(),
+      maxConcurrentNested: manager.getMaxConcurrentNested(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -3834,14 +3834,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
   }
 
   const NUMERIC_IDS = new Set([
-    "maxConcurrent", "maxConcurrentForeground", "maxConcurrentTotal", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
+    "maxConcurrent", "maxConcurrentForeground", "maxConcurrentNested", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
   ]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const mcf = manager.getMaxConcurrentForeground();
-      const mct = manager.getMaxConcurrentTotal();
+      const mcn = manager.getMaxConcurrentNested();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -3856,24 +3856,31 @@ Write the file using the write tool. Only write the file, nothing else.`;
       return [
         {
           id: "maxConcurrent",
-          label: "Max concurrency",
-          description: "Max concurrent background agents (Enter to type)",
+          label: "Max background concurrency",
+          description: "Max concurrent background agents; extras wait in a queue (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
         },
         {
           id: "maxConcurrentForeground",
           label: "Max foreground concurrency",
-          description: "Max concurrent foreground (blocking) agents (0 = unlimited, Enter to type)",
+          description: "Max concurrent foreground (blocking) agents; extras wait in a queue (0 = unlimited, Enter to type)",
           currentValue: String(mcf),
           values: [String(mcf)],
         },
         {
-          id: "maxConcurrentTotal",
-          label: "Max total concurrency",
-          description: "Hard cap on running agents; nested spawns over it are refused (0 = unlimited, Enter to type)",
-          currentValue: String(mct),
-          values: [String(mct)],
+          id: "maxConcurrentNested",
+          label: "Max nested concurrency",
+          description: "Max concurrent nested agents (started by subagents); extras are refused (0 = unlimited, Enter to type)",
+          currentValue: String(mcn),
+          values: [String(mcn)],
+        },
+        {
+          id: "maxSubagentDepth",
+          label: "Nested depth",
+          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
+          currentValue: String(msd),
+          values: [String(msd)],
         },
         {
           id: "defaultMaxTurns",
@@ -3888,13 +3895,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
-        },
-        {
-          id: "maxSubagentDepth",
-          label: "Nested depth",
-          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
-          currentValue: String(msd),
-          values: [String(msd)],
         },
         {
           id: "joinMode",
@@ -4067,7 +4067,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const n = parseInt(value, 10);
         if (n >= 1) {
           manager.setMaxConcurrent(n);
-          notifyApplied(ctx, `Max concurrency set to ${n}`);
+          notifyApplied(ctx, `Max background concurrency set to ${n}`);
         }
       } else if (id === "maxConcurrentForeground") {
         // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
@@ -4078,13 +4078,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
             ? "Max foreground concurrency set to unlimited"
             : `Max foreground concurrency set to ${n}`);
         }
-      } else if (id === "maxConcurrentTotal") {
+      } else if (id === "maxConcurrentNested") {
         const n = parseInt(value, 10);
         if (n >= 0) {
-          manager.setMaxConcurrentTotal(n);
+          manager.setMaxConcurrentNested(n);
           notifyApplied(ctx, n === 0
-            ? "Max total concurrency set to unlimited"
-            : `Max total concurrency set to ${n}`);
+            ? "Max nested concurrency set to unlimited"
+            : `Max nested concurrency set to ${n}`);
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
@@ -4298,8 +4298,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
         ? String(manager.getMaxConcurrent())
         : result === "maxConcurrentForeground"
           ? String(manager.getMaxConcurrentForeground())
-          : result === "maxConcurrentTotal"
-            ? String(manager.getMaxConcurrentTotal())
+          : result === "maxConcurrentNested"
+            ? String(manager.getMaxConcurrentNested())
           : result === "defaultMaxTurns"
             ? String(getDefaultMaxTurns() ?? 0)
             : result === "maxSubagentDepth"
@@ -4307,11 +4307,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
               : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
-        ? "Max concurrency (1+)"
+        ? "Max background concurrency (1+)"
         : result === "maxConcurrentForeground"
           ? "Max foreground concurrency (0 = unlimited)"
-          : result === "maxConcurrentTotal"
-            ? "Max total concurrency (0 = unlimited)"
+          : result === "maxConcurrentNested"
+            ? "Max nested concurrency (0 = unlimited)"
           : result === "defaultMaxTurns"
             ? "Default max turns (0 = unlimited)"
             : result === "maxSubagentDepth"
