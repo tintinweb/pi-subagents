@@ -691,7 +691,7 @@ The two are deliberately **not** one limit. A foreground agent blocks the parent
 
 The foreground pool does not cover `resume`: a foreground resume reopens an existing session and never reaches the spawn path, so several blocking resumes in one message can still run at once. A *background* resume does take a background slot and queues behind them like any other background agent.
 
-**Nested** (`maxConcurrentNested`, default `10`, `0` = unlimited). It counts running [nested children](#nested-subagents) across the session, including the children of workflow agents. A nested spawn over it is refused, not queued: the nested `Agent` call returns an error telling the parent to do the work itself. Queueing would deadlock a child behind a parent that waits on it. Top-level agents neither count nor are refused. Nested `resume` is not checked.
+**Nested** (`maxConcurrentNested`, default `10`, `0` = unlimited). It counts running [nested children](#nested-subagents) across the session, including the children of workflow agents. A nested spawn over it is refused, not queued: the nested `Agent` call returns an error telling the parent to do the work itself. Queueing would deadlock a child behind a parent that waits on it. Top-level agents neither count nor are refused. A nested `resume` counts while it runs but is never refused, as in Claude Code.
 
 Claude Code instead has one limit, `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` (default `20`), which counts every subagent and refuses top-level spawns too. Here top-level spawns queue, and the default 10 background plus 10 nested gives the same 20 at full load. Set all three limits to bound the total.
 
