@@ -466,11 +466,9 @@ export class AgentWidget {
       const parts: string[] = [];
       if (this.showModel()) {
         // Leading, and paired: a thinking level means nothing without the model
-        // it applies to. The tag is taken from buildInvocationTags rather than
-        // rebuilt so the "(asked X)" annotation survives.
-        // Bare level, not "thinking: high" — it reads as a property of the model
-        // beside it, and the fleet row shows the same form. The tag list keeps
-        // the label for the viewer and tool result.
+        // it applies to. Both come from buildInvocationTags so the "(asked X)"
+        // annotation survives. The level is bare, not "thinking: high", as on
+        // the fleet row; the tag list keeps the label for the viewer and tool result.
         const { modelName, thinking } = buildInvocationTags(a.invocation);
         if (modelName) parts.push(modelName);
         if (thinking) parts.push(thinking);
