@@ -159,8 +159,10 @@ describe("AgentWidget", () => {
   it("names the model and thinking on a running row under showModel", () => {
     const manager = { listAgents: () => [makeRecord("bg", { isBackground: true })] };
 
-    expect(renderLines(manager, "bg", () => "background", true))
-      .toContain("sonnet 4.6 · thinking: high");
+    const on = renderLines(manager, "bg", () => "background", true);
+    // Bare level, not "thinking: high" — the label is dropped on this surface.
+    expect(on).toContain("sonnet 4.6 · high");
+    expect(on).not.toContain("thinking:");
   });
 
   it("renders the row exactly as before when showModel is off", () => {
@@ -184,8 +186,9 @@ describe("AgentWidget", () => {
     record.invocation = { modelName: "haiku 4.5", thinking: "high", requestedThinking: "max" };
     const manager = { listAgents: () => [record] };
 
+    // Label stripped, but the "(asked max)" annotation survives the strip.
     expect(renderLines(manager, "bg", () => "background", true))
-      .toContain("haiku 4.5 · thinking: high (asked max)");
+      .toContain("haiku 4.5 · high (asked max)");
   });
 
   // Queued agents stay a one-line count. A fan-out of ten would otherwise eat

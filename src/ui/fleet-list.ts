@@ -16,7 +16,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
+import { type AgentActivity, buildInvocationTags, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./conversation-viewer.js";
 
 /** Widget key for the below-editor fleet list. */
@@ -151,6 +151,14 @@ export class FleetList {
      * widget this list shares with. Omitted → no `b` affordance.
      */
     private backgroundAction?: (record: AgentRecord, notify: (message: string) => void) => ViewerBackgroundAction,
+    /**
+     * Read live at render time, like `showCost`. Whether each row names the
+     * model driving the run and the thinking level it is running at. Defaults to
+     * off — the extension supplies the user's `showModel` setting — because the
+     * row is already dense and the same pair is shown unconditionally in the
+     * conversation viewer and the `Agent` tool result.
+     */
+    private showModel: () => boolean = () => false,
   ) {}
 
   // ---- Lifecycle ----
@@ -545,7 +553,15 @@ export class FleetList {
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    let left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    if (this.showModel()) {
+      // After the description, not in the stats: rightAlign truncates only the
+      // left side, so here the model is cut first and the name survives. Bare
+      // level (`sonnet 4.6 · high`), matching the widget's running line.
+      const { modelName, thinking } = buildInvocationTags(record.invocation);
+      const model = [modelName, thinking].filter(Boolean).join(" · ");
+      if (model) left += theme.fg(selected ? "text" : "dim", ` · ${model}`);
+    }
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it
     // outlives the agent.

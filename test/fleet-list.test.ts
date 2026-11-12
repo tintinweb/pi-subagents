@@ -697,6 +697,76 @@ describe("FleetList cost display", () => {
   });
 });
 
+describe("FleetList model display", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  const SONNET: AgentRecord["invocation"] = { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" };
+
+  /** A fleet over one record, with `showModel` read live from `state.on`. */
+  function mount(state: { on: boolean }, invocation: AgentRecord["invocation"] = SONNET) {
+    const record = makeRecord({ invocation });
+    // showModel is the last positional arg; the middle args take their defaults.
+    const fleet = new FleetList(fakeManager([record]), new Map(), () => false, undefined, undefined, undefined, undefined, () => state.on);
+    let factory: any;
+    fleet.setUICtx({
+      setWidget: (_k: string, c: any) => { factory = c; },
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: (() => new Promise(() => {})) as any,
+    } as any);
+    return {
+      fleet,
+      render: (width = 120): string => {
+        fleet.update();
+        return factory({ requestRender: () => {}, terminal: { columns: width, rows: 40 } }, theme).render(width).join("\n");
+      },
+    };
+  }
+
+  it("names the model and bare thinking level after the description when enabled", () => {
+    const out = mount({ on: true }).render();
+    // Bare level, not "thinking: high" — the label is dropped on this surface,
+    // matching the widget's running row.
+    expect(out).toContain("Sleep then report 1 · sonnet 4.6 · high");
+    expect(out).not.toContain("thinking:");
+    // On the left, ahead of the right-aligned stats.
+    expect(out.indexOf("sonnet 4.6")).toBeLessThan(out.indexOf("token"));
+    // The short label, never the canonical id.
+    expect(out).not.toContain("anthropic/claude-sonnet-4-6");
+  });
+
+  it("shows no model or thinking level when disabled", () => {
+    const out = mount({ on: false }).render();
+    expect(out).not.toContain("sonnet 4.6");
+    expect(out).not.toContain("high");
+  });
+
+  it("keeps the (asked X) annotations", () => {
+    const out = mount({ on: true }, {
+      modelName: "haiku 4.5", requestedModel: "opus", thinking: "high", requestedThinking: "max",
+    }).render();
+    expect(out).toContain("haiku 4.5 (asked opus) · high (asked max)");
+  });
+
+  it("cuts the model, not the agent name or stats, on a narrow terminal", () => {
+    const out = mount({ on: true }, {
+      modelName: "haiku 4.5", requestedModel: "opus", thinking: "high", requestedThinking: "max",
+    }).render(60);
+    expect(out).toContain("Agent  Sleep then report 1");
+    expect(out).toContain("13.1k tokens");
+    expect(out).not.toContain("(asked max)");
+  });
+
+  it("picks up a live toggle on the next update", () => {
+    const state = { on: false };
+    const { render } = mount(state);
+    expect(render()).not.toContain("sonnet 4.6");
+    state.on = true;
+    expect(render()).toContain("sonnet 4.6 · high");
+  });
+});
+
 /* ------------------------------------------------------------------------- *
  * Workflow runs
  * ------------------------------------------------------------------------- */
