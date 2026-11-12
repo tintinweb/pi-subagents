@@ -642,6 +642,60 @@ describe("FleetList nested agents", () => {
     expect(lines.find(l => l.includes("parent"))).toContain("↓ 163.4k tokens");
     expect(lines.find(l => l.includes("child"))).toContain("↓ 336.6k tokens");
   });
+
+  // A nested spawn inserts its row under the parent, mid-list. The cursor must
+  // stay on the agent it was on, or Enter opens (and steers, and stops) another.
+  it("keeps the cursor on its agent when a child row is inserted above it", () => {
+    const now = Date.now();
+    const agents = [
+      makeRecord({ id: "A", description: "parent A", startedAt: now - 5000 }),
+      makeRecord({ id: "A1", description: "child one", parentAgentId: "A", startedAt: now - 4000 }),
+      makeRecord({ id: "B", description: "agent B", startedAt: now - 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); // activate on main
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // A, A1, B
+    const cursorRow = () => h.render(200).map(plain).find(l => l.startsWith("❯"));
+    expect(cursorRow()).toContain("agent B");
+
+    agents.push(makeRecord({ id: "A2", description: "child two", parentAgentId: "A", startedAt: now - 1000 }));
+    h.fleet.update();
+    expect(cursorRow()).toContain("agent B");
+
+    h.press(ENTER);
+    expect((h.fleet as unknown as { viewingAgentId?: string }).viewingAgentId).toBe("B");
+  });
+
+  // The roster can change between ticks; a key pressed before the next
+  // update() must still act on the agent the cursor was on.
+  it("opens the cursor's agent even when the insert lands between ticks", () => {
+    const now = Date.now();
+    const agents = [
+      makeRecord({ id: "A", description: "parent A", startedAt: now - 5000 }),
+      makeRecord({ id: "B", description: "agent B", startedAt: now - 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // main, A, B
+    agents.push(makeRecord({ id: "A1", description: "child", parentAgentId: "A", startedAt: now - 1000 }));
+    h.press(ENTER); // no update() since the insert
+    expect((h.fleet as unknown as { viewingAgentId?: string }).viewingAgentId).toBe("B");
+  });
+
+  // When the agent under the cursor leaves the list, the cursor stays at its
+  // position (clamped), as it did before: the next row takes the slot.
+  it("leaves the cursor in place when its own agent drops out", () => {
+    const now = Date.now();
+    const agents = [
+      makeRecord({ id: "A", description: "agent A", startedAt: now - 5000 }),
+      makeRecord({ id: "B", description: "agent B", startedAt: now - 4000 }),
+      makeRecord({ id: "C", description: "agent C", startedAt: now - 3000 }),
+    ];
+    const h = harness(agents);
+    h.press(DOWN); h.press(DOWN); h.press(DOWN); // main, A, B
+    agents.splice(1, 1); // B gone
+    h.fleet.update();
+    expect(h.render(200).map(plain).find(l => l.startsWith("❯"))).toContain("agent C");
+  });
 });
 
 describe("FleetList markers", () => {

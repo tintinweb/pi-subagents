@@ -79,6 +79,12 @@ type AgentEntry = { kind: "agent"; record: AgentRecord; prefix: string };
 type WorkflowEntry = { kind: "workflow"; workflow: FleetWorkflow };
 type FleetEntry = MainEntry | WorkflowEntry | AgentEntry;
 
+/** A roster row's identity across rebuilds. */
+function entryKey(entry: FleetEntry | undefined): string | undefined {
+  if (!entry) return undefined;
+  return entry.kind === "main" ? "main" : entry.kind === "agent" ? `agent:${entry.record.id}` : `workflow:${entry.workflow.id}`;
+}
+
 /** `11s` — integer seconds, no decimal/suffix (matches Claude Code, unlike formatMs). */
 export function formatFleetElapsed(ms: number): string {
   return `${Math.max(0, Math.round(ms / 1000))}s`;
@@ -118,6 +124,9 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
+  /** The row `selectedIndex` pointed at, and that index, as of the last `clampSelection`. */
+  private selectedKey: string | undefined;
+  private selectedKeyIndex = 0;
   /**
    * Roster index under the mouse pointer (fullscreen mode only), shown as the
    * `❯` cursor while the keyboard is not navigating. The renderer sends no
@@ -246,6 +255,7 @@ export class FleetList {
       if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
       this.active = false;
       this.selectedIndex = 0;
+      this.selectedKey = undefined;
       return;
     }
 
@@ -346,11 +356,26 @@ export class FleetList {
     ];
   }
 
+  /**
+   * Re-resolve the selection against the current roster. The cursor follows its
+   * row, not its slot: a nested spawn inserts a child mid-list, and a slot-based
+   * cursor would then sit on — and Enter open — a different agent. Following
+   * applies only while the index is where the last resolve left it; a key or a
+   * click since then is a deliberate move and wins. A row that is gone leaves
+   * the cursor at its position, clamped, so the next row takes the slot.
+   */
   private clampSelection(): void {
-    const max = this.roster().length - 1;
+    const roster = this.roster();
+    if (this.selectedKey !== undefined && this.selectedIndex === this.selectedKeyIndex) {
+      const idx = roster.findIndex(entry => entryKey(entry) === this.selectedKey);
+      if (idx >= 0) this.selectedIndex = idx;
+    }
+    const max = roster.length - 1;
     if (this.selectedIndex > max) this.selectedIndex = Math.max(0, max);
     if (this.selectedIndex < 0) this.selectedIndex = 0;
     if (this.hoverIndex !== undefined && this.hoverIndex > max) this.hoverIndex = undefined;
+    this.selectedKey = entryKey(roster[this.selectedIndex]);
+    this.selectedKeyIndex = this.selectedIndex;
   }
 
   // ---- Key handling ----
@@ -395,7 +420,9 @@ export class FleetList {
       return undefined;
     }
 
-    // Active — arrows navigate, Enter opens, Esc / Up-past-top exits.
+    // Active — arrows navigate, Enter opens, Esc / Up-past-top exits. Resolve
+    // first: the roster may have changed since the last tick's update().
+    this.clampSelection();
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
