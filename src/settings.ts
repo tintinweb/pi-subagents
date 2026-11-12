@@ -591,6 +591,9 @@ export function saveSettings(changes: SubagentsSettings, cwd: string = process.c
   const project = projectPath(cwd);
   const scope: SettingsScope = existsSync(project) ? "project" : "global";
   const path = scope === "project" ? project : globalPath();
+  // Nothing changed — the file already holds the effective value; don't
+  // rewrite it, or create an empty one.
+  if (Object.keys(changes).length === 0) return scope;
   try {
     const current: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
     if (typeof current !== "object" || current === null || Array.isArray(current)) return undefined;

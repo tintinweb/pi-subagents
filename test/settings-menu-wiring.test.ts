@@ -105,6 +105,17 @@ describe("/agents → Settings writes only the changed setting", () => {
     expect(notify).toHaveBeenCalledWith("Max concurrency set to 4 (saved to global settings)", "info");
   });
 
+  it("typing the current value writes no file", async () => {
+    const agents = boot();
+    const { ctx, notify } = typeSetting("maxConcurrent", "10"); // the built-in default
+
+    await agents(ctx);
+
+    expect(existsSync(globalFile())).toBe(false);
+    expect(existsSync(join(cwd, ".pi"))).toBe(false);
+    expect(notify).toHaveBeenCalledWith("Max concurrency set to 10 (saved to global settings)", "info");
+  });
+
   it("with a project file: writes the one key there and copies no global value into it", async () => {
     writeJson(globalFile(), { graceTurns: 7 });
     writeJson(projectFile(), {});
