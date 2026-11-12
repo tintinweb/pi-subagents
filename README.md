@@ -877,7 +877,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 
 | Event | When | Key fields |
 |-------|------|------------|
-| `subagents:created` | `Agent`-tool background spawn, a detached resume, or a foreground `Agent` call handed to the background (after its `started`) — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started` | [agent fields](#agent-fields), `isBackground` (always `true`) |
+| `subagents:created` | Top-level: an `Agent`-tool background spawn, a detached resume, or a foreground `Agent` call handed to the background (after its `started`) — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started`. Owned (nested or workflow) agents: when the agent starts, just before its `started`, and again on each resume | [agent fields](#agent-fields); `isBackground` (always `true`) on top-level agents |
 | `subagents:started` | Agent transitions to running (including queued→running) | [agent fields](#agent-fields) |
 | `subagents:completed` | Agent finished successfully (background and foreground) | [agent fields](#agent-fields) |
 | `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | [agent fields](#agent-fields); `status` is `error`, `stopped` or `aborted` |
@@ -904,8 +904,10 @@ Every agent-lifecycle event (`created`, `started`, `completed`, `failed`, `steer
 | `sessionFile` | The agent's pi session file, only when the session is persisted |
 | `tokens` | Display total, `{ input, output, total }` — see the note below. Absent when nothing was produced |
 | `usage` | The run's spend as a pi `Usage`: token components including `cacheRead`, plus `cost.total` in USD. Absent when nothing was spent |
+| `parentAgentId` | Nested agents only: the agent that spawned this one through its scoped `Agent` tool |
+| `workflowId` | A workflow's agents only: the run that spawned this one |
 
-The agent-lifecycle events are emitted for **top-level agents only**; nested subagents and a workflow's children report through the parent or workflow that owns them. `subagents:usage` is the one event that is not scoped, on purpose: it is a ledger, not a lifecycle. It fires once per message for every agent, so summing `usage.cost.total` across it gives what this session's subagents spent, each message counted exactly once under the agent that spent it — unlike the ancestor records, which fold a nested child's spend into every parent. It fires regardless of `reportUsage`, which decides only whether the parent session's own totals include the spend.
+The agent-lifecycle events fire for **every agent**, nested subagents and a workflow's children included. A listener that wants only the session's own agents keeps the events where `parentAgentId` and `workflowId` are both absent. Owned agents appear nowhere else: no notification, no saved record, no widget row — they report to the model through the parent or workflow that owns them. An agent's `tokens` and `usage` include its descendants' spend, so summing them across a tree counts a nested child's spend more than once. `subagents:usage` is the ledger for that: it fires once per message for every agent, so summing `usage.cost.total` across it gives what this session's subagents spent, each message counted exactly once under the agent that spent it — unlike the ancestor records, which fold a nested child's spend into every parent. It fires regardless of `reportUsage`, which decides only whether the parent session's own totals include the spend.
 
 `tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it as a measure of work done. Use `contextUsage.percent` (surfaced as `(NN%)` in the widget) for current context size.
 

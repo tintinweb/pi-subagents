@@ -541,20 +541,17 @@ export default function (pi: ExtensionAPI) {
 
   // Background completion: route through group join or send individual nudge
   const manager = new AgentManager((record) => {
-    // Owned children — nested, or a workflow's — report only through their
-    // owner: the parent's scoped tools, or the workflow's card, notification
-    // and dialog. Keep them out of top-level lifecycle, transcript,
-    // notification, and UI channels.
-    if (!isTopLevelAgent(record)) return;
-
-    // Emit lifecycle event based on terminal status
+    // The lifecycle events cover every agent, owned ones included: they carry
+    // `parentAgentId` / `workflowId`, so a listener that wants only the
+    // session's own agents filters on those (#442).
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-    const eventData = toSubagentInfo(record);
-    if (isError) {
-      pi.events.emit("subagents:failed", eventData);
-    } else {
-      pi.events.emit("subagents:completed", eventData);
-    }
+    pi.events.emit(isError ? "subagents:failed" : "subagents:completed", toSubagentInfo(record));
+
+    // Everything below is for the session's own agents only. Owned children —
+    // nested, or a workflow's — report to the model through their owner: the
+    // parent's scoped tools, or the workflow's card, notification and dialog.
+    // Keep them out of the transcript, notification, and UI channels.
+    if (!isTopLevelAgent(record)) return;
 
     // Persist the final record: get_subagent_result answers from it once the
     // live record is gone, and other extensions reconstruct history from it.
@@ -584,7 +581,17 @@ export default function (pi: ExtensionAPI) {
     // 'delivered' → group callback already fired
     widget.update();
   }, undefined, (record) => {
-    if (!isTopLevelAgent(record)) return;
+    if (!isTopLevelAgent(record)) {
+      // An owned agent never queues (it takes no pool slot) and has no
+      // `subagents:created` emit site of its own, so it is announced here, the
+      // moment it starts: a startup that fails first leaves no record and so
+      // announces nothing. A resume re-announces the id, as a detached
+      // top-level resume does.
+      const info = toSubagentInfo(record);
+      pi.events.emit("subagents:created", info);
+      pi.events.emit("subagents:started", info);
+      return;
+    }
     // Agent-tool spawns refresh these surfaces in their tool handler, but RPC
     // and scheduler spawns enter through the manager directly.
     if (currentCtx?.hasUI) {
@@ -596,7 +603,6 @@ export default function (pi: ExtensionAPI) {
     // Emit started event when agent transitions to running (including from queue)
     pi.events.emit("subagents:started", toSubagentInfo(record));
   }, (record, info) => {
-    if (!isTopLevelAgent(record)) return;
     // Emit compacted event when agent's session compacts (preserves count on record).
     pi.events.emit("subagents:compacted", {
       ...toSubagentInfo(record),
@@ -644,7 +650,6 @@ export default function (pi: ExtensionAPI) {
       usage: reported,
     });
   }, (record, message) => {
-    if (!isTopLevelAgent(record)) return;
     pi.events.emit("subagents:steered", { ...toSubagentInfo(record), message });
   });
 
