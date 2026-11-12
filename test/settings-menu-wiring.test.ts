@@ -21,7 +21,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
     label: (text: string) => text,
     value: (text: string) => text,
     description: (text: string) => text,
-    cursor: ">",
+    cursor: "> ",
     hint: (text: string) => text,
   }),
 }));
@@ -308,7 +308,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
     expect(page.screen).not.toContain("to save");
     // The cursor the user sees is on the row Enter acted on.
-    expect(page.screen).toMatch(/^>Tool description · global +compact\b/m);
+    expect(page.screen).toMatch(/^> Tool description +global +compact\b/m);
     expect(readJson(globalFile())).toEqual({ toolDescriptionMode: "compact" });
     expect(notify).toHaveBeenCalledWith(
       "Tool description set to compact. Takes effect on next pi session. (saved to global settings)",
@@ -323,16 +323,20 @@ describe("/agents → Settings writes only the changed setting", () => {
     const before = drivePage([]);
     await agents(before.ctx);
 
-    expect(before.page.screen).toMatch(/Max background concurrency · project +3\b/);
-    expect(before.page.screen).toMatch(/Grace turns · global +7\b/);
+    expect(before.page.screen).toMatch(/Max background concurrency +project +3\b/);
+    expect(before.page.screen).toMatch(/Grace turns +global +7\b/);
+    // The tags line up in one column, whatever the label's length.
+    const lines = before.page.screen.split("\n");
+    const tagAt = (label: string, tag: string) => lines.find(line => line.includes(label))!.indexOf(tag);
+    expect(tagAt("Grace turns", "global")).toBe(tagAt("Max background concurrency", "project"));
     expect(before.page.screen).toMatch(/Nested depth +2\b/);
-    expect(before.page.screen).not.toMatch(/Nested depth · /);
+    expect(before.page.screen).not.toMatch(/Nested depth +(project|global)/);
 
     // Project is the default scope here: the save puts graceTurns in the project file.
     const after = typeSetting("graceTurns", "9");
     await agents(after.ctx);
 
-    expect(after.page.screen).toMatch(/Grace turns · project +9\b/);
+    expect(after.page.screen).toMatch(/Grace turns +project +9\b/);
   });
 
   it("Del removes the row's setting from its file, and the row goes back to the default", async () => {
@@ -343,7 +347,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     await agents(ctx);
 
     expect(readJson(globalFile())).toEqual({ graceTurns: 7 });
-    expect(page.screen).toMatch(/^>Max background concurrency +10\b/m);
+    expect(page.screen).toMatch(/^> Max background concurrency +10\b/m);
     expect(notify).toHaveBeenCalledWith(
       "Max background concurrency reset to the default, 10 (removed from global settings)",
       "info",
@@ -363,7 +367,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
     expect(readJson(projectFile())).toEqual({});
     expect(readJson(globalFile())).toEqual({ maxConcurrent: 8 });
-    expect(first.page.screen).toMatch(/Max background concurrency · global +8\b/);
+    expect(first.page.screen).toMatch(/Max background concurrency +global +8\b/);
     expect(first.notify).toHaveBeenCalledWith(
       "Max background concurrency is now 8 from global settings (removed from project settings)",
       "info",
@@ -406,7 +410,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     await agents(ctx);
 
     expect(readJson(globalFile())).toEqual({});
-    expect(page.screen).toMatch(/^>Package agents +on\b/m);
+    expect(page.screen).toMatch(/^> Package agents +on\b/m);
   });
 
   it("Backspace inside the number editor edits the text and resets nothing", async () => {
@@ -453,7 +457,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     expect(existsSync(globalFile())).toBe(false);
     expect(page.header).toContain("Saving to: Project");
     expect(page.header).not.toContain("created on first change");
-    expect(page.screen).toMatch(/Join mode · project +group\b/);
+    expect(page.screen).toMatch(/Join mode +project +group\b/);
   });
 
   it("opens on Global without a project file, and on Project once one exists — even an empty one", async () => {
@@ -489,8 +493,8 @@ describe("/agents → Settings writes only the changed setting", () => {
 
     await agents(ctx);
 
-    expect(page.screen).toMatch(/Max background concurrency · project +3\b/);
-    expect(page.screen).toMatch(/Grace turns · global +7\b/);
+    expect(page.screen).toMatch(/Max background concurrency +project +3\b/);
+    expect(page.screen).toMatch(/Grace turns +global +7\b/);
     expect(page.screen).toMatch(/Nested depth +2\b/);
   });
 
@@ -503,7 +507,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     await restart()(next.ctx);
 
     expect(next.page.header).toContain("Saving to: Project");
-    expect(next.page.screen).toMatch(/Max background concurrency · project +4\b/);
+    expect(next.page.screen).toMatch(/Max background concurrency +project +4\b/);
     expect(readJson(globalFile())).toEqual({ maxConcurrent: 8 });
   });
 });

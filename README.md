@@ -758,7 +758,7 @@ Runtime tuning values set via `/agents` → Settings (max background concurrency
 
 A save writes only the setting you changed into that file; every other key in it, including ones another pi session saved, is left as it was.
 
-A row whose value comes from a settings file is tagged with that file (`· project` or `· global`); an untagged row is at its built-in default. Delete (or Backspace) on a tagged row removes that setting from the tagged file, so the row shows what the next start would load: the other file's value if it sets one, otherwise the built-in default. Enter on a number row opens an input under the list, with the accepted range: Enter saves, Esc returns to the list, and a value outside the range is refused. The ranges match what loading accepts, so a value the menu saves survives a restart.
+A row whose value comes from a settings file is tagged with that file (`project` or `global`, in a column after the labels); an untagged row is at its built-in default. Delete (or Backspace) on a tagged row removes that setting from the tagged file, so the row shows what the next start would load: the other file's value if it sets one, otherwise the built-in default. Enter on a number row opens an input under the list, with the accepted range: Enter saves, Esc returns to the list, and a value outside the range is refused. The ranges match what loading accepts, so a value the menu saves survives a restart.
 
 **Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max background concurrency `10`, max foreground concurrency `0` = unlimited, max nested concurrency `10`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
 

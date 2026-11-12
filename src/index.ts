@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Input, isKeyRelease, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Input, isKeyRelease, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
@@ -3219,37 +3219,28 @@ Terse command-style prompts produce shallow, generic work.
     reloadCustomAgents();
     const allNames = getAllTypes();
 
-    // Build select options
-    const options: string[] = [];
-
-    // Running agents entry (only if there are active agents)
+    // Each row pairs its label with the value the menu dispatches on.
+    const items: { value: string; label: string }[] = [];
     const agents = runningAgentsRoster().map(row => row.record);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
-      options.push(`Running agents (${agents.length}) — ${running} running, ${done} done`);
+      items.push({ value: "running", label: `Running agents (${agents.length}) — ${running} running, ${done} done` });
     }
-
-    // Agent types list
     if (allNames.length > 0) {
-      options.push(`Agent types (${allNames.length})`);
+      items.push({ value: "types", label: `Agent types (${allNames.length})` });
     }
-
-    // Scheduled jobs entry (always present when scheduler is active)
+    // Shown only while the scheduler is active.
     if (scheduler.isActive()) {
-      const jobCount = scheduler.list().length;
-      options.push(`Scheduled jobs (${jobCount})`);
+      items.push({ value: "schedules", label: `Scheduled jobs (${scheduler.list().length})` });
     }
-
     // Workflow runs, on the same terms as scheduled jobs: shown only when the
     // feature is on, so the menu never advertises something switched off.
     if (isWorkflowsEnabled()) {
-      options.push(`Workflows (${workflowTasks.size})`);
+      items.push({ value: "workflows", label: `Workflows (${workflowTasks.size})` });
     }
-
-    // Actions
-    options.push("Create new agent");
-    options.push("Settings");
+    items.push({ value: "create", label: "Create new agent" });
+    items.push({ value: "settings", label: "Settings" });
 
     const noAgentsMsg = allNames.length === 0 && agents.length === 0
       ? "No agents found. Create specialized subagents that can be delegated to.\n\n" +
@@ -3261,24 +3252,25 @@ Terse command-style prompts produce shallow, generic work.
       ctx.ui.notify(noAgentsMsg, "info");
     }
 
-    const choice = await ctx.ui.select("Agents", options);
+    const label = await ctx.ui.select("Agents", items.map(item => item.label));
+    const choice = items.find(item => item.label === label)?.value;
     if (!choice) return;
 
-    if (choice.startsWith("Running agents (")) {
+    if (choice === "running") {
       await showRunningAgents(ctx);
       await showAgentsMenu(ctx);
-    } else if (choice.startsWith("Agent types (")) {
+    } else if (choice === "types") {
       await showAllAgentsList(ctx);
       await showAgentsMenu(ctx);
-    } else if (choice.startsWith("Scheduled jobs (")) {
+    } else if (choice === "schedules") {
       await showSchedulesMenu(ctx, scheduler);
       await showAgentsMenu(ctx);
-    } else if (choice.startsWith("Workflows (")) {
+    } else if (choice === "workflows") {
       await showWorkflowsMenu(ctx, workflowMenuDeps);
       await showAgentsMenu(ctx);
-    } else if (choice === "Create new agent") {
+    } else if (choice === "create") {
       await showCreateWizard(ctx);
-    } else if (choice === "Settings") {
+    } else if (choice === "settings") {
       await showSettings(ctx);
       await showAgentsMenu(ctx);
     }
@@ -4353,6 +4345,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
     await ctx.ui.custom<undefined>((_tui, theme, kb, done) => {
       const items = buildItems();
       const baseLabels = new Map(items.map(item => [item.id, item.label]));
+      // Tags sit in their own column after the longest label. The widest tagged
+      // label (26 + "  project") stays inside SettingsList's 36-column label cap.
+      const tagColumn = Math.max(...items.map(item => visibleWidth(item.label))) + 2;
       const title = new Text("", 0, 0);
       const fileLine = new Text("", 0, 0);
       const tabKey = kb.getKeys("tui.input.tab")[0];
@@ -4381,7 +4376,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           if (next) Object.assign(item, { currentValue: next.currentValue, values: next.values, description: next.description });
           const source = sources[settingKeyOf(item.id)];
           const base = baseLabels.get(item.id) ?? item.label;
-          item.label = source ? `${base}${theme.fg("muted", ` · ${source}`)}` : base;
+          item.label = source ? `${base.padEnd(tagColumn)}${theme.fg("muted", source)}` : base;
         }
         renderHeader();
       };
