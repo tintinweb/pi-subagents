@@ -1009,7 +1009,7 @@ describe("settings persistence", () => {
         settings: snapshot,
         persisted: true,
       });
-      expect(toast).toEqual({ message: "Max concurrency set to 5 (saved to global settings)", level: "info" });
+      expect(toast).toEqual({ message: "Max concurrency set to 5 (saved to global settings)", level: "info", persisted: true });
       // File actually written — the global one, since this project has no
       // settings file of its own (#391)
       expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual(snapshot);
@@ -1019,7 +1019,7 @@ describe("settings persistence", () => {
     it("names the project scope in the toast when the project file takes the write", () => {
       writeProject({});
       const toast = saveAndEmitChanged({ maxConcurrent: 5 }, {}, "Max concurrency set to 5", vi.fn(), projectDir);
-      expect(toast).toEqual({ message: "Max concurrency set to 5 (saved to project settings)", level: "info" });
+      expect(toast).toEqual({ message: "Max concurrency set to 5 (saved to project settings)", level: "info", persisted: true });
       expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 5 });
     });
 
@@ -1045,6 +1045,7 @@ describe("settings persistence", () => {
         expect(toast).toEqual({
           message: "Max concurrency set to 5 (session only; failed to persist)",
           level: "warning",
+          persisted: false,
         });
       } finally {
         rmSync(filePosingAsParent, { force: true });

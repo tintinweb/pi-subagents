@@ -3836,11 +3836,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
   /** Persist + broadcast what changed since the last save; the toast to show. */
   function saveSnapshot(successMsg: string): { message: string; level: "info" | "warning" } {
     const snapshot = snapshotSettings();
-    const toast = saveAndEmitChanged(snapshot, savedSnapshot, successMsg, (event, payload) =>
+    const { persisted, ...toast } = saveAndEmitChanged(snapshot, savedSnapshot, successMsg, (event, payload) =>
       pi.events.emit(event, payload),
     );
     // A failed write keeps the old baseline, so the next save retries this change.
-    if (toast.level === "info") savedSnapshot = snapshot;
+    if (persisted) savedSnapshot = snapshot;
     return toast;
   }
 

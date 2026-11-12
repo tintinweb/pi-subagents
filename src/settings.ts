@@ -691,8 +691,8 @@ export function applyAndEmitLoaded(
  * Persist what changed between the last saved snapshot and the current one,
  * emit the `subagents:settings_changed` event (regardless of persist outcome
  * so listeners see the in-memory change), and return the toast the UI should
- * display. Event payload carries the full snapshot and the `persisted` flag so
- * listeners can react to write failures.
+ * display plus whether the write landed. Event payload carries the full
+ * snapshot and the same `persisted` flag so listeners can react to failures.
  */
 export function saveAndEmitChanged(
   snapshot: SubagentsSettings,
@@ -700,8 +700,9 @@ export function saveAndEmitChanged(
   successMsg: string,
   emit: SettingsEmit,
   cwd: string = process.cwd(),
-): { message: string; level: "info" | "warning" } {
+): { message: string; level: "info" | "warning"; persisted: boolean } {
   const scope = saveSettings(changedSettings(previous, snapshot), cwd);
-  emit("subagents:settings_changed", { settings: snapshot, persisted: scope !== undefined });
-  return persistToastFor(successMsg, scope);
+  const persisted = scope !== undefined;
+  emit("subagents:settings_changed", { settings: snapshot, persisted });
+  return { ...persistToastFor(successMsg, scope), persisted };
 }
