@@ -12,6 +12,20 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The real page component renders through pi's theme, which a test process
+// never initializes. Plain-text styling is enough to read the header.
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  getSettingsListTheme: () => ({
+    label: (text: string) => text,
+    value: (text: string) => text,
+    description: (text: string) => text,
+    cursor: ">",
+    hint: (text: string) => text,
+  }),
+}));
+
 import subagentsExtension from "../src/index.js";
 
 let cwd: string;
@@ -69,6 +83,51 @@ function typeSetting(id: string, value: string) {
     },
   };
   return { ctx, notify };
+}
+
+/**
+ * `/agents` → Settings with the real page component. Each `keys` entry is one
+ * opening of the page: its keystrokes are sent in order, and the rendered
+ * header is recorded. Enter on Max background concurrency (the first row)
+ * closes the page for the typed prompt, which answers from `inputs`; the page
+ * then reopens for the next entry. A page whose keys don't close it is closed
+ * after them, as Esc would. With no entries left it closes.
+ */
+function drivePage(keys: string[][], inputs: string[]) {
+  const headers: string[] = [];
+  const kb = {
+    matches: (data: string, id: string) => id === "tui.input.tab" && data === "\t",
+    getKeys: (id: string) => (id === "tui.input.tab" ? ["tab"] : []),
+  };
+  const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
+  let opening = 0;
+  const custom = vi.fn(
+    (factory: (...args: any[]) => any) =>
+      new Promise((resolve) => {
+        const strokes = keys[opening++];
+        if (!strokes) return resolve(undefined);
+        const page = factory({ requestRender: vi.fn() }, theme, kb, resolve);
+        for (const key of strokes) page.handleInput(key);
+        headers.push(page.render(120).slice(0, 2).join("\n"));
+        resolve(undefined);
+      }),
+  );
+  const input = vi.fn();
+  for (const value of inputs) input.mockResolvedValueOnce(value);
+  const notify = vi.fn();
+  const ctx = {
+    hasUI: true,
+    cwd,
+    ui: {
+      notify,
+      select: vi.fn().mockResolvedValueOnce("Settings").mockResolvedValue(undefined),
+      custom,
+      input,
+      setStatus: vi.fn(),
+      setWidget: vi.fn(),
+    },
+  };
+  return { ctx, notify, headers };
 }
 
 describe("/agents → Settings writes only the changed setting", () => {
@@ -159,5 +218,62 @@ describe("/agents → Settings writes only the changed setting", () => {
     await agents(typeSetting("graceTurns", "6").ctx);
 
     expect(readJson(globalFile())).toEqual({ maxConcurrent: 4, graceTurns: 6 });
+  });
+
+  it("Tab switches the page to Project, and the change creates the project file", async () => {
+    const agents = boot();
+    const { ctx, notify, headers } = drivePage([["\t", "\r"]], ["4"]);
+
+    await agents(ctx);
+
+    expect(headers[0]).toContain("Saving to: Project");
+    expect(headers[0]).toContain(".pi/subagents.json · created on first change");
+    expect(readJson(projectFile())).toEqual({ maxConcurrent: 4 });
+    expect(existsSync(globalFile())).toBe(false);
+    expect(notify).toHaveBeenCalledWith("Max background concurrency set to 4 (saved to project settings)", "info");
+  });
+
+  it("keeps the chosen scope when the page reopens after a typed value", async () => {
+    // The project file makes the default Project, so a reopen that lost the
+    // switch would write the second value there.
+    writeJson(projectFile(), {});
+    const agents = boot();
+    // Open 1: Tab to Global, Enter → prompt "4". Open 2: Enter → prompt "5".
+    const { ctx, headers } = drivePage([["\t", "\r"], ["\r"]], ["4", "5"]);
+
+    await agents(ctx);
+
+    expect(headers[1]).toContain("Saving to: Global");
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 5 });
+    expect(readJson(projectFile())).toEqual({});
+  });
+
+  it("re-setting the effective value in Project overwrites a different value stored there", async () => {
+    // The Global save below is shadowed by the project's 3 and warns so. Doing
+    // what the warning implies — set 8 again in Project — must replace the 3:
+    // the value is unchanged in memory, but the chosen file disagrees with it.
+    writeJson(projectFile(), { maxConcurrent: 3 });
+    const agents = boot();
+    // Open 1 (Project by default): Tab → Global, set 8. Open 2: Tab → Project, set 8.
+    const { ctx, notify } = drivePage([["\t", "\r"], ["\t", "\r"]], ["8", "8"]);
+
+    await agents(ctx);
+
+    expect(readJson(projectFile())).toEqual({ maxConcurrent: 8 });
+    expect(notify).toHaveBeenLastCalledWith("Max background concurrency set to 8 (saved to project settings)", "info");
+  });
+
+  it("drops the 'created on first change' note once a change has created the project file", async () => {
+    const agents = boot();
+    const down = "\x1b[B";
+    // Tab → Project, then Enter on Default join mode (7th row), which cycles
+    // its value and saves without closing the page.
+    const { ctx, headers } = drivePage([["\t", down, down, down, down, down, down, "\r"]], []);
+
+    await agents(ctx);
+
+    expect(existsSync(projectFile())).toBe(true);
+    expect(headers[0]).toContain("Saving to: Project");
+    expect(headers[0]).not.toContain("created on first change");
   });
 });

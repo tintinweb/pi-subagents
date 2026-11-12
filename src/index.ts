@@ -11,6 +11,7 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
@@ -38,7 +39,16 @@ import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, ses
 import { getPackageAgentsGate, getPackageWorkflowsGate, invalidatePackageCache, packageNameForPath, seedProjectTrust, setPackageAgentsGate, setPackageWorkflowsGate, setProjectTrusted } from "./package-resources.js";
 import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
-import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
+import {
+  applyAndEmitLoaded,
+  defaultSettingsScope,
+  loadSettings,
+  type SettingsScope,
+  type SubagentsSettings,
+  saveAndEmitChanged,
+  settingsFilePath,
+  type ToolDescriptionMode,
+} from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
@@ -66,6 +76,7 @@ import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroun
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
+import { formatKeyLabel } from "./ui/viewer-keys.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
 import { openWorkflowFromFleet, showWorkflowsMenu, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
@@ -3833,11 +3844,20 @@ Write the file using the write tool. Only write the file, nothing else.`;
   // defaults are never frozen into a file.
   let savedSnapshot: SubagentsSettings = snapshotSettings();
 
+  /** Where a Settings-page change goes: the chosen file, and the setting it set. */
+  type SettingsTarget = { scope: SettingsScope; key: keyof SubagentsSettings };
+
   /** Persist + broadcast what changed since the last save; the toast to show. */
-  function saveSnapshot(successMsg: string): { message: string; level: "info" | "warning" } {
+  function saveSnapshot(successMsg: string, target?: SettingsTarget): { message: string; level: "info" | "warning" } {
     const snapshot = snapshotSettings();
-    const { persisted, ...toast } = saveAndEmitChanged(snapshot, savedSnapshot, successMsg, (event, payload) =>
-      pi.events.emit(event, payload),
+    const { persisted, ...toast } = saveAndEmitChanged(
+      snapshot,
+      savedSnapshot,
+      successMsg,
+      (event, payload) => pi.events.emit(event, payload),
+      process.cwd(),
+      target?.scope,
+      target ? { [target.key]: snapshot[target.key] } : {},
     );
     // A failed write keeps the old baseline, so the next save retries this change.
     if (persisted) savedSnapshot = snapshot;
@@ -3872,7 +3892,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
     "maxConcurrent", "maxConcurrentForeground", "maxConcurrentNested", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
   ]);
 
-  async function showSettings(ctx: ExtensionCommandContext) {
+  /**
+   * `scope` is the file changes are written to. It starts at `initialScope` —
+   * the default rule, or the scope carried over when the page reopens after a
+   * typed value — and Tab switches it; the list always shows the effective
+   * (merged) values.
+   */
+  async function showSettings(ctx: ExtensionCommandContext, initialScope: SettingsScope = defaultSettingsScope(process.cwd())) {
+    let scope = initialScope;
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const mcf = manager.getMaxConcurrentForeground();
@@ -4098,18 +4125,22 @@ Write the file using the write tool. Only write the file, nothing else.`;
     }
 
     function applyValue(id: string, value: string) {
+      // The row's setting, in the file the page is switched to. Rows are named
+      // after their setting, except join mode.
+      const key = (id === "joinMode" ? "defaultJoinMode" : id) as keyof SubagentsSettings;
+      const target: SettingsTarget = { scope, key };
       if (id === "maxConcurrent") {
         const n = parseInt(value, 10);
         if (n >= 1) {
           manager.setMaxConcurrent(n);
-          notifyApplied(ctx, `Max background concurrency set to ${n}`);
+          notifyApplied(ctx, target, `Max background concurrency set to ${n}`);
         }
       } else if (id === "maxConcurrentForeground") {
         // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
         const n = parseInt(value, 10);
         if (n >= 0) {
           manager.setMaxConcurrentForeground(n);
-          notifyApplied(ctx, n === 0
+          notifyApplied(ctx, target, n === 0
             ? "Max foreground concurrency set to unlimited"
             : `Max foreground concurrency set to ${n}`);
         }
@@ -4117,7 +4148,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const n = parseInt(value, 10);
         if (n >= 0) {
           manager.setMaxConcurrentNested(n);
-          notifyApplied(ctx, n === 0
+          notifyApplied(ctx, target, n === 0
             ? "Max nested concurrency set to unlimited"
             : `Max nested concurrency set to ${n}`);
         }
@@ -4125,16 +4156,16 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const n = parseInt(value, 10);
         if (n === 0) {
           setDefaultMaxTurns(undefined);
-          notifyApplied(ctx, "Default max turns set to unlimited");
+          notifyApplied(ctx, target, "Default max turns set to unlimited");
         } else if (n >= 1) {
           setDefaultMaxTurns(n);
-          notifyApplied(ctx, `Default max turns set to ${n}`);
+          notifyApplied(ctx, target, `Default max turns set to ${n}`);
         }
       } else if (id === "graceTurns") {
         const n = parseInt(value, 10);
         if (n >= 1) {
           setGraceTurns(n);
-          notifyApplied(ctx, `Grace turns set to ${n}`);
+          notifyApplied(ctx, target, `Grace turns set to ${n}`);
         }
       } else if (id === "maxSubagentDepth") {
         const n = parseInt(value, 10);
@@ -4142,6 +4173,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           setMaxSubagentDepth(n);
           notifyApplied(
             ctx,
+            target,
             n <= 1
               ? "Nested delegation disabled for every agent, including those with allowed_subagents"
               : `Nested depth set to ${n}. Applies to agents started from now on.`,
@@ -4149,12 +4181,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
         }
       } else if (id === "joinMode") {
         setDefaultJoinMode(value as JoinMode);
-        notifyApplied(ctx, `Default join mode set to ${value}`);
+        notifyApplied(ctx, target, `Default join mode set to ${value}`);
       } else if (id === "backgroundByDefault") {
         const enabled = value === "on";
         setBackgroundByDefault(enabled);
         notifyApplied(
           ctx,
+          target,
           enabled
             ? "Agent calls run in the background unless they pass run_in_background: false"
             : "Agent calls block and return inline unless they pass run_in_background: true",
@@ -4168,6 +4201,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           if (!enabled) scheduler.stop();  // immediate kill — outstanding fires stop ticking
           notifyApplied(
             ctx,
+            target,
             `Scheduling ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
           );
         }
@@ -4182,25 +4216,27 @@ Write the file using the write tool. Only write the file, nothing else.`;
           // lose work the user never asked to discard.
           notifyApplied(
             ctx,
+            target,
             `Workflows ${enabled ? "enabled" : "disabled"}. Tool spec change takes effect on next pi session.`,
           );
         }
       } else if (id === "scopeModels") {
         const enabled = value === "on";
         setScopeModelsEnabled(enabled);
-        notifyApplied(ctx, `Scope models ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Scope models ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "strictAgentFiles") {
         const enabled = value === "on";
         strictAgentFiles = enabled;
-        notifyApplied(ctx, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
+        notifyApplied(ctx, target, `Strict agent files ${enabled ? "enabled" : "disabled"}. Takes effect on next pi session.`);
       } else if (id === "disableDefaultAgents") {
         const enabled = value === "on";
         setDisableDefaultAgents(enabled);
-        notifyApplied(ctx, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
+        notifyApplied(ctx, target, `Default agents ${enabled ? "disabled" : "enabled"}. Tool spec change takes effect on next pi session.`);
       } else if (id === "fallbackSubagent") {
         setFallbackSubagent(value);
         notifyApplied(
           ctx,
+          target,
           value === NO_FALLBACK
             ? "Unknown or disabled agent types will now be rejected"
             : `Unknown agent types will fall back to ${value}`,
@@ -4208,7 +4244,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "outputTranscript") {
         const enabled = value === "on";
         setOutputTranscriptDefault(enabled);
-        notifyApplied(ctx, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
+        notifyApplied(ctx, target, `Output transcript ${enabled ? "enabled" : "disabled"} by default`);
       } else if (id === "worktreeIsolation") {
         const enabled = value === "on";
         setWorktreeIsolationEnabled(enabled);
@@ -4216,6 +4252,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         // the isolation parameter only appears/disappears next session.
         notifyApplied(
           ctx,
+          target,
           `Worktree isolation ${enabled ? "enabled" : "disabled"}. Tool parameter updates on next pi session.`,
         );
       } else if (id === "packageAgents" || id === "packageWorkflows") {
@@ -4234,15 +4271,16 @@ Write the file using the write tool. Only write the file, nothing else.`;
         // the `Agent` tool's description and schema are built at registration,
         // so until the next session the model is reading a stale type list.
         const specNote = isAgents ? " Tool spec change takes effect on next pi session." : "";
-        notifyApplied(ctx, `${label} ${enabled ? "enabled" : "disabled"}.${replaced}${specNote}`);
+        notifyApplied(ctx, target, `${label} ${enabled ? "enabled" : "disabled"}.${replaced}${specNote}`);
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
-        notifyApplied(ctx, `Tool description set to ${value}. Takes effect on next pi session.`);
+        notifyApplied(ctx, target, `Tool description set to ${value}. Takes effect on next pi session.`);
       } else if (id === "reportUsage") {
         const enabled = value === "on";
         setReportUsage(enabled);
         notifyApplied(
           ctx,
+          target,
           enabled
             ? "Subagent usage now counted in this session's totals"
             : "Subagent usage no longer counted in this session's totals",
@@ -4250,23 +4288,24 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "showCost") {
         const enabled = value === "on";
         setShowCost(enabled);
-        notifyApplied(ctx, `Cost display ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Cost display ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "showModel") {
         const enabled = value === "on";
         setShowModel(enabled);
-        notifyApplied(ctx, `Model display ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Model display ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "viewerMarkdown") {
         setViewerMarkdown(value as ViewerMarkdownMode);
-        notifyApplied(ctx, `Viewer markdown set to ${value}`);
+        notifyApplied(ctx, target, `Viewer markdown set to ${value}`);
       } else if (id === "fleetView") {
         const enabled = value === "on";
         setFleetViewEnabled(enabled);
-        notifyApplied(ctx, `Fleet view ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Fleet view ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "agentMentions") {
         const mode = value as AgentMentionMode;
         setAgentMentionMode(mode);
         notifyApplied(
           ctx,
+          target,
           mode === "off"
             ? "Agent mentions disabled"
             : mode === "model"
@@ -4276,10 +4315,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
       } else if (id === "rememberAgents") {
         const enabled = value === "on";
         setRememberAgents(enabled);
-        notifyApplied(ctx, `Remember agents ${enabled ? "enabled" : "disabled"}`);
+        notifyApplied(ctx, target, `Remember agents ${enabled ? "enabled" : "disabled"}`);
       } else if (id === "widgetMode") {
         setWidgetMode(value as WidgetMode);
-        notifyApplied(ctx, `Widget set to ${value}`);
+        notifyApplied(ctx, target, `Widget set to ${value}`);
       }
     }
 
@@ -4288,8 +4327,20 @@ Write the file using the write tool. Only write the file, nothing else.`;
     // Updated on arrow keys so Enter knows which field is selected immediately.
     let currentIndex = 0;
 
-    const result = await ctx.ui.custom<string | undefined>((_tui, _theme, _kb, done) => {
+    const result = await ctx.ui.custom<string | undefined>((tui, theme, kb, done) => {
       const items = buildItems();
+      const title = new Text("", 0, 0);
+      const fileLine = new Text("", 0, 0);
+      const tabKey = kb.getKeys("tui.input.tab")[0];
+      const renderHeader = () => {
+        const switchHint = tabKey ? theme.fg("muted", ` · ${formatKeyLabel(tabKey)} to switch`) : "";
+        title.setText(`⚙  Subagent Settings · Saving to: ${scope === "global" ? "Global" : "Project"}${switchHint}`);
+        const path = settingsFilePath(scope, process.cwd());
+        const shown = scope === "project" ? ".pi/subagents.json" : path.replace(homedir(), "~");
+        const created = scope === "project" && !existsSync(path) ? " · created on first change" : "";
+        fileLine.setText(theme.fg("muted", `   ${shown}${created}`));
+      };
+      renderHeader();
 
       list = new SettingsList(
         items,
@@ -4297,12 +4348,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
         getSettingsListTheme(),
         (id, newValue) => {
           applyValue(id, newValue);
+          // The first change in Project scope may have just created the file.
+          renderHeader();
         },
         () => done(undefined as undefined),
       );
 
       const container = new Container();
-      container.addChild(new Text("⚙  Subagent Settings", 0, 0));
+      container.addChild(title);
+      container.addChild(fileLine);
       container.addChild(new Spacer(1));
       container.addChild(list);
 
@@ -4310,6 +4364,12 @@ Write the file using the write tool. Only write the file, nothing else.`;
         render: (w: number) => container.render(w),
         invalidate: () => container.invalidate(),
         handleInput: (data: string) => {
+          if (kb.matches(data, "tui.input.tab")) {
+            scope = scope === "global" ? "project" : "global";
+            renderHeader();
+            tui.requestRender();
+            return;
+          }
           // Track navigation so Enter knows the current field
           if (matchesKey(data, "up")) {
             currentIndex = Math.max(0, currentIndex - 1);
@@ -4361,7 +4421,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const n = Number(trimmed);
         if (trimmed !== "" && Number.isInteger(n)) {
           applyValue(result, String(n));
-          await showSettings(ctx);
+          await showSettings(ctx, scope);
           return;
         }
         // Invalid — re-prompt with the user's last entry so they can edit it
@@ -4391,8 +4451,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
     if (level === "warning") ctx?.ui.notify(message, level);
   }
 
-  function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
-    const { message, level } = saveSnapshot(successMsg);
+  function notifyApplied(ctx: ExtensionCommandContext, target: SettingsTarget, successMsg: string) {
+    const { message, level } = saveSnapshot(successMsg, target);
     ctx.ui.notify(message, level);
   }
 

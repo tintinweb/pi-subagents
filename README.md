@@ -751,8 +751,10 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
-- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Written by `/agents` → Settings when the project has no `subagents.json` of its own.
-- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings when the file already exists; a settings change never creates one.
+- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults.
+- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides.
+
+`/agents` → Settings writes to the scope named in its header: Project when the project already has a `subagents.json`, Global otherwise. Tab switches it. Choosing Project in a repo without the file creates it on your first change; without that choice the menu never creates one. The list always shows the effective (merged) values, and saving to Global a setting the project file also sets warns that the project value still wins.
 
 A save writes only the setting you changed into that file; every other key in it, including ones another pi session saved, is left as it was.
 

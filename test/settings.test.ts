@@ -311,6 +311,29 @@ describe("settings persistence", () => {
     });
   });
 
+  describe("explicit scope (Tab on the Settings page)", () => {
+    it("project scope creates .pi/subagents.json with only the changed key", () => {
+      expect(saveSettings({ maxConcurrent: 2 }, projectDir, "project")).toBe("project");
+      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
+      expect(existsSync(globalFile())).toBe(false);
+    });
+
+    it("global scope writes the global file even when the project has one", () => {
+      writeProject({ graceTurns: 5 });
+      expect(saveSettings({ maxConcurrent: 2 }, projectDir, "global")).toBe("global");
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
+      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ graceTurns: 5 });
+    });
+
+    it("a global write warns only when the project file sets a changed key", () => {
+      writeProject({ maxConcurrent: 3 });
+      const shadowed = saveAndEmitChanged({ maxConcurrent: 6 }, {}, "Max set to 6", vi.fn(), projectDir, "global");
+      expect(shadowed.message).toBe("Max set to 6 (saved to global settings; project settings override it)");
+      const clear = saveAndEmitChanged({ graceTurns: 2 }, {}, "Grace set to 2", vi.fn(), projectDir, "global");
+      expect(clear.message).toBe("Grace set to 2 (saved to global settings)");
+    });
+  });
+
   describe("saveSettings merges only changed keys", () => {
     const defaults = { maxConcurrent: 10, graceTurns: 5, widgetMode: "all" as const };
 

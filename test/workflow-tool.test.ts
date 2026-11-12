@@ -1498,7 +1498,10 @@ describe("collisions with another extension", () => {
           return options.find(o => o === "Settings");
         }),
         custom: vi.fn(async (factory: any) => {
-          built = factory({ requestRender: () => {} }, {}, {}, () => {});
+          // pi always hands the page a theme and a keybindings manager.
+          const theme = { fg: (_color: string, text: string) => text };
+          const kb = { matches: () => false, getKeys: () => [] };
+          built = factory({ requestRender: () => {} }, theme, kb, () => {});
           built.handleInput(" ");
           return undefined;
         }),

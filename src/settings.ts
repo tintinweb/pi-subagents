@@ -1,9 +1,10 @@
 // Persistence for pi-subagents operational settings.
 // - Global:  ~/.pi/agent/subagents.json (via getAgentDir()) — machine-wide defaults
 // - Project: <cwd>/.pi/subagents.json — per-project overrides; wins over global on load
-// /agents → Settings writes the project file when the project already has
-// one, and the global file otherwise — a settings change must not leave a
-// `.pi` directory in every repo the user happens to be in (#391). Only the
+// /agents → Settings writes the scope the page is switched to (Tab). It opens
+// on the project file when the project already has one, and on the global
+// file otherwise — a settings change must not leave a `.pi` directory in every
+// repo the user happens to be in unless they chose Project (#391). Only the
 // keys that changed are merged into the file: the global file is shared by
 // every pi session, and writing a whole snapshot would revert other sessions'
 // changes and freeze built-in defaults into it.
@@ -574,6 +575,16 @@ function readSettingsFile(path: string): SubagentsSettings {
 /** Which settings file a save wrote: `~/.pi/agent/subagents.json` or `<cwd>/.pi/subagents.json`. */
 export type SettingsScope = "global" | "project";
 
+/** The scope a save targets unless one is chosen: project if its file exists, else global (#391). */
+export function defaultSettingsScope(cwd: string = process.cwd()): SettingsScope {
+  return existsSync(projectPath(cwd)) ? "project" : "global";
+}
+
+/** The file a scope reads and writes. */
+export function settingsFilePath(scope: SettingsScope, cwd: string = process.cwd()): string {
+  return scope === "project" ? projectPath(cwd) : globalPath();
+}
+
 /** Load merged settings: global provides defaults, project overrides. */
 export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
   return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
@@ -594,30 +605,41 @@ export function changedSettings(previous: SubagentsSettings, next: SubagentsSett
 }
 
 /**
- * Merge changed settings into a settings file. Writes the project file when
- * the project already has one; otherwise writes the global file, so changing
- * a setting in /agents → Settings does not create `.pi/subagents.json` in
- * whatever repo the user happens to be in (#391). The target is re-read and
+ * Merge changed settings into the file of `scope`, which defaults to
+ * `defaultSettingsScope`: an explicit `project` creates `.pi/subagents.json`
+ * on the first change, the default never does (#391). The target is re-read and
  * only the given keys are set — or removed, when a key's value is `undefined`
  * — so other keys in the file, including ones another session wrote, survive.
+ * `applied` is the setting the user just set. It is written too when the file
+ * stores a different value for it: the value may be unchanged in memory (it
+ * was set in the other scope first) while the chosen file still disagrees.
  * A target that exists but is not a JSON object is left untouched.
  * Returns the scope written, or `undefined` if the write failed so the caller
  * can surface a warning — persistence isn't fatal but isn't silent.
  */
-export function saveSettings(changes: SubagentsSettings, cwd: string = process.cwd()): SettingsScope | undefined {
-  const project = projectPath(cwd);
-  const scope: SettingsScope = existsSync(project) ? "project" : "global";
-  const path = scope === "project" ? project : globalPath();
+export function saveSettings(
+  changes: SubagentsSettings,
+  cwd: string = process.cwd(),
+  scope: SettingsScope = defaultSettingsScope(cwd),
+  applied: SubagentsSettings = {},
+): SettingsScope | undefined {
+  const path = settingsFilePath(scope, cwd);
   // Nothing changed — the file already holds the effective value; don't
   // rewrite it, or create an empty one.
-  if (Object.keys(changes).length === 0) return scope;
+  if (Object.keys(changes).length === 0 && Object.keys(applied).length === 0) return scope;
   try {
     const current: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
     if (typeof current !== "object" || current === null || Array.isArray(current)) return undefined;
+    const stored = current as Record<string, unknown>;
+    const stale = Object.entries(applied).filter(
+      ([key, value]) => key in stored && JSON.stringify(stored[key]) !== JSON.stringify(value),
+    );
+    const writes = { ...Object.fromEntries(stale), ...changes };
+    if (Object.keys(writes).length === 0) return scope;
     mkdirSync(dirname(path), { recursive: true });
     // An `undefined` change overrides the file's value and is then dropped by
     // JSON.stringify — that is how a key is removed.
-    writeFileSync(path, JSON.stringify({ ...current, ...changes }, null, 2), "utf-8");
+    writeFileSync(path, JSON.stringify({ ...stored, ...writes }, null, 2), "utf-8");
     return scope;
   } catch {
     return undefined;
@@ -665,10 +687,11 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
 export function persistToastFor(
   successMsg: string,
   scope: SettingsScope | undefined,
+  shadowed = false,
 ): { message: string; level: "info" | "warning" } {
-  return scope
-    ? { message: `${successMsg} (saved to ${scope} settings)`, level: "info" }
-    : { message: `${successMsg} (session only; failed to persist)`, level: "warning" };
+  if (!scope) return { message: `${successMsg} (session only; failed to persist)`, level: "warning" };
+  const note = shadowed ? "; project settings override it" : "";
+  return { message: `${successMsg} (saved to ${scope} settings${note})`, level: "info" };
 }
 
 /**
@@ -700,9 +723,16 @@ export function saveAndEmitChanged(
   successMsg: string,
   emit: SettingsEmit,
   cwd: string = process.cwd(),
+  target?: SettingsScope,
+  applied: SubagentsSettings = {},
 ): { message: string; level: "info" | "warning"; persisted: boolean } {
-  const scope = saveSettings(changedSettings(previous, snapshot), cwd);
+  const changes = changedSettings(previous, snapshot);
+  const scope = saveSettings(changes, cwd, target, applied);
   const persisted = scope !== undefined;
   emit("subagents:settings_changed", { settings: snapshot, persisted });
-  return { ...persistToastFor(successMsg, scope), persisted };
+  // A global write the project file overrides takes effect only in this
+  // session; say so rather than let the next restart revert it silently.
+  const project = scope === "global" ? readSettingsFile(projectPath(cwd)) : {};
+  const shadowed = Object.keys({ ...changes, ...applied }).some((key) => key in project);
+  return { ...persistToastFor(successMsg, scope, shadowed), persisted };
 }
