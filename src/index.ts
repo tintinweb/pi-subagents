@@ -41,13 +41,17 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import {
   applyAndEmitLoaded,
+  applySettings,
   defaultSettingsScope,
   loadSettings,
   NUMERIC_SETTING_BOUNDS,
   type NumericSettingKey,
+  SETTING_DEFAULTS,
+  type SettingsAppliers,
   type SettingsScope,
   type SubagentsSettings,
   saveAndEmitChanged,
+  saveSettings,
   settingSources,
   settingsFilePath,
   type ToolDescriptionMode,
@@ -1584,38 +1588,37 @@ export default function (pi: ExtensionAPI) {
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
   // to stderr and falls back to defaults.
-  applyAndEmitLoaded(
-    {
-      setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
-      setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
-      setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
-      setDefaultMaxTurns,
-      setGraceTurns,
-      setDefaultJoinMode,
-      setBackgroundByDefault,
-      setSchedulingEnabled,
-      setScopeModels: setScopeModelsEnabled,
-      setStrictAgentFiles: (b) => { strictAgentFiles = b; },
-      setDisableDefaultAgents: setDisableDefaultAgents,
-      setToolDescriptionMode: setToolDescriptionMode,
-      setFleetView: setFleetViewEnabled,
-      setAgentMentions: setAgentMentionMode,
-      setRememberAgents,
-      setWidgetMode: setWidgetMode,
-      setOutputTranscript: setOutputTranscriptDefault,
-      setWorktreeIsolation: setWorktreeIsolationEnabled,
-      setWorkflowsEnabled: setWorkflowsEnabled,
-      setMaxSubagentDepth: setMaxSubagentDepth,
-      setFallbackSubagent: setFallbackSubagent,
-      setReportUsage,
-      setShowCost,
-      setShowModel,
-      setViewerMarkdown,
-      setPackageAgents: setPackageAgentsGate,
-      setPackageWorkflows: setPackageWorkflowsGate,
-    },
-    (event, payload) => pi.events.emit(event, payload),
-  );
+  // Also how Del on the Settings page applies the value a row falls back to.
+  const settingsAppliers: SettingsAppliers = {
+    setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
+    setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
+    setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
+    setDefaultMaxTurns,
+    setGraceTurns,
+    setDefaultJoinMode,
+    setBackgroundByDefault,
+    setSchedulingEnabled,
+    setScopeModels: setScopeModelsEnabled,
+    setStrictAgentFiles: (b) => { strictAgentFiles = b; },
+    setDisableDefaultAgents: setDisableDefaultAgents,
+    setToolDescriptionMode: setToolDescriptionMode,
+    setFleetView: setFleetViewEnabled,
+    setAgentMentions: setAgentMentionMode,
+    setRememberAgents,
+    setWidgetMode: setWidgetMode,
+    setOutputTranscript: setOutputTranscriptDefault,
+    setWorktreeIsolation: setWorktreeIsolationEnabled,
+    setWorkflowsEnabled: setWorkflowsEnabled,
+    setMaxSubagentDepth: setMaxSubagentDepth,
+    setFallbackSubagent: setFallbackSubagent,
+    setReportUsage,
+    setShowCost,
+    setShowModel,
+    setViewerMarkdown,
+    setPackageAgents: setPackageAgentsGate,
+    setPackageWorkflows: setPackageWorkflowsGate,
+  };
+  applyAndEmitLoaded(settingsAppliers, (event, payload) => pi.events.emit(event, payload));
 
   // ---- Agent tool ----
 
@@ -3893,6 +3896,28 @@ Write the file using the write tool. Only write the file, nothing else.`;
 
   // A typed row's id is the setting it writes.
   const isNumericId = (id: string): id is NumericSettingKey => Object.hasOwn(NUMERIC_SETTING_BOUNDS, id);
+  // The setting a row shows: its id, except Join mode's.
+  const settingKeyOf = (id: string) => (id === "joinMode" ? "defaultJoinMode" : id) as keyof SubagentsSettings;
+
+  /**
+   * Put one setting back to `value`, the value loading gives once Del has
+   * removed it from a file; `undefined` unsets it. Carries the side effects
+   * the Settings rows carry when they change the same setting.
+   */
+  function resetSetting(key: keyof SubagentsSettings, value: unknown) {
+    if (value !== undefined) applySettings({ [key]: value } as SubagentsSettings, settingsAppliers);
+    else if (key === "fallbackSubagent") setFallbackSubagent(undefined);
+    else if (key === "packageAgents") setPackageAgentsGate(undefined);
+    else if (key === "packageWorkflows") setPackageWorkflowsGate(undefined);
+    else if (key === "workflowsEnabled") {
+      // On, and no longer the user's answer: the next session may yield it to
+      // another extension's workflow tool again.
+      workflowsEnabled = true;
+      workflowsPinned = false;
+    }
+    if (key === "packageAgents" || key === "packageWorkflows") reloadCustomAgents();
+    if (key === "schedulingEnabled" && !isSchedulingEnabled()) scheduler.stop();
+  }
 
   /**
    * `scope` is the file changes are written to. It starts at the default rule
@@ -4341,7 +4366,10 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const path = settingsFilePath(scope, process.cwd());
         const shown = scope === "project" ? ".pi/subagents.json" : path.replace(homedir(), "~");
         const created = scope === "project" && !existsSync(path) ? " · created on first change" : "";
-        fileLine.setText(theme.fg("muted", `   ${shown}${created} · tagged rows are set in a file`));
+        fileLine.setText(theme.fg(
+          "muted",
+          `   ${shown}${created} · tagged rows are set in a file · ${keyLabel("tui.editor.deleteCharForward")} to reset`,
+        ));
       };
       // Re-read values and file tags after every change: a save can move a
       // key into the other file, and some rows' values depend on others.
@@ -4351,11 +4379,41 @@ Write the file using the write tool. Only write the file, nothing else.`;
         for (const item of items) {
           const next = fresh.get(item.id);
           if (next) Object.assign(item, { currentValue: next.currentValue, values: next.values, description: next.description });
-          const source = sources[(item.id === "joinMode" ? "defaultJoinMode" : item.id) as keyof SubagentsSettings];
+          const source = sources[settingKeyOf(item.id)];
           const base = baseLabels.get(item.id) ?? item.label;
           item.label = source ? `${base}${theme.fg("muted", ` · ${source}`)}` : base;
         }
         renderHeader();
+      };
+
+      // Remove the row's setting from the file its tag names. The row then
+      // shows what a restart would load: the other file's value, or the default.
+      const resetRow = (item: SettingItem) => {
+        const key = settingKeyOf(item.id);
+        const label = baseLabels.get(item.id) ?? item.label;
+        const cwd = process.cwd();
+        const source = settingSources(cwd)[key];
+        if (!source) {
+          ctx.ui.notify(`${label} is already at its default`, "info");
+          return;
+        }
+        if (!saveSettings({ [key]: undefined } as SubagentsSettings, cwd, source)) {
+          ctx.ui.notify(`${label}: failed to remove it from ${source} settings`, "warning");
+          return;
+        }
+        resetSetting(key, loadSettings(cwd)[key] ?? SETTING_DEFAULTS[key]);
+        // The file now agrees with memory for this key; a later save must not write it back.
+        const snapshot = snapshotSettings();
+        savedSnapshot = { ...savedSnapshot, [key]: snapshot[key] };
+        pi.events.emit("subagents:settings_changed", { settings: snapshot, persisted: true });
+        refreshRows();
+        const still = settingSources(cwd)[key];
+        ctx.ui.notify(
+          still
+            ? `${label} is now ${item.currentValue} from ${still} settings (removed from ${source} settings)`
+            : `${label} reset to the default, ${item.currentValue} (removed from ${source} settings)`,
+          "info",
+        );
       };
 
       const list = new SettingsList(
@@ -4434,6 +4492,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
           if (kb.matches(data, "tui.input.tab")) {
             scope = scope === "global" ? "project" : "global";
             renderHeader();
+            return;
+          }
+          // Delete, and Backspace: it is the key labelled "delete" on a Mac.
+          if (kb.matches(data, "tui.editor.deleteCharForward") || kb.matches(data, "tui.editor.deleteCharBackward")) {
+            resetRow(items[selected]);
             return;
           }
           // Wraps at both ends, as SettingsList's own navigation does.

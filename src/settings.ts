@@ -427,6 +427,44 @@ export const NUMERIC_SETTING_BOUNDS: Readonly<Record<NumericSettingKey, NumericB
 };
 
 /**
+ * The value each setting has when no settings file sets it, as the session
+ * snapshot reports it — `/agents` → Settings resets a row to this once Del has
+ * removed the key from every file. Every key is listed; `undefined` marks one
+ * that is unset by default (fallback = general-purpose, workflows and package
+ * gates on, and workflows still free to yield to another extension's tool).
+ * `test/settings-defaults.test.ts` checks it against a boot with no files.
+ */
+export const SETTING_DEFAULTS: { readonly [K in keyof Required<SubagentsSettings>]: SubagentsSettings[K] } = {
+  maxConcurrent: 10,
+  maxConcurrentForeground: 0,
+  maxConcurrentNested: 10,
+  defaultMaxTurns: 0,
+  graceTurns: 5,
+  defaultJoinMode: "smart",
+  backgroundByDefault: true,
+  schedulingEnabled: true,
+  scopeModels: false,
+  strictAgentFiles: false,
+  disableDefaultAgents: false,
+  toolDescriptionMode: "full",
+  fleetView: true,
+  agentMentions: "model",
+  rememberAgents: true,
+  widgetMode: "background",
+  outputTranscript: true,
+  worktreeIsolation: true,
+  workflowsEnabled: undefined,
+  maxSubagentDepth: 2,
+  fallbackSubagent: undefined,
+  reportUsage: false,
+  showCost: false,
+  showModel: false,
+  viewerMarkdown: "assistant",
+  packageAgents: undefined,
+  packageWorkflows: undefined,
+};
+
+/**
  * Normalize a package gate: a boolean passes through, an array is trimmed to its
  * non-empty string entries, a bare string becomes a one-entry allowlist, and
  * anything else is dropped.

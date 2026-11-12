@@ -70,12 +70,16 @@ const KEYS: Record<string, string> = {
   "tui.select.cancel": "\x1b",
   "tui.select.up": "\x1b[A",
   "tui.select.down": "\x1b[B",
+  "tui.editor.deleteCharForward": "\x1b[3~",
+  "tui.editor.deleteCharBackward": "\x7f",
 };
 const TAB = "\t";
 const ENTER = "\r";
 const ESC = "\x1b";
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+const DEL = "\x1b[3~";
+const BACKSPACE = "\x7f";
 
 /** Row order of the number settings on the page. */
 const ROW: Record<string, number> = {
@@ -329,6 +333,90 @@ describe("/agents → Settings writes only the changed setting", () => {
     await agents(after.ctx);
 
     expect(after.page.screen).toMatch(/Grace turns · project +9\b/);
+  });
+
+  it("Del removes the row's setting from its file, and the row goes back to the default", async () => {
+    writeJson(globalFile(), { maxConcurrent: 4, graceTurns: 7 });
+    const agents = boot();
+    const { ctx, notify, page } = drivePage([DEL]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ graceTurns: 7 });
+    expect(page.screen).toMatch(/^>Max background concurrency +10\b/m);
+    expect(notify).toHaveBeenCalledWith(
+      "Max background concurrency reset to the default, 10 (removed from global settings)",
+      "info",
+    );
+    // In memory too, not just on screen: the next opening reads the manager.
+    const next = drivePage([]);
+    await agents(next.ctx);
+    expect(next.page.screen).toMatch(/Max background concurrency +10\b/);
+  });
+
+  it("Backspace removes the tagged project value; the global value then shows, and a second press removes that", async () => {
+    writeJson(globalFile(), { maxConcurrent: 8 });
+    writeJson(projectFile(), { maxConcurrent: 3 });
+    const agents = boot();
+    const first = drivePage([BACKSPACE]);
+    await agents(first.ctx);
+
+    expect(readJson(projectFile())).toEqual({});
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 8 });
+    expect(first.page.screen).toMatch(/Max background concurrency · global +8\b/);
+    expect(first.notify).toHaveBeenCalledWith(
+      "Max background concurrency is now 8 from global settings (removed from project settings)",
+      "info",
+    );
+
+    const second = drivePage([BACKSPACE]);
+    await agents(second.ctx);
+    expect(readJson(globalFile())).toEqual({});
+    expect(second.page.screen).toMatch(/Max background concurrency +10\b/);
+  });
+
+  it("Del on a row no file sets writes nothing", async () => {
+    const agents = boot();
+    const { ctx, notify } = drivePage([DEL]);
+
+    await agents(ctx);
+
+    expect(notify).toHaveBeenCalledWith("Max background concurrency is already at its default", "info");
+    expect(existsSync(globalFile())).toBe(false);
+    expect(existsSync(join(cwd, ".pi"))).toBe(false);
+  });
+
+  it("a change after Del does not write the removed setting back", async () => {
+    writeJson(globalFile(), { maxConcurrent: 4 });
+    const agents = boot();
+    // Del on Max background concurrency, then cycle Join mode.
+    const { ctx } = drivePage([DEL, ...Array<string>(6).fill(DOWN), ENTER]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ defaultJoinMode: "group" });
+  });
+
+  it("Del restores a setting that is unset by default", async () => {
+    // Package agents is on by default because no gate is set at all.
+    writeJson(globalFile(), { packageAgents: false });
+    const agents = boot();
+    const { ctx, page } = drivePage([...Array<string>(10).fill(DOWN), DEL]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({});
+    expect(page.screen).toMatch(/^>Package agents +on\b/m);
+  });
+
+  it("Backspace inside the number editor edits the text and resets nothing", async () => {
+    writeJson(globalFile(), { maxConcurrent: 4 });
+    const agents = boot();
+    const { ctx } = drivePage([ENTER, "6", "5", BACKSPACE, ENTER]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 6 });
   });
 
   it("re-setting the effective value in Project overwrites a different value stored there", async () => {
