@@ -25,9 +25,9 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       // lacks — it already has every tool — so the privilege-boundary reason
       // nesting is opt-in for custom agents does not apply here.
       allowedSubagents: "all",
-      // The closing guideline of Claude Code's general-purpose prompt: without
-      // it a delegating agent tends to hand its whole task to one child.
-      systemPrompt: "You are already the dedicated agent for this task. Do the work directly — do not re-delegate your entire assignment to another single subagent.",
+      // Claude Code's closing "do not re-delegate" line is added by the runner
+      // (`PromptExtras.delegationGuideline`), only when this agent can spawn.
+      systemPrompt: "",
       promptMode: "append",
       isDefault: true,
     },

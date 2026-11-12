@@ -1279,6 +1279,41 @@ describe("agent-runner master tool allowlist", () => {
 
     expect(createNestedSubagentTools).not.toHaveBeenCalled();
     expect(lastToolsPassed()).not.toContain("Agent");
+    // Nor the "do not re-delegate" line, which only makes sense with the tool.
+    const { buildAgentPrompt } = await import("../src/prompts.js");
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("delegationGuideline");
+  });
+
+  // Claude Code's general-purpose prompt closes with the re-delegation line. It
+  // is added exactly when the built-in can spawn.
+  describe("the built-in general-purpose's re-delegation line", () => {
+    async function extrasFor(agentOverrides: Record<string, unknown>): Promise<Record<string, unknown>> {
+      vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+      vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false, ...agentOverrides }));
+      vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+      const { session } = createSession("OK");
+      createAgentSession.mockResolvedValue({ session });
+      await runAgent(ctx, "general-purpose", "go", {
+        pi,
+        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+      });
+      const { buildAgentPrompt } = await import("../src/prompts.js");
+      return vi.mocked(buildAgentPrompt).mock.lastCall![4] as Record<string, unknown>;
+    }
+
+    it("is added when the built-in receives the nested Agent tool", async () => {
+      expect(await extrasFor({ allowedSubagents: "all", isDefault: true })).toMatchObject({ delegationGuideline: true });
+    });
+
+    it("is left out when `Agent` is disallowed", async () => {
+      expect(await extrasFor({ allowedSubagents: "all", isDefault: true, disallowedTools: ["Agent"] }))
+        .not.toHaveProperty("delegationGuideline");
+    });
+
+    // Claude Code adds it to its general-purpose only, not to custom agents.
+    it("is left out for a custom agent that delegates", async () => {
+      expect(await extrasFor({ allowedSubagents: "all" })).not.toHaveProperty("delegationGuideline");
+    });
   });
 
   // A custom agent's `allowed_subagents` is the author's explicit opt-in, and

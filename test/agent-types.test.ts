@@ -111,14 +111,6 @@ describe("agent type registry", () => {
       expect(getAgentConfig("Plan")?.allowedSubagents).toBeUndefined();
     });
 
-    // Claude Code's general-purpose prompt ends with this guideline; without it a
-    // delegating agent tends to hand its whole task to one child.
-    it("tells general-purpose not to re-delegate its whole assignment", () => {
-      expect(getAgentConfig("general-purpose")?.systemPrompt).toContain(
-        "do not re-delegate your entire assignment to another single subagent",
-      );
-    });
-
     it("default agents are marked isDefault", () => {
       const cfg = getAgentConfig("general-purpose");
       expect(cfg?.isDefault).toBe(true);
@@ -319,6 +311,21 @@ describe("agent type registry", () => {
       const config = getConfig("Explore");
       expect(config.description).toBe("Custom Explore");
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+    });
+
+    // The documented opt-out: a general-purpose.md without `allowed_subagents`
+    // replaces the built-in outright. It must not inherit the built-in's
+    // delegation, nor its `isDefault`, which the runner's workflow gate keys on.
+    it("a general-purpose override without allowed_subagents does not delegate", () => {
+      registerAgents(new Map([["general-purpose", makeAgentConfig({
+        name: "general-purpose",
+        description: "Custom general-purpose",
+      })]]));
+
+      const config = getAgentConfig("general-purpose");
+      expect(config?.description).toBe("Custom general-purpose");
+      expect(config?.allowedSubagents).toBeUndefined();
+      expect(config?.isDefault).not.toBe(true);
     });
 
     it("disabled agent is excluded from available types", () => {

@@ -864,6 +864,46 @@ export async function runAgent(
     }
   }
 
+  const disallowedSet = agentConfig?.disallowedTools
+    ? new Set(agentConfig.disallowedTools)
+    : undefined;
+
+  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
+  // set `allowed_subagents` and a nestedRuntime was provided — and never when
+  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
+  // scoping below re-admits them explicitly (registry deny + active-set narrow).
+  // Decided before the prompt is built, which says so when the agent delegates.
+  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
+  // At (or past) the cap this agent can never spawn, so it can never own a child
+  // to fetch from or steer either — inject nothing rather than three tools whose
+  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
+  // "nesting off" instead of "nesting always fails".
+  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
+    ? options.nestedRuntime
+    : undefined;
+  // A workflow agent running the built-in general-purpose (what an untyped
+  // agent() gets) does not delegate: Claude Code's `workflow-subagent` drops the
+  // Agent tool, and the workflow script is what fans out. A custom agent's own
+  // `allowed_subagents` still applies.
+  const builtinInWorkflow = options.workflow === true && agentConfig?.isDefault === true;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated && !builtinInWorkflow
+    ? createNestedSubagentTools({
+        manager: nestedRuntime.manager,
+        pi: options.pi,
+        parentAgentId: nestedRuntime.parentAgentId,
+        depth: nestedRuntime.depth,
+        maxSubagentDepth: effectiveMaxDepth,
+        allowedSubagents: agentConfig.allowedSubagents,
+        configCwd,
+      })
+    : [];
+  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
+  // Only where the built-in general-purpose can actually spawn — not in a
+  // workflow, at the depth cap, isolated, or with `Agent` disallowed.
+  if (agentConfig?.isDefault && nestedToolNames.has("Agent") && !disallowedSet?.has("Agent")) {
+    extras.delegationGuideline = true;
+  }
+
   // Build system prompt from agent config
   let systemPrompt: string;
   if (agentConfig) {
@@ -1079,40 +1119,6 @@ export async function runAgent(
   // defaultThinkingLevel (e.g. "max") instead of matching the spawning session.
   // Same idiom as mention-clone.ts.
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
-
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
-
-  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
-  // set `allowed_subagents` and a nestedRuntime was provided — and never when
-  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
-  // scoping below re-admits them explicitly (registry deny + active-set narrow).
-  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  // At (or past) the cap this agent can never spawn, so it can never own a child
-  // to fetch from or steer either — inject nothing rather than three tools whose
-  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
-  // "nesting off" instead of "nesting always fails".
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
-    ? options.nestedRuntime
-    : undefined;
-  // A workflow agent running the built-in general-purpose (what an untyped
-  // agent() gets) does not delegate: Claude Code's `workflow-subagent` drops the
-  // Agent tool, and the workflow script is what fans out. A custom agent's own
-  // `allowed_subagents` still applies.
-  const builtinInWorkflow = options.workflow === true && agentConfig?.isDefault === true;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated && !builtinInWorkflow
-    ? createNestedSubagentTools({
-        manager: nestedRuntime.manager,
-        pi: options.pi,
-        parentAgentId: nestedRuntime.parentAgentId,
-        depth: nestedRuntime.depth,
-        maxSubagentDepth: effectiveMaxDepth,
-        allowedSubagents: agentConfig.allowedSubagents,
-        configCwd,
-      })
-    : [];
-  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
 
   // The `agent({ schema })` contract: this child reports its answer by calling
   // StructuredOutput, and `structuredJson` below is what the caller reads. The
