@@ -3890,7 +3890,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "maxSubagentDepth",
           label: "Nested depth",
-          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
+          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, even with allowed_subagents; Enter to type)",
           currentValue: String(msd),
           values: [String(msd)],
         },
@@ -4120,7 +4120,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           notifyApplied(
             ctx,
             n <= 1
-              ? "Nested delegation disabled"
+              ? "Nested delegation disabled for every agent, including those with allowed_subagents"
               : `Nested depth set to ${n}. Applies to agents started from now on.`,
           );
         }

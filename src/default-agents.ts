@@ -20,6 +20,13 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       // Setting them to false would lock callsite intent (see resolveAgentInvocationConfig in invocation-config.ts).
       extensions: true,
       skills: true,
+      // Claude Code's general-purpose (`tools: ["*"]`) keeps its Agent tool;
+      // Explore and Plan disallow it. Delegation grants this agent nothing it
+      // lacks — it already has every tool — so the privilege-boundary reason
+      // nesting is opt-in for custom agents does not apply here.
+      allowedSubagents: "all",
+      // Claude Code's closing "do not re-delegate" line is added by the runner
+      // (`PromptExtras.delegationGuideline`), only when this agent can spawn.
       systemPrompt: "",
       promptMode: "append",
       isDefault: true,

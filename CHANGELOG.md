@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Behavior change — `general-purpose` can now spawn subagents of its own** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). A `general-purpose` agent may delegate instead of doing all the work itself; its children count toward `maxConcurrentNested`. Depth stays at `maxSubagentDepth` `2`: a subagent's children cannot spawn again, unlike Claude Code's default of 3; set it to `3` to match. Inside a workflow it does not, as in Claude Code: the script does the fanning out. To keep `general-purpose` from delegating, add a `general-purpose.md` agent file without `allowed_subagents`; it replaces the built-in. A `general-purpose.md` you ejected earlier is such a file, so it keeps the old behavior: add `allowed_subagents: all` to it, or delete it to use the built-in. Set `maxSubagentDepth` to `1` to turn nesting off entirely.
+
+### Changed
+- **The built-in `general-purpose` agent delegates, matching Claude Code** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). In Claude Code, `general-purpose` keeps its `Agent` tool and `Explore`/`Plan` drop it. Here nested delegation required a custom agent with `allowed_subagents`, so asking for "a subagent that spawns subagents" got a `general-purpose` child with no `Agent` tool. The allowlist stays opt-in for custom agents: `general-purpose` already has every tool, so delegation grants it nothing new. When it can spawn, its prompt carries Claude Code's line telling it not to hand its whole task to a single child.
+
 ## [0.24.0] - 2026-11-12
 
 > **⚠️ Behavior change — nested spawns are refused once 10 nested subagents are running** ([#427](https://github.com/tintinweb/pi-subagents/pull/427)). Only agents with `allowed_subagents` are affected; the parent gets a tool error and does the work itself. To restore the unbounded behavior, set `/agents → Settings → Max nested concurrency` (`maxConcurrentNested`) to `0`.

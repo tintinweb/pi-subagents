@@ -33,6 +33,13 @@ export interface PromptExtras {
    * `get_subagent_result` — so terse raw data would be the wrong answer there.
    */
   workflowChild?: boolean;
+  /**
+   * Set only for the built-in general-purpose, and only when it received the
+   * nested `Agent` tool. Claude Code's general-purpose prompt closes with this
+   * line; without it a delegating agent tends to hand its whole task to one
+   * child. An agent that cannot spawn gets nothing to misread.
+   */
+  delegationGuideline?: boolean;
 }
 
 /**
@@ -86,6 +93,11 @@ Return only the answer, in exactly the shape the prompt asks for — no preamble
 </workflow_child>`
     : "";
 
+  // Append mode only: the one agent that gets this, general-purpose, is append.
+  const delegationBlock = extras?.delegationGuideline
+    ? "\n\nYou are already the dedicated agent for this task. Do the work directly — do not re-delegate your entire assignment to another single subagent."
+    : "";
+
   // Build optional extras suffix
   const extraSections: string[] = [];
   if (extras?.memoryBlock) {
@@ -123,7 +135,7 @@ You are operating as a sub-agent invoked to handle a specific task.
     // placed verbatim (no wrapper tag) so it forms an identical byte prefix
     // with the parent session, maximising KV cache hits. The <active_agent>
     // tag and env block vary per call and are placed after the cached prefix.
-    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + workflowBlock + customSection + extrasSuffix;
+    return identity + "\n\n" + bridge + "\n\n" + activeAgentTag + envBlock + worktreeBlock + workflowBlock + delegationBlock + customSection + extrasSuffix;
   }
 
   // "replace" mode — env header + the config's full system prompt

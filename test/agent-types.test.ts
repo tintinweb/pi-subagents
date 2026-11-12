@@ -102,6 +102,15 @@ describe("agent type registry", () => {
       expect(getAgentConfig("Explore")?.model).toBeUndefined();
     });
 
+    // Claude Code parity: its general-purpose has `tools: ["*"]` and so keeps the
+    // Agent tool, while Explore and Plan list it in `disallowedTools`. Delegation
+    // grants general-purpose nothing it lacks — it already has every tool.
+    it("lets general-purpose delegate, and keeps Explore and Plan from it", () => {
+      expect(getAgentConfig("general-purpose")?.allowedSubagents).toBe("all");
+      expect(getAgentConfig("Explore")?.allowedSubagents).toBeUndefined();
+      expect(getAgentConfig("Plan")?.allowedSubagents).toBeUndefined();
+    });
+
     it("default agents are marked isDefault", () => {
       const cfg = getAgentConfig("general-purpose");
       expect(cfg?.isDefault).toBe(true);
@@ -302,6 +311,21 @@ describe("agent type registry", () => {
       const config = getConfig("Explore");
       expect(config.description).toBe("Custom Explore");
       expect(config.builtinToolNames).toEqual(BUILTIN_TOOL_NAMES);
+    });
+
+    // The documented opt-out: a general-purpose.md without `allowed_subagents`
+    // replaces the built-in outright. It must not inherit the built-in's
+    // delegation, nor its `isDefault`, which the runner's workflow gate keys on.
+    it("a general-purpose override without allowed_subagents does not delegate", () => {
+      registerAgents(new Map([["general-purpose", makeAgentConfig({
+        name: "general-purpose",
+        description: "Custom general-purpose",
+      })]]));
+
+      const config = getAgentConfig("general-purpose");
+      expect(config?.description).toBe("Custom general-purpose");
+      expect(config?.allowedSubagents).toBeUndefined();
+      expect(config?.isDefault).not.toBe(true);
     });
 
     it("disabled agent is excluded from available types", () => {

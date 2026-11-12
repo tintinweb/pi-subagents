@@ -62,8 +62,18 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("<sub_agent_context>");
     expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).not.toContain("READ-ONLY");
-    // Empty systemPrompt means no <agent_instructions> section
+    // Empty systemPrompt means no <agent_instructions> section, and no
+    // re-delegation line unless the runner says this agent can spawn.
     expect(prompt).not.toContain("<agent_instructions>");
+    expect(prompt).not.toContain("re-delegate");
+  });
+
+  it("adds Claude Code's re-delegation line when the agent can delegate", () => {
+    const config = getDefaultConfig("general-purpose");
+    const prompt = buildAgentPrompt(config, "/workspace", env, "Parent.", { delegationGuideline: true });
+    expect(prompt).toContain(
+      "You are already the dedicated agent for this task. Do the work directly — do not re-delegate your entire assignment to another single subagent.",
+    );
   });
 
   it("general-purpose without parent prompt falls back to generic base", () => {

@@ -183,6 +183,35 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
     expect(nestedToolsIn(observed.get("plain-child"))).toEqual([]);
   });
 
+  it("gives the built-in general-purpose agent the nested tools, and Explore none", async () => {
+    // Claude Code parity: general-purpose keeps Agent, Explore and Plan do not.
+    const observed = new Map<string, string[]>();
+    ({ run, cwd } = await runWithAgents(
+      {},
+      (ctx) => {
+        const route = userPrompt(ctx);
+        if (route === "gp-child" || route === "explore-child") {
+          observed.set(route, tools(ctx));
+          return `${route} done`;
+        }
+        const spawned = toolResults(ctx, "Agent").length;
+        if (spawned === 0) {
+          return agentCall({ subagent_type: "general-purpose", description: "gp", prompt: "gp-child", run_in_background: false });
+        }
+        if (spawned === 1) {
+          return agentCall({ subagent_type: "Explore", description: "explore", prompt: "explore-child", run_in_background: false });
+        }
+        return "both done";
+      },
+      { prompt: "root-builtins" },
+    ));
+
+    expect(run.responseText).toContain("both done");
+    expect(observed.get("gp-child")).toEqual(expect.arrayContaining(NESTED_TOOLS));
+    expect(observed.get("explore-child")).toBeDefined();
+    expect(nestedToolsIn(observed.get("explore-child"))).toEqual([]);
+  });
+
   it("strips nested tools at the depth cap instead of injecting always-failing ones", async () => {
     // Default maxSubagentDepth is 2: main(0) → level_one(1) → level_two(2).
     // #164 injects nested tools only while depth < max, so the agent at the cap
