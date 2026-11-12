@@ -4012,7 +4012,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "showModel",
           label: "Show model",
           description:
-            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The Agent tool result and the conversation viewer show the pair either way — this adds it to the widget, where the row is already dense.",
+            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows and the fleet view rows. The Agent tool result and the conversation viewer show the pair either way — this adds it where the rows are already dense.",
           currentValue: isShowModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },

@@ -553,29 +553,22 @@ export class FleetList {
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    let left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    if (this.showModel()) {
+      // After the description, not in the stats: rightAlign truncates only the
+      // left side, so here the model is cut first and the name survives. Bare
+      // level (`sonnet 4.6 · high`), matching the widget's running line.
+      const { modelName, thinking } = buildInvocationTags(record.invocation);
+      const model = [modelName, thinking].filter(Boolean).join(" · ");
+      if (model) left += theme.fg(selected ? "text" : "dim", ` · ${model}`);
+    }
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it
     // outlives the agent.
     const tokens = getLifetimeTotal(record.lifetimeUsage);
     const elapsedMs = (record.completedAt ?? Date.now()) - record.startedAt; // freezes once finished
     const cost = this.showCost() ? formatCost(getLifetimeCost(record.lifetimeUsage)) : "";
-    const parts: string[] = [];
-    if (this.showModel()) {
-      // Leading and paired, as the widget's running line builds them. Taken from
-      // buildInvocationTags so the "(asked X)" annotation survives, but the
-      // "thinking: " label is dropped — the bare level reads as a property of
-      // the model it sits beside (`sonnet 4.6 · high`), and both live surfaces
-      // agree on that form.
-      const { modelName, tags } = buildInvocationTags(record.invocation);
-      if (modelName) parts.push(modelName);
-      const thinkingTag = tags.find(tag => tag.startsWith("thinking: "));
-      if (thinkingTag) parts.push(thinkingTag.slice("thinking: ".length));
-    }
-    parts.push(formatFleetElapsed(elapsedMs));
-    parts.push(formatFleetTokens(tokens));
-    if (cost) parts.push(cost);
-    const stats = parts.join(" · ");
+    const stats = `${formatFleetElapsed(elapsedMs)} · ${formatFleetTokens(tokens)}${cost ? ` · ${cost}` : ""}`;
     const right = selected ? theme.fg("text", stats) : theme.fg("dim", stats);
     return rightAlign(left, right, width);
   }
