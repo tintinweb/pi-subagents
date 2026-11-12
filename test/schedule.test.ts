@@ -270,6 +270,63 @@ describe("SubagentScheduler — fire path", () => {
     expect(manager.spawn).toHaveBeenCalledTimes(3);
   });
 
+  it("a throwing store at fire time emits an error instead of crashing the timer tick", () => {
+    scheduler.addJob({
+      name: "contended", description: "tick", schedule: "10s",
+      subagent_type: "general-purpose", prompt: "tick",
+    });
+    vi.spyOn(store, "update").mockImplementation(() => {
+      throw new Error("locked by live process 999");
+    });
+
+    // An uncaught throw here would fail the test outright (uncaught in tick).
+    vi.advanceTimersByTime(10_000);
+
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", error: expect.stringContaining("locked by live process"),
+    }));
+    // The failure is bookkeeping-only; the job still spawned.
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("a throwing store at completion emits an error instead of an unhandled rejection", async () => {
+    const job = scheduler.addJob({
+      name: "contended-finalize", description: "tick", schedule: "10s",
+      subagent_type: "general-purpose", prompt: "tick",
+    });
+    vi.spyOn(store, "update").mockImplementation(() => {
+      throw new Error("locked by live process 999");
+    });
+
+    vi.advanceTimersByTime(10_000);
+    await vi.advanceTimersByTimeAsync(0);  // drain awaitStartup -> promise -> finalize
+
+    const errors = pi.events.emit.mock.calls.filter(
+      ([channel, e]: [string, any]) => channel === "subagents:scheduled" && e.type === "error" && e.jobId === job.id,
+    );
+    // One for the "running" write, one for the completion write.
+    expect(errors).toHaveLength(2);
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("a throwing store when a one-shot auto-disables emits an error and no update", () => {
+    const job = scheduler.addJob({
+      name: "contended-once", description: "once", schedule: "+1s",
+      subagent_type: "general-purpose", prompt: "once",
+    });
+    vi.spyOn(store, "update").mockImplementation(() => {
+      throw new Error("locked by live process 999");
+    });
+
+    vi.advanceTimersByTime(2_000);
+
+    expect(manager.spawn).toHaveBeenCalledTimes(1);
+    expect(pi.events.emit).toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({
+      type: "error", jobId: job.id, error: expect.stringContaining("locked by live process"),
+    }));
+    expect(pi.events.emit).not.toHaveBeenCalledWith("subagents:scheduled", expect.objectContaining({ type: "updated" }));
+  });
+
   it("refuses at fire time when the job's agent type no longer resolves", () => {
     // The registry is what production populates at activation; a job outliving
     // its agent must not silently run something else (#183).
