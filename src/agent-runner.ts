@@ -1096,7 +1096,12 @@ export async function runAgent(
   const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
     ? options.nestedRuntime
     : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
+  // A workflow agent running the built-in general-purpose (what an untyped
+  // agent() gets) does not delegate: Claude Code's `workflow-subagent` drops the
+  // Agent tool, and the workflow script is what fans out. A custom agent's own
+  // `allowed_subagents` still applies.
+  const builtinInWorkflow = options.workflow === true && agentConfig?.isDefault === true;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated && !builtinInWorkflow
     ? createNestedSubagentTools({
         manager: nestedRuntime.manager,
         pi: options.pi,

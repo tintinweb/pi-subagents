@@ -408,7 +408,7 @@ Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_tu
 
 ### Nested subagents
 
-The built-in `general-purpose` agent delegates out of the box, matching Claude Code: it already has every tool, so a child can do nothing it could not. `Explore` and `Plan` never delegate. For custom agents nesting is default-off — set `allowed_subagents` only on a non-isolated custom agent that owns a real fan-out responsibility:
+The built-in `general-purpose` agent delegates out of the box, matching Claude Code: it already has every tool, so a child can do nothing it could not. It does not delegate as a [workflow](#subagentworkflow) `agent()`, where the script does the fanning out — Claude Code's workflow agents have no `Agent` tool either. `Explore` and `Plan` never delegate. For custom agents nesting is default-off — set `allowed_subagents` only on a non-isolated custom agent that owns a real fan-out responsibility:
 
 ```yaml
 ---

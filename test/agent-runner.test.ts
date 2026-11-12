@@ -1259,6 +1259,49 @@ describe("agent-runner master tool allowlist", () => {
     expect(createAgentSession.mock.calls[0][0].customTools).toHaveLength(3);
   });
 
+  // Claude Code's workflow agents run as `workflow-subagent`, which disallows
+  // the Agent tool. Here an untyped workflow agent() runs as the built-in
+  // general-purpose, whose delegation must not follow it into the workflow.
+  it("gives the built-in general-purpose no nested tools as a workflow agent", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, allowedSubagents: "all", isDefault: true }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "general-purpose", "go", {
+      pi,
+      workflow: true,
+      nestedRuntime: { manager: {} as any, parentAgentId: "wf-agent-0", depth: 1 },
+    });
+
+    expect(createNestedSubagentTools).not.toHaveBeenCalled();
+    expect(lastToolsPassed()).not.toContain("Agent");
+  });
+
+  // A custom agent's `allowed_subagents` is the author's explicit opt-in, and
+  // workflows honored it before general-purpose could delegate.
+  it("keeps a custom agent's opt-in nested tools as a workflow agent", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, allowedSubagents: ["scout"] }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "lead", "go", {
+      pi,
+      workflow: true,
+      nestedRuntime: { manager: {} as any, parentAgentId: "wf-agent-0", depth: 1 },
+    });
+
+    expect(createNestedSubagentTools).toHaveBeenCalled();
+    expect(lastToolsPassed()).toContain("Agent");
+  });
+
   it("keeps opt-in nested tools active UNDER EXTENSIONS despite the EXCLUDED-name collision", async () => {
     // The nested tool names ARE EXCLUDED_TOOL_NAMES. Under the denylist mechanism
     // they must (a) not be excluded from the registry, and (b) survive the live
