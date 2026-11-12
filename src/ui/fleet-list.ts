@@ -19,6 +19,7 @@ import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import type { AgentManager } from "../agent-manager.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
+import { agentTree } from "./agent-tree.js";
 import { type AgentActivity, buildInvocationTags, formatCost, type Theme } from "./agent-widget.js";
 import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./conversation-viewer.js";
 
@@ -277,9 +278,8 @@ export class FleetList {
    * Pending agents with no session yet are hidden until they start.
    * (`listAgents()` is newest-first, so we re-sort.)
    *
-   * Nested children are the one exception to `isTopLevelAgent` filtering on a
-   * user-facing surface: they get rows of their own here, as in Claude Code's
-   * FleetView, so each row shows its own usage rather than a rolled-up total.
+   * Nested children get rows of their own here (`agentTree`), as in Claude
+   * Code's FleetView, so each row shows its own usage rather than a rolled-up total.
    * A child shows only under a visible parent. A workflow's agents stay out —
    * the run's own row and inspector cover them.
    */
@@ -301,26 +301,7 @@ export class FleetList {
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
       ))
       .sort((a, b) => a.startedAt - b.startedAt);
-    const children = new Map<string, AgentRecord[]>();
-    for (const record of visible) {
-      if (record.parentAgentId === undefined) continue;
-      const siblings = children.get(record.parentAgentId);
-      if (siblings) siblings.push(record);
-      else children.set(record.parentAgentId, [record]);
-    }
-    const entries: AgentEntry[] = [];
-    // `indent` is what a child's own children continue with: a rail under a
-    // `├`, blank under the last sibling's `└`.
-    const visit = (record: AgentRecord, prefix: string, indent: string): void => {
-      entries.push({ kind: "agent", record, prefix });
-      const kids = children.get(record.id) ?? [];
-      kids.forEach((kid, i) => {
-        const last = i === kids.length - 1;
-        visit(kid, indent + (last ? "└ " : "├ "), indent + (last ? "  " : "│ "));
-      });
-    };
-    for (const record of visible) if (record.parentAgentId === undefined) visit(record, "", "");
-    return entries;
+    return agentTree(visible).map(({ record, prefix }) => ({ kind: "agent", record, prefix }));
   }
 
   /**
