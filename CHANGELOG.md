@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-12
+
 > **⚠️ Behavior change — nested spawns are refused once 10 nested subagents are running** ([#427](https://github.com/tintinweb/pi-subagents/pull/427)). Only agents with `allowed_subagents` are affected; the parent gets a tool error and does the work itself. To restore the unbounded behavior, set `/agents → Settings → Max nested concurrency` (`maxConcurrentNested`) to `0`.
 
 > **⚠️ Behavior change — FleetView rows show each agent's own tokens, and the selection is marked `❯`.** A parent that delegates now shows a smaller figure in FleetView, because its nested children are listed with their own; every other surface still reports the rolled-up total. `●` now marks the view in front (`main` or the open agent) instead of the selection, as in Claude Code. In fullscreen mode a left press on a fleet row opens that agent instead of starting a text selection.
