@@ -751,8 +751,12 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
-- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults. Edit by hand; the `/agents` menu never writes here.
-- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides. Written by `/agents` → Settings.
+- **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults.
+- **Project:** `<cwd>/.pi/subagents.json` — per-project overrides.
+
+`/agents` → Settings writes to the scope named in its header: Project when the project already has a `subagents.json`, Global otherwise. Tab switches it. Choosing Project in a repo without the file creates it on your first change; without that choice the menu never creates one. The list always shows the effective (merged) values, and saving to Global a setting the project file also sets warns that the project value still wins.
+
+A save writes only the setting you changed into that file; every other key in it, including ones another pi session saved, is left as it was.
 
 **Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max background concurrency `10`, max foreground concurrency `0` = unlimited, max nested concurrency `10`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
 
@@ -861,7 +865,7 @@ EOF
 
 Every project now starts with concurrency 16 and grace 10, without ever touching the menu. Individual projects can still override via `/agents` → Settings.
 
-**Failure behavior:** missing file is silent; malformed JSON logs a `[pi-subagents] Ignoring malformed settings at …` warning to stderr; invalid/out-of-range field values are dropped per-field; write failures downgrade the `/agents` toast to a warning with `(session only; failed to persist)`.
+**Failure behavior:** missing file is silent; malformed JSON logs a `[pi-subagents] Ignoring malformed settings at …` warning to stderr; invalid/out-of-range field values are dropped per-field; a successful save's `/agents` toast ends with `(saved to global settings)` or `(saved to project settings)`; write failures — including a target file that is malformed or not a JSON object, which is left untouched — downgrade it to a warning with `(session only; failed to persist)`.
 
 ## Events
 

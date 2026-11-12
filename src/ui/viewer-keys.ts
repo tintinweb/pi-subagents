@@ -48,7 +48,7 @@ export interface ViewerKeys {
  * the key (pi #4748). Formatting the injected manager's own resolved keys here
  * sidesteps both.
  */
-function formatKeyLabel(key: KeyId): string {
+export function formatKeyLabel(key: KeyId): string {
   return key
     .split("+")
     .map(part => {
