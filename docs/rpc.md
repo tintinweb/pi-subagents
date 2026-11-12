@@ -94,8 +94,16 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 Three things the table cannot show:
 
 - **The failure that is not an error.** With `worktreeIsolation` off project-wide, `isolation: "worktree"` is dropped by the `isWorktreeIsolationEnabled()` check in `AgentManager.startAgent` with no error, no note on the record, and a success envelope on the wire. Your agent runs in the main tree. If you asked for isolation because two agents were going to write the same files, they now collide and nothing told you.
-- **`data` is omitted** when a handler returns nothing, so a successful stop or consume reply is a bare `{ success: true }` and `reply.data.anything` throws.
+- **`data` is omitted** when a handler returns nothing, so a successful consume or steer reply is a bare `{ success: true }` and `reply.data.anything` throws. A successful stop replies `{ success: true, data: { settled } }`; see [Stopping](#stopping).
 - **`requestId` is not validated.** It is interpolated straight into the reply channel, so a caller that omits it gets its reply on the literal channel `subagents:rpc:spawn:reply:undefined` — where every other caller that omitted it is also listening. Send one, and send a unique one.
+
+## Stopping
+
+`subagents:rpc:stop` aborts the agent, then replies only once its run and the runs of every agent it owns, directly or transitively, have settled (`waitForSettled` in `src/agent-manager.ts`, #443). Without the wait, a caller that started replacement work on the reply could have a write from the stopped work land on top of it. `abort()` marks the record `stopped` at once, but a tool call that does not stop on the signal, such as a file write in progress or a shell command, keeps running until it returns.
+
+The wait is bounded by `STOP_SETTLE_TIMEOUT_MS` (5 s, `src/cross-extension-rpc.ts`), kept below the 10 s pi-tasks gives the stop reply. `settled: false` means the bound passed first and something may still be running. Anything the tree spawns while it unwinds is waited for too. The lifecycle events are unaffected: `subagents:failed` for the stopped agent fires when its own run settles, as before, so it can precede the stop reply.
+
+`reply.success` means what it always did; `data.settled` is additive, and a caller that never reads it sees only a later reply.
 
 ## Ownership
 
@@ -163,9 +171,9 @@ Prefer the bus. The registry has no reply envelope, no version, and no availabil
 
 `subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION }`, currently `2` (`src/cross-extension-rpc.ts`). The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors.
 
-Everything added since shipped **without a bump**, because all of it is additive: stop's ownership refusal, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), and the whole `consume` and `steer` channels.
+Everything added since shipped **without a bump**, because all of it is additive: stop's ownership refusal, stop waiting for settlement and replying `{ settled }`, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), and the whole `consume` and `steer` channels.
 
-> A `ping` that answers `2` does not tell you whether `consume` or `steer` exists, whether model scope is enforced, or whether stop checks ownership.
+> A `ping` that answers `2` does not tell you whether `consume`, `steer`, `get` or `list` exists, whether model scope is enforced, whether stop checks ownership, or whether stop waits for settlement.
 
 So: send `consume` unconditionally and ignore the outcome — an older build has no handler and simply keeps notifying, which is exactly why it was left outside the handshake. And treat every error envelope as authoritative rather than trying to predict which checks are in force.
 

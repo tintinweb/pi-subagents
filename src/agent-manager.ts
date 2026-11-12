@@ -1750,6 +1750,49 @@ export class AgentManager {
     return count;
   }
 
+  /**
+   * Resolve once `id`'s run and the runs of every agent it owns, directly or
+   * transitively, have settled — true then, or false if `timeoutMs` passes
+   * first. Unlike `waitForAll`, it reads promises, not status: `abort()` marks
+   * a record "stopped" at once, while a tool call that ignores the signal can
+   * still be running, and only the promise says when it is not (#443).
+   *
+   * Loops to a fixed point, as `waitForAll` does: a descendant can be spawned,
+   * and a record resumed with a new promise, while the tree unwinds.
+   */
+  async waitForSettled(id: string, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    const settled = (async () => {
+      let seen = new Set<Promise<unknown>>();
+      while (true) {
+        const pending = new Set<Promise<unknown>>();
+        for (const record of this.agents.values()) {
+          if (!this.isInTree(record, id)) continue;
+          const startup = this.startups.get(record.id);
+          if (startup) pending.add(startup);
+          if (record.promise) pending.add(record.promise);
+        }
+        if ([...pending].every((p) => seen.has(p))) return true;
+        seen = pending;
+        await Promise.allSettled(pending);
+      }
+    })();
+    try {
+      return await Promise.race([settled, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Whether `record` is `rootId` itself or one of the agents it owns. */
+  private isInTree(record: AgentRecord, rootId: string): boolean {
+    for (let r: AgentRecord | undefined = record; r; r = r.parentAgentId ? this.agents.get(r.parentAgentId) : undefined) {
+      if (r.id === rootId) return true;
+    }
+    return false;
+  }
+
   /** Wait for all running and queued agents to complete (including queued ones). */
   async waitForAll(): Promise<void> {
     // Loop because drainQueue respects the concurrency limit — as running

@@ -2844,3 +2844,112 @@ describe("AgentManager — the agent file's `isolation` wins over the spawn opti
     expect(createWorktree).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("AgentManager — waitForSettled (#443)", () => {
+  let manager: AgentManager;
+  afterEach(() => manager?.dispose());
+
+  /**
+   * The parent ends as soon as it is aborted. The child is inside a tool call
+   * that ignores the abort — a write in progress — and finishes only when the
+   * test opens its gate.
+   */
+  function parentAndStubbornChild() {
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => { openGate = resolve; });
+    const writes: string[] = [];
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, prompt, opts: any) => {
+      if (prompt === "child") {
+        await gate;
+        writes.push("OLD");
+        return { responseText: "child done", session: mockSession(), aborted: true, steered: false };
+      }
+      await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { responseText: "", session: mockSession(), aborted: true, steered: false };
+    });
+    manager = new AgentManager();
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent", isBackground: true });
+    const childId = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
+      description: "child", isBackground: true, parentAgentId: parentId, depth: 2,
+    });
+    return { parentId, childId, writes, openGate };
+  }
+
+  it("does not resolve while an aborted agent's owned child is still in a tool call", async () => {
+    const { parentId, childId, writes, openGate } = parentAndStubbornChild();
+
+    manager.abort(parentId);
+    await manager.getRecord(parentId)!.promise;
+    // The repro: the parent has settled and the child already reads "stopped",
+    // yet its write has not landed.
+    expect(manager.getRecord(childId)!.status).toBe("stopped");
+
+    let settled: boolean | undefined;
+    const waiting = manager.waitForSettled(parentId, 5_000).then((s) => { settled = s; });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settled).toBeUndefined();
+
+    openGate();
+    await waiting;
+    expect(settled).toBe(true);
+    // Settled means the child's write is behind us: a replacement writing now
+    // cannot be overwritten by it.
+    writes.push("NEW");
+    expect(writes).toEqual(["OLD", "NEW"]);
+  });
+
+  it("also waits for a descendant spawned while the tree unwinds", async () => {
+    let openChild!: () => void;
+    const childGate = new Promise<void>((resolve) => { openChild = resolve; });
+    let openGrandchild!: () => void;
+    const grandchildGate = new Promise<void>((resolve) => { openGrandchild = resolve; });
+    let childId = "";
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, prompt, opts: any) => {
+      if (prompt === "child") {
+        await childGate;
+        // Its last act before returning: a background grandchild.
+        manager.spawn(mockPi, mockCtx, "general-purpose", "grandchild", {
+          description: "grandchild", isBackground: true, parentAgentId: childId, depth: 3,
+        });
+      } else if (prompt === "grandchild") {
+        await grandchildGate;
+      } else {
+        await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve(), { once: true }));
+      }
+      return { responseText: "", session: mockSession(), aborted: true, steered: false };
+    });
+    manager = new AgentManager();
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent", isBackground: true });
+    childId = manager.spawn(mockPi, mockCtx, "general-purpose", "child", {
+      description: "child", isBackground: true, parentAgentId: parentId, depth: 2,
+    });
+
+    manager.abort(parentId);
+    let settled: boolean | undefined;
+    const waiting = manager.waitForSettled(parentId, 5_000).then((s) => { settled = s; });
+    openChild();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settled, "the grandchild is still running").toBeUndefined();
+
+    openGrandchild();
+    await waiting;
+    expect(settled).toBe(true);
+  });
+
+  it("reports false at the bound when a descendant never settles", async () => {
+    const { parentId, openGate } = parentAndStubbornChild();
+
+    manager.abort(parentId);
+    expect(await manager.waitForSettled(parentId, 30)).toBe(false);
+    openGate();
+  });
+
+  it("resolves true at once for an agent that has already settled with no descendants", async () => {
+    resolvedRun();
+    manager = new AgentManager();
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "solo", { description: "solo", isBackground: true });
+    await manager.getRecord(id)!.promise;
+
+    expect(await manager.waitForSettled(id, 1_000)).toBe(true);
+  });
+});

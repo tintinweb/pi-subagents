@@ -33,12 +33,24 @@ export type RpcReply<T = void> =
 /** RPC protocol version — bumped when the envelope or method contracts change. */
 export const PROTOCOL_VERSION = 2;
 
+/**
+ * How long `subagents:rpc:stop` waits for the stopped agent and the agents it
+ * owns to settle before replying `{ settled: false }`. Below the 10 s pi-tasks
+ * gives the stop reply, so a slow settle never reads to it as a failed stop.
+ */
+export const STOP_SETTLE_TIMEOUT_MS = 5_000;
+
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
 export interface SpawnCapable {
   spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
   /** Resolves once the spawned agent is running; rejects on a startup failure. */
   awaitStartup(id: string): Promise<void>;
   abort(id: string): boolean;
+  /**
+   * Resolves true once the agent's run and every owned descendant's run have
+   * settled, false if `timeoutMs` passes first.
+   */
+  waitForSettled(id: string, timeoutMs: number): Promise<boolean>;
   /**
    * The record behind an id: the stop and steer handlers' ownership check, and
    * what `get` turns into a `SubagentInfo`. Unfiltered — owned agents included.
@@ -188,12 +200,17 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   };
 
   const unsubStop = handleRpc<{ requestId: string; agentId: string }>(
-    events, "subagents:rpc:stop", ({ agentId }) => {
+    events, "subagents:rpc:stop", async ({ agentId }) => {
       assertOwned(agentId);
       // Not "not found" — the lookup above already proved it exists. `abort`
       // returns false only for a record that is neither running nor queued,
       // which is an agent that has already finished.
       if (!manager.abort(agentId)) throw new Error("Agent is not running");
+      // Stop means stopped: the reply waits until no tool call of this agent
+      // or of any agent it owns can still land (#443). A caller that does not
+      // care need not await it. `settled: false` says the bound passed first
+      // and something may still be running.
+      return { settled: await manager.waitForSettled(agentId, STOP_SETTLE_TIMEOUT_MS) };
     },
   );
 

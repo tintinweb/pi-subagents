@@ -226,6 +226,53 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     }
   });
 
+  // #443 over the bus: the parent stops at once, its nested child is inside a
+  // write that ignores the abort. The stop reply must not arrive before that
+  // write has landed, or the caller's replacement write could be overwritten.
+  it("subagents:rpc:stop replies only after a stopped agent's nested child has settled", async () => {
+    const { pi, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+    await lifecycle.get("session_start")({}, ctx());
+
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => { openGate = resolve; });
+    const writes: string[] = [];
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, prompt: any, opts: any) => {
+      if (prompt === "dig") {
+        await gate;
+        writes.push("OLD");
+      } else {
+        await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve(), { once: true }));
+      }
+      return { responseText: "", session: { dispose: vi.fn() }, aborted: true, steered: false } as any;
+    });
+    const reply = (channel: string, requestId: string) =>
+      pi.events.emit.mock.calls.find((c: any[]) => c[0] === `${channel}:reply:${requestId}`)?.[1];
+    try {
+      await busHandlers.get("subagents:rpc:spawn")!({
+        requestId: "req-443-spawn", type: "general-purpose", prompt: "go", options: { description: "owner" },
+      });
+      const topId: string = reply("subagents:rpc:spawn", "req-443-spawn").data.id;
+      const { manager, parentAgentId } = vi.mocked(runAgent).mock.lastCall![3].nestedRuntime;
+      manager.spawn(pi, ctx(), "general-purpose", "dig", {
+        description: "nested dig", isBackground: true, parentAgentId, depth: 2, maxSubagentDepth: 2,
+      });
+
+      const stopped = busHandlers.get("subagents:rpc:stop")!({ requestId: "req-443-stop", agentId: topId });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply("subagents:rpc:stop", "req-443-stop"), "no reply while the child's write is in flight").toBeUndefined();
+
+      openGate();
+      await stopped;
+      expect(reply("subagents:rpc:stop", "req-443-stop")).toEqual({ success: true, data: { settled: true } });
+      writes.push("NEW");
+      expect(writes).toEqual(["OLD", "NEW"]);
+    } finally {
+      openGate();
+      await lifecycle.get("session_shutdown")();
+    }
+  });
+
   it("renders an RPC-spawned agent in the native widget while it is running", async () => {
     const { pi, lifecycle, busHandlers } = makePi();
     const activeCtx = ctx(true);

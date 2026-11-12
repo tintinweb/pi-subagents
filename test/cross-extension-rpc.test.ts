@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable } from "../src/cross-extension-rpc.js";
+import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable, STOP_SETTLE_TIMEOUT_MS } from "../src/cross-extension-rpc.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 
 /** Simple in-process event bus for testing. */
@@ -32,6 +32,7 @@ describe("cross-extension RPC", () => {
       spawn: vi.fn().mockReturnValue("agent-42"),
       awaitStartup: vi.fn().mockResolvedValue(undefined),
       abort: vi.fn().mockReturnValue(true),
+      waitForSettled: vi.fn().mockResolvedValue(true),
       getRecord: vi.fn().mockReturnValue({}),
       listAgents: vi.fn().mockReturnValue([]),
       consumeResult: vi.fn().mockReturnValue(true),
@@ -204,8 +205,32 @@ describe("cross-extension RPC", () => {
       events.emit("subagents:rpc:stop", { requestId: "req-st1", agentId: "agent-42" });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
-      expect(reply).toHaveBeenCalledWith({ success: true });
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { settled: true } });
       expect(manager.abort).toHaveBeenCalledWith("agent-42");
+    });
+
+    // #443: a caller that starts replacement work on the reply must not race a
+    // tool call the stopped agent, or an agent it owns, still has in flight.
+    it("replies only once the agent and its owned agents have settled", async () => {
+      let settle!: (settled: boolean) => void;
+      (manager.waitForSettled as ReturnType<typeof vi.fn>).mockReturnValue(new Promise<boolean>((r) => { settle = r; }));
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st9", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st9", agentId: "agent-42" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(manager.abort).toHaveBeenCalledWith("agent-42");
+      expect(manager.waitForSettled).toHaveBeenCalledWith("agent-42", STOP_SETTLE_TIMEOUT_MS);
+      expect(reply).not.toHaveBeenCalled();
+
+      settle(false);
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { settled: false } });
+    });
+
+    it("waits less than the 10 s pi-tasks gives the stop reply", () => {
+      expect(STOP_SETTLE_TIMEOUT_MS).toBeLessThan(10_000);
     });
 
     // `abort` returning false no longer means "no such agent" — the handler's

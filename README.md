@@ -987,6 +987,8 @@ const unsub = pi.events.on(`subagents:rpc:stop:reply:${requestId}`, (reply) => {
 pi.events.emit("subagents:rpc:stop", { requestId, agentId: "agent-id-here" });
 ```
 
+The reply waits until the agent and every agent it owns have settled, so no tool call from the stopped work can land after it. That matters when you start replacement work in the same directory. `data.settled` is `false` if that took longer than 5 seconds: a tool call that ignores the abort may still be running. A caller that does not need the guarantee can skip awaiting the reply.
+
 ### Consume
 
 Say that an agent's result has been shown to the model, so its completion notification is not delivered on top of it:
