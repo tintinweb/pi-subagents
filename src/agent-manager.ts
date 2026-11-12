@@ -334,11 +334,22 @@ interface ResumeOptions {
    */
   isBackground?: boolean;
   /**
-   * Explicit turn limit for the resumed run: this, else the limit the agent
-   * was spawned with, else its type's own `max_turns`, else the default —
-   * counted afresh from the resume prompt (#368).
+   * Turn limit for the resumed run, counted afresh from the resume prompt (#368).
+   *
+   * Without `maxTurnsResolved`: this, else the limit the agent was spawned
+   * with. `resumeAgent` then applies the type's own `max_turns` from the
+   * process-global registry, else the project default.
+   *
+   * With `maxTurnsResolved`: `maxTurns` is final. `undefined` means unlimited
+   * and is not replaced by the spawn budget or looked up again.
    */
   maxTurns?: number;
+  /**
+   * `maxTurns` was already resolved by the caller (`undefined` = unlimited).
+   * A nested resume sets this after reading the branch's own agent registry,
+   * so a missing limit cannot fall through to `getAgentConfig`.
+   */
+  maxTurnsResolved?: boolean;
   /** Called at the end of each resumed turn with the count since the resume. */
   onTurnEnd?: (turnCount: number) => void;
   /** Called on tool start/end with activity info (for streaming progress to UI). */
@@ -1249,6 +1260,20 @@ export class AgentManager {
   }
 
   /**
+   * Turn limit handed to `resumeAgent`.
+   *
+   * A caller that already resolved the budget is trusted: `undefined` means
+   * unlimited and must not be replaced by the spawn budget, nor looked up
+   * again in the process-global registry. Everyone else keeps the historical
+   * fill-in from the limit the agent was spawned with; the runner then applies
+   * the type's own `max_turns` and the project default.
+   */
+  private resumeLimit(record: AgentRecord, options?: ResumeOptions): { maxTurns?: number; maxTurnsResolved?: true } {
+    if (options?.maxTurnsResolved) return { maxTurns: options.maxTurns, maxTurnsResolved: true };
+    return { maxTurns: options?.maxTurns ?? record.invocation?.maxTurns };
+  }
+
+  /**
    * Resume an existing agent session with a new prompt.
    */
   async resume(
@@ -1334,7 +1359,7 @@ export class AgentManager {
     try {
       this.settleOutcome(record, await resumeAgent(record.session, prompt, {
         type: record.type,
-        maxTurns: options?.maxTurns ?? record.invocation?.maxTurns,
+        ...this.resumeLimit(record, options),
         onTurnEnd: options?.onTurnEnd,
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
@@ -1457,7 +1482,7 @@ export class AgentManager {
 
     const promise = resumeAgent(record.session, prompt, {
       type: record.type,
-      maxTurns: options.maxTurns ?? record.invocation?.maxTurns,
+      ...this.resumeLimit(record, options),
       onTurnEnd: options.onTurnEnd,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;
