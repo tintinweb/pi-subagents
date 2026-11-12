@@ -80,6 +80,10 @@ const UP = "\x1b[A";
 const DOWN = "\x1b[B";
 const DEL = "\x1b[3~";
 const BACKSPACE = "\x7f";
+/** Down from the filter, where the page opens: onto the first row. */
+const FOCUS_LIST = [DOWN];
+/** Keystrokes from the filter onto row `n`: the first Down enters the list. */
+const toRow = (n: number) => Array<string>(n + 1).fill(DOWN);
 
 /** Row order of the number settings on the page. */
 const ROW: Record<string, number> = {
@@ -95,17 +99,17 @@ const typeValue = (value: string) => [ENTER, ...value, ENTER];
  * keystrokes go to the page in order until it closes itself; the rendered
  * screen is then recorded, and the page is closed as Esc would close it.
  */
-function drivePage(keys: string[]) {
+function drivePage(keys: string[], { rows = 200 }: { rows?: number } = {}) {
   const kb = {
     matches: (data: string, id: string) => KEYS[id] === data,
     getKeys: (id: string) => (id === "tui.input.tab" ? ["tab"] : id in KEYS ? ["enter"] : []),
   };
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
-  const page = { header: "", screen: "", closedItself: false };
+  const page = { header: "", screen: "", lines: [] as string[], closedItself: false };
   const custom = vi.fn(
     (factory: (...args: any[]) => any) =>
       new Promise((resolve) => {
-        const component = factory({ requestRender: vi.fn() }, theme, kb, () => {
+        const component = factory({ requestRender: vi.fn(), terminal: { rows } }, theme, kb, () => {
           page.closedItself = true;
           resolve(undefined);
         });
@@ -115,6 +119,7 @@ function drivePage(keys: string[]) {
         }
         const lines: string[] = component.render(120);
         page.header = lines.slice(0, 2).join("\n");
+        page.lines = lines;
         page.screen = lines.join("\n");
         resolve(undefined);
       }),
@@ -136,7 +141,7 @@ function drivePage(keys: string[]) {
 
 /** `/agents` → Settings that types `value` into the number row `id`. */
 const typeSetting = (id: string, value: string) =>
-  drivePage([...Array<string>(ROW[id]).fill(DOWN), ...typeValue(value)]);
+  drivePage([...toRow(ROW[id]), ...typeValue(value)]);
 
 /** A fresh extension instance, as on the next pi start. */
 function restart(): (ctx: any) => Promise<void> {
@@ -236,7 +241,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
   it("Tab switches the page to Project, and the change creates the project file", async () => {
     const agents = boot();
-    const { ctx, notify, page } = drivePage([TAB, ...typeValue("4")]);
+    const { ctx, notify, page } = drivePage([TAB, DOWN, ...typeValue("4")]);
 
     await agents(ctx);
 
@@ -250,14 +255,14 @@ describe("/agents → Settings writes only the changed setting", () => {
     // The project file makes the default Project; Tab moves the page to Global.
     writeJson(projectFile(), {});
     const agents = boot();
-    const editing = drivePage([TAB, ENTER, "4"]);
+    const editing = drivePage([TAB, DOWN, ENTER, "4"]);
     await agents(editing.ctx);
     expect(editing.page.screen).toMatch(/Max background concurrency +10\b/);
     expect(editing.page.screen).toMatch(/Grace turns +\d+/);
     expect(editing.page.screen).toContain("Max background concurrency (1–1024, now 10)");
     expect(editing.page.screen).toMatch(/^> 4/m);
 
-    const { ctx, custom, page } = drivePage([TAB, ...typeValue("4"), ...typeValue("5")]);
+    const { ctx, custom, page } = drivePage([TAB, DOWN, ...typeValue("4"), ...typeValue("5")]);
     await agents(ctx);
 
     expect(custom).toHaveBeenCalledTimes(1);
@@ -271,7 +276,7 @@ describe("/agents → Settings writes only the changed setting", () => {
   it("Esc in the number editor returns to the list and saves nothing", async () => {
     const agents = boot();
     // Esc, then Tab: the Tab reaches the list page, so the page is still open.
-    const { ctx, notify, page } = drivePage([ENTER, "4", ESC, TAB]);
+    const { ctx, notify, page } = drivePage([DOWN, ENTER, "4", ESC, TAB]);
 
     await agents(ctx);
 
@@ -289,7 +294,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     ["above the ceiling, which a reload would drop", "1025"],
   ])("refuses a value %s and keeps the editor open", async (_case, value) => {
     const agents = boot();
-    const { ctx, notify, page } = drivePage(typeValue(value));
+    const { ctx, notify, page } = drivePage([DOWN, ...typeValue(value)]);
 
     await agents(ctx);
 
@@ -299,19 +304,19 @@ describe("/agents → Settings writes only the changed setting", () => {
     expect(existsSync(globalFile())).toBe(false);
   });
 
-  it("Up from the first row wraps to the last row, and Enter acts on that row", async () => {
+  it("Up from the filter wraps to the last row, and Enter acts on that row", async () => {
     const agents = boot();
-    // The last row is Tool description, which cycles full → compact.
+    // The last row is Report usage to session, which cycles off → on.
     const { ctx, notify, page } = drivePage([UP, ENTER]);
 
     await agents(ctx);
 
     expect(page.screen).not.toContain("to save");
     // The cursor the user sees is on the row Enter acted on.
-    expect(page.screen).toMatch(/^> Tool description +global +compact\b/m);
-    expect(readJson(globalFile())).toEqual({ toolDescriptionMode: "compact" });
+    expect(page.screen).toMatch(/^> Report usage to session +global +on\b/m);
+    expect(readJson(globalFile())).toEqual({ reportUsage: true });
     expect(notify).toHaveBeenCalledWith(
-      "Tool description set to compact. Takes effect on next pi session. (saved to global settings)",
+      "Subagent usage now counted in this session's totals (saved to global settings)",
       "info",
     );
   });
@@ -342,7 +347,7 @@ describe("/agents → Settings writes only the changed setting", () => {
   it("Del removes the row's setting from its file, and the row goes back to the default", async () => {
     writeJson(globalFile(), { maxConcurrent: 4, graceTurns: 7 });
     const agents = boot();
-    const { ctx, notify, page } = drivePage([DEL]);
+    const { ctx, notify, page } = drivePage([...FOCUS_LIST, DEL]);
 
     await agents(ctx);
 
@@ -362,7 +367,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     writeJson(globalFile(), { maxConcurrent: 8 });
     writeJson(projectFile(), { maxConcurrent: 3 });
     const agents = boot();
-    const first = drivePage([BACKSPACE]);
+    const first = drivePage([...FOCUS_LIST, BACKSPACE]);
     await agents(first.ctx);
 
     expect(readJson(projectFile())).toEqual({});
@@ -373,7 +378,7 @@ describe("/agents → Settings writes only the changed setting", () => {
       "info",
     );
 
-    const second = drivePage([BACKSPACE]);
+    const second = drivePage([...FOCUS_LIST, BACKSPACE]);
     await agents(second.ctx);
     expect(readJson(globalFile())).toEqual({});
     expect(second.page.screen).toMatch(/Max background concurrency +10\b/);
@@ -381,7 +386,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
   it("Del on a row no file sets writes nothing", async () => {
     const agents = boot();
-    const { ctx, notify } = drivePage([DEL]);
+    const { ctx, notify } = drivePage([...FOCUS_LIST, DEL]);
 
     await agents(ctx);
 
@@ -394,7 +399,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     writeJson(globalFile(), { maxConcurrent: 4 });
     const agents = boot();
     // Del on Max background concurrency, then cycle Join mode.
-    const { ctx } = drivePage([DEL, ...Array<string>(6).fill(DOWN), ENTER]);
+    const { ctx } = drivePage([...FOCUS_LIST, DEL, ...Array<string>(6).fill(DOWN), ENTER]);
 
     await agents(ctx);
 
@@ -405,7 +410,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     // Package agents is on by default because no gate is set at all.
     writeJson(globalFile(), { packageAgents: false });
     const agents = boot();
-    const { ctx, page } = drivePage([...Array<string>(10).fill(DOWN), DEL]);
+    const { ctx, page } = drivePage([...toRow(17), DEL]);
 
     await agents(ctx);
 
@@ -416,7 +421,7 @@ describe("/agents → Settings writes only the changed setting", () => {
   it("Backspace inside the number editor edits the text and resets nothing", async () => {
     writeJson(globalFile(), { maxConcurrent: 4 });
     const agents = boot();
-    const { ctx } = drivePage([ENTER, "6", "5", BACKSPACE, ENTER]);
+    const { ctx } = drivePage([DOWN, ENTER, "6", "5", BACKSPACE, ENTER]);
 
     await agents(ctx);
 
@@ -430,7 +435,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     writeJson(projectFile(), { maxConcurrent: 3 });
     const agents = boot();
     // Project by default: Tab → Global, set 8; Tab → Project, set 8.
-    const { ctx, notify } = drivePage([TAB, ...typeValue("8"), TAB, ...typeValue("8")]);
+    const { ctx, notify } = drivePage([TAB, DOWN, ...typeValue("8"), TAB, ...typeValue("8")]);
 
     await agents(ctx);
 
@@ -450,7 +455,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     expect(tabbed.page.header).toContain(".pi/subagents.json · created on first change");
 
     // Tab → Project, then Enter on Join mode (7th row), which cycles its value.
-    const { ctx, page } = drivePage([TAB, ...Array<string>(6).fill(DOWN), ENTER]);
+    const { ctx, page } = drivePage([TAB, ...toRow(6), ENTER]);
     await agents(ctx);
 
     expect(Object.keys(readJson(projectFile()) as object)).toEqual(["defaultJoinMode"]);
@@ -476,7 +481,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
   it("Tab twice returns to the starting scope", async () => {
     const agents = boot();
-    const { ctx, page } = drivePage([TAB, TAB, ...typeValue("4")]);
+    const { ctx, page } = drivePage([TAB, TAB, DOWN, ...typeValue("4")]);
 
     await agents(ctx);
 
@@ -500,7 +505,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
   it("after a restart, a project file made via Tab is the default scope and its value loads", async () => {
     writeJson(globalFile(), { maxConcurrent: 8 });
-    await boot()(drivePage([TAB, ...typeValue("4")]).ctx);
+    await boot()(drivePage([TAB, DOWN, ...typeValue("4")]).ctx);
     expect(readJson(projectFile())).toEqual({ maxConcurrent: 4 });
 
     const next = drivePage([]);
@@ -509,5 +514,154 @@ describe("/agents → Settings writes only the changed setting", () => {
     expect(next.page.header).toContain("Saving to: Project");
     expect(next.page.screen).toMatch(/Max background concurrency +project +4\b/);
     expect(readJson(globalFile())).toEqual({ maxConcurrent: 8 });
+  });
+});
+
+describe("/agents → Settings filter and height", () => {
+  beforeEach(() => {
+    originalCwd = process.cwd();
+    cwd = mkdtempSync(join(tmpdir(), "settings-menu-filter-"));
+    agentDir = join(cwd, "agent-dir");
+    process.chdir(cwd);
+    originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+    originalHome = process.env.HOME;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.HOME = cwd;
+  });
+
+  afterEach(() => {
+    delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
+    process.chdir(originalCwd);
+    if (originalAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = originalAgentDir;
+    if (originalHome == null) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    rmSync(cwd, { recursive: true, force: true });
+  });
+
+  it("typing filters rows by label, not by the file tag", async () => {
+    writeJson(projectFile(), { maxConcurrent: 3 });
+    const agents = boot();
+
+    const cost = drivePage([..."cost"]);
+    await agents(cost.ctx);
+    expect(cost.page.screen).toMatch(/^ {2}Show cost +off\b/m);
+    expect(cost.page.screen).not.toContain("Max background concurrency");
+
+    // "project" is the tag on the first row, and no label holds a "j".
+    const tag = drivePage([..."project"]);
+    await agents(tag.ctx);
+    expect(tag.page.screen).toContain("No matching settings");
+    expect(tag.page.screen).not.toContain("Max background concurrency");
+  });
+
+  it("Backspace while typing edits the filter and resets nothing", async () => {
+    writeJson(globalFile(), { maxConcurrent: 4 });
+    const agents = boot();
+    const { ctx, notify, page } = drivePage([BACKSPACE, "x", BACKSPACE, DEL]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 4 });
+    expect(notify).not.toHaveBeenCalled();
+    // The filter has focus, so the list draws no cursor.
+    expect(page.screen).toMatch(/^ {2}Max background concurrency +global +4\b/m);
+    expect(page.screen).not.toContain("to reset");
+  });
+
+  it("after moving onto a filtered row, Backspace resets that row", async () => {
+    writeJson(globalFile(), { maxConcurrent: 4, graceTurns: 7 });
+    const agents = boot();
+    const { ctx, page } = drivePage([..."grace", ...FOCUS_LIST, BACKSPACE]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 4 });
+    expect(page.screen).toContain("to reset");
+  });
+
+  it("typing after moving onto a row hands focus back to the filter", async () => {
+    writeJson(globalFile(), { maxConcurrentForeground: 3 });
+    const agents = boot();
+    // Onto Max foreground concurrency, type, then Backspace: it removes the typed "c".
+    const { ctx, notify, page } = drivePage([...toRow(1), "c", BACKSPACE]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ maxConcurrentForeground: 3 });
+    expect(notify).not.toHaveBeenCalled();
+    expect(page.screen).toContain("Tool description");
+  });
+
+  it("Up from the first row and Down from the last return to the filter, where Del edits it", async () => {
+    writeJson(globalFile(), { maxConcurrent: 4, reportUsage: true });
+    const agents = boot();
+
+    const up = drivePage([DOWN, UP, DEL]);
+    await agents(up.ctx);
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 4, reportUsage: true });
+    expect(up.page.screen).not.toMatch(/^> Max background concurrency/m);
+    expect(up.page.screen).not.toContain("to reset");
+
+    // Up from the filter is the last row; Down from there wraps back to the filter.
+    const down = drivePage([UP, DOWN, BACKSPACE]);
+    await agents(down.ctx);
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 4, reportUsage: true });
+    expect(down.notify).not.toHaveBeenCalled();
+  });
+
+  it("Enter and Space in the filter change nothing; Enter moves onto the first row", async () => {
+    const agents = boot();
+    const enter = drivePage([..."cost", ENTER]);
+    await agents(enter.ctx);
+    expect(existsSync(globalFile())).toBe(false);
+    expect(enter.notify).not.toHaveBeenCalled();
+    expect(enter.page.screen).toMatch(/^> Show cost +off\b/m);
+    expect(enter.page.screen).toContain("to reset");
+
+    const space = drivePage([" "]);
+    await agents(space.ctx);
+    expect(existsSync(globalFile())).toBe(false);
+    expect(space.notify).not.toHaveBeenCalled();
+  });
+
+  it("Esc clears the filter first, then closes the page", async () => {
+    const agents = boot();
+    const once = drivePage([..."cost", ESC]);
+    await agents(once.ctx);
+    expect(once.page.closedItself).toBe(false);
+    expect(once.page.screen).toContain("Max background concurrency");
+    expect(once.page.screen).toContain("Esc to close");
+
+    // The selection does not stay on the cleared filter's match.
+    const cleared = drivePage([..."cost", DOWN, ESC, ENTER]);
+    await agents(cleared.ctx);
+    expect(cleared.page.screen).toMatch(/^> Max background concurrency/m);
+
+    const twice = drivePage([..."cost", ESC, ESC]);
+    await agents(twice.ctx);
+    expect(twice.page.closedItself).toBe(true);
+  });
+
+  it("Enter on a filtered number row opens the editor for that row", async () => {
+    const agents = boot();
+    const { ctx } = drivePage([..."grace", DOWN, ...typeValue("9")]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ graceTurns: 9 });
+  });
+
+  it("fits a short terminal: the list scrolls and the header and cursor row stay on screen", async () => {
+    const agents = boot();
+    // Up wraps to the last row, the one furthest from the header.
+    const { ctx, page } = drivePage([UP], { rows: 24 });
+
+    await agents(ctx);
+
+    expect(page.lines.length).toBeLessThanOrEqual(24);
+    expect(page.lines[0]).toContain("Subagent Settings");
+    expect(page.screen).toMatch(/^> Report usage to session +off\b/m);
+    expect(page.screen).toContain("(27/27)");
   });
 });

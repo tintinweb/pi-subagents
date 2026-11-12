@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, Input, isKeyRelease, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text, visibleWidth } from "@earendil-works/pi-tui";
+import { Container, fuzzyFilter, Input, isKeyRelease, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, type SettingsListTheme, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
@@ -121,6 +121,14 @@ export function renderRunningAgentStatus(
 
 /** How long a foreground `Agent` call runs before its row offers ctrl+b. */
 const BACKGROUND_HINT_DELAY_MS = 2000;
+
+/**
+ * Rows `/agents → Settings` leaves for what pi draws under the page — its
+ * footer and any widgets below the editor, which the page cannot measure.
+ */
+const SETTINGS_FOOTER_ROWS = 2;
+/** The fewest settings rows the page shows, however short the terminal. */
+const SETTINGS_MIN_ROWS = 3;
 
 /** Format an agent's lifetime token total, or "" when zero. */
 function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
@@ -3932,6 +3940,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
       const fallbackValue = getFallbackSubagent() ?? "general-purpose";
       const fallbackValues = [...new Set([...getAvailableTypes(), NO_FALLBACK])];
 
+      // Ordered by category, with no header rows (every row stays a setting the
+      // filter can match): limits, dispatch, features, agent files, display.
       return [
         {
           id: "maxConcurrent",
@@ -3991,6 +4001,34 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
+          id: "fallbackSubagent",
+          label: "Fallback agent",
+          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
+          currentValue: fallbackValue,
+          values: fallbackValues,
+        },
+        {
+          id: "disableDefaultAgents",
+          label: "Disable defaults",
+          description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
+          currentValue: isDefaultsDisabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "scopeModels",
+          label: "Scope models",
+          description: "Validate subagent models against scoped models (/scoped-models)",
+          currentValue: isScopeModelsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "toolDescriptionMode",
+          label: "Tool description",
+          description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
+          currentValue: getToolDescriptionMode(),
+          values: ["full", "compact", "custom"],
+        },
+        {
           id: "schedulingEnabled",
           label: "Scheduling",
           description: "Schedule subagent feature (off removes `schedule` param from Agent tool spec on next pi session)",
@@ -4004,6 +4042,28 @@ Write the file using the write tool. Only write the file, nothing else.`;
             "Scripted workflows, on unless another extension provides a workflow tool "
             + "(off keeps the SubagentWorkflow tool out of the tool spec; applies on next pi session)",
           currentValue: isWorkflowsEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "worktreeIsolation",
+          label: "Worktree isolation",
+          description:
+            "Allow isolation: worktree to copy the repo. Off refuses worktrees on every path immediately — for repos where a copy costs too much time or disk — and drops the `isolation` param from the Agent tool spec on next pi session.",
+          currentValue: isWorktreeIsolationEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
+          id: "agentMentions",
+          label: "Agent mentions",
+          description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
+          currentValue: getAgentMentionMode(),
+          values: ["model", "direct", "off"],
+        },
+        {
+          id: "rememberAgents",
+          label: "Remember agents",
+          description: "Persist subagent sessions so `@handle` can resume one long after it finished (they also appear in /resume)",
+          currentValue: getRememberAgents() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4029,32 +4089,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
-          id: "scopeModels",
-          label: "Scope models",
-          description: "Validate subagent models against scoped models (/scoped-models)",
-          currentValue: isScopeModelsEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
           id: "strictAgentFiles",
           label: "Strict agent files",
           description: "Fail startup on an unreadable/unparseable agent .md instead of skipping it with a warning",
           currentValue: strictAgentFiles ? "on" : "off",
           values: ["on", "off"],
-        },
-        {
-          id: "disableDefaultAgents",
-          label: "Disable defaults",
-          description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
-          currentValue: isDefaultsDisabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "fallbackSubagent",
-          label: "Fallback agent",
-          description: `Agent used when subagent_type is unknown, disabled, or ambiguous; "${NO_FALLBACK}" rejects the call instead (strict dispatch)`,
-          currentValue: fallbackValue,
-          values: fallbackValues,
         },
         {
           id: "outputTranscript",
@@ -4064,27 +4103,17 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
-          id: "worktreeIsolation",
-          label: "Worktree isolation",
-          description:
-            "Allow isolation: worktree to copy the repo. Off refuses worktrees on every path immediately — for repos where a copy costs too much time or disk — and drops the `isolation` param from the Agent tool spec on next pi session.",
-          currentValue: isWorktreeIsolationEnabled() ? "on" : "off",
-          values: ["on", "off"],
+          id: "widgetMode",
+          label: "Widget",
+          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
+          currentValue: getWidgetMode(),
+          values: ["all", "background", "off"],
         },
         {
-          id: "reportUsage",
-          label: "Report usage to session",
-          description:
-            "Add subagent tokens and cost to this session's own totals, so pi's footer and /cost stop reading a delegating session as nearly free. Reported on the next tool result (agents that finish in the background are counted on the one after). Context-window % is unaffected.",
-          currentValue: isReportUsageEnabled() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "showCost",
-          label: "Show cost",
-          description:
-            "Show an estimated `~$0.0042` beside subagent token counts in the widget, fleet view, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
-          currentValue: isShowCostEnabled() ? "on" : "off",
+          id: "fleetView",
+          label: "Fleet view",
+          description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
+          currentValue: isFleetViewEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -4096,6 +4125,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
+          id: "showCost",
+          label: "Show cost",
+          description:
+            "Show an estimated `~$0.0042` beside subagent token counts in the widget, fleet view, results and notifications. Priced by pi from the model's rates — omitted entirely for a model it has no rates for.",
+          currentValue: isShowCostEnabled() ? "on" : "off",
+          values: ["on", "off"],
+        },
+        {
           id: "viewerMarkdown",
           label: "Viewer markdown",
           description:
@@ -4104,39 +4141,12 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["off", "assistant", "all"],
         },
         {
-          id: "fleetView",
-          label: "Fleet view",
-          description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
-          currentValue: isFleetViewEnabled() ? "on" : "off",
+          id: "reportUsage",
+          label: "Report usage to session",
+          description:
+            "Add subagent tokens and cost to this session's own totals, so pi's footer and /cost stop reading a delegating session as nearly free. Reported on the next tool result (agents that finish in the background are counted on the one after). Context-window % is unaffected.",
+          currentValue: isReportUsageEnabled() ? "on" : "off",
           values: ["on", "off"],
-        },
-        {
-          id: "agentMentions",
-          label: "Agent mentions",
-          description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
-          currentValue: getAgentMentionMode(),
-          values: ["model", "direct", "off"],
-        },
-        {
-          id: "rememberAgents",
-          label: "Remember agents",
-          description: "Persist subagent sessions so `@handle` can resume one long after it finished (they also appear in /resume)",
-          currentValue: getRememberAgents() ? "on" : "off",
-          values: ["on", "off"],
-        },
-        {
-          id: "widgetMode",
-          label: "Widget",
-          description: "Above-editor agent widget: all = every agent; background = hide foreground (they already render inline); off = hide the widget.",
-          currentValue: getWidgetMode(),
-          values: ["all", "background", "off"],
-        },
-        {
-          id: "toolDescriptionMode",
-          label: "Tool description",
-          description: "Agent tool description sent to the LLM: full (rich, default), compact (~75% fewer tokens, for small/local models), or custom (.pi/agent-tool-description.md with {{placeholders}})",
-          currentValue: getToolDescriptionMode(),
-          values: ["full", "compact", "custom"],
         },
       ];
     }
@@ -4342,12 +4352,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
       }
     }
 
-    await ctx.ui.custom<undefined>((_tui, theme, kb, done) => {
+    await ctx.ui.custom<undefined>((tui, theme, kb, done) => {
       const items = buildItems();
       const baseLabels = new Map(items.map(item => [item.id, item.label]));
-      // Tags sit in their own column after the longest label. The widest tagged
-      // label (26 + "  project") stays inside SettingsList's 36-column label cap.
+      // Tags sit in their own column after the longest label, and every label
+      // is padded to the tagged width, so the value column stays put whichever
+      // rows a filter leaves. The widest (26 + 2 + "project") stays inside
+      // SettingsList's 36-column label cap.
       const tagColumn = Math.max(...items.map(item => visibleWidth(item.label))) + 2;
+      const labelWidth = tagColumn + "project".length;
       const title = new Text("", 0, 0);
       const fileLine = new Text("", 0, 0);
       const tabKey = kb.getKeys("tui.input.tab")[0];
@@ -4361,10 +4374,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const path = settingsFilePath(scope, process.cwd());
         const shown = scope === "project" ? ".pi/subagents.json" : path.replace(homedir(), "~");
         const created = scope === "project" && !existsSync(path) ? " · created on first change" : "";
-        fileLine.setText(theme.fg(
-          "muted",
-          `   ${shown}${created} · tagged rows are set in a file · ${keyLabel("tui.editor.deleteCharForward")} to reset`,
-        ));
+        fileLine.setText(theme.fg("muted", `   ${shown}${created} · tagged rows are set in a file`));
       };
       // Re-read values and file tags after every change: a save can move a
       // key into the other file, and some rows' values depend on others.
@@ -4376,7 +4386,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           if (next) Object.assign(item, { currentValue: next.currentValue, values: next.values, description: next.description });
           const source = sources[settingKeyOf(item.id)];
           const base = baseLabels.get(item.id) ?? item.label;
-          item.label = source ? `${base.padEnd(tagColumn)}${theme.fg("muted", source)}` : base;
+          item.label = source ? `${base.padEnd(tagColumn)}${theme.fg("muted", source.padEnd(labelWidth - tagColumn))}` : base.padEnd(labelWidth);
         }
         renderHeader();
       };
@@ -4411,21 +4421,49 @@ Write the file using the write tool. Only write the file, nothing else.`;
         );
       };
 
-      const list = new SettingsList(
-        items,
-        items.length + 2,
-        getSettingsListTheme(),
+      // The rows the filter leaves, in an array the list holds by reference:
+      // filtering rewrites it in place rather than rebuilding the list.
+      const shown = [...items];
+      // The filter is a stop above the first row. While it has focus, typing,
+      // Backspace and Del edit it, and the list draws no cursor; on a row,
+      // Backspace and Del reset that row. Typing on a row jumps back here.
+      const filter = new Input();
+      let filterFocused = true;
+      const baseTheme = getSettingsListTheme();
+      const listTheme: SettingsListTheme = {
+        ...baseTheme,
+        label: (text, isSelected) => baseTheme.label(text, isSelected && !filterFocused),
+        value: (text, isSelected) => baseTheme.value(text, isSelected && !filterFocused),
+        get cursor() {
+          return filterFocused ? " ".repeat(visibleWidth(baseTheme.cursor)) : baseTheme.cursor;
+        },
+      };
+      // `maxVisible` is fixed per list, so a list is rebuilt when the rows the
+      // terminal has room for change.
+      const makeList = (maxVisible: number) => new SettingsList(
+        shown,
+        maxVisible,
+        listTheme,
         (id, newValue) => {
           applyValue(id, newValue);
           refreshRows();
         },
         () => done(undefined),
       );
+      let listRows = shown.length;
+      let list = makeList(listRows);
       refreshRows();
 
-      // The selected row, owned here: SettingsList doesn't expose its own, and
-      // Enter on a number row must know which one it is.
+      // The selected row, an index into `shown`, owned here: SettingsList
+      // doesn't expose its own, and Enter and Del must know which row it is.
       let selected = 0;
+      // The list draws no cursor while the filter has focus, so the selection
+      // resets to the first row, which is where Down or Enter lands.
+      const applyFilter = () => {
+        shown.splice(0, shown.length, ...fuzzyFilter(items, filter.getValue(), item => baseLabels.get(item.id) ?? item.label));
+        selected = 0;
+        if (shown[0]) list.selectItem(shown[0].id);
+      };
       // The number editor under the list, while one is open.
       let editing: { id: NumericSettingKey; input: Input; error: Text } | undefined;
       const editor = new Container();
@@ -4434,7 +4472,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         editing = undefined;
         editor.clear();
       };
-      const openEditor = (id: NumericSettingKey) => {
+      const openEditor = (item: SettingItem, id: NumericSettingKey) => {
         const { min, max } = NUMERIC_SETTING_BOUNDS[id];
         // Empty, not pre-filled: Input.setValue leaves the cursor at column 0,
         // so typed digits would land in front of the old value.
@@ -4445,7 +4483,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         editor.clear();
         editor.addChild(new Spacer(1));
         editor.addChild(new Text(
-          `${baseLabels.get(id)} (${min}–${max}, now ${items[selected].currentValue})`
+          `${baseLabels.get(id)} (${min}–${max}, now ${item.currentValue})`
             + theme.fg("muted", ` · ${keyLabel("tui.input.submit")} to save · ${keyLabel("tui.select.cancel")} to cancel`),
           0,
           0,
@@ -4466,16 +4504,43 @@ Write the file using the write tool. Only write the file, nothing else.`;
         refreshRows();
       };
 
-      const container = new Container();
-      container.addChild(title);
-      container.addChild(fileLine);
-      container.addChild(new Spacer(1));
-      container.addChild(list);
-      container.addChild(editor);
+      const hint = () => {
+        const keys = filterFocused
+          ? `Type to filter · ${keyLabel("tui.select.down")} or Enter to the list`
+          : `Enter/Space to change · ${keyLabel("tui.editor.deleteCharForward")} to reset`;
+        const esc = filter.getValue() ? "clear" : "close";
+        return listTheme.hint(`  ${keys} · Esc to ${esc}`);
+      };
 
       return {
-        render: (w: number) => container.render(w),
-        invalidate: () => container.invalidate(),
+        render: (w: number) => {
+          filter.focused = filterFocused && !editing;
+          const head = [...title.render(w), ...fileLine.render(w), "", ...filter.render(w), ""];
+          const tail = editing ? editor.render(w) : ["", truncateToWidth(hint(), w)];
+          if (shown.length === 0) return [...head, listTheme.hint("  No matching settings"), ...tail];
+          // Rows left once everything else is drawn: the description under the
+          // list (blank + wrapped, sized by the longest in view so the window
+          // doesn't resize as the cursor moves), the list's (n/N) line, and
+          // pi's footer, which stays below the page.
+          const description = Math.max(...shown.map(item => (item.description ? wrapTextWithAnsi(item.description, w - 4).length + 1 : 0)));
+          const room = tui.terminal.rows - head.length - tail.length - description - 1 - SETTINGS_FOOTER_ROWS;
+          const rows = Math.min(shown.length, Math.max(SETTINGS_MIN_ROWS, room));
+          if (rows !== listRows) {
+            listRows = rows;
+            list = makeList(rows);
+            list.selectItem(shown[selected].id);
+          }
+          // Its own hint (blank + "Enter/Space to change · Esc to cancel") is
+          // replaced by ours, which names the filter and Del.
+          return [...head, ...list.render(w).slice(0, -2), ...tail];
+        },
+        invalidate: () => {
+          title.invalidate();
+          fileLine.invalidate();
+          editor.invalidate();
+          filter.invalidate();
+          list.invalidate();
+        },
         handleInput: (data: string) => {
           // pi repaints after every keystroke it hands the page.
           if (editing) {
@@ -4489,24 +4554,56 @@ Write the file using the write tool. Only write the file, nothing else.`;
             renderHeader();
             return;
           }
+          const query = filter.getValue();
+          if (kb.matches(data, "tui.select.cancel")) {
+            if (!query) {
+              done(undefined);
+              return;
+            }
+            filter.setValue("");
+            filterFocused = true;
+            applyFilter();
+            return;
+          }
           // Delete, and Backspace: it is the key labelled "delete" on a Mac.
-          if (kb.matches(data, "tui.editor.deleteCharForward") || kb.matches(data, "tui.editor.deleteCharBackward")) {
-            resetRow(items[selected]);
+          const deletes = kb.matches(data, "tui.editor.deleteCharForward") || kb.matches(data, "tui.editor.deleteCharBackward");
+          if (deletes && !filterFocused) {
+            if (shown[selected]) resetRow(shown[selected]);
             return;
           }
-          // Wraps at both ends, as SettingsList's own navigation does.
+          // One cycle through the filter and the rows: Down (or Enter) from the
+          // filter enters the first row, Up from the first row returns to the
+          // filter, and both ends wrap through it. Enter in the filter changes
+          // nothing: a change always needs the cursor on its row.
           const up = kb.matches(data, "tui.select.up");
-          if (up || kb.matches(data, "tui.select.down")) {
-            selected = (selected + (up ? items.length - 1 : 1)) % items.length;
-            list.selectItem(items[selected].id);
+          const confirm = kb.matches(data, "tui.select.confirm");
+          if (up || kb.matches(data, "tui.select.down") || (confirm && filterFocused)) {
+            if (shown.length === 0) return;
+            if (filterFocused) {
+              filterFocused = false;
+              selected = up ? shown.length - 1 : 0;
+            } else if (selected === (up ? 0 : shown.length - 1)) {
+              filterFocused = true;
+              selected = 0;
+            } else {
+              selected += up ? -1 : 1;
+            }
+            list.selectItem(shown[selected].id);
             return;
           }
-          const id = items[selected].id;
-          if (kb.matches(data, "tui.select.confirm") && isNumericId(id)) {
-            openEditor(id);
+          // Space in the filter types a space.
+          if (!filterFocused && (confirm || data === " ")) {
+            const item = shown[selected];
+            if (!item) return;
+            if (confirm && isNumericId(item.id)) openEditor(item, item.id);
+            else list.handleInput(data);
             return;
           }
-          list.handleInput?.(data);
+          filter.handleInput(data);
+          if (filter.getValue() !== query) {
+            filterFocused = true;
+            applyFilter();
+          }
         },
       };
     });
