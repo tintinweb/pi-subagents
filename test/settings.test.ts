@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   applyAndEmitLoaded,
   applySettings,
+  changedSettings,
   loadSettings,
   persistToastFor,
   type SettingsAppliers,
@@ -104,8 +105,8 @@ describe("settings persistence", () => {
     saveSettings({ schedulingEnabled: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ schedulingEnabled: true });
 
-    // Absence — caller's "use default" signal — must not become a stored false.
-    saveSettings({}, projectDir);
+    // Unset — the caller's "use default" signal — must not become a stored false.
+    saveSettings({ schedulingEnabled: undefined }, projectDir);
     expect(loadSettings(projectDir)).toEqual({});
   });
 
@@ -183,7 +184,7 @@ describe("settings persistence", () => {
     saveSettings({ backgroundByDefault: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ backgroundByDefault: true });
 
-    saveSettings({}, projectDir);
+    saveSettings({ backgroundByDefault: undefined }, projectDir);
     expect(loadSettings(projectDir)).toEqual({});
   });
 
@@ -202,7 +203,7 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({ packageAgents: true, packageWorkflows: true });
 
     saveSettings({ packageAgents: ["my-subagents", "@acme/tools"] }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ packageAgents: ["my-subagents", "@acme/tools"] });
+    expect(loadSettings(projectDir)).toEqual({ packageAgents: ["my-subagents", "@acme/tools"], packageWorkflows: true });
   });
 
   it("trims allowlist entries and drops the ones that are not strings", () => {
@@ -289,7 +290,7 @@ describe("settings persistence", () => {
 
   describe("saveSettings write target (#391)", () => {
     it("writes the global file when the project has no settings file, and creates no .pi", () => {
-      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
+      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe("global");
 
       expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
       // No project file — and no `.pi` directory left in the project either.
@@ -301,12 +302,54 @@ describe("settings persistence", () => {
     it("writes the project file when one already exists; global is untouched", () => {
       writeGlobal({ maxConcurrent: 16 });
       writeProject({ graceTurns: 5 });
-      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
+      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe("project");
 
-      // Project file contains the new value
-      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
+      // The new value is merged into the project file's existing keys
+      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ graceTurns: 5, maxConcurrent: 2 });
       // Global file unchanged
       expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 16 });
+    });
+  });
+
+  describe("saveSettings merges only changed keys", () => {
+    const defaults = { maxConcurrent: 10, graceTurns: 5, widgetMode: "all" as const };
+
+    it("does not revert a key another session saved to the shared global file", () => {
+      // Two sessions start from the same in-memory defaults.
+      saveAndEmitChanged({ ...defaults, maxConcurrent: 4 }, defaults, "a", vi.fn(), projectDir);
+      // The second session still holds maxConcurrent 10 and changes only the widget.
+      saveAndEmitChanged({ ...defaults, widgetMode: "off" }, defaults, "b", vi.fn(), projectDir);
+
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 4, widgetMode: "off" });
+    });
+
+    it("writes no untouched default into the file", () => {
+      saveAndEmitChanged({ ...defaults, graceTurns: 2 }, defaults, "c", vi.fn(), projectDir);
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ graceTurns: 2 });
+    });
+
+    it("removes a key whose value became unset, and keeps hand-written keys it does not know", () => {
+      writeGlobal({ fallbackSubagent: "Explore", someFutureKey: 1 });
+      expect(saveSettings({ fallbackSubagent: undefined }, projectDir)).toBe("global");
+      expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ someFutureKey: 1 });
+    });
+
+    it("leaves a malformed or non-object target untouched and reports the save as failed", () => {
+      for (const content of ["not json {{", "[1]"]) {
+        writeFileSync(globalFile(), content);
+        expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBeUndefined();
+        expect(readFileSync(globalFile(), "utf-8")).toBe(content);
+      }
+    });
+
+    it("changedSettings returns only differing keys, with undefined for a key that became unset", () => {
+      expect(
+        changedSettings(
+          { maxConcurrent: 10, fallbackSubagent: "Explore", packageAgents: ["a"] },
+          { maxConcurrent: 4, packageAgents: ["a"] },
+        ),
+      ).toEqual({ maxConcurrent: 4, fallbackSubagent: undefined });
+      expect(Object.keys(changedSettings({ fallbackSubagent: "Explore" }, {}))).toEqual(["fallbackSubagent"]);
     });
   });
 
@@ -542,13 +585,13 @@ describe("settings persistence", () => {
   });
 
   describe("save result + corrupt-file warning", () => {
-    it("saveSettings returns true on success", () => {
-      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe(true);
+    it("saveSettings returns the written scope on success", () => {
+      expect(saveSettings({ maxConcurrent: 2 }, projectDir)).toBe("global");
       // No project file in this cwd, so the write landed in the global file.
       expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual({ maxConcurrent: 2 });
     });
 
-    it("saveSettings returns false when the target dir cannot be created", () => {
+    it("saveSettings returns undefined when the target dir cannot be created", () => {
       // No project file, so the write targets the global file. Point the
       // agent dir under a regular file — mkdirSync + writeFileSync both
       // fail with ENOTDIR / EEXIST.
@@ -556,7 +599,7 @@ describe("settings persistence", () => {
       writeFileSync(filePosingAsParent, "");
       process.env.PI_CODING_AGENT_DIR = join(filePosingAsParent, "agent");
       try {
-        expect(saveSettings({ maxConcurrent: 1 }, projectDir)).toBe(false);
+        expect(saveSettings({ maxConcurrent: 1 }, projectDir)).toBeUndefined();
       } finally {
         rmSync(filePosingAsParent, { force: true });
       }
@@ -840,15 +883,19 @@ describe("settings persistence", () => {
   });
 
   describe("persistToastFor", () => {
-    it("returns info-level toast with the plain message on success", () => {
-      expect(persistToastFor("Max concurrency set to 7", true)).toEqual({
-        message: "Max concurrency set to 7",
+    it("returns info-level toast naming the written scope on success", () => {
+      expect(persistToastFor("Max concurrency set to 7", "global")).toEqual({
+        message: "Max concurrency set to 7 (saved to global settings)",
+        level: "info",
+      });
+      expect(persistToastFor("Max concurrency set to 7", "project")).toEqual({
+        message: "Max concurrency set to 7 (saved to project settings)",
         level: "info",
       });
     });
 
     it("returns warning-level toast with session-only suffix on failure", () => {
-      expect(persistToastFor("Max concurrency set to 7", false)).toEqual({
+      expect(persistToastFor("Max concurrency set to 7", undefined)).toEqual({
         message: "Max concurrency set to 7 (session only; failed to persist)",
         level: "warning",
       });
@@ -927,18 +974,25 @@ describe("settings persistence", () => {
       const emit = vi.fn();
       const snapshot = { maxConcurrent: 5, graceTurns: 2 };
 
-      const toast = saveAndEmitChanged(snapshot, "Max concurrency set to 5", emit, projectDir);
+      const toast = saveAndEmitChanged(snapshot, {}, "Max concurrency set to 5", emit, projectDir);
 
       expect(emit).toHaveBeenCalledTimes(1);
       expect(emit).toHaveBeenCalledWith("subagents:settings_changed", {
         settings: snapshot,
         persisted: true,
       });
-      expect(toast).toEqual({ message: "Max concurrency set to 5", level: "info" });
+      expect(toast).toEqual({ message: "Max concurrency set to 5 (saved to global settings)", level: "info" });
       // File actually written — the global one, since this project has no
       // settings file of its own (#391)
       expect(JSON.parse(readFileSync(globalFile(), "utf-8"))).toEqual(snapshot);
       expect(existsSync(projectFile())).toBe(false);
+    });
+
+    it("names the project scope in the toast when the project file takes the write", () => {
+      writeProject({});
+      const toast = saveAndEmitChanged({ maxConcurrent: 5 }, {}, "Max concurrency set to 5", vi.fn(), projectDir);
+      expect(toast).toEqual({ message: "Max concurrency set to 5 (saved to project settings)", level: "info" });
+      expect(JSON.parse(readFileSync(projectFile(), "utf-8"))).toEqual({ maxConcurrent: 5 });
     });
 
     it("emits with persisted=false and returns warning toast on save failure", () => {
@@ -951,6 +1005,7 @@ describe("settings persistence", () => {
       try {
         const toast = saveAndEmitChanged(
           { maxConcurrent: 5 },
+          {},
           "Max concurrency set to 5",
           emit,
           projectDir,

@@ -3754,6 +3754,23 @@ Write the file using the write tool. Only write the file, nothing else.`;
   const _settingsSnapshotIsComplete: _NoMissingSettingsKeys = true;
   void _settingsSnapshotIsComplete;
 
+  // The settings as last persisted (or as loaded at startup). A save writes
+  // only the keys that differ from it, so a change here cannot revert what
+  // another pi session saved to the shared global file, and untouched
+  // defaults are never frozen into a file.
+  let savedSnapshot: SubagentsSettings = snapshotSettings();
+
+  /** Persist + broadcast what changed since the last save; the toast to show. */
+  function saveSnapshot(successMsg: string): { message: string; level: "info" | "warning" } {
+    const snapshot = snapshotSettings();
+    const toast = saveAndEmitChanged(snapshot, savedSnapshot, successMsg, (event, payload) =>
+      pi.events.emit(event, payload),
+    );
+    // A failed write keeps the old baseline, so the next save retries this change.
+    if (toast.level === "info") savedSnapshot = snapshot;
+    return toast;
+  }
+
   /**
    * Whether a package gate lets anything through. `undefined` is the unset
    * default and reads as `true`; an empty allowlist matches nothing, like
@@ -4274,11 +4291,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
    * looking persisted when the next session will not have it.
    */
   function persistSettings(ctx: ExtensionCommandContext | undefined, changeMsg: string): void {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      changeMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
+    const { message, level } = saveSnapshot(changeMsg);
     // `ctx` is absent only on the fleet path between sessions, where
     // `currentCtx` has been cleared and there is no UI to carry the warning to.
     // The write still happens.
@@ -4286,11 +4299,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
   }
 
   function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      successMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
+    const { message, level } = saveSnapshot(successMsg);
     ctx.ui.notify(message, level);
   }
 
