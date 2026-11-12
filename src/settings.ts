@@ -404,6 +404,28 @@ const MAX_TURNS_CEILING = 10_000;
 const GRACE_TURNS_CEILING = 1_000;
 const SUBAGENT_DEPTH_CEILING = 16;
 
+/** The settings typed as whole numbers. */
+export type NumericSettingKey =
+  | "maxConcurrent" | "maxConcurrentForeground" | "maxConcurrentNested"
+  | "defaultMaxTurns" | "graceTurns" | "maxSubagentDepth";
+
+export interface NumericBounds { min: number; max: number }
+
+/**
+ * The accepted range of each number setting, inclusive. Loading drops a value
+ * outside it, and `/agents` → Settings refuses to type one, so a value the menu
+ * saves always survives a restart. A floor of 0 is where 0 is meaningful:
+ * "unlimited" for the foreground/nested caps and max turns, "nesting off" for depth.
+ */
+export const NUMERIC_SETTING_BOUNDS: Readonly<Record<NumericSettingKey, NumericBounds>> = {
+  maxConcurrent: { min: 1, max: MAX_CONCURRENT_CEILING },
+  maxConcurrentForeground: { min: 0, max: MAX_CONCURRENT_CEILING },
+  maxConcurrentNested: { min: 0, max: MAX_CONCURRENT_CEILING },
+  defaultMaxTurns: { min: 0, max: MAX_TURNS_CEILING },
+  graceTurns: { min: 1, max: GRACE_TURNS_CEILING },
+  maxSubagentDepth: { min: 0, max: SUBAGENT_DEPTH_CEILING },
+};
+
 /**
  * Normalize a package gate: a boolean passes through, an array is trimmed to its
  * non-empty string entries, a bare string becomes a one-entry allowlist, and
@@ -428,50 +450,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
   const out: SubagentsSettings = {};
-  if (
-    Number.isInteger(r.maxConcurrent) &&
-    (r.maxConcurrent as number) >= 1 &&
-    (r.maxConcurrent as number) <= MAX_CONCURRENT_CEILING
-  ) {
-    out.maxConcurrent = r.maxConcurrent as number;
-  }
-  // Floor 0, not 1 like maxConcurrent above: 0 is the documented "unlimited"
-  // value and the default, so dropping it would silently be unrepresentable.
-  if (
-    Number.isInteger(r.maxConcurrentForeground) &&
-    (r.maxConcurrentForeground as number) >= 0 &&
-    (r.maxConcurrentForeground as number) <= MAX_CONCURRENT_CEILING
-  ) {
-    out.maxConcurrentForeground = r.maxConcurrentForeground as number;
-  }
-  // Floor 0 for the same reason: 0 is the documented "unlimited".
-  if (
-    Number.isInteger(r.maxConcurrentNested) &&
-    (r.maxConcurrentNested as number) >= 0 &&
-    (r.maxConcurrentNested as number) <= MAX_CONCURRENT_CEILING
-  ) {
-    out.maxConcurrentNested = r.maxConcurrentNested as number;
-  }
-  if (
-    Number.isInteger(r.defaultMaxTurns) &&
-    (r.defaultMaxTurns as number) >= 0 &&
-    (r.defaultMaxTurns as number) <= MAX_TURNS_CEILING
-  ) {
-    out.defaultMaxTurns = r.defaultMaxTurns as number;
-  }
-  if (
-    Number.isInteger(r.graceTurns) &&
-    (r.graceTurns as number) >= 1 &&
-    (r.graceTurns as number) <= GRACE_TURNS_CEILING
-  ) {
-    out.graceTurns = r.graceTurns as number;
-  }
-  if (
-    Number.isInteger(r.maxSubagentDepth) &&
-    (r.maxSubagentDepth as number) >= 0 &&
-    (r.maxSubagentDepth as number) <= SUBAGENT_DEPTH_CEILING
-  ) {
-    out.maxSubagentDepth = r.maxSubagentDepth as number;
+  for (const [key, { min, max }] of Object.entries(NUMERIC_SETTING_BOUNDS) as [NumericSettingKey, NumericBounds][]) {
+    const v = r[key];
+    if (Number.isInteger(v) && (v as number) >= min && (v as number) <= max) out[key] = v as number;
   }
   if (typeof r.defaultJoinMode === "string" && VALID_JOIN_MODES.has(r.defaultJoinMode)) {
     out.defaultJoinMode = r.defaultJoinMode as JoinMode;
@@ -588,6 +569,18 @@ export function settingsFilePath(scope: SettingsScope, cwd: string = process.cwd
 /** Load merged settings: global provides defaults, project overrides. */
 export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
   return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
+}
+
+/**
+ * Which file supplies each key's loaded value: `project` when the project file
+ * sets it (it wins on load), else `global`. A key absent from both is at its
+ * shipped default. Invalid values are dropped before this, as on load.
+ */
+export function settingSources(cwd: string = process.cwd()): Partial<Record<keyof SubagentsSettings, SettingsScope>> {
+  const sources: Partial<Record<keyof SubagentsSettings, SettingsScope>> = {};
+  for (const key of Object.keys(readSettingsFile(globalPath()))) sources[key as keyof SubagentsSettings] = "global";
+  for (const key of Object.keys(readSettingsFile(projectPath(cwd)))) sources[key as keyof SubagentsSettings] = "project";
+  return sources;
 }
 
 /**

@@ -63,61 +63,58 @@ function boot(): (ctx: any) => Promise<void> {
   return (ctx) => commands.get("agents").handler("", ctx);
 }
 
-/**
- * One trip through `/agents` → Settings that types `value` into the numeric
- * field `id`: the menu opens Settings, Enter on the field closes the list with
- * its id, the input prompt takes the value, the re-shown list and then the
- * agents menu are dismissed.
- */
-function typeSetting(id: string, value: string) {
-  const notify = vi.fn();
-  const ctx = {
-    hasUI: true,
-    cwd,
-    ui: {
-      notify,
-      select: vi.fn().mockResolvedValueOnce("Settings").mockResolvedValue(undefined),
-      custom: vi.fn().mockResolvedValueOnce(id).mockResolvedValue(undefined),
-      input: vi.fn().mockResolvedValueOnce(value),
-      setStatus: vi.fn(),
-      setWidget: vi.fn(),
-    },
-  };
-  return { ctx, notify };
-}
+const KEYS: Record<string, string> = {
+  "tui.input.tab": "\t",
+  "tui.input.submit": "\r",
+  "tui.select.confirm": "\r",
+  "tui.select.cancel": "\x1b",
+  "tui.select.up": "\x1b[A",
+  "tui.select.down": "\x1b[B",
+};
+const TAB = "\t";
+const ENTER = "\r";
+const ESC = "\x1b";
+const UP = "\x1b[A";
+const DOWN = "\x1b[B";
+
+/** Row order of the number settings on the page. */
+const ROW: Record<string, number> = {
+  maxConcurrent: 0, maxConcurrentForeground: 1, maxConcurrentNested: 2,
+  maxSubagentDepth: 3, defaultMaxTurns: 4, graceTurns: 5,
+};
+
+/** Keystrokes that open the editor on the selected row, type `value`, and submit it. */
+const typeValue = (value: string) => [ENTER, ...value, ENTER];
 
 /**
- * `/agents` → Settings with the real page component. Each `keys` entry is one
- * opening of the page: its keystrokes are sent in order, and the rendered
- * header is recorded. Enter on Max background concurrency (the first row)
- * closes the page for the typed prompt, which answers from `inputs`; the page
- * then reopens for the next entry. A page whose keys don't close it is closed
- * after them, as Esc would. With no entries left it closes.
+ * One trip through `/agents` → Settings with the real page component. The
+ * keystrokes go to the page in order until it closes itself; the rendered
+ * screen is then recorded, and the page is closed as Esc would close it.
  */
-function drivePage(keys: string[][], inputs: string[]) {
-  const headers: string[] = [];
-  const screens: string[] = [];
+function drivePage(keys: string[]) {
   const kb = {
-    matches: (data: string, id: string) => id === "tui.input.tab" && data === "\t",
-    getKeys: (id: string) => (id === "tui.input.tab" ? ["tab"] : []),
+    matches: (data: string, id: string) => KEYS[id] === data,
+    getKeys: (id: string) => (id === "tui.input.tab" ? ["tab"] : id in KEYS ? ["enter"] : []),
   };
   const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
-  let opening = 0;
+  const page = { header: "", screen: "", closedItself: false };
   const custom = vi.fn(
     (factory: (...args: any[]) => any) =>
       new Promise((resolve) => {
-        const strokes = keys[opening++];
-        if (!strokes) return resolve(undefined);
-        const page = factory({ requestRender: vi.fn() }, theme, kb, resolve);
-        for (const key of strokes) page.handleInput(key);
-        const lines: string[] = page.render(120);
-        headers.push(lines.slice(0, 2).join("\n"));
-        screens.push(lines.join("\n"));
+        const component = factory({ requestRender: vi.fn() }, theme, kb, () => {
+          page.closedItself = true;
+          resolve(undefined);
+        });
+        for (const key of keys) {
+          if (page.closedItself) break;
+          component.handleInput(key);
+        }
+        const lines: string[] = component.render(120);
+        page.header = lines.slice(0, 2).join("\n");
+        page.screen = lines.join("\n");
         resolve(undefined);
       }),
   );
-  const input = vi.fn();
-  for (const value of inputs) input.mockResolvedValueOnce(value);
   const notify = vi.fn();
   const ctx = {
     hasUI: true,
@@ -126,13 +123,16 @@ function drivePage(keys: string[][], inputs: string[]) {
       notify,
       select: vi.fn().mockResolvedValueOnce("Settings").mockResolvedValue(undefined),
       custom,
-      input,
       setStatus: vi.fn(),
       setWidget: vi.fn(),
     },
   };
-  return { ctx, notify, headers, screens };
+  return { ctx, notify, custom, page };
 }
+
+/** `/agents` → Settings that types `value` into the number row `id`. */
+const typeSetting = (id: string, value: string) =>
+  drivePage([...Array<string>(ROW[id]).fill(DOWN), ...typeValue(value)]);
 
 /** A fresh extension instance, as on the next pi start. */
 function restart(): (ctx: any) => Promise<void> {
@@ -232,30 +232,103 @@ describe("/agents → Settings writes only the changed setting", () => {
 
   it("Tab switches the page to Project, and the change creates the project file", async () => {
     const agents = boot();
-    const { ctx, notify, headers } = drivePage([["\t", "\r"]], ["4"]);
+    const { ctx, notify, page } = drivePage([TAB, ...typeValue("4")]);
 
     await agents(ctx);
 
-    expect(headers[0]).toContain("Saving to: Project");
-    expect(headers[0]).toContain(".pi/subagents.json · created on first change");
+    expect(page.header).toContain("Saving to: Project");
     expect(readJson(projectFile())).toEqual({ maxConcurrent: 4 });
     expect(existsSync(globalFile())).toBe(false);
     expect(notify).toHaveBeenCalledWith("Max background concurrency set to 4 (saved to project settings)", "info");
   });
 
-  it("keeps the chosen scope when the page reopens after a typed value", async () => {
-    // The project file makes the default Project, so a reopen that lost the
-    // switch would write the second value there.
+  it("types a number under the list: the list stays on screen, and the page and its scope stay after the save", async () => {
+    // The project file makes the default Project; Tab moves the page to Global.
     writeJson(projectFile(), {});
     const agents = boot();
-    // Open 1: Tab to Global, Enter → prompt "4". Open 2: Enter → prompt "5".
-    const { ctx, headers } = drivePage([["\t", "\r"], ["\r"]], ["4", "5"]);
+    const editing = drivePage([TAB, ENTER, "4"]);
+    await agents(editing.ctx);
+    expect(editing.page.screen).toMatch(/Max background concurrency +10\b/);
+    expect(editing.page.screen).toMatch(/Grace turns +\d+/);
+    expect(editing.page.screen).toContain("Max background concurrency (1–1024, now 10)");
+    expect(editing.page.screen).toMatch(/^> 4/m);
+
+    const { ctx, custom, page } = drivePage([TAB, ...typeValue("4"), ...typeValue("5")]);
+    await agents(ctx);
+
+    expect(custom).toHaveBeenCalledTimes(1);
+    expect(page.closedItself).toBe(false);
+    expect(page.header).toContain("Saving to: Global");
+    expect(page.screen).not.toContain("to save");
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 5 });
+    expect(readJson(projectFile())).toEqual({});
+  });
+
+  it("Esc in the number editor returns to the list and saves nothing", async () => {
+    const agents = boot();
+    // Esc, then Tab: the Tab reaches the list page, so the page is still open.
+    const { ctx, notify, page } = drivePage([ENTER, "4", ESC, TAB]);
 
     await agents(ctx);
 
-    expect(headers[1]).toContain("Saving to: Global");
-    expect(readJson(globalFile())).toEqual({ maxConcurrent: 5 });
-    expect(readJson(projectFile())).toEqual({});
+    expect(page.closedItself).toBe(false);
+    expect(page.header).toContain("Saving to: Project");
+    expect(page.screen).not.toContain("to save");
+    expect(notify).not.toHaveBeenCalled();
+    expect(existsSync(globalFile())).toBe(false);
+    expect(existsSync(join(cwd, ".pi"))).toBe(false);
+  });
+
+  it.each([
+    ["not a whole number", "2.5"],
+    ["below the minimum", "0"],
+    ["above the ceiling, which a reload would drop", "1025"],
+  ])("refuses a value %s and keeps the editor open", async (_case, value) => {
+    const agents = boot();
+    const { ctx, notify, page } = drivePage(typeValue(value));
+
+    await agents(ctx);
+
+    expect(page.screen).toContain("Enter a whole number from 1 to 1024");
+    expect(page.screen).toContain("to save");
+    expect(notify).not.toHaveBeenCalled();
+    expect(existsSync(globalFile())).toBe(false);
+  });
+
+  it("Up from the first row wraps to the last row, and Enter acts on that row", async () => {
+    const agents = boot();
+    // The last row is Tool description, which cycles full → compact.
+    const { ctx, notify, page } = drivePage([UP, ENTER]);
+
+    await agents(ctx);
+
+    expect(page.screen).not.toContain("to save");
+    // The cursor the user sees is on the row Enter acted on.
+    expect(page.screen).toMatch(/^>Tool description · global +compact\b/m);
+    expect(readJson(globalFile())).toEqual({ toolDescriptionMode: "compact" });
+    expect(notify).toHaveBeenCalledWith(
+      "Tool description set to compact. Takes effect on next pi session. (saved to global settings)",
+      "info",
+    );
+  });
+
+  it("tags each row set in a file with that file, and retags a row after a save moves it", async () => {
+    writeJson(globalFile(), { graceTurns: 7, maxConcurrent: 8 });
+    writeJson(projectFile(), { maxConcurrent: 3 });
+    const agents = boot();
+    const before = drivePage([]);
+    await agents(before.ctx);
+
+    expect(before.page.screen).toMatch(/Max background concurrency · project +3\b/);
+    expect(before.page.screen).toMatch(/Grace turns · global +7\b/);
+    expect(before.page.screen).toMatch(/Nested depth +2\b/);
+    expect(before.page.screen).not.toMatch(/Nested depth · /);
+
+    // Project is the default scope here: the save puts graceTurns in the project file.
+    const after = typeSetting("graceTurns", "9");
+    await agents(after.ctx);
+
+    expect(after.page.screen).toMatch(/Grace turns · project +9\b/);
   });
 
   it("re-setting the effective value in Project overwrites a different value stored there", async () => {
@@ -264,8 +337,8 @@ describe("/agents → Settings writes only the changed setting", () => {
     // the value is unchanged in memory, but the chosen file disagrees with it.
     writeJson(projectFile(), { maxConcurrent: 3 });
     const agents = boot();
-    // Open 1 (Project by default): Tab → Global, set 8. Open 2: Tab → Project, set 8.
-    const { ctx, notify } = drivePage([["\t", "\r"], ["\t", "\r"]], ["8", "8"]);
+    // Project by default: Tab → Global, set 8; Tab → Project, set 8.
+    const { ctx, notify } = drivePage([TAB, ...typeValue("8"), TAB, ...typeValue("8")]);
 
     await agents(ctx);
 
@@ -280,40 +353,42 @@ describe("/agents → Settings writes only the changed setting", () => {
 
   it("drops the 'created on first change' note once a change has created the project file", async () => {
     const agents = boot();
-    const down = "\x1b[B";
-    // Tab → Project, then Enter on Default join mode (7th row), which cycles
-    // its value and saves without closing the page.
-    const { ctx, headers } = drivePage([["\t", down, down, down, down, down, down, "\r"]], []);
+    const tabbed = drivePage([TAB]);
+    await agents(tabbed.ctx);
+    expect(tabbed.page.header).toContain(".pi/subagents.json · created on first change");
 
+    // Tab → Project, then Enter on Join mode (7th row), which cycles its value.
+    const { ctx, page } = drivePage([TAB, ...Array<string>(6).fill(DOWN), ENTER]);
     await agents(ctx);
 
     expect(Object.keys(readJson(projectFile()) as object)).toEqual(["defaultJoinMode"]);
     expect(existsSync(globalFile())).toBe(false);
-    expect(headers[0]).toContain("Saving to: Project");
-    expect(headers[0]).not.toContain("created on first change");
+    expect(page.header).toContain("Saving to: Project");
+    expect(page.header).not.toContain("created on first change");
+    expect(page.screen).toMatch(/Join mode · project +group\b/);
   });
 
   it("opens on Global without a project file, and on Project once one exists — even an empty one", async () => {
     const agents = boot();
-    const first = drivePage([[]], []);
+    const first = drivePage([]);
     await agents(first.ctx);
-    expect(first.headers[0]).toContain("Saving to: Global · Tab to switch");
-    expect(first.headers[0]).toContain("agent-dir/subagents.json");
+    expect(first.page.header).toContain("Saving to: Global · Tab to switch");
+    expect(first.page.header).toContain("agent-dir/subagents.json");
 
     writeJson(projectFile(), {});
-    const second = drivePage([[]], []);
+    const second = drivePage([]);
     await agents(second.ctx);
-    expect(second.headers[0]).toContain("Saving to: Project");
-    expect(second.headers[0]).not.toContain("created on first change");
+    expect(second.page.header).toContain("Saving to: Project");
+    expect(second.page.header).not.toContain("created on first change");
   });
 
   it("Tab twice returns to the starting scope", async () => {
     const agents = boot();
-    const { ctx, headers } = drivePage([["\t", "\t", "\r"]], ["4"]);
+    const { ctx, page } = drivePage([TAB, TAB, ...typeValue("4")]);
 
     await agents(ctx);
 
-    expect(headers[0]).toContain("Saving to: Global");
+    expect(page.header).toContain("Saving to: Global");
     expect(readJson(globalFile())).toEqual({ maxConcurrent: 4 });
     expect(existsSync(join(cwd, ".pi"))).toBe(false);
   });
@@ -322,25 +397,25 @@ describe("/agents → Settings writes only the changed setting", () => {
     writeJson(globalFile(), { maxConcurrent: 8, graceTurns: 7 });
     writeJson(projectFile(), { maxConcurrent: 3 });
     const agents = boot();
-    const { ctx, screens } = drivePage([[]], []);
+    const { ctx, page } = drivePage([]);
 
     await agents(ctx);
 
-    expect(screens[0]).toMatch(/Max background concurrency +3\b/);
-    expect(screens[0]).toMatch(/Grace turns +7\b/);
-    expect(screens[0]).toMatch(/Nested depth +2\b/);
+    expect(page.screen).toMatch(/Max background concurrency · project +3\b/);
+    expect(page.screen).toMatch(/Grace turns · global +7\b/);
+    expect(page.screen).toMatch(/Nested depth +2\b/);
   });
 
   it("after a restart, a project file made via Tab is the default scope and its value loads", async () => {
     writeJson(globalFile(), { maxConcurrent: 8 });
-    await boot()(drivePage([["\t", "\r"]], ["4"]).ctx);
+    await boot()(drivePage([TAB, ...typeValue("4")]).ctx);
     expect(readJson(projectFile())).toEqual({ maxConcurrent: 4 });
 
-    const next = drivePage([[]], []);
+    const next = drivePage([]);
     await restart()(next.ctx);
 
-    expect(next.headers[0]).toContain("Saving to: Project");
-    expect(next.screens[0]).toMatch(/Max background concurrency +4\b/);
+    expect(next.page.header).toContain("Saving to: Project");
+    expect(next.page.screen).toMatch(/Max background concurrency · project +4\b/);
     expect(readJson(globalFile())).toEqual({ maxConcurrent: 8 });
   });
 });

@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Input, isKeyRelease, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
@@ -43,9 +43,12 @@ import {
   applyAndEmitLoaded,
   defaultSettingsScope,
   loadSettings,
+  NUMERIC_SETTING_BOUNDS,
+  type NumericSettingKey,
   type SettingsScope,
   type SubagentsSettings,
   saveAndEmitChanged,
+  settingSources,
   settingsFilePath,
   type ToolDescriptionMode,
 } from "./settings.js";
@@ -3888,19 +3891,15 @@ Write the file using the write tool. Only write the file, nothing else.`;
       : `${base} Currently limited to an empty list, so nothing loads.`;
   }
 
-  // Typed as setting keys: a typed row's id is the setting it writes.
-  const NUMERIC_IDS: ReadonlySet<string> = new Set<keyof SubagentsSettings>([
-    "maxConcurrent", "maxConcurrentForeground", "maxConcurrentNested", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
-  ]);
+  // A typed row's id is the setting it writes.
+  const isNumericId = (id: string): id is NumericSettingKey => Object.hasOwn(NUMERIC_SETTING_BOUNDS, id);
 
   /**
-   * `scope` is the file changes are written to. It starts at `initialScope` —
-   * the default rule, or the scope carried over when the page reopens after a
-   * typed value — and Tab switches it; the list always shows the effective
-   * (merged) values.
+   * `scope` is the file changes are written to. It starts at the default rule
+   * and Tab switches it; the list always shows the effective (merged) values.
    */
-  async function showSettings(ctx: ExtensionCommandContext, initialScope: SettingsScope = defaultSettingsScope(process.cwd())) {
-    let scope = initialScope;
+  async function showSettings(ctx: ExtensionCommandContext) {
+    let scope: SettingsScope = defaultSettingsScope(process.cwd());
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const mcf = manager.getMaxConcurrentForeground();
@@ -4131,7 +4130,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       // different one. Toggle and cycling rows always change their value.
       const target: SettingsTarget = {
         scope,
-        key: NUMERIC_IDS.has(id) ? (id as keyof SubagentsSettings) : undefined,
+        key: isNumericId(id) ? id : undefined,
       };
       if (id === "maxConcurrent") {
         const n = parseInt(value, 10);
@@ -4326,112 +4325,133 @@ Write the file using the write tool. Only write the file, nothing else.`;
       }
     }
 
-    let list: SettingsList;
-    // Track current selection index directly (SettingsList doesn't expose it).
-    // Updated on arrow keys so Enter knows which field is selected immediately.
-    let currentIndex = 0;
-
-    const result = await ctx.ui.custom<string | undefined>((_tui, theme, kb, done) => {
+    await ctx.ui.custom<undefined>((_tui, theme, kb, done) => {
       const items = buildItems();
+      const baseLabels = new Map(items.map(item => [item.id, item.label]));
       const title = new Text("", 0, 0);
       const fileLine = new Text("", 0, 0);
       const tabKey = kb.getKeys("tui.input.tab")[0];
+      const keyLabel = (id: Parameters<typeof kb.getKeys>[0]) => {
+        const key = kb.getKeys(id)[0];
+        return key ? formatKeyLabel(key) : id;
+      };
       const renderHeader = () => {
         const switchHint = tabKey ? theme.fg("muted", ` · ${formatKeyLabel(tabKey)} to switch`) : "";
         title.setText(`⚙  Subagent Settings · Saving to: ${scope === "global" ? "Global" : "Project"}${switchHint}`);
         const path = settingsFilePath(scope, process.cwd());
         const shown = scope === "project" ? ".pi/subagents.json" : path.replace(homedir(), "~");
         const created = scope === "project" && !existsSync(path) ? " · created on first change" : "";
-        fileLine.setText(theme.fg("muted", `   ${shown}${created}`));
+        fileLine.setText(theme.fg("muted", `   ${shown}${created} · tagged rows are set in a file`));
       };
-      renderHeader();
+      // Re-read values and file tags after every change: a save can move a
+      // key into the other file, and some rows' values depend on others.
+      const refreshRows = () => {
+        const sources = settingSources(process.cwd());
+        const fresh = new Map(buildItems().map(item => [item.id, item]));
+        for (const item of items) {
+          const next = fresh.get(item.id);
+          if (next) Object.assign(item, { currentValue: next.currentValue, values: next.values, description: next.description });
+          const source = sources[(item.id === "joinMode" ? "defaultJoinMode" : item.id) as keyof SubagentsSettings];
+          const base = baseLabels.get(item.id) ?? item.label;
+          item.label = source ? `${base}${theme.fg("muted", ` · ${source}`)}` : base;
+        }
+        renderHeader();
+      };
 
-      list = new SettingsList(
+      const list = new SettingsList(
         items,
         items.length + 2,
         getSettingsListTheme(),
         (id, newValue) => {
           applyValue(id, newValue);
-          // The first change in Project scope may have just created the file.
-          renderHeader();
+          refreshRows();
         },
-        () => done(undefined as undefined),
+        () => done(undefined),
       );
+      refreshRows();
+
+      // The selected row, owned here: SettingsList doesn't expose its own, and
+      // Enter on a number row must know which one it is.
+      let selected = 0;
+      // The number editor under the list, while one is open.
+      let editing: { id: NumericSettingKey; input: Input; error: Text } | undefined;
+      const editor = new Container();
+
+      const closeEditor = () => {
+        editing = undefined;
+        editor.clear();
+      };
+      const openEditor = (id: NumericSettingKey) => {
+        const { min, max } = NUMERIC_SETTING_BOUNDS[id];
+        // Empty, not pre-filled: Input.setValue leaves the cursor at column 0,
+        // so typed digits would land in front of the old value.
+        const input = new Input();
+        input.focused = true;
+        const error = new Text("", 0, 0);
+        editing = { id, input, error };
+        editor.clear();
+        editor.addChild(new Spacer(1));
+        editor.addChild(new Text(
+          `${baseLabels.get(id)} (${min}–${max}, now ${items[selected].currentValue})`
+            + theme.fg("muted", ` · ${keyLabel("tui.input.submit")} to save · ${keyLabel("tui.select.cancel")} to cancel`),
+          0,
+          0,
+        ));
+        editor.addChild(input);
+        editor.addChild(error);
+      };
+      const submitEditor = ({ id, input, error }: NonNullable<typeof editing>) => {
+        const { min, max } = NUMERIC_SETTING_BOUNDS[id];
+        const trimmed = input.getValue().trim();
+        const n = Number(trimmed);
+        if (trimmed === "" || !Number.isInteger(n) || n < min || n > max) {
+          error.setText(theme.fg("error", `Enter a whole number from ${min} to ${max}`));
+          return;
+        }
+        closeEditor();
+        applyValue(id, String(n));
+        refreshRows();
+      };
 
       const container = new Container();
       container.addChild(title);
       container.addChild(fileLine);
       container.addChild(new Spacer(1));
       container.addChild(list);
+      container.addChild(editor);
 
       return {
         render: (w: number) => container.render(w),
         invalidate: () => container.invalidate(),
         handleInput: (data: string) => {
+          // pi repaints after every keystroke it hands the page.
+          if (editing) {
+            if (kb.matches(data, "tui.input.submit")) submitEditor(editing);
+            else if (kb.matches(data, "tui.select.cancel")) closeEditor();
+            else if (!kb.matches(data, "tui.input.tab")) editing.input.handleInput(data);
+            return;
+          }
           if (kb.matches(data, "tui.input.tab")) {
             scope = scope === "global" ? "project" : "global";
-            // pi repaints after every keystroke it hands the page.
             renderHeader();
             return;
           }
-          // Track navigation so Enter knows the current field
-          if (matchesKey(data, "up")) {
-            currentIndex = Math.max(0, currentIndex - 1);
-          } else if (matchesKey(data, "down")) {
-            currentIndex = Math.min(items.length - 1, currentIndex + 1);
+          // Wraps at both ends, as SettingsList's own navigation does.
+          const up = kb.matches(data, "tui.select.up");
+          if (up || kb.matches(data, "tui.select.down")) {
+            selected = (selected + (up ? items.length - 1 : 1)) % items.length;
+            list.selectItem(items[selected].id);
+            return;
           }
-
-          // Enter on numeric field → close and prompt for typed input
-          if (matchesKey(data, Key.enter) && NUMERIC_IDS.has(items[currentIndex].id)) {
-            done(items[currentIndex].id);
+          const id = items[selected].id;
+          if (kb.matches(data, "tui.select.confirm") && isNumericId(id)) {
+            openEditor(id);
             return;
           }
           list.handleInput?.(data);
         },
       };
     });
-
-    // If a numeric field ID was returned, prompt for typed input
-    if (result && NUMERIC_IDS.has(result)) {
-      const current = result === "maxConcurrent"
-        ? String(manager.getMaxConcurrent())
-        : result === "maxConcurrentForeground"
-          ? String(manager.getMaxConcurrentForeground())
-          : result === "maxConcurrentNested"
-            ? String(manager.getMaxConcurrentNested())
-          : result === "defaultMaxTurns"
-            ? String(getDefaultMaxTurns() ?? 0)
-            : result === "maxSubagentDepth"
-              ? String(getMaxSubagentDepth())
-              : String(getGraceTurns());
-
-      const label = result === "maxConcurrent"
-        ? "Max background concurrency (1+)"
-        : result === "maxConcurrentForeground"
-          ? "Max foreground concurrency (0 = unlimited)"
-          : result === "maxConcurrentNested"
-            ? "Max nested concurrency (0 = unlimited)"
-          : result === "defaultMaxTurns"
-            ? "Default max turns (0 = unlimited)"
-            : result === "maxSubagentDepth"
-              ? "Nested depth (0/1 = nesting off)"
-              : "Grace turns (1+)";
-
-      // Loop until user enters a valid integer or cancels (Esc / null).
-      // Silently trims whitespace; rejects non-numeric input by re-prompting.
-      let input: string | undefined = await ctx.ui.input(label, current);
-      while (input != null) {
-        const trimmed = input.trim();
-        const n = Number(trimmed);
-        if (trimmed !== "" && Number.isInteger(n)) {
-          applyValue(result, String(n));
-          await showSettings(ctx, scope);
-          return;
-        }
-        // Invalid — re-prompt with the user's last entry so they can edit it
-        input = await ctx.ui.input(label, trimmed);
-      }
-    }
   }
 
   // Persist the current snapshot, emit `subagents:settings_changed`, and surface

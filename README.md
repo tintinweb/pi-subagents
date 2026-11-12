@@ -758,6 +758,8 @@ Runtime tuning values set via `/agents` → Settings (max background concurrency
 
 A save writes only the setting you changed into that file; every other key in it, including ones another pi session saved, is left as it was.
 
+A row whose value comes from a settings file is tagged with that file (`· project` or `· global`); an untagged row is at its built-in default. Enter on a number row opens an input under the list, with the accepted range: Enter saves, Esc returns to the list, and a value outside the range is refused. The ranges match what loading accepts, so a value the menu saves survives a restart.
+
 **Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max background concurrency `10`, max foreground concurrency `0` = unlimited, max nested concurrency `10`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nested subagents entirely, even for agents that set `allowed_subagents` — see the [depth table](#nested-subagents). Read when a subagent session is built, so a change applies to agents started after it.

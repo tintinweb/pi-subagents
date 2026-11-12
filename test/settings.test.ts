@@ -11,6 +11,7 @@ import {
   type SettingsAppliers,
   saveAndEmitChanged,
   saveSettings,
+  settingSources,
 } from "../src/settings.js";
 
 /**
@@ -331,6 +332,24 @@ describe("settings persistence", () => {
       expect(shadowed.message).toBe("Max set to 6 (saved to global settings; project settings override it)");
       const clear = saveAndEmitChanged({ graceTurns: 2 }, {}, "Grace set to 2", vi.fn(), projectDir, "global");
       expect(clear.message).toBe("Grace set to 2 (saved to global settings)");
+    });
+  });
+
+  describe("settingSources (the file tags on the Settings page)", () => {
+    it("names the file each loaded key comes from, the project file winning a key both set", () => {
+      writeGlobal({ maxConcurrent: 16, graceTurns: 10 });
+      writeProject({ maxConcurrent: 4, defaultJoinMode: "group" });
+      expect(settingSources(projectDir)).toEqual({
+        maxConcurrent: "project",
+        defaultJoinMode: "project",
+        graceTurns: "global",
+      });
+    });
+
+    it("leaves out a key whose stored value loading would drop", () => {
+      writeGlobal({ graceTurns: 10 });
+      writeProject({ graceTurns: 0, maxConcurrent: "four" });
+      expect(settingSources(projectDir)).toEqual({ graceTurns: "global" });
     });
   });
 
