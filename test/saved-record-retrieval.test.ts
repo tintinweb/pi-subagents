@@ -111,6 +111,20 @@ describe("get_subagent_result falls back to the saved record", () => {
     expect(out).toContain("saved record");
   });
 
+  it("says when the saved run finished and how long ago (#436)", async () => {
+    // A saved record outlives the run it came from by days in a long session;
+    // without a date, an old result reads as current.
+    const branch: any[] = [];
+    const id = await finishedAgent(branch);
+    const saved = branch.find((entry) => entry.customType === "subagents:record" && entry.data.id === id);
+    const completedAt = Date.now() - 2 * 86_400_000 - 3 * 3_600_000;
+    saved.data.startedAt = completedAt - 5_000;
+    saved.data.completedAt = completedAt;
+
+    const out = await readAfterReload(branch, id);
+    expect(out).toContain(`Finished: ${new Date(completedAt).toISOString().slice(0, 16)}Z (2d ago)`);
+  });
+
   it("answers with a foreground resume's outcome, not the earlier run's", async () => {
     const branch: any[] = [];
     const id = await finishedAgent(branch, {}, { text: "THE-RESUMED-RESULT", aborted: false, steered: false });
@@ -159,6 +173,7 @@ describe("get_subagent_result falls back to the saved record", () => {
     const byType = await read("Explore");
     expect(byType).toContain(`Agent: ${id}`);
     expect(byType).toContain("THE-NAMED-RESULT");
+    expect(byType).toMatch(/\nFinished: \d{4}-\d\d-\d\dT\d\d:\d\dZ \(<1m ago\)\n/);
     expect(byType).toContain("saved record");
 
     expect(await read("no-such-handle")).toContain("Agent not found");

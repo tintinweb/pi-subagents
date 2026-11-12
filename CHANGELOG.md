@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Finished nested subagents no longer outlive their parent across a session switch.** On `/new` or a session switch, finished agents whose result was never read stay in memory. A nested child's result is only ever read by its parent, so nothing marked it read: it stayed for up to 10 minutes with its session still loaded, after its parent was gone. It is now removed along with its parent.
+- **`get_subagent_result` says when a saved result is from** ([#436](https://github.com/tintinweb/pi-subagents/issues/436) — thanks [@EndUser123](https://github.com/EndUser123)). Once the live record is gone, the answer comes from the session's saved record, which lasts as long as the session, so a days-old result read as current. That answer now carries a `Finished:` line with the time and age (`2026-11-10T14:14Z (2d ago)`). It matters most for handles: after a reload, `explore` resolves to the most recent saved run, however old.
 
 ## [0.24.0] - 2026-11-12
 

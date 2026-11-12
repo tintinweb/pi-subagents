@@ -50,6 +50,7 @@ import {
   buildInvocationTags,
   describeActivity,
   fgPreservingNestedStyles,
+  formatAge,
   formatCost,
   formatDuration,
   formatMs,
@@ -775,10 +776,15 @@ export default function (pi: ExtensionAPI) {
     return resolved?.kind === "live" ? resolved.record : undefined;
   };
 
-  /** get_subagent_result's answer from a persisted record, once the live record is gone. */
+  /**
+   * get_subagent_result's answer from a persisted record, once the live record
+   * is gone. The record lasts as long as the session file, so it states when
+   * the run finished: a days-old result must not read as current (#436).
+   */
   const formatSavedAgentRecord = (saved: AgentRecordEntryData): string =>
     `Agent: ${saved.id}\n` +
     `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
+    (saved.completedAt ? `Finished: ${new Date(saved.completedAt).toISOString().slice(0, 16)}Z (${formatAge(saved.completedAt)} ago)\n` : "") +
     `Description: ${saved.description}\n` +
     `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
     (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
