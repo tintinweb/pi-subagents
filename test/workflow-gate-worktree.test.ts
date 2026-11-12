@@ -23,10 +23,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../src/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-  resumeAgent: vi.fn(),
-}));
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
 
 import { AgentManager } from "../src/agent-manager.js";
 import { runAgent } from "../src/agent-runner.js";

@@ -125,6 +125,12 @@ describe("ConversationViewer invocation line", () => {
     })).toBe("↳ anthropic/claude-sonnet-4-6 · thinking: high · max turns: 60");
   });
 
+  // `0` is how the record keeps "unlimited" apart from "no limit given" (a
+  // resume falls back to it); shown, it would read as a limit of none.
+  it("shows no turn limit for an unlimited run", () => {
+    expect(invocationLine({ modelName: "sonnet 4.6", maxTurns: 0 })).toBe("↳ sonnet 4.6");
+  });
+
   it("falls back to the short label when no canonical id was captured", () => {
     expect(invocationLine({ modelName: "sonnet 4.6", thinking: "high" }))
       .toBe("↳ sonnet 4.6 · thinking: high");

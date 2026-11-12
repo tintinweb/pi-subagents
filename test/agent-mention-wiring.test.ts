@@ -445,9 +445,9 @@ describe("mentioning an agent that has never run", () => {
 
   });
 
-  it("leaves model, thinking and max turns to the agent's own config", async () => {
-    // runAgent resolves all three from the config when the spawn omits them,
-    // so passing anything here would override frontmatter the user wrote.
+  it("leaves model and thinking to the agent's own config", async () => {
+    // runAgent resolves both from the config when the spawn omits them, so
+    // passing anything here would override frontmatter the user wrote.
     const { lifecycle } = bootDirect();
     heldRun(fakeSession());
 
@@ -456,14 +456,14 @@ describe("mentioning an agent that has never run", () => {
     const opts = vi.mocked(runAgent).mock.calls[0][3] as any;
     expect(opts.model).toBeUndefined();
     expect(opts.thinkingLevel).toBeUndefined();
-    expect(opts.maxTurns).toBeUndefined();
 
   });
 
-  it("shows the turn limit it will actually be held to (#181)", async () => {
-    // The spawn passes no maxTurns on purpose (see the test above), so the
-    // tracker has to resolve the same limit runAgent will enforce — otherwise
-    // the row reads `↻1` where the Agent tool would read `↻1≤9`.
+  it("is held to the turn limit it shows (#181)", async () => {
+    // The mention passes no maxTurns, so the spawn funnel resolves the agent's
+    // own limit once and hands that one value to both the tracker and the
+    // runner, which enforces it as given. Otherwise the row reads `↻1` where
+    // the Agent tool would read `↻1≤9`, or the agent runs unbounded.
     const prevMax = getDefaultMaxTurns();
     try {
       const { lifecycle } = bootDirect({ defaultMaxTurns: 9 });
@@ -485,6 +485,7 @@ describe("mentioning an agent that has never run", () => {
       const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
       const lines = factory({ terminal: { columns: 200 }, requestRender: vi.fn() }, theme).render().join("\n");
       expect(lines).toContain("≤9");
+      expect((vi.mocked(runAgent).mock.calls[0][3] as any).maxTurns).toBe(9);
     } finally {
       setDefaultMaxTurns(prevMax);
     }

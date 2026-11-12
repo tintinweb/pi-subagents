@@ -20,7 +20,7 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
 import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, resolveResumeTurnLimit, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
@@ -727,15 +727,15 @@ export default function (pi: ExtensionAPI) {
     // callbacks are the funnel's own — a caller's are not honoured, since a
     // half-wired tracker renders worse than none.
     //
-    // The turn limit is resolved rather than read off `options`, which a mention
-    // spawn deliberately omits so the agent's own config can decide: a tracker
-    // built with `undefined` renders `↻3` where the Agent tool renders `↻3≤20`.
-    // Like the tool's own, it is a prediction — editing the agent file mid-run
-    // leaves the displayed ceiling stale.
-    const { state, callbacks } = createActivityTracker(resolveEffectiveMaxTurns(dispatch.type, options?.maxTurns));
+    // The turn limit is resolved here rather than read off `options`, which a
+    // mention spawn deliberately omits so the agent's own config can decide. The
+    // runner enforces exactly what it is handed, so this one value is both the
+    // limit and what the tracker shows (`↻3≤20`).
+    const maxTurns = resolveEffectiveMaxTurns(dispatch.type, options?.maxTurns);
+    const { state, callbacks } = createActivityTracker(maxTurns);
     // Repaints are left to the manager's `onStart` callback, which already starts
     // the widget/fleet timers for agents that enter this way.
-    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...options, ...callbacks });
+    const id = manager.spawn(piRef, ctxRef, dispatch.type, prompt, { ...options, maxTurns, ...callbacks });
     agentActivity.set(id, state);
     return id;
   };
@@ -1425,7 +1425,7 @@ export default function (pi: ExtensionAPI) {
    * was spawned with, else the default (#368).
    */
   function resumeTurnLimit(record: AgentRecord, explicit?: number): number | undefined {
-    return normalizeMaxTurns(getAgentConfig(record.type)?.maxTurns ?? explicit ?? record.invocation?.maxTurns ?? getDefaultMaxTurns());
+    return resolveResumeTurnLimit(getAgentConfig(record.type)?.maxTurns, explicit, record.invocation?.maxTurns);
   }
 
   /**
@@ -2103,8 +2103,9 @@ Terse command-style prompts produce shallow, generic work.
         requestedThinking: resolvedConfig.overridden?.thinking,
         requestedModel: askedModel,
         // Explicit value only — the default fallback would just add noise.
-        // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
-        maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
+        // Kept raw: `0` is how a resume tells "spawned unlimited" from "no
+        // limit given", which falls through to the default. The viewer hides it.
+        maxTurns: resolvedConfig.maxTurns,
         isolated,
         // Neither is applied to a reopened conversation (runAgent, the
         // manager), so neither is shown.

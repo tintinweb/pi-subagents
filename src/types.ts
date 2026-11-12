@@ -343,6 +343,10 @@ export interface AgentInvocation {
   requestedThinking?: EffectiveThinkingLevel;
   /** The caller's `model` parameter, as written, when an agent file's pin won. */
   requestedModel?: string;
+  /**
+   * The explicit turn limit the run was given (agent file, else call), raw:
+   * `0` = unlimited, `undefined` = none given. A resume falls back to it.
+   */
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;

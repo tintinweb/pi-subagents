@@ -681,7 +681,7 @@ Instead of hard-aborting at the turn limit, agents get a graceful shutdown:
 2. Up to 5 grace turns to finish cleanly
 3. Hard abort only after the grace period
 
-A resumed agent gets a fresh budget: `max_turns` is counted from the resume prompt, resolved as for a spawn — the agent file's `max_turns`, else the resume call's, else the limit the agent was spawned with, else the default.
+A resumed agent gets a fresh budget: `max_turns` is counted from the resume prompt, resolved as for a spawn — the agent file's `max_turns`, else the resume call's, else the limit the agent was spawned with, else the default. An agent reopened from its saved session after eviction skips the spawn limit, which is not saved. A nested resume reads the agent file from its own branch's config root. A `max_turns: 0` at any of those levels means unlimited and is not replaced by a later one.
 
 | Status | Meaning | Icon |
 |--------|---------|------|

@@ -36,6 +36,7 @@ import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../agent-manager.js";
 import { reopenTarget, worktreeLost } from "../agent-record-entry.js";
+import { resolveEffectiveMaxTurns, resolveResumeTurnLimit } from "../agent-runner.js";
 import { getAgentConfig, resolveSpawnType } from "../agent-types.js";
 import { resolveModel } from "../model-resolver.js";
 import { checkModelScope } from "../model-scope.js";
@@ -234,6 +235,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
         prompt,
         {
           description: kept.description,
+          maxTurns: resolveEffectiveMaxTurns(reopen.type),
           resumeSessionFile: reopen.sessionFile,
           reclaim: { id },
           ...(config?.isolated !== undefined ? { isolated: config.isolated } : {}),
@@ -358,6 +360,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
           request.prompt,
           {
             description: request.label,
+            maxTurns: resolveEffectiveMaxTurns(dispatch.type),
             // Same as the Agent tool: `isolated` comes off the agent definition.
             // Left out, a hermetic agent's script-spawned children loaded every
             // host extension and picked up its MCP and web tools.
@@ -431,7 +434,12 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
       if (id === undefined) {
         return { ok: false, error: `Cannot resume "${agentId}" — it never started.` };
       }
-      const record = await manager.resume(id, prompt, deps.signal);
+      // An evicted record resolves nothing here: the manager declines it and
+      // `reopenAgent` resolves the reopened run's limit itself.
+      const live = manager.getRecord(id);
+      const record = await manager.resume(id, prompt, deps.signal, {
+        maxTurns: live && resolveResumeTurnLimit(getAgentConfig(live.type)?.maxTurns, undefined, live.invocation?.maxTurns),
+      });
       // No live session: the manager evicted the child, or it never got as far
       // as having one. `reopenAgent` refuses the second with the reason — and a
       // record still in memory without a session is refused by the manager,

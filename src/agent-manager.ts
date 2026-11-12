@@ -215,6 +215,7 @@ interface SpawnOptions {
    */
   reclaim?: { id?: string; handle?: string; alias?: string };
   model?: Model<any>;
+  /** Already resolved by the caller; `undefined` = unlimited. */
   maxTurns?: number;
   isolated?: boolean;
   inheritContext?: boolean;
@@ -334,9 +335,9 @@ interface ResumeOptions {
    */
   isBackground?: boolean;
   /**
-   * Explicit turn limit for the resumed run: this, else the limit the agent
-   * was spawned with, else its type's own `max_turns`, else the default —
-   * counted afresh from the resume prompt (#368).
+   * Turn limit for the resumed run, counted afresh from the resume prompt
+   * (#368). Already resolved by the caller (`resolveResumeTurnLimit`):
+   * `undefined` = unlimited, not "fill in from the spawn".
    */
   maxTurns?: number;
   /** Called at the end of each resumed turn with the count since the resume. */
@@ -1333,8 +1334,7 @@ export class AgentManager {
 
     try {
       this.settleOutcome(record, await resumeAgent(record.session, prompt, {
-        type: record.type,
-        maxTurns: options?.maxTurns ?? record.invocation?.maxTurns,
+        maxTurns: options?.maxTurns,
         onTurnEnd: options?.onTurnEnd,
         onToolActivity: (activity) => {
           if (activity.type === "end") record.toolUses++;
@@ -1456,8 +1456,7 @@ export class AgentManager {
     };
 
     const promise = resumeAgent(record.session, prompt, {
-      type: record.type,
-      maxTurns: options.maxTurns ?? record.invocation?.maxTurns,
+      maxTurns: options.maxTurns,
       onTurnEnd: options.onTurnEnd,
       onToolActivity: (activity) => {
         if (activity.type === "end") record.toolUses++;

@@ -26,7 +26,7 @@ vi.mock("../src/output-file.js", async () => {
   };
 });
 
-import { resumeAgent, runAgent } from "../src/agent-runner.js";
+import { getDefaultMaxTurns, resumeAgent, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { ensureOutputFile, streamToOutputFile, writeInitialEntry } from "../src/output-file.js";
 
@@ -334,5 +334,80 @@ describe("Agent tool — background resume wiring", () => {
     expect(vi.mocked(resumeAgent).mock.calls[0][2].maxTurns).toBe(7);
 
     await lifecycle.get("session_shutdown")?.({}, ctx);
+  });
+
+  // An explicit `max_turns: 0` is the decision "unlimited", and it is final. The
+  // resume used to normalize it to `undefined`, which the manager then filled in
+  // from the limit the agent was spawned with.
+  describe("an explicit max_turns: 0 stays unlimited on resume", () => {
+    async function resumeAndReadLimit(tools: Map<string, any>, ctx: any, id: string, params: Record<string, unknown> = {}) {
+      vi.mocked(resumeAgent).mockClear();
+      await tools.get("Agent").execute(
+        "resume-call",
+        { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false, ...params },
+        undefined,
+        undefined,
+        ctx,
+      );
+      expect(resumeAgent).toHaveBeenCalledTimes(1);
+      return vi.mocked(resumeAgent).mock.calls[0][2].maxTurns;
+    }
+
+    it("from the agent file, edited to 0 after a spawn under a numeric limit", async () => {
+      writeFileSync(join(agentDir, "agents", "capped.md"), "---\ndescription: Capped\nmax_turns: 30\n---\n\nCapped.\n");
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = makeCtx(cwd);
+      const id = await spawnSettled(tools, ctx, "capped");
+
+      writeFileSync(join(agentDir, "agents", "capped.md"), "---\ndescription: Capped\nmax_turns: 0\n---\n\nCapped.\n");
+      expect(await resumeAndReadLimit(tools, ctx, id, { subagent_type: "capped" })).toBeUndefined();
+
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    });
+
+    it("from the resume call, over the limit the agent was spawned with", async () => {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = makeCtx(cwd);
+      const res = await tools.get("Agent").execute(
+        "spawn-call",
+        { prompt: "first task", description: "First task", subagent_type: "general-purpose", run_in_background: true, max_turns: 5 },
+        undefined,
+        undefined,
+        ctx,
+      );
+      const id = agentIdOf(res);
+      await new Promise((r) => setTimeout(r, 0));
+
+      expect(await resumeAndReadLimit(tools, ctx, id, { max_turns: 0 })).toBeUndefined();
+
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    });
+
+    it("from the spawn call, when the resume sets none and a default exists", async () => {
+      const prevMax = getDefaultMaxTurns();
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = makeCtx(cwd);
+      setDefaultMaxTurns(20);
+      try {
+        const res = await tools.get("Agent").execute(
+          "spawn-call",
+          { prompt: "first task", description: "First task", subagent_type: "general-purpose", run_in_background: true, max_turns: 0 },
+          undefined,
+          undefined,
+          ctx,
+        );
+        expect(vi.mocked(runAgent).mock.calls.at(-1)![3].maxTurns).toBeUndefined();
+        const id = agentIdOf(res);
+        await new Promise((r) => setTimeout(r, 0));
+
+        expect(await resumeAndReadLimit(tools, ctx, id)).toBeUndefined();
+      } finally {
+        setDefaultMaxTurns(prevMax);
+        await lifecycle.get("session_shutdown")?.({}, ctx);
+      }
+    });
   });
 });

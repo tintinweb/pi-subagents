@@ -19,7 +19,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
-import { normalizeMaxTurns } from "./agent-runner.js";
 import { resolveSpawnType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
@@ -252,6 +251,9 @@ export class SubagentScheduler {
         isBackground: true,
         bypassQueue: true,
         model: resolvedModel,
+        // Resolved when the job was scheduled (the Agent tool stores its
+        // effective limit), and the runner enforces it as given: `undefined`
+        // stays unlimited rather than picking up the default at fire time.
         maxTurns: job.max_turns,
         isolated: job.isolated,
         thinkingLevel: job.thinking,
@@ -263,9 +265,10 @@ export class SubagentScheduler {
         // would only be right until then.
         invocation: {
           thinking: job.thinking,
-          // Normalized like the Agent tool's own snapshot: `0` means unlimited,
-          // and rendering it as "max turns: 0" would read as a limit of none.
-          maxTurns: normalizeMaxTurns(job.max_turns),
+          // Stored already resolved, so no limit here is "unlimited" — recorded
+          // as `0`, or a resume would read it as "none given" and apply the
+          // default. The viewer hides 0.
+          maxTurns: job.max_turns ?? 0,
           isolated: job.isolated,
           runInBackground: true,
           isolation: job.isolation,
