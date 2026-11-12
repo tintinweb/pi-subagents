@@ -470,7 +470,10 @@ export class AgentWidget {
         const { modelName, tags } = buildInvocationTags(a.invocation);
         if (modelName) parts.push(modelName);
         const thinkingTag = tags.find(tag => tag.startsWith("thinking: "));
-        if (thinkingTag) parts.push(thinkingTag);
+        // Bare level, not "thinking: high" — it reads as a property of the model
+        // beside it, and the fleet row shows the same form. The tag list keeps
+        // the label for the viewer and tool result.
+        if (thinkingTag) parts.push(thinkingTag.slice("thinking: ".length));
       }
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);

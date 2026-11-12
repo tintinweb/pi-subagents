@@ -782,10 +782,10 @@ The `~` marks it as pi's estimate rather than a billed figure. **A cost is shown
 
 Independent of `reportUsage`: this one is what you read, that one is what your session counts. Toggle via `/agents → Settings → Show cost`; applied live.
 
-**Show model** (`showModel`, default `false`): whether the widget's running rows name the model driving each agent and the thinking level it is running at:
+**Show model** (`showModel`, default `false`): whether the widget's running rows and the fleet view rows name the model driving each agent and the thinking level it is running at:
 
 ```text
-├─ ⠹ Explore  inspect code · sonnet 4.6 · thinking: high · ↻3 · 8.2k token · 4.1s
+├─ ⠹ Explore  inspect code · sonnet 4.6 · high · ↻3 · 8.2k token · 4.1s
 ```
 
 Off by default because the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal. The other surfaces show the pair either way: the `Agent` tool result names the model beside its tags, and the conversation viewer's `↳` row spells out the canonical `provider/model-id`.

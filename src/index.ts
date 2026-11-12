@@ -438,10 +438,10 @@ export default function (pi: ExtensionAPI) {
   let showCost = false;
   function isShowCostEnabled(): boolean { return showCost; }
   function setShowCost(b: boolean): void { showCost = b; widget.update(); fleet.update(); }
-  /** Name the model and thinking level on the widget's running rows. */
+  /** Name the model and thinking level on the widget's running rows and the fleet rows. */
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
-  function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  function setShowModel(b: boolean): void { showModel = b; widget.update(); fleet.update(); }
   /**
    * How much of the conversation viewer renders as Markdown. Read through a
    * getter by the viewer rather than captured like `showCost`, because the
@@ -1284,7 +1284,7 @@ export default function (pi: ExtensionAPI) {
   // one opened from `/agents`: same settings on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    getFullscreenScrollbar, backgroundActionFor);
+    getFullscreenScrollbar, backgroundActionFor, isShowModelEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }

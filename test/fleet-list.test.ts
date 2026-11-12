@@ -697,6 +697,44 @@ describe("FleetList cost display", () => {
   });
 });
 
+describe("FleetList model display", () => {
+  const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  function row(showModel: boolean): string {
+    const record = makeRecord({
+      invocation: { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" },
+    });
+    // showModel is the last positional arg; the middle args take their defaults.
+    const fleet = new FleetList(fakeManager([record]), new Map(), () => false, undefined, undefined, undefined, undefined, () => showModel);
+    let factory: any;
+    fleet.setUICtx({
+      setWidget: (_k: string, c: any) => { factory = c; },
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: (() => new Promise(() => {})) as any,
+    } as any);
+    fleet.update();
+    return factory({ requestRender: () => {}, terminal: { columns: 120, rows: 40 } }, theme).render(120).join("\n");
+  }
+
+  it("names the model and bare thinking level when enabled", () => {
+    const out = row(true);
+    // Bare level, not "thinking: high" — the label is dropped on this surface,
+    // matching the widget's running row.
+    expect(out).toContain("sonnet 4.6 · high");
+    expect(out).not.toContain("thinking:");
+    // The short label, never the canonical id.
+    expect(out).not.toContain("anthropic/claude-sonnet-4-6");
+  });
+
+  it("shows no model or thinking level when disabled", () => {
+    const out = row(false);
+    expect(out).not.toContain("sonnet 4.6");
+    expect(out).not.toContain("thinking:");
+  });
+});
+
 /* ------------------------------------------------------------------------- *
  * Workflow runs
  * ------------------------------------------------------------------------- */
