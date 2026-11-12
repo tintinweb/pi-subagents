@@ -991,11 +991,10 @@ describe("FleetList model display", () => {
 
   const SONNET: AgentRecord["invocation"] = { modelName: "sonnet 4.6", modelId: "anthropic/claude-sonnet-4-6", thinking: "high" };
 
-  /** A fleet over one record, with `showModel` read live from `state.on`. */
-  function mount(state: { on: boolean }, invocation: AgentRecord["invocation"] = SONNET) {
-    const record = makeRecord({ invocation });
+  /** A fleet over one record (or `records`), with `showModel` read live from `state.on`. */
+  function mount(state: { on: boolean }, invocation: AgentRecord["invocation"] = SONNET, records = [makeRecord({ invocation })]) {
     // showModel is the last positional arg; the middle args take their defaults.
-    const fleet = new FleetList(fakeManager([record]), new Map(), () => false, undefined, undefined, undefined, undefined, () => state.on);
+    const fleet = new FleetList(fakeManager(records), new Map(), () => false, undefined, undefined, undefined, undefined, () => state.on);
     let factory: any;
     fleet.setUICtx({
       setWidget: (_k: string, c: any) => { factory = c; },
@@ -1045,6 +1044,22 @@ describe("FleetList model display", () => {
     expect(out).toContain("Agent  Sleep then report 1");
     expect(out).toContain("13.1k tokens");
     expect(out).not.toContain("(asked max)");
+  });
+
+  it("names each nested row's own model after its tree prefix and description", () => {
+    const now = Date.now();
+    const records = [
+      makeRecord({ id: "top", description: "parent", startedAt: now - 2000, invocation: SONNET }),
+      makeRecord({ id: "kid", description: "child", parentAgentId: "top", startedAt: now - 1000, invocation: { modelName: "haiku 4.5", thinking: "low" } }),
+    ];
+    const agent = getDisplayName("general-purpose");
+    const wide = plain(mount({ on: true }, undefined, records).render());
+    expect(wide).toContain(`○ ${agent}  parent · sonnet 4.6 · high`);
+    expect(wide).toContain(`  └ ○ ${agent}  child · haiku 4.5 · low`);
+    // Narrow: the indented child loses its model, never its rail or name.
+    const narrow = plain(mount({ on: true }, undefined, records).render(48));
+    expect(narrow).toContain(`  └ ○ ${agent}  child`);
+    expect(narrow).not.toContain("haiku 4.5 · low");
   });
 
   it("picks up a live toggle on the next update", () => {
