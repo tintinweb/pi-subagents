@@ -27,6 +27,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
 }));
 
 import subagentsExtension from "../src/index.js";
+import { loadSettings } from "../src/settings.js";
 
 let cwd: string;
 let agentDir: string;
@@ -95,6 +96,7 @@ function typeSetting(id: string, value: string) {
  */
 function drivePage(keys: string[][], inputs: string[]) {
   const headers: string[] = [];
+  const screens: string[] = [];
   const kb = {
     matches: (data: string, id: string) => id === "tui.input.tab" && data === "\t",
     getKeys: (id: string) => (id === "tui.input.tab" ? ["tab"] : []),
@@ -108,7 +110,9 @@ function drivePage(keys: string[][], inputs: string[]) {
         if (!strokes) return resolve(undefined);
         const page = factory({ requestRender: vi.fn() }, theme, kb, resolve);
         for (const key of strokes) page.handleInput(key);
-        headers.push(page.render(120).slice(0, 2).join("\n"));
+        const lines: string[] = page.render(120);
+        headers.push(lines.slice(0, 2).join("\n"));
+        screens.push(lines.join("\n"));
         resolve(undefined);
       }),
   );
@@ -127,7 +131,13 @@ function drivePage(keys: string[][], inputs: string[]) {
       setWidget: vi.fn(),
     },
   };
-  return { ctx, notify, headers };
+  return { ctx, notify, headers, screens };
+}
+
+/** A fresh extension instance, as on the next pi start. */
+function restart(): (ctx: any) => Promise<void> {
+  delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
+  return boot();
 }
 
 describe("/agents → Settings writes only the changed setting", () => {
@@ -259,8 +269,13 @@ describe("/agents → Settings writes only the changed setting", () => {
 
     await agents(ctx);
 
+    expect(notify.mock.calls.map(([message]) => message)).toEqual([
+      "Max background concurrency set to 8 (saved to global settings; project settings override it)",
+      "Max background concurrency set to 8 (saved to project settings)",
+    ]);
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 8 });
     expect(readJson(projectFile())).toEqual({ maxConcurrent: 8 });
-    expect(notify).toHaveBeenLastCalledWith("Max background concurrency set to 8 (saved to project settings)", "info");
+    expect(loadSettings(cwd)).toEqual({ maxConcurrent: 8 });
   });
 
   it("drops the 'created on first change' note once a change has created the project file", async () => {
@@ -272,8 +287,60 @@ describe("/agents → Settings writes only the changed setting", () => {
 
     await agents(ctx);
 
-    expect(existsSync(projectFile())).toBe(true);
+    expect(Object.keys(readJson(projectFile()) as object)).toEqual(["defaultJoinMode"]);
+    expect(existsSync(globalFile())).toBe(false);
     expect(headers[0]).toContain("Saving to: Project");
     expect(headers[0]).not.toContain("created on first change");
+  });
+
+  it("opens on Global without a project file, and on Project once one exists — even an empty one", async () => {
+    const agents = boot();
+    const first = drivePage([[]], []);
+    await agents(first.ctx);
+    expect(first.headers[0]).toContain("Saving to: Global");
+    expect(first.headers[0]).toContain("agent-dir/subagents.json");
+
+    writeJson(projectFile(), {});
+    const second = drivePage([[]], []);
+    await agents(second.ctx);
+    expect(second.headers[0]).toContain("Saving to: Project");
+    expect(second.headers[0]).not.toContain("created on first change");
+  });
+
+  it("Tab twice returns to the starting scope", async () => {
+    const agents = boot();
+    const { ctx, headers } = drivePage([["\t", "\t", "\r"]], ["4"]);
+
+    await agents(ctx);
+
+    expect(headers[0]).toContain("Saving to: Global");
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 4 });
+    expect(existsSync(join(cwd, ".pi"))).toBe(false);
+  });
+
+  it("shows the merged values: project wins, global fills in, defaults cover the rest", async () => {
+    writeJson(globalFile(), { maxConcurrent: 8, graceTurns: 7 });
+    writeJson(projectFile(), { maxConcurrent: 3 });
+    const agents = boot();
+    const { ctx, screens } = drivePage([[]], []);
+
+    await agents(ctx);
+
+    expect(screens[0]).toMatch(/Max background concurrency +3\b/);
+    expect(screens[0]).toMatch(/Grace turns +7\b/);
+    expect(screens[0]).toMatch(/Nested depth +2\b/);
+  });
+
+  it("after a restart, a project file made via Tab is the default scope and its value loads", async () => {
+    writeJson(globalFile(), { maxConcurrent: 8 });
+    await boot()(drivePage([["\t", "\r"]], ["4"]).ctx);
+    expect(readJson(projectFile())).toEqual({ maxConcurrent: 4 });
+
+    const next = drivePage([[]], []);
+    await restart()(next.ctx);
+
+    expect(next.headers[0]).toContain("Saving to: Project");
+    expect(next.screens[0]).toMatch(/Max background concurrency +4\b/);
+    expect(readJson(globalFile())).toEqual({ maxConcurrent: 8 });
   });
 });
