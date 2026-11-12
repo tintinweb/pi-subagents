@@ -102,6 +102,23 @@ describe("agent type registry", () => {
       expect(getAgentConfig("Explore")?.model).toBeUndefined();
     });
 
+    // Claude Code parity: its general-purpose has `tools: ["*"]` and so keeps the
+    // Agent tool, while Explore and Plan list it in `disallowedTools`. Delegation
+    // grants general-purpose nothing it lacks — it already has every tool.
+    it("lets general-purpose delegate, and keeps Explore and Plan from it", () => {
+      expect(getAgentConfig("general-purpose")?.allowedSubagents).toBe("all");
+      expect(getAgentConfig("Explore")?.allowedSubagents).toBeUndefined();
+      expect(getAgentConfig("Plan")?.allowedSubagents).toBeUndefined();
+    });
+
+    // Claude Code's general-purpose prompt ends with this guideline; without it a
+    // delegating agent tends to hand its whole task to one child.
+    it("tells general-purpose not to re-delegate its whole assignment", () => {
+      expect(getAgentConfig("general-purpose")?.systemPrompt).toContain(
+        "do not re-delegate your entire assignment to another single subagent",
+      );
+    });
+
     it("default agents are marked isDefault", () => {
       const cfg = getAgentConfig("general-purpose");
       expect(cfg?.isDefault).toBe(true);

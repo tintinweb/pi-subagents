@@ -62,8 +62,8 @@ describe("buildAgentPrompt", () => {
     expect(prompt).toContain("<sub_agent_context>");
     expect(prompt).not.toContain("<inherited_system_prompt>");
     expect(prompt).not.toContain("READ-ONLY");
-    // Empty systemPrompt means no <agent_instructions> section
-    expect(prompt).not.toContain("<agent_instructions>");
+    // Its only instruction of its own is Claude Code's re-delegation guideline.
+    expect(prompt).toContain("<agent_instructions>\nYou are already the dedicated agent for this task.");
   });
 
   it("general-purpose without parent prompt falls back to generic base", () => {
