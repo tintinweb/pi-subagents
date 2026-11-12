@@ -184,7 +184,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
         (c: any[]) => c[0] === "subagents:rpc:steer:reply:req-steer",
       );
       expect(steerReply![1]).toEqual({ success: true });
-      expect(pi.events.emit).toHaveBeenCalledWith("subagents:steered", { id, message: "also fix the lint" });
+      expect(pi.events.emit).toHaveBeenCalledWith("subagents:steered", expect.objectContaining({ id, message: "also fix the lint" }));
     } finally {
       await lifecycle.get("session_shutdown")();
     }
