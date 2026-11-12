@@ -1163,7 +1163,9 @@ src/
     conversation-viewer.ts # Live conversation overlay for viewing agent sessions
     viewer-keys.ts        # Viewer scroll, expand and jump keys, resolved through user keybindings
     agent-mention.ts      # `@` roster (running, resumable, and startable agents) + popup rows
+    agents-menu.ts        # /agents root menu, running agents, agent types and detail, create wizards
     schedule-menu.ts      # /agents → Scheduled jobs submenu
+    settings-menu.ts      # /agents → Settings page: filter, focus, number editor, terminal-sized list
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)
     workflow-dialog.ts    # /agents → Workflows two-pane inspector

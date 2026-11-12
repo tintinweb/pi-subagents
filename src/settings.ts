@@ -426,6 +426,9 @@ export const NUMERIC_SETTING_BOUNDS: Readonly<Record<NumericSettingKey, NumericB
   maxSubagentDepth: { min: 0, max: SUBAGENT_DEPTH_CEILING },
 };
 
+/** A typed `/agents → Settings` row: its id is the setting it writes. */
+export const isNumericSettingKey = (id: string): id is NumericSettingKey => Object.hasOwn(NUMERIC_SETTING_BOUNDS, id);
+
 /**
  * The value each setting has when no settings file sets it, as the session
  * snapshot reports it — `/agents` → Settings resets a row to this once Del has
