@@ -42,6 +42,7 @@ import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitCh
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
+import { agentTree } from "./ui/agent-tree.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -3199,7 +3200,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents().filter(isTopLevelAgent);
+    const agents = runningAgentsRoster().map(row => row.record);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -3327,9 +3328,19 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
+  /**
+   * The session's agents plus their nested children, as a tree (newest
+   * top-level first). Nested children are listed here as in FleetView: this
+   * list keeps finished agents until eviction, so it is where a finished child
+   * stays reachable. Workflow agents stay in the workflow inspector.
+   */
+  function runningAgentsRoster() {
+    return agentTree(manager.listAgents().filter(a => a.workflowId === undefined));
+  }
+
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents().filter(isTopLevelAgent);
-    if (agents.length === 0) {
+    const rows = runningAgentsRoster();
+    if (rows.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
     }
@@ -3337,12 +3348,13 @@ Terse command-style prompts produce shallow, generic work.
     // Numbered + item-paired. Two same-type agents spawned together with the
     // same description render identically here, and resolving the choice by
     // string match would open whichever came first.
-    const record = await selectItem(ctx.ui, "Running agents", agents, a => {
+    const row = await selectItem(ctx.ui, "Running agents", rows, ({ record: a, prefix }) => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      return `${prefix}${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
-    if (!record) return;
+    if (!row) return;
+    const record = row.record;
 
     await viewAgentConversation(ctx, record);
     // Back-navigation: re-show the list

@@ -682,6 +682,10 @@ describe("AgentManager — the usage hook fires once per assistant message", () 
     // records would bill this session for two messages when one was sent. The
     // double-booking stays — it is what makes a hidden child visible.
     expect(manager.getRecord(parentId)!.lifetimeUsage).toEqual({ input: 20, output: 10, cacheWrite: 0, cost: 0.002 });
+    // `ownUsage` is the figure that is not double-booked: the parent keeps only
+    // its own message, the child only its own — what the fleet list shows.
+    expect(manager.getRecord(parentId)!.ownUsage).toEqual({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
+    expect(manager.getRecord(childId)!.ownUsage).toEqual({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 });
   });
 });
 
@@ -706,6 +710,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     const record = manager.getRecord(id)!;
 
     expect(record.lifetimeUsage).toEqual({ input: 0, output: 0, cacheWrite: 0, cost: 0 });
+    expect(record.ownUsage).toEqual({ input: 0, output: 0, cacheWrite: 0, cost: 0 });
     expect(record.compactionCount).toBe(0);
 
     manager.abort(id);
@@ -798,6 +803,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     await manager.resume(id, "more");
 
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
+    expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 70, output: 30, cacheWrite: 5, cost: 0.007 });
     expect(manager.getRecord(id)!.compactionCount).toBe(1);
   });
 
@@ -2324,6 +2330,7 @@ describe("AgentManager — background resume", () => {
     // Internal record bookkeeping still runs alongside the forwarded callbacks.
     expect(manager.getRecord(id)!.toolUses).toBe(1);
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+    expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
   });
 
   it("queues a background resume when the concurrency pool is full", async () => {

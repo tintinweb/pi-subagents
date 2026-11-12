@@ -48,7 +48,8 @@ export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void
  * double-booked into ancestors (see `nested-tools.ts`) so a hidden child's spend
  * shows up on the record a human can see, which makes those records useless as
  * a basis for anything that must not count a message twice — parent-session
- * accounting above all.
+ * accounting above all. (`AgentRecord.ownUsage` is the per-record figure that
+ * is not double-booked.)
  */
 export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
@@ -130,10 +131,12 @@ function occupiesPoolSlot(
  * Whether a record is one of the session's own agents, rather than something
  * another agent or a workflow owns.
  *
- * The single definition behind every user-facing surface — the fleet list, the
- * widget, the `/agents` menus, `@handle` resolution, and the completion events
- * and session entries. An owned child reports through its owner, so surfacing
- * it separately would double-count the same work in the places a person reads.
+ * The single definition behind the user-facing surfaces — the widget, `@handle`
+ * resolution, and the completion events and session entries. An owned child
+ * reports through its owner, so surfacing it separately would double-count the
+ * same work in the places a person reads. FleetView and `/agents → Running
+ * agents` are the exceptions: they list Agent-tool children under their parent
+ * (`agentTree`), with no rolled-up figures to double-count.
  */
 export function isTopLevelAgent(
   record: Pick<AgentRecord, "parentAgentId" | "workflowId">,
@@ -604,6 +607,7 @@ export class AgentManager {
       startedAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+      ownUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       compactionCount: 0,
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
@@ -904,6 +908,7 @@ export class AgentManager {
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
+        addUsage(record.ownUsage, usage);
         this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
       },
@@ -1337,6 +1342,7 @@ export class AgentManager {
         },
         onAssistantUsage: (usage) => {
           addUsage(record.lifetimeUsage, usage);
+          addUsage(record.ownUsage, usage);
           this.onUsage?.(record, usage);
           options?.onAssistantUsage?.(usage);
         },
@@ -1459,6 +1465,7 @@ export class AgentManager {
       },
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
+        addUsage(record.ownUsage, usage);
         this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
       },
