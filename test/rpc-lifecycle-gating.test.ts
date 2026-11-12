@@ -28,7 +28,7 @@ vi.mock("../src/agent-runner.js", async () => {
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 
-const RPC_CHANNELS = ["subagents:rpc:ping", "subagents:rpc:spawn", "subagents:rpc:stop", "subagents:rpc:consume", "subagents:rpc:steer"] as const;
+const RPC_CHANNELS = ["subagents:rpc:ping", "subagents:rpc:spawn", "subagents:rpc:stop", "subagents:rpc:consume", "subagents:rpc:steer", "subagents:rpc:get", "subagents:rpc:list"] as const;
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -132,7 +132,7 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
 
     await lifecycle.get("session_start")({}, ctx());
 
-    // Readiness broadcast once, all five channels now live.
+    // Readiness broadcast once, every channel now live.
     expect(readyEmits(pi), "subagents:ready fires once bound").toHaveLength(1);
     for (const channel of RPC_CHANNELS) {
       expect(busHandlers.has(channel), `${channel} registered on session_start`).toBe(true);
@@ -185,6 +185,42 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
       );
       expect(steerReply![1]).toEqual({ success: true });
       expect(pi.events.emit).toHaveBeenCalledWith("subagents:steered", expect.objectContaining({ id, message: "also fix the lint" }));
+    } finally {
+      await lifecycle.get("session_shutdown")();
+    }
+  });
+
+  it("subagents:rpc:get and :list answer for an RPC-spawned agent and its nested child", async () => {
+    const { pi, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+    await lifecycle.get("session_start")({}, ctx());
+
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as any); // never resolves
+    const reply = (channel: string, requestId: string) =>
+      pi.events.emit.mock.calls.find((c: any[]) => c[0] === `${channel}:reply:${requestId}`)?.[1];
+    try {
+      await busHandlers.get("subagents:rpc:spawn")!({
+        requestId: "req-get-spawn", type: "general-purpose", prompt: "go", options: { description: "snapshot owner" },
+      });
+      const topId: string = reply("subagents:rpc:spawn", "req-get-spawn").data.id;
+      // The nested child, spawned the way the parent's scoped Agent tool does.
+      const { manager, parentAgentId } = vi.mocked(runAgent).mock.lastCall![3].nestedRuntime;
+      const childId: string = manager.spawn(pi, ctx(), "general-purpose", "dig", {
+        description: "nested dig", isBackground: true, parentAgentId, depth: 2, maxSubagentDepth: 2,
+      });
+
+      await busHandlers.get("subagents:rpc:get")!({ requestId: "req-get", agentId: childId });
+      expect(reply("subagents:rpc:get", "req-get")).toEqual({ success: true, data: { agent: expect.objectContaining({
+        id: childId, status: "running", description: "nested dig", parentAgentId: topId, depth: 2,
+      }) } });
+
+      await busHandlers.get("subagents:rpc:get")!({ requestId: "req-get-missing", agentId: "nope" });
+      expect(reply("subagents:rpc:get", "req-get-missing")).toEqual({ success: false, error: "Agent not found" });
+
+      await busHandlers.get("subagents:rpc:list")!({ requestId: "req-list" });
+      const agents = reply("subagents:rpc:list", "req-list").data.agents;
+      expect(agents.map((a: any) => a.id).sort()).toEqual([childId, topId].sort());
+      expect(agents.find((a: any) => a.id === topId)).not.toHaveProperty("parentAgentId");
     } finally {
       await lifecycle.get("session_shutdown")();
     }

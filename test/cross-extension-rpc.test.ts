@@ -33,6 +33,7 @@ describe("cross-extension RPC", () => {
       awaitStartup: vi.fn().mockResolvedValue(undefined),
       abort: vi.fn().mockReturnValue(true),
       getRecord: vi.fn().mockReturnValue({}),
+      listAgents: vi.fn().mockReturnValue([]),
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
     };
@@ -410,6 +411,85 @@ describe("cross-extension RPC", () => {
       const reply = vi.fn();
       events.on("subagents:rpc:steer:reply:req-m6", reply);
       events.emit("subagents:rpc:steer", { requestId: "req-m6", agentId: "agent-42", message: "x" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- get / list ---
+
+  describe("get and list RPCs", () => {
+    const record = (over: Record<string, unknown>) => ({
+      id: "agent-42", type: "Explore", description: "audit", status: "completed", toolUses: 2,
+      startedAt: 1000, completedAt: 3000, result: "done", abortController: new AbortController(),
+      lifetimeUsage: { input: 0, output: 0, cacheWrite: 0 }, ownUsage: { input: 0, output: 0, cacheWrite: 0 },
+      compactionCount: 0, ...over,
+    });
+
+    it("get returns the agent's public fields, never the live record", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(record({ structuredJson: '{"ok":true}' }));
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:get:reply:req-g1", reply);
+      events.emit("subagents:rpc:get", { requestId: "req-g1", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      const agent = reply.mock.calls[0][0].data.agent;
+      expect(agent).toMatchObject({ id: "agent-42", status: "completed", durationMs: 2000, result: "done", structuredJson: '{"ok":true}' });
+      expect(agent).not.toHaveProperty("abortController");
+      expect(manager.getRecord).toHaveBeenCalledWith("agent-42");
+    });
+
+    // A read is harmless, so it does not take stop's ownership guard: an owned
+    // agent comes back with the owner field that says whose it is.
+    it("get answers for a workflow's agent", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(record({ workflowId: "wf-1" }));
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:get:reply:req-g2", reply);
+      events.emit("subagents:rpc:get", { requestId: "req-g2", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply.mock.calls[0][0]).toEqual({ success: true, data: { agent: expect.objectContaining({ workflowId: "wf-1" }) } });
+    });
+
+    it("get returns error when the agent is unknown", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:get:reply:req-g3", reply);
+      events.emit("subagents:rpc:get", { requestId: "req-g3", agentId: "gone" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent not found" });
+    });
+
+    it("list returns every record the manager holds, in any status", async () => {
+      (manager.listAgents as ReturnType<typeof vi.fn>).mockReturnValue([
+        record({ id: "a1", status: "running", completedAt: undefined }),
+        record({ id: "a2", parentAgentId: "a1", depth: 2 }),
+      ]);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:list:reply:req-l1", reply);
+      events.emit("subagents:rpc:list", { requestId: "req-l1" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      const agents = reply.mock.calls[0][0].data.agents;
+      expect(agents.map((a: any) => [a.id, a.status, a.parentAgentId])).toEqual([["a1", "running", undefined], ["a2", "completed", "a1"]]);
+    });
+
+    it("unsub stops responding to get and list", async () => {
+      const { unsubGet, unsubList } = registerRpcHandlers(deps);
+      unsubGet();
+      unsubList();
+
+      const reply = vi.fn();
+      events.on("subagents:rpc:get:reply:req-g4", reply);
+      events.on("subagents:rpc:list:reply:req-l2", reply);
+      events.emit("subagents:rpc:get", { requestId: "req-g4", agentId: "agent-42" });
+      events.emit("subagents:rpc:list", { requestId: "req-l2" });
 
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();

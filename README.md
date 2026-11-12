@@ -915,7 +915,7 @@ The agent-lifecycle events fire for **every agent**, nested subagents and a work
 
 ## Cross-Extension RPC
 
-Other pi extensions can spawn and stop subagents programmatically via the `pi.events` event bus, without importing this package directly.
+Other pi extensions can spawn, stop, steer and inspect subagents programmatically via the `pi.events` event bus, without importing this package directly.
 
 All RPC replies use a standardized envelope: `{ success: true, data?: T }` on success, `{ success: false, error: string }` on failure.
 
@@ -1006,6 +1006,20 @@ pi.events.emit("subagents:rpc:steer", { requestId: crypto.randomUUID(), agentId:
 ```
 
 Same ownership guard as stop; `Agent is not running` once the agent has settled. A successful steer emits `subagents:steered`.
+
+### Get and list
+
+Read the current state of agents, for a listener that joined after the lifecycle events it needed had already fired:
+
+```typescript
+pi.events.emit("subagents:rpc:get", { requestId: crypto.randomUUID(), agentId: "agent-id-here" });
+// reply data: { agent: SubagentInfo }
+
+pi.events.emit("subagents:rpc:list", { requestId: crypto.randomUUID() });
+// reply data: { agents: SubagentInfo[] }
+```
+
+Both return the same [agent fields](#agent-fields) the lifecycle events carry. Unlike stop and steer, neither takes an ownership guard: nested and workflow agents are included, with `parentAgentId` or `workflowId` set, and `list` returns every status, so filter on those fields yourself. A record stays readable for 10 minutes after the agent settles. A consumed one is dropped earlier, at the next session start or switch. After that, `get` answers `Agent not found`.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 

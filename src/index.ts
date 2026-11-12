@@ -834,6 +834,7 @@ export default function (pi: ExtensionAPI) {
           spawn: spawnTopLevel,
           awaitStartup: (id) => manager.awaitStartup(id),
           getRecord: (id) => manager.getRecord(id),
+          listAgents: () => manager.listAgents(),
           // Unguarded on purpose: the stop handler now runs the top-level check
           // itself off `getRecord`, and reports the refusal instead of the
           // "Agent not found" a false from here used to be read as.
@@ -1119,6 +1120,8 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle?.unsubSteer();
+    rpcHandle?.unsubGet();
+    rpcHandle?.unsubList();
     rpcHandle = undefined;
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child
