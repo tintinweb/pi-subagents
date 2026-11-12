@@ -140,7 +140,7 @@ describe("ScheduleStore", () => {
     expect(store.list().map(j => j.id).sort()).toEqual(["a", "b"]);
   });
 
-  it("reclaims a lock held by its own PID without blocking the event loop", async () => {
+  it("reclaims a lock held by its own PID without blocking the event loop", () => {
     const file = join(tmp, "s.json");
     const lockFile = file + ".lock";
     // A same-process lock is necessarily stale: withLock() never awaits
@@ -148,14 +148,12 @@ describe("ScheduleStore", () => {
     // mid-mutation while another call tries to acquire.
     writeFileSync(lockFile, String(process.pid));
 
-    let timerFired = false;
-    setTimeout(() => { timerFired = true; }, 50);
     const store = new ScheduleStore(file);
+    const started = performance.now();
     store.add(makeJob());
-    await new Promise((r) => setTimeout(r, 100));
-
+    // The old synchronous retry loop held the thread for ~5000 ms here.
+    expect(performance.now() - started).toBeLessThan(1000);
     expect(store.list()).toHaveLength(1);
-    expect(timerFired).toBe(true);  // event loop never blocked
   });
 
   it("fails fast on a lock held by a live foreign process", () => {

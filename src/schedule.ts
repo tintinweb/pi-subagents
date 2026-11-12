@@ -180,13 +180,7 @@ export class SubagentScheduler {
           const t = setTimeout(() => {
             this.executeJob(job.id);
             // Auto-disable one-shots after they fire (mirrors pi-cron-schedule)
-            try {
-              store.update(job.id, { enabled: false });
-            } catch (err) {
-              this.emit({ type: "error", jobId: job.id, error: err instanceof Error ? err.message : String(err) });
-              return;
-            }
-            const updated = store.get(job.id);
+            const updated = this.persist(job.id, { enabled: false });
             if (updated) this.emit({ type: "updated", job: updated });
           }, delay);
           this.intervals.set(job.id, t);
@@ -232,12 +226,7 @@ export class SubagentScheduler {
     const job = store.get(id);
     if (!job?.enabled) return;
 
-    // status persistence is bookkeeping; a lock failure must not escape the tick
-    try {
-      store.update(id, { lastStatus: "running" });
-    } catch (err) {
-      this.emit({ type: "error", jobId: id, error: err instanceof Error ? err.message : String(err) });
-    }
+    this.persist(id, { lastStatus: "running" });
 
     // Resolve model at fire time — registry contents may have changed since the
     // job was created (auth added/removed). Fall back silently to spawn-default
@@ -284,9 +273,7 @@ export class SubagentScheduler {
       });
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
-      try {
-        store.update(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
-      } catch { /* bookkeeping — the error event below is the durable signal */ }
+      this.persist(id, { lastRun: new Date().toISOString(), lastStatus: "error" });
       this.emit({ type: "error", jobId: id, error });
       return;
     }
@@ -294,16 +281,14 @@ export class SubagentScheduler {
     this.emit({ type: "fired", jobId: id, agentId, name: job.name });
 
     const finalize = (status: "success" | "error") => {
-      try {
-        const next = this.getNextRun(id);
-        const current = store.get(id);
-        store.update(id, {
-          lastRun: new Date().toISOString(),
-          lastStatus: status,
-          runCount: (current?.runCount ?? 0) + 1,
-          nextRun: next,
-        });
-      } catch { /* bookkeeping — a failed persist must not surface as an unhandled rejection */ }
+      const next = this.getNextRun(id);
+      const current = store.get(id);
+      this.persist(id, {
+        lastRun: new Date().toISOString(),
+        lastStatus: status,
+        runCount: (current?.runCount ?? 0) + 1,
+        nextRun: next,
+      });
     };
 
     // AgentManager's promise resolves either way (its .catch returns ""), so we
@@ -319,6 +304,20 @@ export class SubagentScheduler {
         finalize(failed ? "error" : "success");
       })
       .catch(() => finalize("error"));
+  }
+
+  /**
+   * Fire-time bookkeeping. A failed persist (e.g. the store lock is held by
+   * another process) becomes an error event rather than a throw out of a timer
+   * tick; the run itself is unaffected.
+   */
+  private persist(id: string, patch: Partial<ScheduledSubagent>): ScheduledSubagent | undefined {
+    try {
+      return this.store?.update(id, patch);
+    } catch (err) {
+      this.emit({ type: "error", jobId: id, error: err instanceof Error ? err.message : String(err) });
+      return undefined;
+    }
   }
 
   private emit(event: ScheduleChangeEvent): void {
