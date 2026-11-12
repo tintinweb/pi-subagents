@@ -102,7 +102,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
     expect(readJson(globalFile())).toEqual({ maxConcurrent: 4 });
     expect(existsSync(join(cwd, ".pi"))).toBe(false);
-    expect(notify).toHaveBeenCalledWith("Max concurrency set to 4 (saved to global settings)", "info");
+    expect(notify).toHaveBeenCalledWith("Max background concurrency set to 4 (saved to global settings)", "info");
   });
 
   it("typing the current value writes no file", async () => {
@@ -113,7 +113,7 @@ describe("/agents → Settings writes only the changed setting", () => {
 
     expect(existsSync(globalFile())).toBe(false);
     expect(existsSync(join(cwd, ".pi"))).toBe(false);
-    expect(notify).toHaveBeenCalledWith("Max concurrency set to 10 (saved to global settings)", "info");
+    expect(notify).toHaveBeenCalledWith("Max background concurrency set to 10 (saved to global settings)", "info");
   });
 
   it("with a project file: writes the one key there and copies no global value into it", async () => {
@@ -149,7 +149,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     const failed = typeSetting("maxConcurrent", "4");
     await agents(failed.ctx);
     expect(failed.notify).toHaveBeenCalledWith(
-      "Max concurrency set to 4 (session only; failed to persist)",
+      "Max background concurrency set to 4 (session only; failed to persist)",
       "warning",
     );
 
