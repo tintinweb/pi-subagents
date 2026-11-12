@@ -4,7 +4,7 @@
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
@@ -79,11 +79,12 @@ export function extensionCanonicalName(extPath: string): string {
  *   - a `node_modules` directory: a package never spans one (it's where OTHER
  *     packages live), so reaching it means we've climbed out of the package —
  *     stop before reading a consumer's or parent package's manifest.
- * The name is then taken only when that root's `pi.extensions` manifest actually
- * lists this entry. That "declares this entry" check is deliberate: our own test
- * fixtures live under this repo, whose root manifest declares `./src/index.ts`
- * as `@tintinweb/pi-subagents`, so a looser rule would misattribute every
- * co-located file to `pi-subagents`.
+ * The name is then taken only when that root's `pi.extensions` manifest declares
+ * this entry, either as the file itself or as a directory containing it (pi
+ * expands `"./dist"` to `dist/index.js`). That "declares this entry" check is
+ * deliberate: our own test fixtures live under this repo, whose root manifest
+ * declares `./src/index.ts` as `@tintinweb/pi-subagents`, so a looser rule would
+ * misattribute every co-located file to `pi-subagents`.
  */
 function extensionPackageName(extPath: string): string | undefined {
   // `builtin:<name>` names no file; climbing from it would read the process cwd's manifest.
@@ -107,7 +108,15 @@ function extensionPackageName(extPath: string): string | undefined {
     if (
       typeof pkg.name === "string" &&
       Array.isArray(entries) &&
-      entries.some((e) => typeof e === "string" && resolve(dir, e) === entry)
+      entries.some((e) => {
+        if (typeof e !== "string") return false;
+        // A declaration may name a directory (`"./dist"`) that pi resolves to
+        // `dist/index.js`, so an entry belongs to this package when it equals the
+        // declaration or lives underneath it. The `${sep}` boundary keeps that
+        // prefix test platform-correct (`dist-v2` never matches `"./dist"`).
+        const declared = resolve(dir, e);
+        return declared === entry || entry.startsWith(`${declared}${sep}`);
+      })
     ) {
       const short = pkg.name.startsWith("@") ? pkg.name.slice(pkg.name.indexOf("/") + 1) : pkg.name;
       return short.toLowerCase();
@@ -768,6 +777,26 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+/**
+ * Open an agent's saved session to continue it — or a copy of it, when the
+ * session belongs to another parent.
+ *
+ * pi's `/fork` and `/clone` copy the parent's entries, saved agent records
+ * included, so two parent sessions can each resume the same agent. Appending
+ * both continuations to one file would interleave two histories in it. The
+ * child's header names the parent that spawned it; a resume from any other
+ * parent forks the child alongside, exactly as pi forked the parent, and the
+ * copy is that parent's from then on. A header with no parent (a child
+ * spawned from a context without a session file) gives nothing to compare,
+ * so it opens in place as before.
+ */
+function reopenSession(file: string, parentSessionFile: string | undefined, sessionDir: string | undefined): SessionManager {
+  const opened = SessionManager.open(file, sessionDir);
+  const owner = opened.getHeader()?.parentSession;
+  if (owner === undefined || owner === parentSessionFile) return opened;
+  return SessionManager.forkFrom(file, opened.getCwd(), sessionDir, { parentSession: parentSessionFile });
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -833,6 +862,46 @@ export async function runAgent(
       if (extraNames.length > 0) toolNames = [...toolNames, ...extraNames];
       extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
     }
+  }
+
+  const disallowedSet = agentConfig?.disallowedTools
+    ? new Set(agentConfig.disallowedTools)
+    : undefined;
+
+  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
+  // set `allowed_subagents` and a nestedRuntime was provided — and never when
+  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
+  // scoping below re-admits them explicitly (registry deny + active-set narrow).
+  // Decided before the prompt is built, which says so when the agent delegates.
+  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
+  // At (or past) the cap this agent can never spawn, so it can never own a child
+  // to fetch from or steer either — inject nothing rather than three tools whose
+  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
+  // "nesting off" instead of "nesting always fails".
+  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
+    ? options.nestedRuntime
+    : undefined;
+  // A workflow agent running the built-in general-purpose (what an untyped
+  // agent() gets) does not delegate: Claude Code's `workflow-subagent` drops the
+  // Agent tool, and the workflow script is what fans out. A custom agent's own
+  // `allowed_subagents` still applies.
+  const builtinInWorkflow = options.workflow === true && agentConfig?.isDefault === true;
+  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated && !builtinInWorkflow
+    ? createNestedSubagentTools({
+        manager: nestedRuntime.manager,
+        pi: options.pi,
+        parentAgentId: nestedRuntime.parentAgentId,
+        depth: nestedRuntime.depth,
+        maxSubagentDepth: effectiveMaxDepth,
+        allowedSubagents: agentConfig.allowedSubagents,
+        configCwd,
+      })
+    : [];
+  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
+  // Only where the built-in general-purpose can actually spawn — not in a
+  // workflow, at the depth cap, isolated, or with `Agent` disallowed.
+  if (agentConfig?.isDefault && nestedToolNames.has("Agent") && !disallowedSet?.has("Agent")) {
+    extras.delegationGuideline = true;
   }
 
   // Build system prompt from agent config
@@ -1051,35 +1120,6 @@ export async function runAgent(
   // Same idiom as mention-clone.ts.
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
 
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
-
-  // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
-  // set `allowed_subagents` and a nestedRuntime was provided — and never when
-  // isolated. Their names collide with EXCLUDED_TOOL_NAMES by design, so the
-  // scoping below re-admits them explicitly (registry deny + active-set narrow).
-  const effectiveMaxDepth = options.nestedRuntime?.maxSubagentDepth ?? getMaxSubagentDepth();
-  // At (or past) the cap this agent can never spawn, so it can never own a child
-  // to fetch from or steer either — inject nothing rather than three tools whose
-  // every call is an error. This is also what makes `maxSubagentDepth` 0/1 mean
-  // "nesting off" instead of "nesting always fails".
-  const nestedRuntime = options.nestedRuntime && options.nestedRuntime.depth < effectiveMaxDepth
-    ? options.nestedRuntime
-    : undefined;
-  const nestedTools = agentConfig?.allowedSubagents && nestedRuntime && !isolated
-    ? createNestedSubagentTools({
-        manager: nestedRuntime.manager,
-        pi: options.pi,
-        parentAgentId: nestedRuntime.parentAgentId,
-        depth: nestedRuntime.depth,
-        maxSubagentDepth: effectiveMaxDepth,
-        allowedSubagents: agentConfig.allowedSubagents,
-        configCwd,
-      })
-    : [];
-  const nestedToolNames = new Set(nestedTools.map(tool => tool.name));
-
   // The `agent({ schema })` contract: this child reports its answer by calling
   // StructuredOutput, and `structuredJson` below is what the caller reads. The
   // schema was already compiled by whoever asked for it, so a bad one failed
@@ -1207,11 +1247,12 @@ export async function runAgent(
   // which `rememberAgents` supplies for top-level agents only. Same precedence
   // as `outputTranscript`.
   const persistSession = agentConfig?.persistSession ?? (options.nested ? false : rememberAgents);
+  const parentSessionFile = ctx.sessionManager?.getSessionFile?.();
   const sessionManager = options.resumeSessionFile
     // Reopening an existing conversation: the file already carries its own
     // header (cwd, parent) and history, so none of the create-time options
     // apply. `sessionDir` still matters for a later /new or /branch off it.
-    ? SessionManager.open(options.resumeSessionFile, configuredSessionDir ?? defaultSessionDir)
+    ? reopenSession(options.resumeSessionFile, parentSessionFile, configuredSessionDir ?? defaultSessionDir)
     : persistSession
       ? SessionManager.create(effectiveCwd, configuredSessionDir ?? defaultSessionDir, {
           // Optional metadata — it only nests the subagent under its spawner in
@@ -1219,7 +1260,7 @@ export async function runAgent(
           // `persist_session: true` agent; now it runs for every spawn, so a
           // context without a session manager (a bare programmatic ctx) must
           // still persist rather than take the whole spawn down.
-          parentSession: ctx.sessionManager?.getSessionFile?.(),
+          parentSession: parentSessionFile,
         })
       : SessionManager.inMemory(effectiveCwd);
 
@@ -1299,9 +1340,11 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  // Build the effective prompt: optionally prepend parent context
+  // Build the effective prompt: optionally prepend parent context. Only for a
+  // fresh conversation — a reopened one already holds its history, and a live
+  // resume never re-sends the parent's either.
   let effectivePrompt = prompt;
-  if (options.inheritContext) {
+  if (options.inheritContext && !options.resumeSessionFile) {
     const parentContext = buildParentContext(ctx);
     if (parentContext) {
       effectivePrompt = parentContext + prompt;

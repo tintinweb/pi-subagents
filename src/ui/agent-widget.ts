@@ -171,6 +171,15 @@ export function formatMs(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** Coarse age of a past timestamp: `<1m`, `42m`, `5h`, `3d` (floored). */
+export function formatAge(timestamp: number, now = Date.now()): string {
+  const minutes = Math.floor((now - timestamp) / 60_000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
 /** Format duration from start/completed timestamps. */
 export function formatDuration(startedAt: number, completedAt?: number): string {
   if (completedAt) return formatMs(completedAt - startedAt);
@@ -197,7 +206,7 @@ export function getPromptModeLabel(type: SubagentType): string | undefined {
  */
 export function buildInvocationTags(
   invocation: AgentInvocation | undefined,
-): { modelName?: string; modelId?: string; tags: string[] } {
+): { modelName?: string; modelId?: string; thinking?: string; tags: string[] } {
   const tags: string[] = [];
   if (!invocation) return { tags };
   const asked = (value: string | undefined, requested: string | undefined): string | undefined =>
@@ -212,6 +221,7 @@ export function buildInvocationTags(
   return {
     modelName: asked(invocation.modelName, invocation.requestedModel),
     modelId: asked(invocation.modelId, invocation.requestedModel),
+    thinking,
     tags,
   };
 }
@@ -465,12 +475,12 @@ export class AgentWidget {
       const parts: string[] = [];
       if (this.showModel()) {
         // Leading, and paired: a thinking level means nothing without the model
-        // it applies to. The tag is taken from buildInvocationTags rather than
-        // rebuilt so the "(asked X)" annotation survives.
-        const { modelName, tags } = buildInvocationTags(a.invocation);
+        // it applies to. Both come from buildInvocationTags so the "(asked X)"
+        // annotation survives. The level is bare, not "thinking: high", as on
+        // the fleet row; the tag list keeps the label for the viewer and tool result.
+        const { modelName, thinking } = buildInvocationTags(a.invocation);
         if (modelName) parts.push(modelName);
-        const thinkingTag = tags.find(tag => tag.startsWith("thinking: "));
-        if (thinkingTag) parts.push(thinkingTag);
+        if (thinking) parts.push(thinking);
       }
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);

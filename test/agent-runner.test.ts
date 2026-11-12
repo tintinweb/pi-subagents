@@ -11,6 +11,7 @@ const {
   sessionManagerInMemory,
   sessionManagerCreate,
   sessionManagerOpen,
+  sessionManagerForkFrom,
   settingsManagerCreate,
   settingsManagerGetSessionDir,
 } = vi.hoisted(() => ({
@@ -26,7 +27,14 @@ const {
   getAgentDir: vi.fn(() => "/mock/agent-dir"),
   sessionManagerInMemory: vi.fn(() => ({ kind: "memory-session-manager" })),
   sessionManagerCreate: vi.fn(() => ({ kind: "persistent-session-manager" })),
-  sessionManagerOpen: vi.fn(() => ({ kind: "reopened-session-manager" })),
+  // A child session this parent spawned: its header names the parent's file
+  // (`ctx` below), so a resume reopens it in place.
+  sessionManagerOpen: vi.fn((_path: string, _dir?: string) => ({
+    kind: "reopened-session-manager",
+    getHeader: () => ({ parentSession: "/sessions/parent.jsonl" }),
+    getCwd: () => "/child-cwd",
+  })),
+  sessionManagerForkFrom: vi.fn(() => ({ kind: "forked-session-manager" })),
   settingsManagerGetSessionDir: vi.fn(() => undefined as string | undefined),
   settingsManagerCreate: vi.fn(() => ({ kind: "settings-manager", getSessionDir: settingsManagerGetSessionDir })),
 }));
@@ -69,7 +77,12 @@ vi.mock("@earendil-works/pi-coding-agent", () => ({
     }
   },
   getAgentDir,
-  SessionManager: { inMemory: sessionManagerInMemory, create: sessionManagerCreate, open: sessionManagerOpen },
+  SessionManager: {
+    inMemory: sessionManagerInMemory,
+    create: sessionManagerCreate,
+    open: sessionManagerOpen,
+    forkFrom: sessionManagerForkFrom,
+  },
   SettingsManager: { create: settingsManagerCreate },
 }));
 
@@ -214,6 +227,7 @@ beforeEach(() => {
   sessionManagerInMemory.mockClear();
   sessionManagerCreate.mockClear();
   sessionManagerOpen.mockClear();
+  sessionManagerForkFrom.mockClear();
   // The setting is process-global; a test that flips it must not leak the
   // flip into the next one.
   setRememberAgents(true);
@@ -1014,6 +1028,83 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerOpen).toHaveBeenCalledWith("/sessions/explore.jsonl", "/normal/pi/sessions");
   });
 
+  it("reopens the child in place when this parent spawned it", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(sessionManagerForkFrom).not.toHaveBeenCalled();
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: expect.objectContaining({ kind: "reopened-session-manager" }),
+    }));
+  });
+
+  it("forks the child when another parent resumes it, leaving the original file to its own parent", async () => {
+    // pi's /fork and /clone copy the parent's saved agent records, so a second
+    // parent can resume the same child. Opening the file in place would
+    // interleave two histories in it.
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
+    sessionManagerOpen.mockReturnValueOnce({
+      kind: "reopened-session-manager",
+      getHeader: () => ({ parentSession: "/sessions/original-parent.jsonl" }),
+      getCwd: () => "/child-cwd",
+    });
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(sessionManagerForkFrom).toHaveBeenCalledWith(
+      "/sessions/explore.jsonl",
+      "/child-cwd",
+      "/normal/pi/sessions",
+      { parentSession: "/sessions/parent.jsonl" },
+    );
+    expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
+      sessionManager: { kind: "forked-session-manager" },
+    }));
+  });
+
+  it("does not prepend the parent's conversation to a reopened one", async () => {
+    // A reopened session already holds its own history; `inherit_context` is a
+    // property of the agent type and must only seed a fresh conversation, or a
+    // cold resume would paste the parent's whole transcript into this turn.
+    const parentCtx = {
+      ...ctx,
+      sessionManager: {
+        ...ctx.sessionManager,
+        getBranch: vi.fn(() => [{ type: "message", message: { role: "user", content: "PARENT-TURN" } }]),
+      },
+    };
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const fresh = createSession("OK").session;
+    createAgentSession.mockResolvedValueOnce({ session: fresh });
+    await runAgent(parentCtx, "Explore", "go", { pi, inheritContext: true });
+    expect(String(fresh.prompt.mock.calls[0][0])).toContain("PARENT-TURN");
+
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    const reopened = createSession("OK").session;
+    createAgentSession.mockResolvedValueOnce({ session: reopened });
+    await runAgent(parentCtx, "Explore", "carry on", { pi, inheritContext: true, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(reopened.prompt).toHaveBeenCalledWith("carry on");
+  });
+
+  it("reopens in place a child whose header names no parent", async () => {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
+    sessionManagerOpen.mockReturnValueOnce({
+      kind: "reopened-session-manager",
+      getHeader: () => ({}),
+      getCwd: () => "/child-cwd",
+    } as any);
+    createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+    await runAgent(ctx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+    expect(sessionManagerForkFrom).not.toHaveBeenCalled();
+  });
+
   it("uses pi's normal persistent session location and links to the parent session", async () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: true }));
     settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
@@ -1166,6 +1257,84 @@ describe("agent-runner master tool allowlist", () => {
       "Agent", "get_subagent_result", "steer_subagent",
     ]));
     expect(createAgentSession.mock.calls[0][0].customTools).toHaveLength(3);
+  });
+
+  // Claude Code's workflow agents run as `workflow-subagent`, which disallows
+  // the Agent tool. Here an untyped workflow agent() runs as the built-in
+  // general-purpose, whose delegation must not follow it into the workflow.
+  it("gives the built-in general-purpose no nested tools as a workflow agent", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, allowedSubagents: "all", isDefault: true }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "general-purpose", "go", {
+      pi,
+      workflow: true,
+      nestedRuntime: { manager: {} as any, parentAgentId: "wf-agent-0", depth: 1 },
+    });
+
+    expect(createNestedSubagentTools).not.toHaveBeenCalled();
+    expect(lastToolsPassed()).not.toContain("Agent");
+    // Nor the "do not re-delegate" line, which only makes sense with the tool.
+    const { buildAgentPrompt } = await import("../src/prompts.js");
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("delegationGuideline");
+  });
+
+  // Claude Code's general-purpose prompt closes with the re-delegation line. It
+  // is added exactly when the built-in can spawn.
+  describe("the built-in general-purpose's re-delegation line", () => {
+    async function extrasFor(agentOverrides: Record<string, unknown>): Promise<Record<string, unknown>> {
+      vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+      vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ extensions: false, ...agentOverrides }));
+      vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+      const { session } = createSession("OK");
+      createAgentSession.mockResolvedValue({ session });
+      await runAgent(ctx, "general-purpose", "go", {
+        pi,
+        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+      });
+      const { buildAgentPrompt } = await import("../src/prompts.js");
+      return vi.mocked(buildAgentPrompt).mock.lastCall![4] as Record<string, unknown>;
+    }
+
+    it("is added when the built-in receives the nested Agent tool", async () => {
+      expect(await extrasFor({ allowedSubagents: "all", isDefault: true })).toMatchObject({ delegationGuideline: true });
+    });
+
+    it("is left out when `Agent` is disallowed", async () => {
+      expect(await extrasFor({ allowedSubagents: "all", isDefault: true, disallowedTools: ["Agent"] }))
+        .not.toHaveProperty("delegationGuideline");
+    });
+
+    // Claude Code adds it to its general-purpose only, not to custom agents.
+    it("is left out for a custom agent that delegates", async () => {
+      expect(await extrasFor({ allowedSubagents: "all" })).not.toHaveProperty("delegationGuideline");
+    });
+  });
+
+  // A custom agent's `allowed_subagents` is the author's explicit opt-in, and
+  // workflows honored it before general-purpose could delegate.
+  it("keeps a custom agent's opt-in nested tools as a workflow agent", async () => {
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, allowedSubagents: ["scout"] }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "lead", "go", {
+      pi,
+      workflow: true,
+      nestedRuntime: { manager: {} as any, parentAgentId: "wf-agent-0", depth: 1 },
+    });
+
+    expect(createNestedSubagentTools).toHaveBeenCalled();
+    expect(lastToolsPassed()).toContain("Agent");
   });
 
   it("keeps opt-in nested tools active UNDER EXTENSIONS despite the EXCLUDED-name collision", async () => {
@@ -1944,6 +2113,36 @@ describe("extensionCanonicalNames (#143 — package short name alias)", () => {
     // Without this, `pi.extensions: ["./src/index.ts"]` only ever matches as "src".
     const dir = pkgDir("@tintinweb/Pi-Subagents", ["./src/index.ts"]);
     expect(extensionCanonicalNames(join(dir, "src", "index.ts"))).toEqual(["src", "pi-subagents"]);
+  });
+
+  it("aliases a directory-style entry to the package name even though pi registers dist/index.js", () => {
+    // A manifest may name a directory (`pi.extensions: ["./dist"]`); pi resolves
+    // it to `dist/index.js` when registering, so an exact-equality check never
+    // fires and the package alias is lost — `ext:<pkg>` silently matches nothing
+    // and the path-derived fallback (`ext:dist`) breaks on a folder rename.
+    const dir = pkgDir("pi-web-access", ["./dist"]);
+    mkdirSync(join(dir, "dist"));
+    writeFileSync(join(dir, "dist", "index.js"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "dist", "index.js"))).toEqual(["dist", "pi-web-access"]);
+  });
+
+  it("a directory-style entry lends its alias to every file inside that directory", () => {
+    // The directory arm matches by path prefix, so a sibling loaded by its own
+    // path answers to the same package alias — it lives under the package's
+    // declared directory either way. A file outside the declaration gets no
+    // alias, and the separator in the prefix test keeps a longer sibling
+    // directory name (`dist-v2`) from matching the `./dist` declaration.
+    const dir = pkgDir("@scope/dir-pkg", ["./dist"]);
+    mkdirSync(join(dir, "dist"));
+    writeFileSync(join(dir, "dist", "index.js"), "export default () => {};");
+    writeFileSync(join(dir, "dist", "other.js"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "dist", "index.js"))).toEqual(["dist", "dir-pkg"]);
+    expect(extensionCanonicalNames(join(dir, "dist", "other.js"))).toEqual(["other", "dir-pkg"]);
+    writeFileSync(join(dir, "root-level.ts"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "root-level.ts"))).toEqual(["root-level"]);
+    mkdirSync(join(dir, "dist-v2"));
+    writeFileSync(join(dir, "dist-v2", "index.js"), "export default () => {};");
+    expect(extensionCanonicalNames(join(dir, "dist-v2", "index.js"))).toEqual(["dist-v2"]);
   });
 
   it("adds no alias for a loose file with no enclosing package.json", () => {

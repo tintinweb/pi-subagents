@@ -473,6 +473,17 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       expect(await started(marker)).toBe(false);
     });
 
+    it("isolated: true keeps the built-in MCP and its bridges out of the subagent", async () => {
+      // `extensions: true` on purpose: `isolated` must override it, not rely on
+      // the agent file leaving extensions off.
+      const marker = writeMcpConfig(cwd);
+      const active = await withEmptyAgentDir(() => activeToolsFor({ extensions: true, isolated: true }, true));
+      expect(registered).not.toContain("codemode");
+      expect(registered).not.toContain("tool_search");
+      expect(active.filter((n) => n.startsWith("mcp__"))).toEqual([]);
+      expect(await started(marker)).toBe(false);
+    });
+
     it("exclude_extensions: builtin:mcp keeps the built-in MCP out of the subagent", async () => {
       const marker = writeMcpConfig(cwd);
       await withEmptyAgentDir(() => activeToolsFor({ extensions: true, excludeExtensions: ["builtin:mcp"] }, true));

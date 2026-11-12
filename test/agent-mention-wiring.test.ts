@@ -1345,6 +1345,28 @@ describe("resuming an evicted agent by name", () => {
     );
   });
 
+  it("refuses when the agent's work lived in a worktree that is gone", async () => {
+    // Settling removed the worktree after committing its edits to a branch.
+    // Claude Code refuses this resume rather than continue the work elsewhere.
+    const { lifecycle, tools } = boot();
+    finishedRun(fakeSession());
+    const id = await spawnBackground(tools);
+    await flush();
+    const record = (globalThis as any)[Symbol.for("pi-subagents:manager")].getRecord(id);
+    record.worktree = { path: "/gone", branch: "pi-agent-x", baseSha: "abc", workPath: "/gone" };
+    record.worktreeResult = { hasChanges: true, branch: "pi-agent-x" };
+    await evict(id);
+    vi.mocked(runAgent).mockClear();
+
+    const uiCtx = ctx();
+    await lifecycle.get("input")({ type: "input", text: "@explore anything else?", source: "interactive" }, uiCtx);
+
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalled();
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith(
+      "Could not resume @explore — its worktree no longer exists.", "warning",
+    );
+  });
+
   it("forgets an unopenable session so the next mention starts fresh", async () => {
     // A row that can only ever fail is worse than no row: it holds the handle
     // and refuses every message sent to it.

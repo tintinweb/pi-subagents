@@ -12,13 +12,14 @@
 
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import { defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
+import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { rowDescription, sourceIndicator, sourceLegend } from "./agent-source-badge.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getAllTypes, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
@@ -41,6 +42,7 @@ import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitCh
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
+import { agentTree } from "./ui/agent-tree.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -48,6 +50,7 @@ import {
   buildInvocationTags,
   describeActivity,
   fgPreservingNestedStyles,
+  formatAge,
   formatCost,
   formatDuration,
   formatMs,
@@ -437,10 +440,10 @@ export default function (pi: ExtensionAPI) {
   let showCost = false;
   function isShowCostEnabled(): boolean { return showCost; }
   function setShowCost(b: boolean): void { showCost = b; widget.update(); fleet.update(); }
-  /** Name the model and thinking level on the widget's running rows. */
+  /** Name the model and thinking level on the widget's running rows and the fleet rows. */
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
-  function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  function setShowModel(b: boolean): void { showModel = b; widget.update(); fleet.update(); }
   /**
    * How much of the conversation viewer renders as Markdown. Read through a
    * getter by the viewer rather than captured like `showCost`, because the
@@ -586,12 +589,9 @@ export default function (pi: ExtensionAPI) {
       pi.events.emit("subagents:completed", eventData);
     }
 
-    // Persist final record for cross-extension history reconstruction
-    pi.appendEntry("subagents:record", {
-      id: record.id, type: record.type, description: record.description,
-      status: record.status, result: record.result, error: record.error,
-      startedAt: record.startedAt, completedAt: record.completedAt,
-    });
+    // Persist the final record: get_subagent_result answers from it once the
+    // live record is gone, and other extensions reconstruct history from it.
+    pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
 
     // Skip notification if result was already consumed via get_subagent_result
     if (record.resultConsumed) {
@@ -775,6 +775,19 @@ export default function (pi: ExtensionAPI) {
     const resolved = manager.resolveMention(ref);
     return resolved?.kind === "live" ? resolved.record : undefined;
   };
+
+  /**
+   * get_subagent_result's answer from a persisted record, once the live record
+   * is gone. The record lasts as long as the session file, so it states when
+   * the run finished: a days-old result must not read as current (#436).
+   */
+  const formatSavedAgentRecord = (saved: AgentRecordEntryData): string =>
+    `Agent: ${saved.id}\n` +
+    `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
+    (saved.completedAt ? `Finished: ${new Date(saved.completedAt).toISOString().slice(0, 16)}Z (${formatAge(saved.completedAt)} ago)\n` : "") +
+    `Description: ${saved.description}\n` +
+    `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
+    (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
 
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
@@ -1017,30 +1030,14 @@ export default function (pi: ExtensionAPI) {
       const entry = resolved.entry;
       const target = `@${entry.alias ?? entry.handle}`;
 
-      // Checked here rather than left to SessionManager.open: that runs inside
-      // runAgent, whose rejection lands on the record as an agent error, not in
-      // the catch below. A `/new` in another pi window or a manual delete makes
-      // the conversation unrecoverable (Claude Code's `not_reachable`), so drop
-      // the entry — a row that can only ever fail is worse than none — and say
-      // so rather than quietly sending this message to an unrelated agent.
-      if (!existsSync(entry.sessionFile)) {
-        manager.dropTombstone(entry.handle);
-        ctx.ui.notify(`Could not resume ${target} — its session is gone.`, "warning");
-        return { action: "handled" };
-      }
-
-      // The Agent tool deliberately falls back to general-purpose for a type it
-      // cannot resolve (#183), which covers a deleted file AND a merely
-      // disabled one. A resume must not inherit that: reopening this
-      // conversation under a different agent's prompt and tools is not
-      // continuing it, and the new record would re-tombstone under the
-      // substitute, so the handle would never find its way back.
       reloadCustomAgents();
-      const dispatch = resolveSpawnType(entry.type);
-      if (!dispatch.ok || dispatch.fellBackFrom !== undefined) {
-        // The tombstone stays: re-enabling the agent makes the handle work
-        // again, which a drop would foreclose.
-        ctx.ui.notify(`Could not resume ${target} — the ${entry.type} agent is no longer available.`, "warning");
+      const reopen = reopenTarget(entry.type, entry.sessionFile, entry.worktreeLost);
+      if (!reopen.ok) {
+        // A session that is gone can only ever fail, so its row goes with it;
+        // an unavailable agent stays, since re-enabling it makes the handle
+        // work again.
+        if (reopen.gone) manager.dropTombstone(entry.handle);
+        ctx.ui.notify(`Could not resume ${target} — ${reopen.reason}.`, "warning");
         return { action: "handled" };
       }
 
@@ -1048,7 +1045,7 @@ export default function (pi: ExtensionAPI) {
         // spawnResolved, not spawnTopLevel: the latter strips
         // `resumeSessionFile` and `reclaim` as untrusted. This path is the
         // exception — both come from a tombstone this extension wrote.
-        const id = spawnResolved(pi, ctx, dispatch.type, mention.message, {
+        const id = spawnResolved(pi, ctx, reopen.type, mention.message, {
           description: entry.description,
           reclaim: { handle: entry.handle, alias: entry.alias },
           resumeSessionFile: entry.sessionFile,
@@ -1294,7 +1291,7 @@ export default function (pi: ExtensionAPI) {
   // one opened from `/agents`: same settings on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    getFullscreenScrollbar, backgroundActionFor);
+    getFullscreenScrollbar, backgroundActionFor, isShowModelEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -1577,6 +1574,7 @@ export default function (pi: ExtensionAPI) {
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
+      setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
@@ -1947,12 +1945,46 @@ Terse command-style prompts produce shallow, generic work.
 
     // ---- Execute ----
 
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    execute: async (toolCallId, callParams, signal, onUpdate, ctx) => {
       // Ensure we have UI context for widget rendering
       widget.setUICtx(ctx.ui as UICtx);
 
       // Reload custom agents so new project/global .md files are picked up without restart
       reloadCustomAgents();
+
+      // A resume whose record is gone — evicted ten minutes after it finished,
+      // or lost to a reload or restart — reopens the agent from the session's
+      // saved record of it, under the same id, as Claude Code resumes from the
+      // transcript on disk. This is an ordinary spawn carrying a session file,
+      // like the `@handle` path's, so it runs through the spawn branches below
+      // and picks up the widget, fleet row, transcript, join batching and
+      // completion notification unchanged. Only the prompt, the turn budget and
+      // run_in_background carry over from the call: like a live resume, it
+      // ignores `subagent_type`, model and the rest, and runs under the agent
+      // type's current definition.
+      // `schedule` is left to its own branch, which refuses the combination.
+      const saved = callParams.resume !== undefined && !callParams.schedule
+        && manager.getRecord(callParams.resume) === undefined
+        ? findAgentRecordEntry(ctx, callParams.resume)
+        : undefined;
+      let reopenOptions: { resumeSessionFile: string; reclaim: { id: string; handle?: string; alias?: string } } | undefined;
+      if (saved !== undefined) {
+        const reopen = reopenTarget(saved.type, saved.sessionFile, saved.worktreeLost);
+        if (!reopen.ok) return textResult(`Agent "${saved.id}" cannot be resumed — ${reopen.reason}.`);
+        reopenOptions = {
+          resumeSessionFile: reopen.sessionFile,
+          reclaim: { id: saved.id, handle: saved.handle, alias: saved.alias },
+        };
+      }
+      const params: typeof callParams = saved === undefined ? callParams : {
+        prompt: callParams.prompt,
+        description: saved.description,
+        subagent_type: saved.type,
+        run_in_background: callParams.run_in_background,
+        max_turns: callParams.max_turns,
+        isolation: undefined,
+        schedule: undefined,
+      };
 
       const rawType = params.subagent_type as SubagentType;
       // Single decision point for dispatch (#183): unknown, disabled and
@@ -2030,8 +2062,16 @@ Terse command-style prompts produce shallow, generic work.
       const attachTranscript = (rec: AgentRecord | undefined, agentId: string): void => {
         if (!rec || !outputTranscript) return;
         rec.outputFile = createOutputFilePath(ctx.cwd, agentId, ctx.sessionManager.getSessionId());
-        writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
+        // A reopened agent keeps its id, so this is the transcript its earlier
+        // runs wrote: append to it, as a live resume does, never truncate it.
+        if (reopenOptions) ensureOutputFile(rec.outputFile);
+        else writeInitialEntry(rec.outputFile, agentId, params.prompt, ctx.cwd);
       };
+      // Where a reopened agent's transcript stream starts: past the turns the
+      // reopened session already holds, so its new prompt is written once and
+      // the old turns are not written again. A spawn starts from its prompt.
+      const transcriptAnchor = (session: AgentSession): number | undefined =>
+        reopenOptions ? session.messages.length : undefined;
 
       // Unconditional, not "only when it differs from the parent": a thinking
       // level reads as a property of a model, and an agent that inherited the
@@ -2063,9 +2103,11 @@ Terse command-style prompts produce shallow, generic work.
         // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
-        inheritContext,
+        // Neither is applied to a reopened conversation (runAgent, the
+        // manager), so neither is shown.
+        inheritContext: reopenOptions ? undefined : inheritContext,
         runInBackground,
-        isolation,
+        isolation: reopenOptions ? undefined : isolation,
       };
       // Tool-result render shows the mode label too; viewer's header already does.
       const modeLabel = getPromptModeLabel(subagentType);
@@ -2228,6 +2270,10 @@ Terse command-style prompts produce shallow, generic work.
         if (!record) {
           return textResult(`Failed to resume agent "${params.resume}".`);
         }
+        // A foreground resume settles inline, never through the completion
+        // callback, so persist its outcome here: get_subagent_result must find
+        // this run's result, not the earlier run's, once the live record is gone.
+        pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
         // A failed resume surfaces the error, plus any partial output THIS
         // resume produced (never the previous turn's answer, #144).
         if (record.status === "error") {
@@ -2245,7 +2291,7 @@ Terse command-style prompts produce shallow, generic work.
       const backgroundResult = (id: string, record: AgentRecord | undefined) => {
         const isQueued = record?.status === "queued";
         return textResult(
-          `${fallbackNote}Agent ${isQueued ? "queued" : "started"} in background.\n` +
+          `${fallbackNote}Agent ${isQueued ? "queued" : reopenOptions ? "resumed from its saved session" : "started"} in background.\n` +
           `Agent ID: ${id}\n` +
           `Type: ${displayName}\n` +
           `Description: ${params.description}\n` +
@@ -2271,7 +2317,7 @@ Terse command-style prompts produce shallow, generic work.
           origBgOnSession(session);
           const rec = manager.getRecord(id);
           if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, ctx.cwd);
+            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, id, ctx.cwd, transcriptAnchor(session));
           }
         };
 
@@ -2290,6 +2336,7 @@ Terse command-style prompts produce shallow, generic work.
           isolation,
           invocation: agentInvocation,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          ...reopenOptions,
           ...bgCallbacks,
         });
 
@@ -2407,7 +2454,7 @@ Terse command-style prompts produce shallow, generic work.
         if (fgId) {
           const rec = manager.getRecord(fgId);
           if (rec?.outputFile) {
-            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd);
+            rec.outputCleanup = streamToOutputFile(session, rec.outputFile, fgId, ctx.cwd, transcriptAnchor(session));
           }
         }
       };
@@ -2442,6 +2489,7 @@ Terse command-style prompts produce shallow, generic work.
           invocation: agentInvocation,
           signal,
           rootSessionId: ctx.sessionManager.getSessionId(),
+          ...reopenOptions,
           // Deliberately does NOT set fgId: that drives agentActivity, the
           // widget and the `finally` cleanup below, none of which should see an
           // agent that has no session and may never get one.
@@ -2990,8 +3038,21 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
-    execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+    execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const record = resolveAgentRef(params.agent_id);
+      if (!record) {
+        // Evicted, or lost to a reload: answer from the record the session saved.
+        // An evicted handle still resolves to its id through its tombstone. After
+        // a reload there is no tombstone, so the saved entry's handle and alias
+        // have to match on their own.
+        const tombstone = manager.resolveMention(params.agent_id);
+        const savedId = tombstone?.kind === "tombstone" ? tombstone.entry.id : params.agent_id;
+        const saved = findAgentRecordEntry(ctx, savedId, tombstone === undefined);
+        if (saved) {
+          outbox.cancel(saved.id);
+          return textResult(formatSavedAgentRecord(saved));
+        }
+      }
       if (!record || !isTopLevelAgent(record)) {
         return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
       }
@@ -3145,7 +3206,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents().filter(isTopLevelAgent);
+    const agents = runningAgentsRoster().map(row => row.record);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -3273,9 +3334,19 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
+  /**
+   * The session's agents plus their nested children, as a tree (newest
+   * top-level first). Nested children are listed here as in FleetView: this
+   * list keeps finished agents until eviction, so it is where a finished child
+   * stays reachable. Workflow agents stay in the workflow inspector.
+   */
+  function runningAgentsRoster() {
+    return agentTree(manager.listAgents().filter(a => a.workflowId === undefined));
+  }
+
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents().filter(isTopLevelAgent);
-    if (agents.length === 0) {
+    const rows = runningAgentsRoster();
+    if (rows.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
     }
@@ -3283,12 +3354,13 @@ Terse command-style prompts produce shallow, generic work.
     // Numbered + item-paired. Two same-type agents spawned together with the
     // same description render identically here, and resolving the choice by
     // string match would open whichever came first.
-    const record = await selectItem(ctx.ui, "Running agents", agents, a => {
+    const row = await selectItem(ctx.ui, "Running agents", rows, ({ record: a, prefix }) => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      return `${prefix}${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
-    if (!record) return;
+    if (!row) return;
+    const record = row.record;
 
     await viewAgentConversation(ctx, record);
     // Back-navigation: re-show the list
@@ -3703,6 +3775,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       maxConcurrent: manager.getMaxConcurrent(),
       // 0 = unlimited, and the default — see SubagentsSettings.
       maxConcurrentForeground: manager.getMaxConcurrentForeground(),
+      maxConcurrentNested: manager.getMaxConcurrentNested(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -3796,13 +3869,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
   }
 
   const NUMERIC_IDS = new Set([
-    "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
+    "maxConcurrent", "maxConcurrentForeground", "maxConcurrentNested", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
   ]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const mcf = manager.getMaxConcurrentForeground();
+      const mcn = manager.getMaxConcurrentNested();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -3817,17 +3891,31 @@ Write the file using the write tool. Only write the file, nothing else.`;
       return [
         {
           id: "maxConcurrent",
-          label: "Max concurrency",
-          description: "Max concurrent background agents (Enter to type)",
+          label: "Max background concurrency",
+          description: "Max concurrent background agents; extras wait in a queue (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
         },
         {
           id: "maxConcurrentForeground",
           label: "Max foreground concurrency",
-          description: "Max concurrent foreground (blocking) agents (0 = unlimited, Enter to type)",
+          description: "Max concurrent foreground (blocking) agents; extras wait in a queue (0 = unlimited, Enter to type)",
           currentValue: String(mcf),
           values: [String(mcf)],
+        },
+        {
+          id: "maxConcurrentNested",
+          label: "Max nested concurrency",
+          description: "Max concurrent nested agents (started by subagents); extras are refused (0 = unlimited, Enter to type)",
+          currentValue: String(mcn),
+          values: [String(mcn)],
+        },
+        {
+          id: "maxSubagentDepth",
+          label: "Nested depth",
+          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, even with allowed_subagents; Enter to type)",
+          currentValue: String(msd),
+          values: [String(msd)],
         },
         {
           id: "defaultMaxTurns",
@@ -3842,13 +3930,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
-        },
-        {
-          id: "maxSubagentDepth",
-          label: "Nested depth",
-          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
-          currentValue: String(msd),
-          values: [String(msd)],
         },
         {
           id: "joinMode",
@@ -3966,7 +4047,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "showModel",
           label: "Show model",
           description:
-            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The Agent tool result and the conversation viewer show the pair either way — this adds it to the widget, where the row is already dense.",
+            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows and the fleet view rows. The Agent tool result and the conversation viewer show the pair either way — this adds it where the rows are already dense.",
           currentValue: isShowModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
@@ -4021,7 +4102,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const n = parseInt(value, 10);
         if (n >= 1) {
           manager.setMaxConcurrent(n);
-          notifyApplied(ctx, `Max concurrency set to ${n}`);
+          notifyApplied(ctx, `Max background concurrency set to ${n}`);
         }
       } else if (id === "maxConcurrentForeground") {
         // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
@@ -4031,6 +4112,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
           notifyApplied(ctx, n === 0
             ? "Max foreground concurrency set to unlimited"
             : `Max foreground concurrency set to ${n}`);
+        }
+      } else if (id === "maxConcurrentNested") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          manager.setMaxConcurrentNested(n);
+          notifyApplied(ctx, n === 0
+            ? "Max nested concurrency set to unlimited"
+            : `Max nested concurrency set to ${n}`);
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
@@ -4054,7 +4143,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           notifyApplied(
             ctx,
             n <= 1
-              ? "Nested delegation disabled"
+              ? "Nested delegation disabled for every agent, including those with allowed_subagents"
               : `Nested depth set to ${n}. Applies to agents started from now on.`,
           );
         }
@@ -4244,6 +4333,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
         ? String(manager.getMaxConcurrent())
         : result === "maxConcurrentForeground"
           ? String(manager.getMaxConcurrentForeground())
+          : result === "maxConcurrentNested"
+            ? String(manager.getMaxConcurrentNested())
           : result === "defaultMaxTurns"
             ? String(getDefaultMaxTurns() ?? 0)
             : result === "maxSubagentDepth"
@@ -4251,9 +4342,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
               : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
-        ? "Max concurrency (1+)"
+        ? "Max background concurrency (1+)"
         : result === "maxConcurrentForeground"
           ? "Max foreground concurrency (0 = unlimited)"
+          : result === "maxConcurrentNested"
+            ? "Max nested concurrency (0 = unlimited)"
           : result === "defaultMaxTurns"
             ? "Default max turns (0 = unlimited)"
             : result === "maxSubagentDepth"

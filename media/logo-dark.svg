@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="140" viewBox="0 0 600 140" role="img" aria-label="@tintinweb/pi-subagents">
+  <style>
+    .edge { stroke: #d97757; stroke-width: 4; stroke-linecap: round; fill: none; }
+    .parent { fill: #d97757; }
+    .child { fill: none; stroke: #d97757; stroke-width: 4; }
+    .word { fill: #f0f6fc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-weight: 700; font-size: 64px; letter-spacing: -1px; }
+    .scope { fill: #9198a1; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-weight: 500; font-size: 24px; letter-spacing: 0.5px; }
+    .accent { fill: #d97757; }
+  </style>
+  <!-- fan-out glyph: one parent, three child agents -->
+  <path class="edge" d="M38 70 C 62 70, 66 30, 92 30" />
+  <path class="edge" d="M38 70 L 92 70" />
+  <path class="edge" d="M38 70 C 62 70, 66 110, 92 110" />
+  <circle class="parent" cx="30" cy="70" r="16" />
+  <circle class="child" cx="104" cy="30" r="11" />
+  <circle class="child" cx="104" cy="70" r="11" />
+  <circle class="child" cx="104" cy="110" r="11" />
+  <!-- wordmark -->
+  <text class="scope" x="150" y="44">@tintinweb</text>
+  <text class="word" x="146" y="106"><tspan class="accent">pi</tspan>-subagents</text>
+</svg>

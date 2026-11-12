@@ -39,6 +39,13 @@ export interface SubagentsSettings {
    */
   maxConcurrentForeground?: number;
   /**
+   * Cap on running nested children (outside workflows) — `0` = unlimited,
+   * default 10. A nested spawn over it is refused, not queued, and the parent
+   * is told to do the work itself (#352). Top-level and workflow agents neither
+   * count nor are refused.
+   */
+  maxConcurrentNested?: number;
+  /**
    * 0 = unlimited — the extension's single source of truth for that convention:
    * `normalizeMaxTurns()` in agent-runner.ts treats 0 → `undefined`, and the
    * `/agents` → Settings input prompt explicitly says "0 = unlimited".
@@ -149,8 +156,9 @@ export interface SubagentsSettings {
    */
   agentMentions?: AgentMentionMode;
   /**
-   * Whether subagents persist their pi session by default, so `@handle` can
-   * reopen an agent's conversation long after its in-memory record is gone.
+   * Whether subagents persist their pi session by default, so `@handle`,
+   * `Agent({ resume })` and a workflow's `resume` can reopen an agent's
+   * conversation long after its in-memory record is gone.
    * Defaults to `true`. Per-agent `persist_session:` frontmatter overrides it
    * in both directions. Turning it off restores the previous behaviour, where
    * a handle stops resolving roughly ten minutes after the agent finishes and
@@ -351,6 +359,7 @@ export type ToolDescriptionMode = "full" | "compact" | "custom";
 export interface SettingsAppliers {
   setMaxConcurrent: (n: number) => void;
   setMaxConcurrentForeground: (n: number) => void;
+  setMaxConcurrentNested: (n: number) => void;
   setDefaultMaxTurns: (n: number) => void;
   setGraceTurns: (n: number) => void;
   setDefaultJoinMode: (mode: JoinMode) => void;
@@ -433,6 +442,14 @@ function sanitize(raw: unknown): SubagentsSettings {
     (r.maxConcurrentForeground as number) <= MAX_CONCURRENT_CEILING
   ) {
     out.maxConcurrentForeground = r.maxConcurrentForeground as number;
+  }
+  // Floor 0 for the same reason: 0 is the documented "unlimited".
+  if (
+    Number.isInteger(r.maxConcurrentNested) &&
+    (r.maxConcurrentNested as number) >= 0 &&
+    (r.maxConcurrentNested as number) <= MAX_CONCURRENT_CEILING
+  ) {
+    out.maxConcurrentNested = r.maxConcurrentNested as number;
   }
   if (
     Number.isInteger(r.defaultMaxTurns) &&
@@ -613,6 +630,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.maxConcurrentForeground === "number") {
     appliers.setMaxConcurrentForeground(s.maxConcurrentForeground);
   }
+  if (typeof s.maxConcurrentNested === "number") appliers.setMaxConcurrentNested(s.maxConcurrentNested);
   if (typeof s.defaultMaxTurns === "number") appliers.setDefaultMaxTurns(s.defaultMaxTurns);
   if (typeof s.graceTurns === "number") appliers.setGraceTurns(s.graceTurns);
   if (typeof s.maxSubagentDepth === "number") appliers.setMaxSubagentDepth(s.maxSubagentDepth);
