@@ -85,6 +85,8 @@ const PRELUDE = ${JSON.stringify(DETERMINISM_PRELUDE)};
 
 let nextCallId = 1;
 const pendingCalls = new Map();
+// Per run, shared by nested workflows like the host's resume label map.
+const agentErrors = new Map();
 
 /**
  * Output tokens this run has spent, as last reported by the host.
@@ -114,6 +116,11 @@ port.on("message", function (message) {
   if (!waiter) return;
   pendingCalls.delete(message.callId);
   if (message.ok) {
+    // Record before resolving: the awaiting script can read the reason as
+    // soon as agent() returns null, without changing that return value.
+    if (message.value === null && typeof message.agentLabel === "string" && typeof message.error === "string") {
+      agentErrors.set(message.agentLabel, message.error);
+    }
     waiter.resolve(message.value);
     return;
   }
@@ -346,6 +353,10 @@ const UNSUPPORTED_AGENT_OPTIONS = {};
  * \`phase("Scan")\` must not resolve to the parent's "Scan".
  */
 let nextPhaseIndex = 0;
+
+function agentError(label) {
+  return agentErrors.get(requireText(label, "agentError(label)"));
+}
 
 /**
  * One script's view of the world.
@@ -737,6 +748,7 @@ async function main() {
     budget: makeBudget(),
     console: rootScope.console,
   };
+  Object.defineProperty(sandbox, "agentError", { value: agentError, enumerable: true });
   const context = vm.createContext(sandbox, {
     name: "workflow",
     codeGeneration: { strings: false, wasm: false },
