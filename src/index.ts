@@ -3845,7 +3845,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
   let savedSnapshot: SubagentsSettings = snapshotSettings();
 
   /** Where a Settings-page change goes: the chosen file, and the setting it set. */
-  type SettingsTarget = { scope: SettingsScope; key: keyof SubagentsSettings };
+  type SettingsTarget = { scope: SettingsScope; key?: keyof SubagentsSettings };
 
   /** Persist + broadcast what changed since the last save; the toast to show. */
   function saveSnapshot(successMsg: string, target?: SettingsTarget): { message: string; level: "info" | "warning" } {
@@ -3857,7 +3857,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       (event, payload) => pi.events.emit(event, payload),
       process.cwd(),
       target?.scope,
-      target ? { [target.key]: snapshot[target.key] } : {},
+      target?.key ? { [target.key]: snapshot[target.key] } : {},
     );
     // A failed write keeps the old baseline, so the next save retries this change.
     if (persisted) savedSnapshot = snapshot;
@@ -3888,7 +3888,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
       : `${base} Currently limited to an empty list, so nothing loads.`;
   }
 
-  const NUMERIC_IDS = new Set([
+  // Typed as setting keys: a typed row's id is the setting it writes.
+  const NUMERIC_IDS: ReadonlySet<string> = new Set<keyof SubagentsSettings>([
     "maxConcurrent", "maxConcurrentForeground", "maxConcurrentNested", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
   ]);
 
@@ -4125,10 +4126,13 @@ Write the file using the write tool. Only write the file, nothing else.`;
     }
 
     function applyValue(id: string, value: string) {
-      // The row's setting, in the file the page is switched to. Rows are named
-      // after their setting, except join mode.
-      const key = (id === "joinMode" ? "defaultJoinMode" : id) as keyof SubagentsSettings;
-      const target: SettingsTarget = { scope, key };
+      // The file the page is switched to. A typed row also names its setting:
+      // retyping the value in effect must still reach a file that stores a
+      // different one. Toggle and cycling rows always change their value.
+      const target: SettingsTarget = {
+        scope,
+        key: NUMERIC_IDS.has(id) ? (id as keyof SubagentsSettings) : undefined,
+      };
       if (id === "maxConcurrent") {
         const n = parseInt(value, 10);
         if (n >= 1) {
@@ -4327,7 +4331,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
     // Updated on arrow keys so Enter knows which field is selected immediately.
     let currentIndex = 0;
 
-    const result = await ctx.ui.custom<string | undefined>((tui, theme, kb, done) => {
+    const result = await ctx.ui.custom<string | undefined>((_tui, theme, kb, done) => {
       const items = buildItems();
       const title = new Text("", 0, 0);
       const fileLine = new Text("", 0, 0);
@@ -4366,8 +4370,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
         handleInput: (data: string) => {
           if (kb.matches(data, "tui.input.tab")) {
             scope = scope === "global" ? "project" : "global";
+            // pi repaints after every keystroke it hands the page.
             renderHeader();
-            tui.requestRender();
             return;
           }
           // Track navigation so Enter knows the current field

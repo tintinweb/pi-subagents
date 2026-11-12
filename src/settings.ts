@@ -624,9 +624,6 @@ export function saveSettings(
   applied: SubagentsSettings = {},
 ): SettingsScope | undefined {
   const path = settingsFilePath(scope, cwd);
-  // Nothing changed — the file already holds the effective value; don't
-  // rewrite it, or create an empty one.
-  if (Object.keys(changes).length === 0 && Object.keys(applied).length === 0) return scope;
   try {
     const current: unknown = existsSync(path) ? JSON.parse(readFileSync(path, "utf-8")) : {};
     if (typeof current !== "object" || current === null || Array.isArray(current)) return undefined;
@@ -635,6 +632,8 @@ export function saveSettings(
       ([key, value]) => key in stored && JSON.stringify(stored[key]) !== JSON.stringify(value),
     );
     const writes = { ...Object.fromEntries(stale), ...changes };
+    // Nothing to write — the file already agrees with what is in effect; don't
+    // rewrite it, or create an empty one.
     if (Object.keys(writes).length === 0) return scope;
     mkdirSync(dirname(path), { recursive: true });
     // An `undefined` change overrides the file's value and is then dropped by
@@ -730,9 +729,10 @@ export function saveAndEmitChanged(
   const scope = saveSettings(changes, cwd, target, applied);
   const persisted = scope !== undefined;
   emit("subagents:settings_changed", { settings: snapshot, persisted });
-  // A global write the project file overrides takes effect only in this
-  // session; say so rather than let the next restart revert it silently.
+  // A changed value saved to global that the project file overrides holds only
+  // for this session; say so rather than let the next restart revert it
+  // silently. An unchanged value is already what the next start loads.
   const project = scope === "global" ? readSettingsFile(projectPath(cwd)) : {};
-  const shadowed = Object.keys({ ...changes, ...applied }).some((key) => key in project);
+  const shadowed = Object.keys(changes).some((key) => key in project);
   return { ...persistToastFor(successMsg, scope, shadowed), persisted };
 }

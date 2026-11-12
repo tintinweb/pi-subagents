@@ -297,7 +297,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     const agents = boot();
     const first = drivePage([[]], []);
     await agents(first.ctx);
-    expect(first.headers[0]).toContain("Saving to: Global");
+    expect(first.headers[0]).toContain("Saving to: Global · Tab to switch");
     expect(first.headers[0]).toContain("agent-dir/subagents.json");
 
     writeJson(projectFile(), {});
