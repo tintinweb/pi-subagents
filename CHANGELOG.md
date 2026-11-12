@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **The built-in `general-purpose` agent delegates, matching Claude Code** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). In Claude Code, `general-purpose` keeps its `Agent` tool and `Explore`/`Plan` drop it. Here nested delegation required a custom agent with `allowed_subagents`, so asking for "a subagent that spawns subagents" got a `general-purpose` child with no `Agent` tool. The allowlist stays opt-in for custom agents: `general-purpose` already has every tool, so delegation grants it nothing new. When it can spawn, its prompt carries Claude Code's line telling it not to hand its whole task to a single child.
 
+### Fixed
+- **Finished nested subagents no longer outlive their parent across a session switch.** On `/new` or a session switch, finished agents whose result was never read stay in memory. A nested child's result is only ever read by its parent, so nothing marked it read: it stayed for up to 10 minutes with its session still loaded, after its parent was gone. It is now removed along with its parent.
+
 ## [0.24.0] - 2026-11-12
 
 > **⚠️ Behavior change — nested spawns are refused once 10 nested subagents are running** ([#427](https://github.com/tintinweb/pi-subagents/pull/427)). Only agents with `allowed_subagents` are affected; the parent gets a tool error and does the work itself. To restore the unbounded behavior, set `/agents → Settings → Max nested concurrency` (`maxConcurrentNested`) to `0`.
