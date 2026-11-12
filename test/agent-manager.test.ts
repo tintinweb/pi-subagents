@@ -615,6 +615,59 @@ describe("AgentManager — Bug 3 clearCompleted", () => {
     manager.clearCompleted(true);
     expect(manager.getRecord(id)).toBeDefined();
   });
+
+  // Only the owner can read a nested child's result, so once the owner is gone
+  // an unread child has no reader left to be spared for.
+  it("clearCompleted(true) removes unread nested descendants along with their removed parent", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    const grandchildId = manager.spawn(mockPi, mockCtx, "scout", "grandchild", {
+      description: "grandchild",
+      isBackground: true,
+      depth: 3,
+      parentAgentId: childId,
+    });
+    await Promise.all([parentId, childId, grandchildId].map(id => manager.getRecord(id)!.promise));
+    manager.getRecord(parentId)!.resultConsumed = true;
+
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parentId)).toBeUndefined();
+    expect(manager.getRecord(childId)).toBeUndefined();
+    expect(manager.getRecord(grandchildId)).toBeUndefined();
+  });
+
+  it("clearCompleted(true) keeps an unread nested child while its parent stays", async () => {
+    manager = new AgentManager();
+    resolvedRun();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", {
+      description: "parent",
+      isBackground: true,
+    });
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child",
+      isBackground: true,
+      depth: 2,
+      parentAgentId: parentId,
+    });
+    await Promise.all([parentId, childId].map(id => manager.getRecord(id)!.promise));
+
+    // The parent is unread too, so it is spared — and can still collect its child.
+    manager.clearCompleted(true);
+    expect(manager.getRecord(parentId)).toBeDefined();
+    expect(manager.getRecord(childId)).toBeDefined();
+  });
 });
 
 // The manager-level usage hook is the ONE place every assistant message is seen

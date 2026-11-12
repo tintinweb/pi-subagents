@@ -1693,11 +1693,20 @@ export class AgentManager {
    * Called on session start/switch so tasks from a prior session don't persist.
    * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
    * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
+   * A nested child is spared only while its parent stays: the parent is its
+   * only reader, and nothing marks it consumed when the parent collects it.
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       if (skipUnconsumed && !record.resultConsumed) continue;
+      this.removeRecord(id, record);
+    }
+    // One pass reaches grandchildren too: the map is in spawn order, so a
+    // parent is visited, and removed, before its children.
+    for (const [id, record] of this.agents) {
+      if (record.status === "running" || record.status === "queued") continue;
+      if (record.parentAgentId === undefined || this.agents.has(record.parentAgentId)) continue;
       this.removeRecord(id, record);
     }
     // Unconditional: both callers are session boundaries (`session_start` and
