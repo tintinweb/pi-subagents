@@ -320,7 +320,11 @@ export interface WorkflowRunResult {
   /** The script's return value, JSON-checked at the boundary. */
   value?: unknown;
   error?: string;
-  /** The append-only log, in emission order. */
+  /**
+   * Every transition, in emission order: one entry each time an agent is
+   * queued, started, resolved or settled. Live counter reports go to
+   * `onProgress` only; the settled entry carries the final counters.
+   */
   progress: WorkflowEntry[];
   /** Agents scheduled, including those that failed. */
   agentCount: number;
@@ -999,7 +1003,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             // let an older callback overwrite the current attempt or revive a row.
             if (!acceptingProgress || settled) return;
             updateCounters(info);
-            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+            // To the listener only, not `emit`: a report arrives on every
+            // finished tool and message, and logging each would grow `progress`
+            // by one entry. The settled entry carries the final counters.
+            options.onProgress?.([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
           };
 
           // Mutates `base` rather than emitting a standalone patch: every later

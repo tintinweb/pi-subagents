@@ -1385,6 +1385,31 @@ describe("live tool and token counters", () => {
     expect(rows(seen).at(-1)).toMatchObject({ state: "done", tokens: 150, toolCalls: 2 });
   });
 
+  it("keeps live reports out of the run's transition log", async () => {
+    // A host that reports `reports` live updates, then settles.
+    const runWith = async (reports: number) => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          for (let i = 1; i <= reports; i++) request.onProgress?.({ tokens: i * 10, toolCalls: i });
+          return { ok: true, text: "ok", tokens: 1000, toolCalls: 50 };
+        },
+        abortAgent() {},
+      };
+      const result = await run("return await agent('go');", { host, onProgress(e) { seen.push([...e]); } });
+      return { seen, logged: agentEntries(result.progress) };
+    };
+
+    const quiet = await runWith(0);
+    const live = await runWith(50);
+
+    // Every report reached the listener, which is what the task log reads.
+    expect(rows(live.seen).length - rows(quiet.seen).length).toBe(50);
+    // The returned log holds the same transitions either way, ending on the final totals.
+    expect(live.logged).toHaveLength(quiet.logged.length);
+    expect(live.logged.at(-1)).toMatchObject({ state: "done", tokens: 1000, toolCalls: 50 });
+  });
+
   it("updates a resumed row from the host's reports before it settles", async () => {
     const seen: WorkflowEntry[][] = [];
     let report: WorkflowSpawnRequest["onProgress"];

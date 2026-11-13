@@ -1,11 +1,12 @@
 /**
  * progress.ts — the workflow progress model, ported from Claude Code.
  *
- * Progress is an **append-only event log**, not a tree. Agent entries are keyed
- * by `index` and last-write-wins, so a running agent is updated by appending a
- * fresh entry with the same index rather than mutating anything. Every view —
- * the inline card, the workflows dialog, the fleet widget — derives its shape
- * by collapsing that log. Keeping the log authoritative is what lets a batched
+ * Progress is an **event log**, not a tree. Agent entries are keyed by `index`
+ * and last-write-wins, so a running agent is updated by emitting a fresh entry
+ * with the same index rather than mutating anything. The task's copy keeps only
+ * each agent's latest entry, in place (`updateWorkflowProgressBatch`). Every
+ * view — the inline card, the workflows dialog, the fleet widget — derives its
+ * shape by collapsing that log. Keeping the log authoritative is what lets a batched
  * update carry several agents' changes in one message from the worker.
  *
  * Two vocabularies, deliberately distinct:
@@ -328,8 +329,8 @@ export function stats(progress: readonly WorkflowEntry[], agentCount = 0): Workf
   let started = 0;
   let anyLive = false;
 
-  // The log holds an entry per transition (queued, started, progress, settled);
-  // only each agent's latest one describes it.
+  // The log can hold several entries per agent (one per transition, in the
+  // runtime's copy); only each agent's latest one describes it.
   for (const entry of collapse(progress).agents) {
     seen++;
     if (entry.state === "done") {

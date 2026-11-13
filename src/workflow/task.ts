@@ -8,7 +8,8 @@
  * Claude Code's `local_workflow` task so the fields line up with what the
  * renderers already expect.
  *
- * The progress log is append-only and collapses by index (see `progress.ts`),
+ * The progress log holds each agent's latest entry, replaced in place, plus
+ * logs and phases in order, and collapses by index (see `progress.ts`),
  * so every derived counter here is recomputed from the log rather than
  * incremented as entries arrive — a re-emitted agent entry replaces its
  * predecessor, and adding its tokens on top would double-count them.
@@ -74,7 +75,7 @@ export interface WorkflowTask {
    * Agents that have settled successfully, recomputed with the other counters.
    *
    * Cached rather than derived on read because the fleet list asks five times a
-   * second: deriving it there would walk the whole append-only log on every
+   * second: deriving it there would walk the whole progress log on every
    * tick, which for a thousand-agent run is real work in the render loop.
    */
   doneCount: number;
