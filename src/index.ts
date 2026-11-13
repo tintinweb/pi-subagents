@@ -2696,9 +2696,11 @@ Terse command-style prompts produce shallow, generic work.
   // Defined unconditionally, registered only when the feature is on — the same
   // shape the Agent tool uses. Keeping the definition out of the `if` means the
   // switch changes exactly one thing: whether pi is ever told about the tool.
+  let deferredWorkflowWithdrawn = false;
   const workflowTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
+    ...(bootSettings.workflowToolExposure === "deferred" ? { exposure: "deferred" as const } : {}),
     description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
@@ -2782,6 +2784,7 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
+      if (deferredWorkflowWithdrawn) return textResult("Workflows are disabled in this session.");
       const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
       if (resumeFrom !== undefined && !resumeFrom.ok) return textResult(resumeFrom.message);
 
@@ -2871,6 +2874,45 @@ Terse command-style prompts produce shallow, generic work.
 
   if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
 
+  // Check at the model boundary, after all startup handlers have settled, and
+  // again after runtime active-tool changes. A registered search tool alone is
+  // not an entry point: it must be active and carry Pi's built-in provenance.
+  let workflowDiscoveryWarning: string | undefined;
+  pi.on("context", (_event, ctx) => {
+    if (!isWorkflowsEnabled() || bootSettings.workflowToolExposure !== "deferred") return;
+    const active = pi.getActiveTools();
+    if (active.includes(SUBAGENT_TOOL_NAMES.WORKFLOW)) {
+      workflowDiscoveryWarning = undefined;
+      return;
+    }
+    const tools = pi.getAllTools();
+    const search = tools.find(tool => tool.name === "tool_search");
+    const reason = !tools.some(tool => tool.name === SUBAGENT_TOOL_NAMES.WORKFLOW && tool.description === workflowTool.description)
+      ? "it is not registered or is excluded from Pi's tool registry; reload after enabling Workflows and check tool selection"
+      : !search
+        ? "Pi's native tool_search is not registered"
+        : search.sourceInfo?.source !== "builtin" || search.sourceInfo?.path !== "builtin:tool-search"
+          || search.exposure !== "model-only"
+        ? "cannot verify tool_search as Pi's native discovery tool"
+        : !active.includes("tool_search")
+          ? "Pi's native tool_search is inactive"
+          : undefined;
+    if (reason === undefined) {
+      workflowDiscoveryWarning = undefined;
+      return;
+    }
+    if (reason === workflowDiscoveryWarning) return;
+    workflowDiscoveryWarning = reason;
+    const message = `SubagentWorkflow remains deferred, but ${reason}; the model has no verified discovery entry point. `
+      + 'Enable Pi\'s native tool_search through defaultTools in .pi/settings.json (for example, ["+tool_search"]) '
+      + 'or --tools +tool_search, keeping the existing tool selection. Plain --tools allowlists must also include SubagentWorkflow. '
+      + 'If disabled, re-enable builtin:tool-search in Pi\'s extensions selection, then /reload. '
+      + 'SDK hosts must load Pi\'s native tool-search extension. '
+      + 'Set "workflowToolExposure": "direct" in .pi/subagents.json to use direct exposure on reload.';
+    if (ctx.hasUI) ctx.ui.notify(message, "warning");
+    else console.warn(`[pi-subagents] ${message}`);
+  });
+
   /**
    * Act on {@link decideWorkflowCollision} — the half that needs the host.
    *
@@ -2926,6 +2968,12 @@ Terse command-style prompts produce shallow, generic work.
       warn(verdict.message);
 
       if (!verdict.withdraw) return;
+      // Inactive deferred tools remain searchable and callable. Hidden exposure
+      // makes this session's stand-down hold across native discovery too.
+      if (bootSettings.workflowToolExposure === "deferred") {
+        deferredWorkflowWithdrawn = true;
+        pi.registerTool({ ...workflowTool, exposure: "hidden" });
+      }
       const active = pi.getActiveTools();
       if (active.includes(SUBAGENT_TOOL_NAMES.WORKFLOW)) {
         pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.WORKFLOW));
@@ -3268,6 +3316,7 @@ Terse command-style prompts produce shallow, generic work.
       // JSON.stringify, so unset stays unset — same reasoning as
       // `fallbackSubagent` below.
       workflowsEnabled: isWorkflowsPinned() ? isWorkflowsEnabled() : undefined,
+      workflowToolExposure: bootSettings.workflowToolExposure,
       maxSubagentDepth: getMaxSubagentDepth(),
       // Deliberately NOT `?? "general-purpose"`: every settings change writes the
       // whole snapshot, and materializing the implicit default would turn it into

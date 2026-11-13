@@ -29,6 +29,8 @@ There is no `/workflows` command. The tool is model-invoked, so you get a workfl
 
 You do not have to say "workflow" — the model picks the tool — but saying it removes the ambiguity when the task is borderline.
 
+With deferred Workflow exposure, the model can first use pi's native `tool_search` to discover `SubagentWorkflow`. Pi then declares the full tool for the next model request, and the model can call it as usual. See [Settings and the CLI flag](#settings-and-the-cli-flag) for setup.
+
 ### 2. Read what came back
 
 The tool returns immediately. The run continues in the background and notifies you when it is done.
@@ -320,11 +322,13 @@ A run's concurrency limit is its own, independent of the session's `maxConcurren
 
 `workflowsEnabled` is **on**; leaving it unset means *auto*, which is on unless another extension already offers a `Workflow` or `SubagentWorkflow` tool, in which case this one stands down for the session. Setting it explicitly pins it. See [Persistent settings](../README.md#persistent-settings).
 
-`pi --subagents-workflow-file=<path>` runs a workflow at startup, including headless under `pi -p`. Use the `=` form — the bare `--flag value` spelling swallows the next argument. See [CLI flags](../README.md#cli-flags).
+`workflowToolExposure` controls the model-facing declaration: `"direct"` (default) declares the full tool immediately; `"deferred"` leaves it registered for pi's native `tool_search` to find and activate. The setting is written in `subagents.json` and read when the extension loads. Native `tool_search` must also be active; see [Workflow tool exposure](../README.md#persistent-settings) for an example using pi's separate settings. Deferral does not change the master switch or its collision behavior.
+
+`pi --subagents-workflow-file=<path>` runs a workflow at startup, including headless under `pi -p`, without waiting for model-side discovery. It still requires workflows to be enabled. Use the `=` form — the bare `--flag value` spelling swallows the next argument. See [CLI flags](../README.md#cli-flags).
 
 ## Recipes
 
-The orchestration patterns themselves — adversarial verification, judge panels, loop-until-dry — live in exactly one place: the tool description the model reads on every turn. It already knows them. So these are not instructions for writing scripts by hand; they are **what to ask for**, and what the resulting script looks like so you can recognize it in the file.
+The orchestration patterns themselves — adversarial verification, judge panels, loop-until-dry — live in the tool description the model receives when `SubagentWorkflow` is declared. So these are not instructions for writing scripts by hand; they are **what to ask for**, and what the resulting script looks like so you can recognize it in the file.
 
 ### Fan out over a list you don't have yet
 
@@ -375,6 +379,9 @@ Recognize it by `await workflow('repo-map', { … })`. Reach for it to reuse som
 See [`compose.js`](../examples/workflows/compose.js).
 
 ## Troubleshooting
+
+**Deferred Workflow is not available to the model.**
+Enable pi's native `tool_search` in its `defaultTools` setting and reload the extension; see the [configuration example](../README.md#persistent-settings). If pi's `extensions` setting contains `-builtin:tool-search`, remove that exclusion. A plain `--tools` allowlist must include both `tool_search` and `SubagentWorkflow`. The extension warns if the inactive Workflow is not registered or is excluded, or native search is missing, inactive, or unverifiable, and keeps it deferred. If workflows were disabled at startup, reload after enabling them. SDK hosts must load pi's native `createToolSearchExtension()` before activating `tool_search` via `defaultTools`; some may show a verification warning even when search works.
 
 **The run failed with `… is unavailable in workflow scripts (breaks resume)`.**
 The script called `Date.now()`, `new Date()` or `Math.random()`. A script that varies run to run cannot be replayed from its journal, so these throw. Use the loop index for ids, pass timestamps in through `args`, or stamp them after the workflow returns. This most often bites pasted-in helper code, and it throws at the line that calls it — *after* you have already paid for the preceding agents.

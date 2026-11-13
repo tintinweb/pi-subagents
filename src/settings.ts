@@ -234,6 +234,12 @@ export interface SubagentsSettings {
    */
   workflowsEnabled?: boolean;
   /**
+   * How the model discovers SubagentWorkflow. Defaults to `direct`; `deferred`
+   * uses Pi's native tool_search to load the unchanged tool on demand. Read at
+   * extension load. This does not enable workflows or activate tool_search.
+   */
+  workflowToolExposure?: "direct" | "deferred";
+  /**
    * Hard ceiling on nested subagent delegation, counted from the main session:
    * main = 0, its subagents = 1, their children = 2. Defaults to `2`; `0` or `1`
    * disables nesting project-wide. Read when a subagent session is built, so a
@@ -552,6 +558,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.workflowsEnabled === "boolean") {
     out.workflowsEnabled = r.workflowsEnabled;
+  }
+  if (r.workflowToolExposure === "direct" || r.workflowToolExposure === "deferred") {
+    out.workflowToolExposure = r.workflowToolExposure;
   }
   const packageAgents = sanitizePackageGate(r.packageAgents);
   if (packageAgents !== undefined) out.packageAgents = packageAgents;
