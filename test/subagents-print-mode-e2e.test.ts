@@ -15,8 +15,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Context, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
+import { type Context, fauxToolCall, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { WORKFLOW_FILE_FLAG } from "../src/index.js";
 import {
   agentCall,
   agentToolCalls,
@@ -120,46 +121,90 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
   });
 
-  it("the hold condition is load-bearing: it keeps a BACKGROUND child alive (vs abandoned without it)", async () => {
-    // The child takes a beat to "think" (a real delay in its faux turn). That
-    // delay is what makes the contrast causal and deterministic:
-    //   - WITHOUT the hold, the parent's turn ends and the runner tears down
-    //     before the child ever streams → the child is abandoned (2 model calls:
-    //     parent's tool-call turn + its summary turn; the child never runs).
-    //   - WITH the hold, the parent loop blocks in waitForAll() until the child
-    //     finishes → the child's own model turn actually runs (≥3 calls).
+  // The parent ends its turn while a BACKGROUND child is still thinking (a real
+  // delay in the child's faux turn). Headless, nothing would ever come back for
+  // it: the extension itself must keep the run open until the child reports,
+  // then hand the completion to the parent for a turn of its own — no host-side
+  // hold patch involved. `hold: true` must keep working for hosts that still
+  // apply the pi-chonky-step patch; with it the drain finds nothing to wait for.
+  it.each([false, true])("keeps the run open until a BACKGROUND child reports back (host hold: %s)", async (hold) => {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const sawCompletion = (ctx: Context) => JSON.stringify(ctx.messages).includes("CHILD_BG_RAN");
     const respond = async (ctx: Context) => {
-      const isParent = !isSubagentContext(ctx);
-      if (!isParent) {
-        await sleep(80); // child takes long enough that a non-held parent exits first
+      if (isSubagentContext(ctx)) {
+        await sleep(80); // long enough that the parent's turn ends first
         return "CHILD_BG_RAN";
       }
+      if (sawCompletion(ctx)) return "Parent relays: CHILD_BG_RAN";
       const spawned = ctx.messages.some(
         (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "Agent",
       );
       return spawned
-        ? "summarized"
+        ? "Started; waiting for it."
         : agentCall({ description: "bg work", prompt: "Do background work.", run_in_background: true });
     };
 
-    // Control: no hold → the child hasn't run by the time the parent turn ends.
-    // `modelCalls` is snapshotted at that moment (it's a plain number on the
-    // result), so draining afterwards to tear down cleanly doesn't change it.
-    const noHold = await runPrintMode({ prompt: "go", hold: false, respond });
-    const abandonedCalls = noHold.modelCalls;
-    await noHold.manager?.waitForAll(); // let the orphan finish before dispose (avoids stale-ctx)
-    await noHold.dispose();
+    run = await runPrintMode({ prompt: "go", hold, respond });
 
-    // Subject: hold on → child runs to completion before the parent finishes.
-    run = await runPrintMode({ prompt: "go", hold: true, respond });
-
-    // Background spawn returns its envelope synchronously either way.
     expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
-    // The hold is load-bearing: only with it does the child's turn actually run.
-    expect(abandonedCalls).toBe(2); // parent tool-call + summary; child never streamed
-    expect(run.modelCalls).toBeGreaterThan(abandonedCalls);
-    expect(run.modelCalls).toBeGreaterThanOrEqual(3);
+    // Parent spawn turn + parent "waiting" turn + child turn + parent relay turn.
+    expect(run.modelCalls).toBeGreaterThanOrEqual(4);
+    // The printed answer is the parent's reaction to the completion.
+    expect(run.responseText).toContain("Parent relays: CHILD_BG_RAN");
+  });
+
+  // A workflow's agents sit in the manager only while one runs. Between stages,
+  // and after its last agent, `manager.hasRunning()` is false while the run is
+  // still going — the gap the host-side hold never saw. The script below works
+  // for a while after its only agent has finished.
+  it("keeps the run open through a BACKGROUND workflow's gap after its last agent", async () => {
+    const script = [
+      'export const meta = { name: "gap", description: "agent, then work with no agent running" };',
+      'const out = await agent("Report.", { label: "step" });',
+      "let n = 0; for (let i = 0; i < 1e8; i++) n += i;", // Date.now() is unavailable in scripts
+      'return "WF_DONE:" + out;',
+    ].join("\n");
+    const respond = async (ctx: Context) => {
+      if (isSubagentContext(ctx)) return "WF_CHILD_OUT";
+      if (JSON.stringify(ctx.messages).includes("WF_DONE:WF_CHILD_OUT")) return "Parent relays: WF_DONE";
+      const started = ctx.messages.some(
+        (m) => m.role === "toolResult" && (m as { toolName?: string }).toolName === "SubagentWorkflow",
+      );
+      return started ? "Workflow started; waiting." : fauxToolCall("SubagentWorkflow", { script });
+    };
+
+    run = await runPrintMode({ prompt: "go", hold: false, respond });
+
+    expect(run.responseText).toContain("Parent relays: WF_DONE");
+  });
+
+  // `pi -p --subagents-workflow-file=x.js "prompt"`: the workflow runs alongside
+  // the prompt's turn, which ends first. The run must stay open until the
+  // workflow reports, and the printed answer is the parent's reaction to it.
+  it("keeps the run open until a --subagents-workflow-file run reports back", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "pi-flag-wf-"));
+    const path = join(dir, "flow.js");
+    writeFileSync(path, [
+      'export const meta = { name: "flagged", description: "one agent, then more work" };',
+      'const out = await agent("Report.", { label: "step" });',
+      "let n = 0; for (let i = 0; i < 1e8; i++) n += i;",
+      'return "FLAG_WF:" + out;',
+    ].join("\n"));
+    const respond = async (ctx: Context) => {
+      if (isSubagentContext(ctx)) return "FLAG_CHILD_OUT";
+      if (JSON.stringify(ctx.messages).includes("FLAG_WF:FLAG_CHILD_OUT")) return "Parent relays: FLAG_WF";
+      return "Nothing to report yet.";
+    };
+
+    try {
+      run = await runPrintMode({ prompt: "Report the result.", hold: false, respond, flags: { [WORKFLOW_FILE_FLAG]: path } });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    // The prompt's own turn answered first, without the result.
+    expect(conversationText(run.parentSession)).toContain("Nothing to report yet.");
+    expect(run.responseText).toContain("Parent relays: FLAG_WF");
   });
 
   it("spawns a FRONTMATTER-defined (.pi/agents/*.md) agent and its prompt reaches the child", async () => {

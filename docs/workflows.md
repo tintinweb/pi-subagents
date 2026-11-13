@@ -318,7 +318,9 @@ A run's concurrency limit is its own, independent of the session's `maxConcurren
 
 `workflowsEnabled` is **on**; leaving it unset means *auto*, which is on unless another extension already offers a `Workflow` or `SubagentWorkflow` tool, in which case this one stands down for the session. Setting it explicitly pins it. See [Persistent settings](../README.md#persistent-settings).
 
-`pi --subagents-workflow-file=<path>` runs a workflow at startup, including headless under `pi -p`. Use the `=` form — the bare `--flag value` spelling swallows the next argument. See [CLI flags](../README.md#cli-flags).
+`pi --subagents-workflow-file=<path>` runs a workflow at startup, alongside the session; when it finishes, the model is notified and reacts. Use the `=` form — the bare `--flag value` spelling swallows the next argument. Headless, pass a prompt as well: `pi -p --subagents-workflow-file=review.js "Report the result."`. Without one, the run is stopped at exit with a warning. See [CLI flags](../README.md#cli-flags).
+
+Under `pi -p` (and JSON mode), a background workflow the model started keeps the run open until it finishes, gaps between its stages included, and the model then answers with its result. See [Headless mode](../README.md#headless-mode-pi--p).
 
 ## Recipes
 

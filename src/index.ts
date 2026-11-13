@@ -1151,7 +1151,16 @@ export default function (pi: ExtensionAPI) {
 
   // On shutdown, abort all agents immediately and clean up.
   // If the session is going down, there's nothing left to consume agent results.
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event, ctx) => {
+    // `pi -p` with no prompt never starts a run, so a flag workflow has no turn
+    // to report into and is stopped below. Claude Code's `-p` refuses to run
+    // without input; say so rather than stop it silently.
+    if (workflowRuns.size > 0 && !runStarted && event.reason === "quit" && isHeadless(ctx)) {
+      process.stderr.write(
+        `[pi-subagents] --${WORKFLOW_FILE_FLAG} under -p needs a prompt; workflow stopped. ` +
+          `Example: pi -p --${WORKFLOW_FILE_FLAG}=x.js "Report the result."\n`,
+      );
+    }
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -1169,6 +1178,7 @@ export default function (pi: ExtensionAPI) {
     // as well as its children, and only its own signal terminates that.
     for (const task of workflowTasks.values()) task.abortController.abort();
     workflowTasks.clear();
+    workflowRuns.clear();
     manager.abortAll();
     // Activation-owned UI and group state (#256): `session_shutdown` also runs for
     // reload and session replacement, where the Node process survives, so a live
@@ -1538,6 +1548,74 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", () => outbox.onAgentEnd());
   pi.on("agent_settled", () => outbox.onAgentEnd());
 
+  // ---- Headless drain (print / JSON mode) ----
+  // Nothing follows a headless parent's run: pi prints its last message and
+  // disposes the session, and `session_shutdown` stops whatever is still
+  // running. So the run's last boundary waits for background work and returns
+  // the completions as an entry that continues the run — the model reacts in a
+  // turn of its own, as with Claude Code's `-p`. TUI and RPC keep the session
+  // open, so their completions start a turn through the outbox as usual.
+  let headlessWaitMinutes = 0;
+  /** A `-p` with no prompt never starts a run, so nothing can drain into one. */
+  let runStarted = false;
+  const isHeadless = (ctx: ExtensionContext) => ctx.mode === "print" || ctx.mode === "json";
+  const hasBackgroundWork = () => manager.hasRunning() || workflowRuns.size > 0;
+  const allBackgroundWorkSettled = () => Promise.allSettled([manager.waitForAll(), ...workflowRuns]);
+  function describeBackgroundWork(): string {
+    const agents = manager.listAgents()
+      .filter(r => isTopLevelAgent(r) && (r.status === "running" || r.status === "queued")).length;
+    return [
+      agents > 0 ? `${agents} agent${agents === 1 ? "" : "s"}` : "",
+      workflowRuns.size > 0 ? `${workflowRuns.size} workflow${workflowRuns.size === 1 ? "" : "s"}` : "",
+    ].filter(Boolean).join(", ");
+  }
+
+  pi.on("agent_start", () => { runStarted = true; });
+
+  pi.on("agent_before_settle", async (event, ctx) => {
+    if (!isHeadless(ctx) || !hasBackgroundWork()) return;
+    process.stderr.write(
+      `[pi-subagents] Waiting for background work to finish (${describeBackgroundWork()}). Press Ctrl+C to exit now.\n`,
+    );
+    // Per drain, as Claude Code measures from when the session last went idle.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const ceiling = headlessWaitMinutes > 0
+      ? new Promise<"ceiling">(resolve => { timer = setTimeout(() => resolve("ceiling"), headlessWaitMinutes * 60_000); })
+      : undefined;
+    try {
+      // Loops: a workflow starts agents, and a finished agent starts a queued one.
+      while (hasBackgroundWork()) {
+        const settled = allBackgroundWorkSettled();
+        if ((await (ceiling ? Promise.race([settled, ceiling]) : settled)) !== "ceiling") continue;
+        process.stderr.write(
+          `[pi-subagents] Background work still running after ${headlessWaitMinutes} min (${describeBackgroundWork()}); ` +
+            "stopping it. Set headlessWaitMinutes to 0 to wait indefinitely.\n",
+        );
+        for (const task of workflowTasks.values()) task.abortController.abort();
+        manager.abortAll();
+        // The stderr line is the report: drop the "stopped" notifications rather
+        // than spend a turn on them, or leave them for the outbox's idle timer.
+        await allBackgroundWorkSettled();
+        outbox.take();
+        return;
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    const message = outbox.take();
+    if (!message) return;
+    return {
+      entries: [...event.entries, {
+        type: "custom_message" as const,
+        customType: "subagent-notification",
+        content: message.content,
+        display: true,
+        details: message.details,
+      }],
+      continue: true,
+    };
+  });
+
   /** Build the full type list text dynamically from available agents only. */
   const buildTypeListText = () => {
     const available = getAvailableTypes();
@@ -1581,6 +1659,7 @@ export default function (pi: ExtensionAPI) {
     setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
     setDefaultMaxTurns,
     setGraceTurns,
+    setHeadlessWaitMinutes: (n) => { headlessWaitMinutes = Math.max(0, n); },
     setDefaultJoinMode,
     setBackgroundByDefault,
     setSchedulingEnabled,
@@ -2606,6 +2685,18 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTasks = new Map<string, WorkflowTask>();
 
   /**
+   * Detached runs until each has settled AND handed its result to the outbox —
+   * what a headless parent's drain waits on. `workflowTasks` keeps finished
+   * runs for their cards, and between stages a run has no agent in the
+   * manager, so neither can say whether a run is still going.
+   */
+  const workflowRuns = new Set<Promise<void>>();
+  function trackWorkflowRun(run: Promise<void>): void {
+    workflowRuns.add(run);
+    void run.finally(() => workflowRuns.delete(run));
+  }
+
+  /**
    * Workflow runs as the fleet list wants them.
    *
    * Mapped here rather than handing `WorkflowTask` over the seam: the list is
@@ -2633,7 +2724,8 @@ Terse command-style prompts produce shallow, generic work.
    * Run a task to completion against the real manager, settling the record
    * either way. Never rejects: a run that cannot start (bad `meta`, oversized
    * source, non-JSON `args`) is a failed workflow, and both callers here are
-   * detached — a rejection would surface as an unhandled one.
+   * detached — a rejection would surface as an unhandled one, and would end a
+   * headless drain's wait early.
    */
   async function runWorkflowTask(ctx: ExtensionContext, task: WorkflowTask): Promise<void> {
     try {
@@ -2848,7 +2940,7 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background, like Claude Code: the id comes back now and the run keeps
       // going without the tool call.
-      void runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task));
+      trackWorkflowRun(runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task)));
 
       return {
         content: [{
@@ -3001,21 +3093,26 @@ Terse command-style prompts produce shallow, generic work.
     fleet.update();
     report(`Running workflow ${meta.name}…`, "info");
 
-    // Detached: session_start is awaited by the host, and a workflow can run for
-    // minutes — blocking here would hold the whole session's startup.
-    void runWorkflowTask(ctx, task).then(() => {
+    // Detached, alongside the session like a user's own turns: session_start is
+    // awaited by the host, and a workflow can run for minutes. When it finishes
+    // it notifies the model through the same outbox a background SubagentWorkflow
+    // uses, so the model can react — under `-p` the headless drain keeps the run
+    // open until then.
+    trackWorkflowRun(runWorkflowTask(ctx, task).then(() => {
       // No tool call to attach a result card to, so the card becomes a session
-      // entry (same layout), and the outcome is handed to the model as context
-      // for its next turn rather than forcing one.
-      pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
-      pi.sendMessage({
-        customType: "workflow-result",
-        content: formatWorkflowNotification(task),
-        display: false,
-      }, { deliverAs: "nextTurn" });
-      widget.update();
-      fleet.update();
-    });
+      // entry (same layout). A run that settles after /new or /reload holds a
+      // stale `pi`, which throws (#309); the notification is still attempted —
+      // the outbox swallows its own stale send.
+      try {
+        pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
+      } catch (err) {
+        console.warn(
+          `[pi-subagents] Workflow ${meta.name} finished, but its result card could not be saved: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+      notifyWorkflowFinished(task);
+    }));
   }
 
   // ---- get_subagent_result tool ----
@@ -3248,6 +3345,8 @@ Terse command-style prompts produce shallow, generic work.
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
       graceTurns: getGraceTurns(),
+      // 0 = no limit, the default — see SubagentsSettings.
+      headlessWaitMinutes,
       defaultJoinMode: getDefaultJoinMode(),
       backgroundByDefault: getBackgroundByDefault(),
       schedulingEnabled: isSchedulingEnabled(),
@@ -3433,6 +3532,13 @@ Terse command-style prompts produce shallow, generic work.
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
+        },
+        {
+          id: "headlessWaitMinutes",
+          label: "Headless wait (min)",
+          description: "pi -p: minutes to wait for background work before stopping it (0 = no limit, Enter to type)",
+          currentValue: String(headlessWaitMinutes),
+          values: [String(headlessWaitMinutes)],
         },
         {
           id: "joinMode",
@@ -3645,6 +3751,14 @@ Terse command-style prompts produce shallow, generic work.
         if (n >= 1) {
           setGraceTurns(n);
           notifyApplied(ctx, target, `Grace turns set to ${n}`);
+        }
+      } else if (id === "headlessWaitMinutes") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          headlessWaitMinutes = n;
+          notifyApplied(ctx, target, n === 0
+            ? "Headless wait set to no limit"
+            : `Headless wait set to ${n} min`);
         }
       } else if (id === "maxSubagentDepth") {
         const n = parseInt(value, 10);
