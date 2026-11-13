@@ -1232,6 +1232,16 @@ describe("workflowsEnabled — the master switch", () => {
     return booted;
   };
 
+  // Claude Code's Workflow tool carries no guideline choosing it over Agent;
+  // its description's explicit opt-in rule decides. A pi-only line ("Use Agent
+  // for ... a handful you can name up front") routed "use 10 agents to explore
+  // this folder" to SubagentWorkflow instead of 10 parallel Agent calls.
+  it("adds no guideline that picks SubagentWorkflow over Agent", () => {
+    const guidelines: string[] = boot({}).tools.get("SubagentWorkflow").promptGuidelines;
+
+    expect(guidelines.filter((g) => /\bAgent\b|handful|number of agents/i.test(g))).toEqual([]);
+  });
+
   it("is on with no setting at all", () => {
     const booted = boot({});
 
