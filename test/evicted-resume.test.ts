@@ -302,13 +302,25 @@ describe("a workflow's resume once the manager evicted the child", () => {
         sessionFile: file,
         ...overrides,
       }) as AgentRecord;
+    /** Only the reopened record is live: the first run's was evicted. */
+    let live: AgentRecord | undefined;
+    /** What the reopened child does mid-run, before it settles. */
+    let duringReopen: ((record: AgentRecord, options: any) => void) | undefined;
     const spawnAndWait = vi.fn(async (_pi: any, _ctx: any, _type: string, _prompt: string, options: any, onSpawned?: (id: string) => void) => {
       const record = settled(options.reclaim ? { result: "fixed" } : firstRun);
+      if (options.reclaim) live = record;
       onSpawned?.(record.id);
+      if (options.reclaim) duringReopen?.(record, options);
       return { id: record.id, record };
     });
     const resume = vi.fn(async () => undefined);
-    return { manager: { spawnAndWait, resume, abort: vi.fn() } as unknown as AgentManager, spawnAndWait, resume };
+    const getRecord = (id: string) => (live?.id === id ? live : undefined);
+    return {
+      manager: { spawnAndWait, resume, getRecord, abort: vi.fn() } as unknown as AgentManager,
+      spawnAndWait,
+      resume,
+      onReopenRun(fn: (record: AgentRecord, options: any) => void) { duringReopen = fn; },
+    };
   }
 
   const request = { agentId: "wf-agent-0", index: 0, prompt: "build it", label: "worker", agentType: "general-purpose" };
@@ -327,7 +339,27 @@ describe("a workflow's resume once the manager evicted the child", () => {
     expect(resumed).toMatchObject({ ok: true, text: "fixed" });
   });
 
-  const wt = { path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };
+  it("reports the reopened child's counters while it runs (#298)", async () => {
+    // The reopen goes through spawnAndWait, not manager.resume, so it needs the
+    // live forwarding wired on its own. The reclaimed record starts from zero:
+    // its lifetime totals are this continuation's, with no baseline to subtract.
+    const stub = evictingManager(sessionFile, { toolUses: 9, lifetimeUsage: { input: 900, output: 90, cacheWrite: 0 } });
+    const snapshots: unknown[] = [];
+    stub.onReopenRun((record, options) => {
+      record.toolUses = 1;
+      options.onToolActivity?.({ type: "end", toolName: "read" });
+      record.lifetimeUsage = { input: 30, output: 12, cacheWrite: 0 };
+      options.onAssistantUsage?.({ input: 30, output: 12, cacheWrite: 0 });
+    });
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request);
+    await host.resumeAgent?.("wf-agent-0", "fix it", undefined, info => snapshots.push(info));
+
+    expect(snapshots.at(-1)).toEqual({ tokens: 42, outputTokens: 12, toolCalls: 1 });
+  });
+
+  const wt ={ path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };
 
   it("refuses, starting nothing, when the child's worktree held its work", async () => {
     const stub = evictingManager(sessionFile, { worktree: wt, worktreeResult: { hasChanges: true, branch: "pi-agent-c" } });

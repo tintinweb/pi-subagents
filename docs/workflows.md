@@ -68,6 +68,8 @@ A **card in the transcript**, updating as the run goes:
   ⎿  auditing 6 route files
 ```
 
+A running row's token and tool-call counts move as the child works: tool calls when each one completes, tokens when pi finalizes an assistant message, so a long response holds the count until it ends. A resumed row counts only its continuation; a retried row keeps the earlier attempt's spend.
+
 A **`workflow` row in FleetView**, above the agents, carrying its agent counts where a description would go. `⏎` on it opens the inspector rather than a conversation overlay.
 
 Each row names the model the child *actually* ran on — read back from its session once pi has resolved its defaults, not the string the script asked for — so a fuzzy `model: "haiku"` reads as the model it resolved to, and an `agent()` that named no model still says what it inherited.
@@ -278,7 +280,7 @@ The child runs in the *same* worker and vm context under its own globals, so it 
 - **`phase(title)`** — start a new progress group; subsequent `agent()` calls are grouped under it. Inside `pipeline`/`parallel` stages use the `phase` *option* instead, since the ambient phase races.
 - **`log(message)`** — a progress line under the tree, for you to read.
 - **`args`** — whatever was passed as the tool's `args`, verbatim; `undefined` if none.
-- **`budget`** — `{ total, spent(), remaining() }`. **`total` is always `null` here**: it comes from a token-target directive pi does not have. That is deliberate rather than broken — Claude Code scripts guard on it (`while (budget.total && budget.remaining() > 50_000)`), and those guards correctly do not fire instead of throwing on a missing global. `remaining()` is `Infinity` with no target. `spent()` is real, and counts output tokens this run's agents have used.
+- **`budget`** — `{ total, spent(), remaining() }`. **`total` is always `null` here**: it comes from a token-target directive pi does not have. That is deliberate rather than broken — Claude Code scripts guard on it (`while (budget.total && budget.remaining() > 50_000)`), and those guards correctly do not fire instead of throwing on a missing global. `remaining()` is `Infinity` with no target. `spent()` is real, and counts output tokens this run's agents have used, including attempts stopped by a retry.
 
 ### Where files live
 

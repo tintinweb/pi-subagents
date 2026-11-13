@@ -1344,3 +1344,99 @@ describe("nested workflow()", () => {
     expect(replayHost.calls).toHaveLength(0);
   });
 });
+
+/* ------------------------------------------------------------------------- *
+ * Live counters (#298)
+ * ------------------------------------------------------------------------- */
+
+describe("live tool and token counters", () => {
+  const rows = (seen: readonly WorkflowEntry[][], index = 0) =>
+    seen.flat().filter((e): e is WorkflowAgentEntry => e.type === "workflow_agent" && e.index === index);
+
+  async function until(predicate: () => boolean, what: string): Promise<void> {
+    for (let i = 0; i < 400; i++) {
+      if (predicate()) return;
+      await sleep(5);
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  it("updates a running row from the host's reports, then settles to the final totals once", async () => {
+    const seen: WorkflowEntry[][] = [];
+    let report: WorkflowSpawnRequest["onProgress"];
+    let finish: ((r: WorkflowSpawnResult) => void) | undefined;
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        report = request.onProgress;
+        return new Promise(resolve => { finish = resolve; });
+      },
+      abortAgent() {},
+    };
+    const done = run("return await agent('go');", { host, onProgress(e) { seen.push([...e]); } });
+
+    await until(() => finish !== undefined, "the agent to start");
+    report?.({ tokens: 120, toolCalls: 1 });
+    const running = rows(seen).at(-1);
+    expect(running).toMatchObject({ state: "start", tokens: 120, toolCalls: 1 });
+
+    // The settled result is the same absolute snapshot, not a delta to add.
+    finish?.({ ok: true, text: "ok", tokens: 150, toolCalls: 2, outputTokens: 30 });
+    await done;
+    expect(rows(seen).at(-1)).toMatchObject({ state: "done", tokens: 150, toolCalls: 2 });
+  });
+
+  it("ignores a report that arrives after the agent settled", async () => {
+    const seen: WorkflowEntry[][] = [];
+    let report: WorkflowSpawnRequest["onProgress"];
+    const host: WorkflowHost = {
+      async spawnAgent(request) {
+        report = request.onProgress;
+        return { ok: true, text: "ok", tokens: 10, toolCalls: 1 };
+      },
+      abortAgent() {},
+    };
+
+    await run("return await agent('go');", { host, onProgress(e) { seen.push([...e]); } });
+    const before = seen.length;
+    report?.({ tokens: 999, toolCalls: 9 });
+
+    expect(seen.length).toBe(before);
+    expect(rows(seen).at(-1)).toMatchObject({ state: "done", tokens: 10, toolCalls: 1 });
+  });
+
+  it("keeps a retried row's earlier attempt, counted once, in the row and the budget", async () => {
+    const seen: WorkflowEntry[][] = [];
+    const attempts: Array<{ report?: WorkflowSpawnRequest["onProgress"]; finish: (r: WorkflowSpawnResult) => void }> = [];
+    let control: WorkflowControl | undefined;
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        return new Promise(resolve => { attempts.push({ report: request.onProgress, finish: resolve }); });
+      },
+      // A stopped child reports what it spent before it was stopped.
+      abortAgent() {
+        attempts.at(-1)?.finish({ ok: false, skipped: true, error: "Stopped.", tokens: 100, toolCalls: 2, outputTokens: 10 });
+      },
+    };
+    const done = run("await agent('go'); return budget.spent();", {
+      host,
+      onControl: c => { control = c; },
+      onProgress(e) { seen.push([...e]); },
+    });
+
+    await until(() => attempts.length === 1, "the first attempt");
+    attempts[0]?.report?.({ tokens: 100, toolCalls: 2 });
+    control?.retry(0);
+    await until(() => attempts.length === 2, "the second attempt");
+
+    // The first attempt's late report must not touch the second's row.
+    attempts[0]?.report?.({ tokens: 5000, toolCalls: 50 });
+    attempts[1]?.report?.({ tokens: 40, toolCalls: 1 });
+    expect(rows(seen).at(-1)).toMatchObject({ attempt: 2, tokens: 140, toolCalls: 3 });
+
+    attempts[1]?.finish({ ok: true, text: "ok", tokens: 50, toolCalls: 1, outputTokens: 5 });
+    const result = await done;
+    expect(rows(seen).at(-1)).toMatchObject({ state: "done", attempt: 2, tokens: 150, toolCalls: 3 });
+    // Both attempts burned output tokens; a retry does not refund the first.
+    expect(result.value).toBe(15);
+  });
+});

@@ -67,6 +67,8 @@ export interface WorkflowSpawnRequest {
    */
   effort?: string;
   isolation?: "worktree";
+  /** Absolute counters for this spawn/resume invocation, not per-event deltas. */
+  onProgress?(info: Pick<WorkflowSpawnResult, "tokens" | "toolCalls">): void;
   /**
    * Called by the host once the child's EFFECTIVE configuration is known —
    * which is when its session exists, not when the spawn resolves.
@@ -128,11 +130,12 @@ export interface WorkflowSpawnResult {
   error?: string;
   /** The user dismissed it rather than it failing; renders as skipped. */
   skipped?: boolean;
+  /** Display total for this spawn/resume invocation, excluding earlier turns. */
   tokens?: number;
   /**
    * Output tokens only, for the script's `budget.spent()`.
    *
-   * Separate from {@link tokens}, which is the lifetime total. Claude Code's
+   * Separate from {@link tokens}, which includes input. Claude Code's
    * budget counts output, and a fan-out's re-sent input would swamp it.
    */
   outputTokens?: number;
@@ -205,6 +208,7 @@ export interface WorkflowHost {
      * the row above it shows the one that ran.
      */
     onResolved?: WorkflowSpawnRequest["onResolved"],
+    onProgress?: WorkflowSpawnRequest["onProgress"],
   ): Promise<WorkflowSpawnResult>;
   /**
    * Run a `gate` command and report whether it passed.
@@ -981,6 +985,22 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
           const startedAt = Date.now();
           emit([{ ...base, queuedAt, startedAt, ...attemptMark }]);
+          // One row covers every attempt. Reconcile snapshots against the previous
+          // attempts, not the last live snapshot, so completion cannot count twice.
+          const previousTokens = base.tokens ?? 0;
+          const previousToolCalls = base.toolCalls ?? 0;
+          const updateCounters: NonNullable<WorkflowSpawnRequest["onProgress"]> = info => {
+            if (info.tokens !== undefined) base.tokens = previousTokens + info.tokens;
+            if (info.toolCalls !== undefined) base.toolCalls = previousToolCalls + info.toolCalls;
+          };
+          let acceptingProgress = true;
+          const onProgress: WorkflowSpawnRequest["onProgress"] = info => {
+            // agentId is reused by retries and resumes; an inflight id alone would
+            // let an older callback overwrite the current attempt or revive a row.
+            if (!acceptingProgress || settled) return;
+            updateCounters(info);
+            emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
 
           // Mutates `base` rather than emitting a standalone patch: every later
           // emit spreads it, so the settle path carries the effective values
@@ -995,18 +1015,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             requestedThinking?: string;
             requestedModel?: string;
           }) => {
+            if (!acceptingProgress || settled) return;
             if (info.recordId !== undefined) base.recordId = info.recordId;
             if (info.modelName !== undefined) base.model = info.modelName;
             if (info.modelId !== undefined) base.modelId = info.modelId;
             if (info.thinking !== undefined) base.thinking = info.thinking;
             if (info.requestedThinking !== undefined) base.requestedThinking = info.requestedThinking;
             if (info.requestedModel !== undefined) base.requestedModel = info.requestedModel;
-            // `base.state` is still "start", so emitting after the row reached a
-            // terminal state would revert it to running under last-write-wins.
-            // Not reachable from this repo's host, which reports during startup
-            // — but this is the host boundary, and every other promise it makes
-            // is checked rather than trusted.
-            if (!inflight.has(agentId)) return;
             emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
           };
           live.started = true;
@@ -1016,7 +1031,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           try {
             result =
               resumed !== undefined && resumeAgent !== undefined
-                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved)
+                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved, onProgress)
                 : await host.spawnAgent({
                     agentId,
                     index,
@@ -1033,7 +1048,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     // child's worktree does, and hands back `result.gate`.
                     ...(payload.gate !== undefined ? { gate: payload.gate } : {}),
                     onResolved,
+                    onProgress,
                   });
+            updateCounters(result);
             if (result.ok) {
               // Recorded before the gate runs: the child itself finished, so it is
               // resumable even when its gate rejects the work — "here is what the
@@ -1062,12 +1079,17 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           } catch (error) {
             result = { ok: false, error: error instanceof Error ? error.message : String(error) };
           } finally {
+            acceptingProgress = false;
             inflight.delete(agentId);
             live.started = false;
             semaphore.release();
           }
 
           if (settled) return;
+
+          // Budget stays output-only and settlement-based, including stopped
+          // attempts: a retry cannot refund tokens the previous child spent.
+          spentOutputTokens += result.outputTokens ?? 0;
 
           // The stop that produced this result was ours, so run the same call
           // again rather than reporting it. The script is still awaiting this
@@ -1079,11 +1101,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             continue;
           }
 
-          // Counted before the response is sent, so the very call that spent
-          // them already sees them in `budget.spent()`. Failed and skipped
-          // agents count too — they burned the tokens either way.
-          spentOutputTokens += result.outputTokens ?? 0;
-
           const finishedAt = Date.now();
           const common = {
             ...base,
@@ -1092,8 +1109,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             ...attemptMark,
             lastProgressAt: finishedAt,
             durationMs: finishedAt - startedAt,
-            ...(result.tokens !== undefined ? { tokens: result.tokens } : {}),
-            ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
           };
 
           if (result.ok) {

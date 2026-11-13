@@ -60,8 +60,13 @@ export interface WorkflowTask {
   /** How many agents came back from {@link replay} instead of being spawned. */
   replayedCount: number;
 
-  /** The append-only event log, in emission order. */
+  /**
+   * The event log, in first-emission order, holding each agent's latest entry
+   * only — see {@link updateWorkflowProgressBatch}. Logs and phases append.
+   */
   workflowProgress: WorkflowEntry[];
+  /** Agent index → its entry's position in {@link workflowProgress}. */
+  agentSlots: Map<number, number>;
   /** Bumped once per applied batch, so a renderer can tell nothing changed. */
   progressVersion: number;
   agentCount: number;
@@ -115,6 +120,7 @@ export function createWorkflowTask(init: {
     resumedFrom: init.resumedFrom,
     replayedCount: 0,
     workflowProgress: [],
+    agentSlots: new Map(),
     progressVersion: 0,
     agentCount: 0,
     doneCount: 0,
@@ -140,7 +146,20 @@ export function updateWorkflowProgressBatch(
   entries: readonly WorkflowEntry[],
 ): void {
   if (entries.length === 0) return;
-  task.workflowProgress.push(...entries);
+  for (const entry of entries) {
+    // An agent's newer entry replaces its older one in place. Every reader goes
+    // through `collapse`, which keeps only the latest entry per index, so this
+    // loses nothing — and a running child's live counters, re-emitted on every
+    // tool and message, would otherwise grow the log (and the session entry it
+    // is persisted into) by one entry each.
+    const slot = entry.type === "workflow_agent" ? task.agentSlots.get(entry.index) : undefined;
+    if (slot !== undefined) {
+      task.workflowProgress[slot] = entry;
+      continue;
+    }
+    if (entry.type === "workflow_agent") task.agentSlots.set(entry.index, task.workflowProgress.length);
+    task.workflowProgress.push(entry);
+  }
   task.progressVersion++;
 
   const { agents, logs } = collapse(task.workflowProgress);
