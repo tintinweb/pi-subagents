@@ -1385,6 +1385,34 @@ describe("live tool and token counters", () => {
     expect(rows(seen).at(-1)).toMatchObject({ state: "done", tokens: 150, toolCalls: 2 });
   });
 
+  it("updates a resumed row from the host's reports before it settles", async () => {
+    const seen: WorkflowEntry[][] = [];
+    let report: WorkflowSpawnRequest["onProgress"];
+    let finish: ((r: WorkflowSpawnResult) => void) | undefined;
+    const host: WorkflowHost = {
+      async spawnAgent() {
+        return { ok: true, text: "first", tokens: 500, toolCalls: 5 };
+      },
+      resumeAgent(_id, _prompt, _onResolved, onProgress) {
+        report = onProgress;
+        return new Promise(resolve => { finish = resolve; });
+      },
+      abortAgent() {},
+    };
+    const done = run("await agent('go', { label: 'w' }); return await agent('more', { resume: 'w' });", {
+      host,
+      onProgress(e) { seen.push([...e]); },
+    });
+
+    await until(() => finish !== undefined, "the resume to start");
+    report?.({ tokens: 30, toolCalls: 1 });
+    expect(rows(seen, 1).at(-1)).toMatchObject({ state: "start", tokens: 30, toolCalls: 1 });
+
+    finish?.({ ok: true, text: "second", tokens: 35, toolCalls: 1 });
+    await done;
+    expect(rows(seen, 1).at(-1)).toMatchObject({ state: "done", tokens: 35, toolCalls: 1 });
+  });
+
   it("ignores a report that arrives after the agent settled", async () => {
     const seen: WorkflowEntry[][] = [];
     let report: WorkflowSpawnRequest["onProgress"];
