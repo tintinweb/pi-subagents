@@ -542,17 +542,61 @@ describe("keys", () => {
     expect(press(UP, { ...agents, selectedAgent: 0 })?.state.selectedAgent).toBe(0);
   });
 
-  it("scrolls the detail with j/k in the subview instead of moving the agent", () => {
+  it("treats j/k as ↓/↑ in the subview, moving between agents", () => {
     const full = input({ progress, state: { level: "agent" } });
     const view = resolveWorkflowDialog(full);
-    const j = handleWorkflowDialogKey("j", full.state, view, 3);
-    expect(j?.state.detailScroll).toBe(1);
-    expect(j?.state.selectedAgent).toBe(0);
-    // Clamped at both ends: no offset past the last row, none above the first.
-    expect(handleWorkflowDialogKey("j", { ...full.state, detailScroll: 3 }, view, 3)?.state.detailScroll).toBe(3);
-    expect(handleWorkflowDialogKey("k", full.state, view, 3)?.state.detailScroll).toBe(0);
-    // A detail that fits does not scroll at all.
-    expect(handleWorkflowDialogKey("j", full.state, view)?.state.detailScroll).toBe(0);
+    // Even with a detail to scroll: until → focuses it, the keys belong to the list.
+    expect(handleWorkflowDialogKey("j", full.state, view, { maxDetailScroll: 3, detailPageRows: 10 })?.state).toMatchObject({ selectedAgent: 1, detailScroll: 0 });
+    expect(press("k", { level: "agent", selectedAgent: 1 })?.state.selectedAgent).toBe(0);
+  });
+
+  it("→ expands and focuses the detail, so ↑↓ scroll it; ← and esc hand focus back", () => {
+    const [RIGHT, LEFT, DOWN, UP] = ["\x1b[C", "\x1b[D", "\x1b[B", "\x1b[A"];
+    const full = input({ progress, state: { level: "agent" } });
+    const view = resolveWorkflowDialog(full);
+    const key = (data: string, state: WorkflowDialogState, max = 3) =>
+      handleWorkflowDialogKey(data, state, view, { maxDetailScroll: max, detailPageRows: 10 })?.state;
+
+    // One keypress from collapsed: no ⏎ needed first.
+    const focused = key(RIGHT, full.state, 0)!;
+    expect(focused).toMatchObject({ detailFocused: true, expanded: true, detailScroll: 0 });
+    // The arrows (and j/k with them) scroll now, and leave the agent where it was.
+    expect(key(DOWN, focused)).toMatchObject({ detailScroll: 1, selectedAgent: 0 });
+    expect(key(UP, { ...focused, detailScroll: 2 })?.detailScroll).toBe(1);
+    expect(key("j", focused)?.detailScroll).toBe(1);
+    // Clamped at both ends.
+    expect(key(DOWN, { ...focused, detailScroll: 3 })?.detailScroll).toBe(3);
+    expect(key(UP, focused)?.detailScroll).toBe(0);
+    // Back out one level at a time: focus first, folding the detail back to
+    // its compact view and its top, then the overview.
+    const scrolled = { ...focused, detailScroll: 2 };
+    expect(key(LEFT, scrolled)).toEqual({ ...full.state, detailFocused: false, expanded: false, detailScroll: 0 });
+    expect(key("\x1b", scrolled)).toEqual({ ...full.state, detailFocused: false, expanded: false, detailScroll: 0 });
+    expect(key(LEFT, full.state)?.level).toBe("phases");
+    // An already-scrolled expanded detail keeps its place when → returns to it.
+    expect(key(RIGHT, { ...full.state, expanded: true, detailScroll: 2 })?.detailScroll).toBe(2);
+
+    // The expanded detail fits: focus has nothing to scroll, so the arrows still move between agents.
+    expect(key(DOWN, focused, 0)?.selectedAgent).toBe(1);
+  });
+
+  it("pages and jumps the detail with the conversation viewer's keys", () => {
+    const full = input({ progress, state: { level: "agent", expanded: true } });
+    const view = resolveWorkflowDialog(full);
+    const pane = { maxDetailScroll: 25, detailPageRows: 10 };
+    const at = (data: string, detailScroll: number) =>
+      handleWorkflowDialogKey(data, { ...full.state, detailScroll }, view, pane)?.state.detailScroll;
+    const [PGDN, PGUP, SHIFT_DOWN, SHIFT_UP, HOME, END] = ["\x1b[6~", "\x1b[5~", "\x1b[1;2B", "\x1b[1;2A", "\x1b[H", "\x1b[F"];
+    expect(at(PGDN, 0)).toBe(10);
+    expect(at(SHIFT_DOWN, 10)).toBe(20);
+    // Clamped at both ends.
+    expect(at(PGDN, 20)).toBe(25);
+    expect(at(PGUP, 5)).toBe(0);
+    expect(at(SHIFT_UP, 25)).toBe(15);
+    expect(at(END, 3)).toBe(25);
+    expect(at(HOME, 17)).toBe(0);
+    // No focus needed: nothing else in the subview uses these keys. The agent stays put.
+    expect(handleWorkflowDialogKey(PGDN, full.state, view, pane)?.state.selectedAgent).toBe(0);
   });
 
   it("starts a newly selected agent at the top, collapsed", () => {
@@ -849,10 +893,23 @@ describe("frame height", () => {
     expect(rightRows(past).map(bare).join("\n")).toContain("Outcome");
   });
 
-  it("advertises j/k scroll only when the detail overflows", () => {
+  it("advertises → scroll only when the detail overflows", () => {
     const hints = (state: Partial<WorkflowDialogState>) => dialog({ progress: longPrompt, state, width: 120 }).at(-1) ?? "";
-    expect(hints(expanded)).toContain("j/k scroll");
-    expect(hints({ level: "agent" })).not.toContain("j/k scroll");
+    expect(hints(expanded)).toContain("↑↓ agent · → scroll");
+    expect(hints({ level: "agent" })).not.toContain("→ scroll");
+    expect(hints(expanded)).not.toContain("j/k");
+  });
+
+  it("says where ↑↓ go once the detail has focus, and marks the focused pane", () => {
+    const focused = { ...expanded, detailFocused: true };
+    const hints = dialog({ progress: longPrompt, state: focused, width: 120 }).at(-1) ?? "";
+    expect(hints).toContain("↑↓ scroll · ← agents");
+    expect(hints).not.toContain("↑↓ agent");
+    const title = (state: Partial<WorkflowDialogState>) =>
+      styleWorkflowCardLines(layoutWorkflowDialog(input({ progress: longPrompt, state, width: 120 })), theme)
+        .find(line => line.includes("╭")) ?? "";
+    expect(title(focused)).toContain("<accent>");
+    expect(title(expanded)).not.toContain("<accent>");
   });
 });
 

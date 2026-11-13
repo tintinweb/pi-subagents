@@ -16,8 +16,8 @@
  * Opening an agent swaps the panes: that phase's agents move left and the
  * right becomes the agent's Prompt / Activity / Outcome detail. Activity lists
  * the child's tool calls from its transcript (`AgentDetail`, injected through
- * the source); `⏎` expands all three sections, and `j/k` scroll the detail
- * while `↑↓` keep moving between agents.
+ * the source); `⏎` expands all three sections, and `→` expands and focuses
+ * the detail so `↑↓` scroll it rather than moving between agents.
  *
  * A phase with no agents yet shows its number and nothing else. The single-pane
  * layout this replaced spelled that out as "Not started yet"; the left pane is
@@ -66,6 +66,7 @@ import {
   type WorkflowEntry,
 } from "../workflow/progress.js";
 import { SPINNER, type Theme } from "./agent-widget.js";
+import { createViewerKeys, type ViewerKeys } from "./viewer-keys.js";
 import {
   ASCII_GLYPHS,
   clampLine,
@@ -156,6 +157,9 @@ export interface WorkflowDialogGlyphs {
   moreBelow: string;
   /** How the footer names the arrow keys and Enter. */
   upDown: string;
+  /** How the footer names the keys that move focus between the agent list and the detail. */
+  left: string;
+  right: string;
   enter: string;
 }
 
@@ -183,6 +187,8 @@ export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
   moreAbove: "↑",
   moreBelow: "↓",
   upDown: "↑↓",
+  left: "←",
+  right: "→",
   enter: "⏎",
 };
 
@@ -211,6 +217,8 @@ export const ASCII_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
   moreAbove: "^",
   moreBelow: "v",
   upDown: "up/down",
+  left: "left",
+  right: "right",
   enter: "enter",
 };
 
@@ -302,7 +310,17 @@ export interface WorkflowDialogState {
   expanded: boolean;
   /** First detail row shown; clamped on read against what the pane holds. */
   detailScroll: number;
+  /**
+   * `→` moved focus into the detail, so `↑↓` scroll it instead of moving
+   * between agents. Only in effect while the detail overflows the pane — see
+   * {@link detailHasFocus}.
+   */
+  detailFocused: boolean;
 }
+
+/** Focus is on the detail and there is something there to scroll. */
+const detailHasFocus = (state: WorkflowDialogState, maxDetailScroll: number) =>
+  state.level === "agent" && state.detailFocused && maxDetailScroll > 0;
 
 export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialogState {
   return {
@@ -312,6 +330,7 @@ export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialo
     filter: "all",
     expanded: false,
     detailScroll: 0,
+    detailFocused: false,
   };
 }
 
@@ -512,7 +531,7 @@ function padCell(line: WorkflowCardLine, width: number): WorkflowCardLine {
 }
 
 /** A title as it sits in the frame's top edge: ` Title ` then rule to `width`. */
-function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardSegment[] {
+function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs, focused = false): WorkflowCardSegment[] {
   const room = Math.max(0, width - 2);
   // Truncated with the marker rather than simply cut: `Discover · 1 ag…` has to
   // read as "there was more", not as a title that happens to end oddly. Pi's
@@ -527,7 +546,7 @@ function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs):
   return clampLine(
     [
       { text: " ", color: "dim" },
-      { text: shown, color: "muted", bold: true },
+      { text: shown, color: focused ? "accent" : "muted", bold: true },
       { text: ` ${glyphs.box.horizontal.repeat(rule)}`, color: "dim" },
     ],
     width,
@@ -548,6 +567,8 @@ function paneFrame(options: {
   rightRows: WorkflowCardLine[];
   /** A label set into the bottom edge under the right pane, flush right. */
   rightFooter?: string;
+  /** The right pane has the keyboard: its title is drawn in the accent colour. */
+  rightFocused?: boolean;
   width: number;
   bodyRows: number;
   glyphs: WorkflowDialogGlyphs;
@@ -562,7 +583,7 @@ function paneFrame(options: {
     { text: box.topLeft, color: "dim" },
     ...padTitle(frameTitle(options.leftTitle, left, glyphs), left, box.horizontal),
     { text: box.topTee, color: "dim" },
-    ...padTitle(frameTitle(options.rightTitle, right, glyphs), right, box.horizontal),
+    ...padTitle(frameTitle(options.rightTitle, right, glyphs, options.rightFocused), right, box.horizontal),
     { text: box.topRight, color: "dim" },
   ]);
 
@@ -845,12 +866,20 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   return buildWorkflowDialog(input).lines;
 }
 
+/** What the last layout knew about the detail pane, which the key handler needs to scroll it. */
+export interface DetailPaneMetrics {
+  /** Furthest the detail can scroll; 0 means it fits. */
+  maxDetailScroll: number;
+  /** Rows the pane shows at once — one page. */
+  detailPageRows: number;
+}
+
 /**
  * The layout plus how far the detail pane can scroll, which only the layout
  * knows — it depends on the width the rows wrapped at. The shell keeps it so
- * `j` stops at the last row instead of piling up offset nobody can see.
+ * `↓` stops at the last row instead of piling up offset nobody can see.
  */
-export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: WorkflowCardLine[]; maxDetailScroll: number } {
+export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: WorkflowCardLine[] } & DetailPaneMetrics {
   const glyphs = input.ascii ? ASCII_DIALOG_GLYPHS : UNICODE_DIALOG_GLYPHS;
   const width = workflowDialogContentWidth(input.width ?? DEFAULT_WIDTH);
   const now = input.now ?? Date.now();
@@ -1012,6 +1041,7 @@ export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: Workfl
       leftRows,
       rightRows,
       rightFooter,
+      rightFocused: detailHasFocus(state, maxDetailScroll),
       width: width - 1,
       bodyRows,
       glyphs,
@@ -1031,8 +1061,16 @@ export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: Workfl
     if (view.visibleAgents.length > 0) hints.push(`${glyphs.enter} open`);
     hints.push("f filter");
   } else {
-    hints.push(`${glyphs.upDown} agent`);
-    if (maxDetailScroll > 0) hints.push("j/k scroll");
+    // `↑↓` follow the focus: the agent list's cursor, or the detail once `→`
+    // moved into it. `→` also expands a collapsed detail, but is advertised
+    // only once there is something to scroll: on a collapsed one `⏎ expand`
+    // already says so, and every hint costs what an 80-column footer drops.
+    if (detailHasFocus(state, maxDetailScroll)) {
+      hints.push(`${glyphs.upDown} scroll`, `${glyphs.left} agents`);
+    } else {
+      hints.push(`${glyphs.upDown} agent`);
+      if (maxDetailScroll > 0) hints.push(`${glyphs.right} scroll`);
+    }
     if (expandable) hints.push(`${glyphs.enter} ${state.expanded ? "collapse" : "expand"}`);
     const actions = agentActions(entry, view.workflowActive);
     if (actions.skip && can("onSkipAgent")) hints.push("s skip");
@@ -1057,7 +1095,7 @@ export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: Workfl
   }
   lines.push(clampLine([{ text: ` ${hints.join(" · ")}`, color: "dim" }], width));
 
-  return { lines, maxDetailScroll };
+  return { lines, maxDetailScroll, detailPageRows: bodyRows };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -1078,9 +1116,12 @@ export function handleWorkflowDialogKey(
   data: string,
   state: WorkflowDialogState,
   view: ResolvedWorkflowDialog,
-  /** From the last layout (`buildWorkflowDialog`); 0 means the detail fits. */
-  maxDetailScroll = 0,
+  /** From the last layout (`buildWorkflowDialog`); the default is a detail that fits. */
+  pane: DetailPaneMetrics = { maxDetailScroll: 0, detailPageRows: 1 },
+  /** Page and jump keys, resolved through the user's keybindings as the conversation viewer's are. */
+  keys: ViewerKeys = createViewerKeys(),
 ): { state: WorkflowDialogState; action?: WorkflowDialogAction } | undefined {
+  const { maxDetailScroll } = pane;
   // Ctrl+C is the reflex for backing out of a full-screen overlay, so it closes
   // outright from EITHER level — the conversation viewer's #255 fix, which this
   // dialog is reached the same way as. Deliberately not folded into the `esc`
@@ -1091,27 +1132,51 @@ export function handleWorkflowDialogKey(
   // Back one level before out of the dialog: `esc` in the subview returns to
   // the overview, and only closes from there. Anything else would make a wrong
   // turn cost the whole dialog.
-  if (matchesKey(data, "escape") || matchesKey(data, "q")) {
-    if (state.level === "agent") return { state: { ...state, level: "phases", expanded: false, detailScroll: 0 } };
+  // A focused detail is the innermost level, so `esc` and `←` hand focus back
+  // to the agent list first — and fold the detail back to its compact view,
+  // undoing the expand that `→` did on the way in.
+  const focused = detailHasFocus(state, maxDetailScroll);
+  const back = matchesKey(data, "escape") || matchesKey(data, "q");
+  if (focused && (back || matchesKey(data, "left"))) {
+    return { state: { ...state, detailFocused: false, expanded: false, detailScroll: 0 } };
+  }
+  const toPhases = { ...state, level: "phases" as const, expanded: false, detailScroll: 0, detailFocused: false };
+  if (back) {
+    if (state.level === "agent") return { state: toPhases };
     return { state, action: { kind: "cancel" } };
   }
-  if (matchesKey(data, "left") && state.level === "agent") {
-    return { state: { ...state, level: "phases", expanded: false, detailScroll: 0 } };
+  if (matchesKey(data, "left") && state.level === "agent") return { state: toPhases };
+  // `→` goes into the detail: expanded, so there is all of it to read, and
+  // focused, so `↑↓` scroll it. Whether the expanded detail overflows is only
+  // known once the next layout has wrapped it; if it fits, `detailHasFocus`
+  // stays false and the arrows keep moving between agents.
+  if (matchesKey(data, "right") && state.level === "agent") {
+    return { state: { ...state, expanded: true, detailFocused: true, detailScroll: state.expanded ? state.detailScroll : 0 } };
   }
 
-  const arrowDown = matchesKey(data, "down");
-  const arrowUp = matchesKey(data, "up");
-  const scrollDown = matchesKey(data, "j");
-  const scrollUp = matchesKey(data, "k");
-  // In the subview j/k scroll the detail and the arrows move between agents,
-  // as in Claude Code. At the overview there is nothing to scroll, so both
-  // pairs move the phase cursor.
-  if (state.level === "agent" && (scrollDown || scrollUp)) {
-    const next = Math.min(Math.max(0, state.detailScroll + (scrollDown ? 1 : -1)), maxDetailScroll);
+  // Paging and jumps, with the conversation viewer's keys: `PgUp`/`PgDn` (or
+  // `shift+↑`/`shift+↓`) a page, `Home`/`End` the ends. Checked before the
+  // arrows, and active whether or not the detail has focus, since nothing else
+  // in the subview uses them.
+  if (state.level === "agent" && maxDetailScroll > 0) {
+    const scrollTo = (row: number) => ({ state: { ...state, detailScroll: Math.min(Math.max(0, row), maxDetailScroll) } });
+    if (keys.pageDown(data)) return scrollTo(state.detailScroll + pane.detailPageRows);
+    if (keys.pageUp(data)) return scrollTo(state.detailScroll - pane.detailPageRows);
+    if (keys.top(data) || matchesKey(data, "home")) return scrollTo(0);
+    if (keys.bottom(data) || matchesKey(data, "end")) return scrollTo(maxDetailScroll);
+  }
+
+  // `j`/`k` are `↓`/`↑`. At the overview they move the phase cursor; in the
+  // subview they move between agents, or scroll the detail once `→` has
+  // focused it.
+  const down = matchesKey(data, "j") || matchesKey(data, "down");
+  const up = matchesKey(data, "k") || matchesKey(data, "up");
+  if (focused && (down || up)) {
+    const next = Math.min(Math.max(0, state.detailScroll + (down ? 1 : -1)), maxDetailScroll);
     return { state: { ...state, detailScroll: next } };
   }
-  if (arrowDown || arrowUp || scrollDown || scrollUp) {
-    const delta = arrowDown || scrollDown ? 1 : -1;
+  if (down || up) {
+    const delta = down ? 1 : -1;
     if (state.level === "phases") {
       const next = clampIndex(view.clampedPhase + delta, view.groups.length);
       // Changing phase re-points the agent list at a different set of rows, so
@@ -1121,11 +1186,12 @@ export function handleWorkflowDialogKey(
     const next = clampIndex(view.clampedAgent + delta, view.visibleAgents.length);
     if (next === view.clampedAgent) return { state };
     // A different agent's detail starts at its top, collapsed.
-    return { state: { ...state, selectedAgent: next, expanded: false, detailScroll: 0 } };
+    return { state: { ...state, selectedAgent: next, expanded: false, detailScroll: 0, detailFocused: false } };
   }
 
   // One key, two jobs, because the two levels are what it means at each: open
   // the selected phase's agents, then expand the detail of the one you opened.
+  // `→` opens a phase too; in the subview it moves focus instead (above).
   if (matchesKey(data, "enter") || matchesKey(data, "right")) {
     if (state.level === "phases") {
       // Nothing to open, so nothing happens — entering an empty pane would
@@ -1194,8 +1260,8 @@ export class WorkflowDialog implements Component {
   private spinnerFrame = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
-  /** How far `j` may scroll, as of the last render. */
-  private maxDetailScroll = 0;
+  /** How far the detail may scroll, and its page size, as of the last render. */
+  private pane: DetailPaneMetrics = { maxDetailScroll: 0, detailPageRows: 1 };
 
   constructor(
     private tui: TUI,
@@ -1204,6 +1270,7 @@ export class WorkflowDialog implements Component {
     private done: (result: undefined) => void,
     private actions: WorkflowDialogActions = {},
     initialPhaseIndex = 0,
+    private keys: ViewerKeys = createViewerKeys(),
   ) {
     this.state = initialWorkflowDialogState(initialPhaseIndex);
     this.timer = setInterval(() => {
@@ -1215,7 +1282,7 @@ export class WorkflowDialog implements Component {
 
   handleInput(data: string): void {
     const input: WorkflowDialogInput = { ...this.source(), state: this.state };
-    const result = handleWorkflowDialogKey(data, this.state, resolveWorkflowDialog(input), this.maxDetailScroll);
+    const result = handleWorkflowDialogKey(data, this.state, resolveWorkflowDialog(input), this.pane, this.keys);
     if (!result) return;
     this.state = result.state;
     if (result.action) this.dispatch(result.action);
@@ -1223,7 +1290,7 @@ export class WorkflowDialog implements Component {
   }
 
   render(width: number): string[] {
-    const { lines, maxDetailScroll } = buildWorkflowDialog({
+    const { lines, maxDetailScroll, detailPageRows } = buildWorkflowDialog({
       ...this.source(),
       state: this.state,
       // Derived from what was actually injected, so the footer advertises only
@@ -1239,7 +1306,7 @@ export class WorkflowDialog implements Component {
       width,
       spinnerFrame: this.spinnerFrame,
     });
-    this.maxDetailScroll = maxDetailScroll;
+    this.pane = { maxDetailScroll, detailPageRows };
     return styleWorkflowCardLines(lines, this.theme);
   }
 

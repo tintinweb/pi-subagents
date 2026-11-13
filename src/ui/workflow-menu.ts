@@ -18,6 +18,7 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
 import { type AgentDetail, agentDetailFromMessages } from "../workflow/agent-detail.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
+import { createViewerKeys } from "./viewer-keys.js";
 import { WorkflowDialog } from "./workflow-dialog.js";
 
 /** Everything the menu and the inspector need from the extension around them. */
@@ -109,7 +110,7 @@ export async function showWorkflowDialog(
   let overlay: { setHidden(hidden: boolean): void } | undefined;
   const detail = createAgentDetailSource(deps.getRecord);
   await ctx.ui.custom<undefined>(
-    (tui, theme, _keybindings, done) =>
+    (tui, theme, keybindings, done) =>
       new WorkflowDialog(
         tui,
         // Re-read on every render: the run is in the background, so the
@@ -179,6 +180,9 @@ export async function showWorkflowDialog(
               .finally(() => overlay?.setHidden(false));
           },
         },
+        undefined,
+        // The conversation viewer's page and jump keys, so the two scroll alike.
+        createViewerKeys(keybindings),
       ),
     {
       overlay: true,

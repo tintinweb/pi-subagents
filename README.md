@@ -631,7 +631,7 @@ Send a steering message to a running agent. The message interrupts after the cur
  ↑↓ select · ⏎ open · f filter · x stop · esc close · c convo
 ```
 
-The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, and `esc` goes back a level rather than closing. At the overview `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. In the agent view `↑↓` move between agents and `j`/`k` scroll the detail, whose bottom edge reads `1–12 of 26 ↓` when it runs on:
+The overview puts the phases on the left (a phase shows its number until it finishes, then `✔`/`✘`) and the selected phase's agents on the right. `⏎` opens one: the agents move to the left pane and the right becomes that agent's **Prompt**, **Activity** and **Outcome**, and `esc` goes back a level rather than closing. At the overview `↑↓` (or `j`/`k`) move and `f` cycles the state filter, naming it in the pane title. In the agent view `↑↓` (or `j`/`k`) move between agents. `→` expands the detail and moves focus into it, its title turning the accent colour; `↑↓` then scroll it, and the bottom edge reads `1–12 of 26 ↓` when it runs on. `PgUp`/`PgDn` (or `shift+↑`/`shift+↓`) page it and `Home`/`End` jump to either end, the conversation viewer's keys, with or without focus. `←` or `esc` hand focus back to the agent list and fold the detail back to its compact view:
 
 ```
  ╭ Audit · 2 agents ┬ audit:src/a.ts ────────────────────────────────────────────────╮
@@ -648,7 +648,7 @@ The overview puts the phases on the left (a phase shows its number until it fini
  │                  │ Activity · 3 tool calls · ⏎ expand                             │
  │                  │   ⏺ Read(src/a.ts)                                             │
  ╰──────────────────┴───────────────────────────────────────────────── 1–12 of 26 ↓ ─╯
- ↑↓ agent · j/k scroll · ⏎ expand · p pause · x stop · esc back · c convo
+ ↑↓ agent · → scroll · ⏎ expand · p pause · x stop · esc back · c convo
 ```
 
 Collapsed, Activity lists the agent's most recent tool calls, one row each, with the glyph turning green or red as each result arrives. `⏎` (or `e`) expands all three sections at once: the full prompt, the transcript (assistant text, each call, and the first lines of its result), and the full outcome, pretty-printed when the agent returned structured output. These come from the child's session, so they are complete rather than the 200-character previews the progress log carries. Once a record is swept, ten minutes after it finishes, the sections fall back to those previews. The dialog opens as a centered overlay, like the conversation viewer in regular mode; the frame sizes itself to what it holds, between six rows and twenty-two, so a three-agent run is not twenty rows of nothing and a two-hundred-agent one scrolls inside the pane. Long titles truncate with `…` rather than tearing it. With more than one workflow in the session it asks which, newest first.
