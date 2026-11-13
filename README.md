@@ -877,7 +877,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 
 | Event | When | Key fields |
 |-------|------|------------|
-| `subagents:created` | Top-level: an `Agent`-tool background spawn, a detached resume, or a foreground `Agent` call handed to the background (after its `started`) — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started`. Owned (nested or workflow) agents: when the agent starts, just before its `started`, and again on each resume | [agent fields](#agent-fields); `isBackground` (always `true`) on top-level agents |
+| `subagents:created` | Top-level: an `Agent`-tool background spawn, a detached resume, or a foreground `Agent` call handed to the background — each after its `started`, unless the spawn queued — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started`. Owned (nested or workflow) agents: when the agent starts, just before its `started`, and again on each resume | [agent fields](#agent-fields); `isBackground` (always `true`) on top-level agents |
 | `subagents:started` | Agent transitions to running (including queued→running) | [agent fields](#agent-fields) |
 | `subagents:completed` | Agent finished successfully (background and foreground) | [agent fields](#agent-fields) |
 | `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | [agent fields](#agent-fields); `status` is `error`, `stopped` or `aborted` |

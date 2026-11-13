@@ -6,6 +6,29 @@ The thing worth understanding up front is that **the bus is in-process.** Every 
 
 For the channel list, the reply envelope, the per-channel snippets and the event table, see [`README.md`](../README.md#cross-extension-rpc). This document is the reference README does not have room for: the complete spawn-option surface, every error string, the notification race, the registry, and what protocol version `2` does and does not promise.
 
+## The surface at a glance
+
+Everything goes through `pi.events`. The lifecycle events push one agent shape, `SubagentInfo` (`toSubagentInfo` in `src/subagent-info.ts`). `get` and `list` pull the same shape, `spawn`, `steer`, `consume` and `stop` act on an agent, and every request is answered on its own `:reply:<requestId>` channel.
+
+```mermaid
+flowchart LR
+  subgraph you["Your extension"]
+    L["listener"]
+    C["caller"]
+  end
+  subgraph ext["pi-subagents"]
+    R["cross-extension-rpc.ts<br/>handlers"]
+    M["AgentManager<br/>top-level, nested, workflow records"]
+    I["toSubagentInfo()"]
+  end
+  C -- "subagents:rpc:ping / spawn / steer / consume / stop / get / list" --> R
+  R -- "subagents:rpc:CHANNEL:reply:REQUESTID<br/>{ success, data? } or { success: false, error }" --> C
+  R --> M
+  M --> I
+  I -- "subagents:created / started / completed /<br/>failed / steered / compacted" --> L
+  M -- "subagents:usage (per message)" --> L
+```
+
 ## Spawn options
 
 `subagents:rpc:spawn` forwards `options` to `AgentManager.spawn` — but not verbatim. The manager's `spawn` behind the RPC is `spawnTopLevel` in `src/index.ts`, which deletes internal-only fields first, and then `spawnResolved` overwrites the activity-tracker callbacks with its own. The full interface is `SpawnOptions` in `src/agent-manager.ts`; what a bus caller actually gets is three different things.
@@ -105,6 +128,25 @@ The wait is bounded by `STOP_SETTLE_TIMEOUT_MS` (5 s, `src/cross-extension-rpc.t
 
 `reply.success` means what it always did; `data.settled` is additive, and a caller that never reads it sees only a later reply.
 
+```mermaid
+sequenceDiagram
+  participant C as Caller
+  participant M as AgentManager
+  participant A as Stopped agent
+  participant N as Its nested child
+  C->>M: subagents:rpc:stop { agentId }
+  M->>A: abort() marks it stopped
+  M->>M: waitForSettled(agentId, STOP_SETTLE_TIMEOUT_MS) starts
+  Note over N: in a tool call that ignores the abort
+  A-->>M: run settles, abortOwnedChildren aborts N
+  M-->>C: subagents:failed for A (unchanged timing)
+  N-->>M: tool call returns, run settles
+  M-->>C: reply { success: true, data: { settled: true } }
+  Note over C: start replacement work here, not on subagents:failed
+```
+
+If the bound passes before the last run settles, the reply is `{ settled: false }`. A second stop then answers `Agent is not running`, and `status` already reads `stopped`, so there is currently no bus call to keep waiting.
+
 ## Ownership
 
 `isTopLevelAgent(record)` is `parentAgentId === undefined && workflowId === undefined` (`src/agent-manager.ts`). `subagents:rpc:stop` and `subagents:rpc:steer` enforce it through one shared check (`assertOwned` in `src/cross-extension-rpc.ts`): a nested child or a workflow's agent is owned by something that is *waiting on it*, and aborting or redirecting it out from under that owner turns another extension's request into a failed step. It is a live boundary: the lifecycle events and `subagents:rpc:list` hand out every agent's id, owned ones included. Reads (`get`, `list`) take no guard.
@@ -115,6 +157,24 @@ Two asymmetries to know about, stated as they are:
 - **Consume checks `parentAgentId` but not `workflowId`** (`consumeResult`, `src/index.ts`). A workflow-owned agent's result can be marked consumed over the bus even though the same agent cannot be stopped.
 
 The lifecycle events are **not** scoped by it. `subagents:created`, `:started`, `:completed`, `:failed`, `:steered` and `:compacted` fire for nested and workflow-owned agents too, carrying `parentAgentId` or `workflowId` (#442). Filter on both being absent to keep only the session's own agents; through 0.24 that was all the events carried. The `isTopLevelAgent` checks in the `AgentManager` callbacks (`src/index.ts`) still keep owned agents out of everything after the emit: notifications, the saved `subagents:record`, and the widget. An owned agent's `subagents:created` fires when it starts, since it never queues, and again on each resume.
+
+What reaches which kind of agent:
+
+```mermaid
+flowchart TB
+  subgraph top["Top-level agent: isTopLevelAgent true"]
+    T1["lifecycle events"]
+    T2["get / list"]
+    T3["stop / steer / consume"]
+    T4["completion notification, subagents:record entry, widget"]
+  end
+  subgraph owned["Owned agent: parentAgentId or workflowId set"]
+    O1["lifecycle events, with owner fields"]
+    O2["get / list, with owner fields"]
+    O3["stop / steer: refused by assertOwned"]
+    O4["no notification, no subagents:record, no widget row"]
+  end
+```
 
 **`subagents:disposed` is the last event of a session.** It is emitted at the end of this extension's `session_shutdown`, after every agent is stopped and every child session has shut down, so no `subagents:usage` can follow it. A listener gets only its synchronous prefix on quit: `pi.events.emit` does not await listeners, and pi calls `process.exit` once the shutdown handlers return. Flush with `writeFileSync`, not `fs.promises`. Fields, and the other events, are in README's [event table](../README.md#events).
 
@@ -129,6 +189,23 @@ When a background agent finishes, pi-subagents sends the user a completion notif
 1. The agent settles, and the manager's completion callback in `src/index.ts` emits `subagents:completed`.
 2. Next, in the same synchronous callback, it checks `record.resultConsumed` and decides whether to notify at all.
 3. `pi.events` dispatch is synchronous and in-process, so a handler that emits `subagents:rpc:consume` **without awaiting anything** has already set that flag before step 2 evaluates.
+
+```mermaid
+sequenceDiagram
+  participant M as AgentManager
+  participant X as pi-subagents completion callback
+  participant Y as Your listener
+  participant O as Completion outbox
+  participant P as Parent session
+  M->>X: agent settles
+  X->>Y: emit subagents:completed
+  Y->>X: emit subagents:rpc:consume (sync, sets resultConsumed)
+  X->>X: resultConsumed? then notify nothing
+  Note over X,O: otherwise
+  X->>O: queue notification
+  Y-->>O: consume after an await cancels it here
+  O->>P: sent 200 ms later if idle (starts a turn), or at turn_end if busy
+```
 
 | When you consume | What happens |
 |---|---|
@@ -153,6 +230,30 @@ It takes an id only, enforces the same top-level ownership guard as stop, and an
 `subagents:rpc:get` `{ requestId, agentId }` replies `{ agent }`, and `subagents:rpc:list` `{ requestId }` replies `{ agents }`. Both return the [agent fields](../README.md#agent-fields) the lifecycle events carry, built by the same `toSubagentInfo` (`src/subagent-info.ts`). They are for a listener that joined after the events it needed had already fired. `list` returns every record the manager holds, in any status and owned agents included, so filter on `status`, `parentAgentId` and `workflowId` yourself. A record stays readable until the manager drops it: 10 minutes after it settles (`cleanup` in `src/agent-manager.ts`), or earlier at a session start or switch if its result was consumed (`clearCompleted(true)`, which keeps unconsumed records). After that, `get` answers `Agent not found`, and only a top-level agent's persisted `subagents:record` session entry remains. Both are outside the `ping` version handshake, like `consume` and `steer`.
 
 They add one field the events cannot carry: `notificationPending: true` while a settled top-level agent's completion is still on its way to the parent (`isNotificationPending` in the `session_start` RPC wiring, `src/index.ts`). The notification waits in one of three places: the completion outbox (200 ms on an idle parent, until `turn_end` on a busy one, through an Esc), a `group` holding it for its siblings (up to 30 s), or a `group` spawn whose turn has not ended yet. When it is sent it starts a parent turn. So `hasRunning()` and every `status` read `completed` while a turn is still coming, which is the race in [#103](https://github.com/tintinweb/pi-subagents/issues/103). An orchestrator deciding whether to inject its own prompt treats an agent as active while it is `running`, `queued`, or `notificationPending`. The field is absent once the result has been read, since a read result is never notified, and on owned agents.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Running
+  Running --> Held: settles with isBackground true, result unread
+  Running --> Done: settles without isBackground (foreground, or an RPC spawn that left it unset), or is owned
+  Held --> Delivered: notification sent to the parent
+  Held --> Read: consume, or get_subagent_result
+  Delivered --> [*]
+  Read --> [*]
+  Done --> [*]
+  note right of Held
+    notificationPending is true only here.
+    outbox.has, groupJoin.isHolding, or turnGroupSpawns.
+  end note
+```
+
+The check, with `agents` from a `list` reply:
+
+```typescript
+const active = agents.some((a) =>
+  a.parentAgentId === undefined && a.workflowId === undefined &&
+  (a.status === "running" || a.status === "queued" || a.notificationPending));
+```
 
 ## The manager registry
 
@@ -185,7 +286,7 @@ So: send `consume` unconditionally and ignore the outcome — an older build has
 
 The consequence is worth stating plainly: **a session that excludes pi-subagents is indistinguishable from pi-subagents not being installed.** It emits no `subagents:ready` and answers nothing. Give discovery a timeout and treat expiry as "not available here" rather than waiting indefinitely. The payload is `{}` — read nothing off it. Handlers are torn down and `rpcHandle` reset in the `session_shutdown` handler, so a later `session_start` re-registers and re-emits.
 
-One more trap on the way in: an RPC-spawned agent emits **no `subagents:created`**. The only three emit sites, all in `src/index.ts`, are the `Agent` tool's `run_in_background` branch, a detached resume (`startBackgroundResume`), and a foreground `Agent` call handed to the background with ctrl+b or the viewer's `b` (`sendForegroundToBackground`) — that one fires after the agent's `subagents:started`, as resume does. Your first event for your own agent is `subagents:started` (the manager's start callback), so key your bookkeeping off the id that `spawn` handed you, not off `subagents:created`.
+One more trap on the way in: an RPC-spawned agent emits **no top-level `subagents:created`**. The only three emit sites, all in `src/index.ts`, are the `Agent` tool's `run_in_background` branch, a detached resume (`startBackgroundResume`), and a foreground `Agent` call handed to the background with ctrl+b or the viewer's `b` (`sendForegroundToBackground`). All three fire after the agent's `subagents:started`, unless the spawn queued: each emits `created` only after startup, which is where the manager's start callback emits `started`. Owned agents are announced separately, `created` then `started`, when they start. Your first event for your own agent is `subagents:started` (the manager's start callback), so key your bookkeeping off the id that `spawn` handed you, not off `subagents:created`.
 
 ## What the tests pin
 
