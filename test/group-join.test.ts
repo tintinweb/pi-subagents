@@ -47,6 +47,28 @@ describe("GroupJoinManager", () => {
     expect(deliver).not.toHaveBeenCalled();
   });
 
+  it("isHolding names a completed member until its group is delivered", () => {
+    const mgr = new GroupJoinManager(vi.fn(), 30_000);
+    mgr.registerGroup("g", ["a", "b"]);
+    expect(mgr.isHolding("a"), "still running").toBe(false);
+
+    mgr.onAgentComplete(makeRecord("a"));
+    expect(mgr.isHolding("a")).toBe(true);
+    expect(mgr.isHolding("b")).toBe(false);
+
+    mgr.onAgentComplete(makeRecord("b"));
+    expect(mgr.isHolding("a")).toBe(false);
+  });
+
+  it("isHolding releases a member at the partial delivery on timeout", () => {
+    const mgr = new GroupJoinManager(vi.fn(), 30_000);
+    mgr.registerGroup("g", ["a", "b"]);
+    mgr.onAgentComplete(makeRecord("a"));
+
+    vi.advanceTimersByTime(30_000);
+    expect(mgr.isHolding("a")).toBe(false);
+  });
+
   it("delivers all records (partial=false) when the final completion arrives in time", () => {
     const deliver = vi.fn();
     const mgr = new GroupJoinManager(deliver);

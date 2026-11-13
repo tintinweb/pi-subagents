@@ -59,6 +59,12 @@ export interface SpawnCapable {
   /** Every record the manager holds, owned agents included, any status. */
   listAgents(): AgentRecord[];
   /**
+   * Whether the agent has settled but the parent has not been sent its
+   * completion notification yet — still held for the parent's next boundary
+   * or for its `group`. A notification that will start a parent turn.
+   */
+  isNotificationPending(id: string): boolean;
+  /**
    * Mark a settled agent's result as read by the caller, suppressing the
    * completion notification — what `get_subagent_result` does when it returns
    * one. False when there is no such agent, or it has not settled yet.
@@ -243,17 +249,29 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // agents are included: they carry `parentAgentId` / `workflowId` exactly as
   // on the events, and the caller filters. `assertOwned` guards only the
   // mutations. Outside the ping version handshake, like consume and steer.
+  //
+  // Snapshots also say what the events cannot: `notificationPending`, set while
+  // a settled agent's completion is still on its way to the parent. An
+  // orchestrator that waits for "nothing active" must wait for it too, or the
+  // notification starts a parent turn right after it concluded none would
+  // (#103). Not on the events: `completed` fires before the notification is
+  // queued, so there it would always read false.
+  const snapshot = (record: AgentRecord, now?: number) => ({
+    ...toSubagentInfo(record, now),
+    ...(manager.isNotificationPending(record.id) ? { notificationPending: true } : {}),
+  });
+
   const unsubGet = handleRpc<{ requestId: string; agentId: string }>(
     events, "subagents:rpc:get", ({ agentId }) => {
       const record = manager.getRecord(agentId);
       if (!record) throw new Error("Agent not found");
-      return { agent: toSubagentInfo(record) };
+      return { agent: snapshot(record) };
     },
   );
 
   const unsubList = handleRpc(events, "subagents:rpc:list", () => {
     const now = Date.now();
-    return { agents: manager.listAgents().map(record => toSubagentInfo(record, now)) };
+    return { agents: manager.listAgents().map(record => snapshot(record, now)) };
   });
 
   return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubGet, unsubList };

@@ -835,6 +835,16 @@ export default function (pi: ExtensionAPI) {
           awaitStartup: (id) => manager.awaitStartup(id),
           getRecord: (id) => manager.getRecord(id),
           listAgents: () => manager.listAgents(),
+          isNotificationPending: (id) => {
+            const record = manager.getRecord(id);
+            // Owned agents are never notified, and a read result never will be.
+            if (!record || !isTopLevelAgent(record) || record.resultConsumed) return false;
+            if (record.status === "running" || record.status === "queued") return false;
+            // The three places a settled agent's completion waits: the outbox,
+            // a `group` holding it for its siblings, and a `group` spawn whose
+            // turn has not ended yet (see the manager's onComplete).
+            return outbox.has(id) || groupJoin.isHolding(id) || turnGroupSpawns.includes(id);
+          },
           // Unguarded on purpose: the stop handler now runs the top-level check
           // itself off `getRecord`, and reports the refusal instead of the
           // "Agent not found" a false from here used to be read as.

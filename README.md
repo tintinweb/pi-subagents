@@ -1021,7 +1021,17 @@ pi.events.emit("subagents:rpc:list", { requestId: crypto.randomUUID() });
 // reply data: { agents: SubagentInfo[] }
 ```
 
-Both return the same [agent fields](#agent-fields) the lifecycle events carry. Unlike stop and steer, neither takes an ownership guard: nested and workflow agents are included, with `parentAgentId` or `workflowId` set, and `list` returns every status, so filter on those fields yourself. A record stays readable for 10 minutes after the agent settles. A consumed one is dropped earlier, at the next session start or switch. After that, `get` answers `Agent not found`.
+Both return the same [agent fields](#agent-fields) the lifecycle events carry. Unlike stop and steer, neither takes an ownership guard: nested and workflow agents are included, with `parentAgentId` or `workflowId` set, and `list` returns every status, so filter on those fields yourself. A record stays readable for 10 minutes after the agent settles.
+
+Both also set `notificationPending: true` on a settled agent whose completion notification has not reached the parent yet. It is still held for the parent's next boundary, or for the rest of its `group`, and starts a parent turn when it is sent. An extension that resumes the parent once nothing is active should wait for it too:
+
+```typescript
+const active = agents.some(a =>
+  a.parentAgentId === undefined && a.workflowId === undefined &&
+  (a.status === "running" || a.status === "queued" || a.notificationPending));
+```
+
+The field is absent on owned agents, which are never notified, and on an agent whose result was read with `subagents:rpc:consume` or `get_subagent_result`. It is not on the lifecycle events: `subagents:completed` fires before the notification is queued. A consumed one is dropped earlier, at the next session start or switch. After that, `get` answers `Agent not found`.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 

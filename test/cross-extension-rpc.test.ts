@@ -35,6 +35,7 @@ describe("cross-extension RPC", () => {
       waitForSettled: vi.fn().mockResolvedValue(true),
       getRecord: vi.fn().mockReturnValue({}),
       listAgents: vi.fn().mockReturnValue([]),
+      isNotificationPending: vi.fn().mockReturnValue(false),
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
     };

@@ -273,6 +273,93 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     }
   });
 
+  // #103: an orchestrator that resumes the parent once "nothing is active"
+  // must also wait out a finished agent's held notification, which starts a
+  // parent turn of its own when it is sent.
+  it("subagents:rpc:list marks a finished agent whose notification is still held", async () => {
+    const { pi, tools, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+    await lifecycle.get("session_start")({}, ctx());
+    vi.mocked(runAgent).mockResolvedValue({ responseText: "done", session: { dispose: vi.fn(), messages: [] }, aborted: false, steered: false } as any);
+    const agents = async (requestId: string) => {
+      await busHandlers.get("subagents:rpc:list")!({ requestId });
+      return pi.events.emit.mock.calls.find((c: any[]) => c[0] === `subagents:rpc:list:reply:${requestId}`)![1].data.agents;
+    };
+    try {
+      const spawn = async (description: string) => {
+        await tools.get("Agent").execute(`tc-${description}`, { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx());
+        await new Promise((r) => setTimeout(r, 0));
+      };
+      await spawn("unread");
+      const [held] = await agents("req-103-held");
+      expect(held).toMatchObject({ status: "completed", notificationPending: true });
+
+      await new Promise((r) => setTimeout(r, 300));
+      expect(pi.sendMessage).toHaveBeenCalled();
+      const [sent] = await agents("req-103-sent");
+      expect(sent).not.toHaveProperty("notificationPending");
+
+      // A result the caller has already read is never notified.
+      await spawn("read");
+      const read = (await agents("req-103-pre")).find((a: any) => a.description === "read");
+      await busHandlers.get("subagents:rpc:consume")!({ requestId: "req-103-consume", agentId: read.id });
+      const consumed = (await agents("req-103-read")).find((a: any) => a.id === read.id);
+      expect(consumed).not.toHaveProperty("notificationPending");
+    } finally {
+      await lifecycle.get("session_shutdown")();
+    }
+  });
+
+  it("subagents:rpc:list marks a `group` member held for its turn or its siblings, unless already read", async () => {
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultJoinMode: "group" }));
+    const { pi, tools, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+    // A parent turn is in flight while `signal` is set: group spawns made now
+    // are joined at that turn's end.
+    const session = ctx();
+    session.signal = new AbortController().signal;
+    await lifecycle.get("session_start")({}, session);
+    // "gated" finishes when the test opens the gate, after its spawn has
+    // returned and joined the turn's group, as a real agent always does.
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => { openGate = resolve; });
+    vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, prompt: any) => {
+      if (prompt === "slow") await new Promise(() => {});
+      if (prompt === "gated") await gate;
+      return { responseText: "done", session: { dispose: vi.fn(), messages: [] }, aborted: false, steered: false } as any;
+    });
+    const spawn = async (description: string, prompt: string) => {
+      const result = await tools.get("Agent").execute(`tc-${description}`, { prompt, description, subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, session);
+      await new Promise((r) => setTimeout(r, 0));
+      return result.content[0].text.match(/Agent ID: (\S+)/)![1] as string;
+    };
+    let n = 0;
+    const pending = async (id: string) => {
+      const requestId = `req-103-g${n++}`;
+      await busHandlers.get("subagents:rpc:get")!({ requestId, agentId: id });
+      return pi.events.emit.mock.calls.find((c: any[]) => c[0] === `subagents:rpc:get:reply:${requestId}`)![1].data.agent.notificationPending;
+    };
+    try {
+      // Finished before its turn ended: deferred until the turn's group exists.
+      const read = await spawn("read", "gated");
+      await spawn("first-slow", "slow");
+      openGate();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(await pending(read)).toBe(true);
+      await busHandlers.get("subagents:rpc:consume")!({ requestId: "req-103-consume", agentId: read });
+      expect(await pending(read), "a read result is never notified").toBeUndefined();
+      await lifecycle.get("turn_end")({ message: { role: "assistant", stopReason: "toolUse" } }, session);
+
+      // Finished, while its group waits for a sibling still running.
+      const held = await spawn("held", "fast");
+      await spawn("second-slow", "slow");
+      await lifecycle.get("turn_end")({ message: { role: "assistant", stopReason: "toolUse" } }, session);
+      expect(await pending(held)).toBe(true);
+    } finally {
+      await lifecycle.get("session_shutdown")();
+    }
+  });
+
   it("renders an RPC-spawned agent in the native widget while it is running", async () => {
     const { pi, lifecycle, busHandlers } = makePi();
     const activeCtx = ctx(true);
