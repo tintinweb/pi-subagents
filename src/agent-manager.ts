@@ -12,6 +12,9 @@
  * session of work it could have done itself. Excess agents in either pool are
  * queued and auto-started as slots free up. Nested children take no slot in
  * either — see `occupiesPoolSlot` / `occupiesForegroundSlot`.
+ *
+ * Nested children are bounded by `maxConcurrentNested` instead, which refuses
+ * rather than queues — see `spawn`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -45,7 +48,8 @@ export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void
  * double-booked into ancestors (see `nested-tools.ts`) so a hidden child's spend
  * shows up on the record a human can see, which makes those records useless as
  * a basis for anything that must not count a message twice — parent-session
- * accounting above all.
+ * accounting above all. (`AgentRecord.ownUsage` is the per-record figure that
+ * is not double-booked.)
  */
 export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
@@ -73,6 +77,13 @@ const DEFAULT_MAX_CONCURRENT = 10;
  * cache (#253) — opt in; everyone else keeps today's behaviour exactly.
  */
 const DEFAULT_MAX_CONCURRENT_FOREGROUND = 0;
+
+/**
+ * Default cap on running nested children. Added to a full background pool
+ * (`DEFAULT_MAX_CONCURRENT`) it gives 20, Claude Code's default for
+ * `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS`.
+ */
+const DEFAULT_MAX_CONCURRENT_NESTED = 10;
 
 /**
  * How many evicted agents stay addressable by name. Only a bound on memory —
@@ -108,9 +119,7 @@ function assertValidSpawnCwd(cwd: unknown): asserts cwd is string | undefined | 
  * Nested children don't: their parent already holds a slot, so counting (and
  * therefore queueing) them would deadlock a parent that waits on its own child.
  *
- * Note this bounds nothing horizontally — the depth cap limits how DEEP nesting
- * goes, not how WIDE. A parent's only limit on concurrent children is that each
- * spawn costs it a turn, which is unbounded when max turns is unlimited.
+ * How WIDE nesting goes is bounded by `maxConcurrentNested` — see `spawn`.
  */
 function occupiesPoolSlot(
   record: Pick<AgentRecord, "isBackground" | "parentAgentId" | "workflowId">,
@@ -122,10 +131,12 @@ function occupiesPoolSlot(
  * Whether a record is one of the session's own agents, rather than something
  * another agent or a workflow owns.
  *
- * The single definition behind every user-facing surface — the fleet list, the
- * widget, the `/agents` menus, `@handle` resolution, and the completion events
- * and session entries. An owned child reports through its owner, so surfacing
- * it separately would double-count the same work in the places a person reads.
+ * The single definition behind the user-facing surfaces — the widget, `@handle`
+ * resolution, and the completion events and session entries. An owned child
+ * reports through its owner, so surfacing it separately would double-count the
+ * same work in the places a person reads. FleetView and `/agents → Running
+ * agents` are the exceptions: they list Agent-tool children under their parent
+ * (`agentTree`), with no rolled-up figures to double-count.
  */
 export function isTopLevelAgent(
   record: Pick<AgentRecord, "parentAgentId" | "workflowId">,
@@ -388,6 +399,7 @@ export class AgentManager {
   private onSteered?: OnAgentSteered;
   private maxConcurrent: number;
   private maxConcurrentForeground = DEFAULT_MAX_CONCURRENT_FOREGROUND;
+  private maxConcurrentNested = DEFAULT_MAX_CONCURRENT_NESTED;
   /** Base repos worktrees were created from — so dispose() can prune them all,
    *  not just the parent repo (caller-supplied cwd can target other repos). */
   private worktreeRepos = new Set<string>();
@@ -474,6 +486,29 @@ export class AgentManager {
     return this.maxConcurrentForeground;
   }
 
+  /** Update the cap on running nested children, over which nested spawns are refused. 0 = unlimited. */
+  setMaxConcurrentNested(n: number) {
+    // Nothing queues on this cap, so a change has nothing to drain.
+    this.maxConcurrentNested = Math.max(0, n);
+  }
+
+  getMaxConcurrentNested(): number {
+    return this.maxConcurrentNested;
+  }
+
+  /**
+   * Running nested children outside workflows — what `maxConcurrentNested`
+   * caps. Read from the records rather than kept as a counter, so no start or
+   * settle path can leak a slot.
+   */
+  private runningNestedCount(): number {
+    let n = 0;
+    for (const record of this.agents.values()) {
+      if (record.status === "running" && record.parentAgentId !== undefined && record.workflowId === undefined) n++;
+    }
+    return n;
+  }
+
   /**
    * Which pool a spawn is charged to, or undefined for one that is charged to
    * neither (nested children, detached non-background spawns).
@@ -519,6 +554,25 @@ export class AgentManager {
     // can fix and retry; the RPC layer converts throws into error envelopes.
     assertValidSpawnCwd(options.cwd);
 
+    // Nested fan-out is capped by refusing, not queueing: a nested child cannot
+    // queue — its parent waits on it while holding a slot — so refusing is the
+    // only bound that cannot deadlock. The parent is told to do the work itself,
+    // as Claude Code tells it over CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS. Only
+    // nested children count; top-level agents have their pools, and a
+    // workflow's agents the run's own cap.
+    if (
+      options.parentAgentId !== undefined &&
+      options.workflowId === undefined &&
+      this.maxConcurrentNested > 0 &&
+      this.runningNestedCount() >= this.maxConcurrentNested
+    ) {
+      throw new Error(
+        `Concurrent nested subagent limit reached. You can run ${this.maxConcurrentNested} nested subagents at once. Do not retry. ` +
+          "Complete this task directly with your tools, or if the user wants more, " +
+          "ask them to raise maxConcurrentNested in /agents → Settings.",
+      );
+    }
+
     // A reclaimed id must not be live: the record would replace the one in the
     // map, orphaning its run beyond the reach of stop and `abortAll()`.
     // Callers reopen only what they found evicted; this keeps that true.
@@ -553,6 +607,7 @@ export class AgentManager {
       startedAt: Date.now(),
       abortController,
       lifetimeUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
+      ownUsage: { input: 0, output: 0, cacheWrite: 0, cost: 0 },
       compactionCount: 0,
       // Raw tri-state (not coerced to a boolean): true = background, false =
       // foreground (has an inline tool-result surface), undefined = caller never
@@ -853,6 +908,7 @@ export class AgentManager {
       onTextDelta: options.onTextDelta,
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
+        addUsage(record.ownUsage, usage);
         this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
       },
@@ -1286,6 +1342,7 @@ export class AgentManager {
         },
         onAssistantUsage: (usage) => {
           addUsage(record.lifetimeUsage, usage);
+          addUsage(record.ownUsage, usage);
           this.onUsage?.(record, usage);
           options?.onAssistantUsage?.(usage);
         },
@@ -1408,6 +1465,7 @@ export class AgentManager {
       },
       onAssistantUsage: (usage) => {
         addUsage(record.lifetimeUsage, usage);
+        addUsage(record.ownUsage, usage);
         this.onUsage?.(record, usage);
         options.onAssistantUsage?.(usage);
       },

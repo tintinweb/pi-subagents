@@ -314,7 +314,7 @@ These are three different things and are easy to conflate: 1000 is a budget for 
 
 Above 25 scheduled agents, or 1.5M tokens actual or projected, the card adds `⚠ Large workflow · /agents → Workflows to stop`.
 
-A run's concurrency limit is its own, independent of the session's `maxConcurrent` and `maxConcurrentForeground` pools — its agents do not enter either.
+A run's concurrency limit is its own, independent of the session's `maxConcurrent` and `maxConcurrentForeground` pools — its agents do not enter either, and do not count toward `maxConcurrentNested`. Nested children that a workflow agent spawns through `allowed_subagents` do count, and are refused over that limit.
 
 ### Settings and the CLI flag
 

@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { initTheme, type ToolInfo } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -159,11 +160,17 @@ describe("workflow tool exposure wiring", () => {
           selected = true;
           return "Settings";
         }),
-        custom: vi.fn(async (factory: (tui: object, theme: object, keys: object, done: () => void) => { handleInput: (data: string) => void }) => {
+        custom: vi.fn(async (factory: (tui: object, theme: object, keys: object, done: () => void) => { render: (width: number) => string[]; handleInput: (data: string) => void }) => {
           const list = factory({}, {}, {}, () => {});
-          for (let row = 0; row < 8; row++) list.handleInput("\u001b[B");
-          list.handleInput(" ");
-          return undefined;
+          for (let row = 0; row < 100; row++) {
+            const selected = list.render(120).map(stripVTControlCharacters).find(line => line.startsWith("→ "));
+            if (selected?.startsWith("→ Workflows ")) {
+              list.handleInput(" ");
+              return undefined;
+            }
+            list.handleInput("\u001b[B");
+          }
+          throw new Error("Workflows setting not found");
         }),
       },
     });

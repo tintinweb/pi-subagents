@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-11-12
+
+> **⚠️ Behavior change — nested spawns are refused once 10 nested subagents are running** ([#427](https://github.com/tintinweb/pi-subagents/pull/427)). Only agents with `allowed_subagents` are affected; the parent gets a tool error and does the work itself. To restore the unbounded behavior, set `/agents → Settings → Max nested concurrency` (`maxConcurrentNested`) to `0`.
+
+> **⚠️ Behavior change — FleetView rows show each agent's own tokens, and the selection is marked `❯`.** A parent that delegates now shows a smaller figure in FleetView, because its nested children are listed with their own; every other surface still reports the rolled-up total. `●` now marks the view in front (`main` or the open agent) instead of the selection, as in Claude Code. In fullscreen mode a left press on a fleet row opens that agent instead of starting a text selection.
+
+### Changed
+- **`showModel` now also names the model on the fleet view rows, and both surfaces show the bare thinking level** ([#445](https://github.com/tintinweb/pi-subagents/issues/445)). The fleet row carried only the agent type, description, elapsed and tokens, so two same-type agents differing only by model or thinking level were indistinguishable without opening each viewer; with `showModel` on, each row now names the model and level after the description. The level renders bare (`sonnet 4.6 · high`) on both the fleet row and the widget running line, dropping the earlier `thinking:` label; the `Agent` tool result and conversation viewer keep the labelled form.
+
+### Added
+- **`maxConcurrentNested` caps how many nested subagents run at once** ([#427](https://github.com/tintinweb/pi-subagents/pull/427), part of [#352](https://github.com/tintinweb/pi-subagents/issues/352)). Nested children skip both queueing pools, so nothing bounded a parent's fan-out. A nested spawn over the limit (default `10`, `0` = unlimited) is refused rather than queued, since queueing a child behind its waiting parent would deadlock. Top-level and workflow agents neither count nor are refused. In `/agents → Settings`, "Max concurrency" is now "Max background concurrency", next to the new "Max nested concurrency" and "Nested depth".
+- **FleetView lists nested subagents under their parent, with a `❯` cursor and mouse support.** Agents spawned through `allowed_subagents` were hidden from every surface, so a delegating agent's fan-out was invisible until it returned. They now appear indented under their parent (`├`/`└`), and open, steer and stop like any other row. In fullscreen mode, hovering a row moves the cursor and clicking opens it. `/agents → Running agents` lists them the same way, and keeps a finished child there after FleetView drops it. Workflow agents stay in the workflow inspector. New `AgentRecord.ownUsage` holds an agent's spend without its descendants'.
+
+## [0.23.2] - 2026-11-10
+
+### Added
+- **Partial README translations in Simplified Chinese, Japanese and Korean** (`README.zh-CN.md`, `README.ja.md`, `README.ko.md`). They cover the intro, Features, Install, Quick Start and the `/agents` command, and link to the English `README.md` for everything else. A language switcher sits at the top of each README.
+
+### Fixed
+
+- **Conversation viewer honors `tui.altScreen.top`/`tui.altScreen.bottom`.** The fullscreen observer's scroll-to-top and jump-to-latest keys, and the jump-to-latest divider label, now resolve through your keybindings the way its scroll and expand keys already did. Remapping those actions in `keybindings.json` no longer leaves the observer on the stock `Ctrl+Home`/`Ctrl+End` while the main transcript uses the remap. `Home`/`End` keep working as aliases, and `Ctrl+Home`/`Ctrl+End` now also scroll in the windowed viewer ([#438](https://github.com/tintinweb/pi-subagents/issues/438)).
+
 ## [0.23.1] - 2026-11-04
 
 ### Added

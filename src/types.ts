@@ -249,8 +249,18 @@ export interface AgentRecord {
    * Lifetime usage breakdown, accumulated via `message_end` events. Survives
    * compaction. Total = input + output + cacheWrite (cacheRead deliberately
    * excluded — see issue #38). Initialized to zeros at spawn.
+   *
+   * Includes every descendant's spend: `nested-tools.ts` folds a nested
+   * child's turns into all its ancestors, because the child itself is hidden
+   * from the surfaces that read this field.
    */
   lifetimeUsage: LifetimeUsage;
+  /**
+   * This agent's own turns only — `lifetimeUsage` minus its descendants. What
+   * the fleet list shows, since it gives nested children rows of their own and
+   * the rolled-up figure would count their spend twice.
+   */
+  ownUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
   /**

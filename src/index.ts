@@ -42,6 +42,7 @@ import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitCh
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
+import { agentTree } from "./ui/agent-tree.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -438,10 +439,10 @@ export default function (pi: ExtensionAPI) {
   let showCost = false;
   function isShowCostEnabled(): boolean { return showCost; }
   function setShowCost(b: boolean): void { showCost = b; widget.update(); fleet.update(); }
-  /** Name the model and thinking level on the widget's running rows. */
+  /** Name the model and thinking level on the widget's running rows and the fleet rows. */
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
-  function setShowModel(b: boolean): void { showModel = b; widget.update(); }
+  function setShowModel(b: boolean): void { showModel = b; widget.update(); fleet.update(); }
   /**
    * How much of the conversation viewer renders as Markdown. Read through a
    * getter by the viewer rather than captured like `showCost`, because the
@@ -1284,7 +1285,7 @@ export default function (pi: ExtensionAPI) {
   // one opened from `/agents`: same settings on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    getFullscreenScrollbar, backgroundActionFor);
+    getFullscreenScrollbar, backgroundActionFor, isShowModelEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -1567,6 +1568,7 @@ export default function (pi: ExtensionAPI) {
     {
       setMaxConcurrent: (n) => manager.setMaxConcurrent(n),
       setMaxConcurrentForeground: (n) => manager.setMaxConcurrentForeground(n),
+      setMaxConcurrentNested: (n) => manager.setMaxConcurrentNested(n),
       setDefaultMaxTurns,
       setGraceTurns,
       setDefaultJoinMode,
@@ -3246,7 +3248,7 @@ Terse command-style prompts produce shallow, generic work.
     const options: string[] = [];
 
     // Running agents entry (only if there are active agents)
-    const agents = manager.listAgents().filter(isTopLevelAgent);
+    const agents = runningAgentsRoster().map(row => row.record);
     if (agents.length > 0) {
       const running = agents.filter(a => a.status === "running" || a.status === "queued").length;
       const done = agents.filter(a => a.status === "completed" || a.status === "steered").length;
@@ -3374,9 +3376,19 @@ Terse command-style prompts produce shallow, generic work.
     }
   }
 
+  /**
+   * The session's agents plus their nested children, as a tree (newest
+   * top-level first). Nested children are listed here as in FleetView: this
+   * list keeps finished agents until eviction, so it is where a finished child
+   * stays reachable. Workflow agents stay in the workflow inspector.
+   */
+  function runningAgentsRoster() {
+    return agentTree(manager.listAgents().filter(a => a.workflowId === undefined));
+  }
+
   async function showRunningAgents(ctx: ExtensionCommandContext) {
-    const agents = manager.listAgents().filter(isTopLevelAgent);
-    if (agents.length === 0) {
+    const rows = runningAgentsRoster();
+    if (rows.length === 0) {
       ctx.ui.notify("No agents.", "info");
       return;
     }
@@ -3384,12 +3396,13 @@ Terse command-style prompts produce shallow, generic work.
     // Numbered + item-paired. Two same-type agents spawned together with the
     // same description render identically here, and resolving the choice by
     // string match would open whichever came first.
-    const record = await selectItem(ctx.ui, "Running agents", agents, a => {
+    const row = await selectItem(ctx.ui, "Running agents", rows, ({ record: a, prefix }) => {
       const dn = getDisplayName(a.type);
       const dur = formatDuration(a.startedAt, a.completedAt);
-      return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
+      return `${prefix}${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
-    if (!record) return;
+    if (!row) return;
+    const record = row.record;
 
     await viewAgentConversation(ctx, record);
     // Back-navigation: re-show the list
@@ -3804,6 +3817,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
       maxConcurrent: manager.getMaxConcurrent(),
       // 0 = unlimited, and the default — see SubagentsSettings.
       maxConcurrentForeground: manager.getMaxConcurrentForeground(),
+      maxConcurrentNested: manager.getMaxConcurrentNested(),
       // 0 = unlimited — per SubagentsSettings.defaultMaxTurns docstring and
       // normalizeMaxTurns() in agent-runner.ts (which maps 0 → undefined).
       defaultMaxTurns: getDefaultMaxTurns() ?? 0,
@@ -3881,13 +3895,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
   }
 
   const NUMERIC_IDS = new Set([
-    "maxConcurrent", "maxConcurrentForeground", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
+    "maxConcurrent", "maxConcurrentForeground", "maxConcurrentNested", "defaultMaxTurns", "graceTurns", "maxSubagentDepth",
   ]);
 
   async function showSettings(ctx: ExtensionCommandContext) {
     function buildItems(): SettingItem[] {
       const mc = manager.getMaxConcurrent();
       const mcf = manager.getMaxConcurrentForeground();
+      const mcn = manager.getMaxConcurrentNested();
       const dmt = getDefaultMaxTurns() ?? 0;
       const gt = getGraceTurns();
       const msd = getMaxSubagentDepth();
@@ -3902,17 +3917,31 @@ Write the file using the write tool. Only write the file, nothing else.`;
       return [
         {
           id: "maxConcurrent",
-          label: "Max concurrency",
-          description: "Max concurrent background agents (Enter to type)",
+          label: "Max background concurrency",
+          description: "Max concurrent background agents; extras wait in a queue (Enter to type)",
           currentValue: String(mc),
           values: [String(mc)],
         },
         {
           id: "maxConcurrentForeground",
           label: "Max foreground concurrency",
-          description: "Max concurrent foreground (blocking) agents (0 = unlimited, Enter to type)",
+          description: "Max concurrent foreground (blocking) agents; extras wait in a queue (0 = unlimited, Enter to type)",
           currentValue: String(mcf),
           values: [String(mcf)],
+        },
+        {
+          id: "maxConcurrentNested",
+          label: "Max nested concurrency",
+          description: "Max concurrent nested agents (started by subagents); extras are refused (0 = unlimited, Enter to type)",
+          currentValue: String(mcn),
+          values: [String(mcn)],
+        },
+        {
+          id: "maxSubagentDepth",
+          label: "Nested depth",
+          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
+          currentValue: String(msd),
+          values: [String(msd)],
         },
         {
           id: "defaultMaxTurns",
@@ -3927,13 +3956,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           description: "Grace turns after wrap-up steer (Enter to type)",
           currentValue: String(gt),
           values: [String(gt)],
-        },
-        {
-          id: "maxSubagentDepth",
-          label: "Nested depth",
-          description: "Hard cap on nested delegation — main is 0, its subagents 1 (0/1 = nesting off, Enter to type)",
-          currentValue: String(msd),
-          values: [String(msd)],
         },
         {
           id: "joinMode",
@@ -4051,7 +4073,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           id: "showModel",
           label: "Show model",
           description:
-            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows. The Agent tool result and the conversation viewer show the pair either way — this adds it to the widget, where the row is already dense.",
+            "Name the model driving each agent, and the thinking level it is running at, on the widget's running rows and the fleet view rows. The Agent tool result and the conversation viewer show the pair either way — this adds it where the rows are already dense.",
           currentValue: isShowModelEnabled() ? "on" : "off",
           values: ["on", "off"],
         },
@@ -4106,7 +4128,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const n = parseInt(value, 10);
         if (n >= 1) {
           manager.setMaxConcurrent(n);
-          notifyApplied(ctx, `Max concurrency set to ${n}`);
+          notifyApplied(ctx, `Max background concurrency set to ${n}`);
         }
       } else if (id === "maxConcurrentForeground") {
         // 0 is meaningful here, unlike maxConcurrent above: it means unlimited.
@@ -4116,6 +4138,14 @@ Write the file using the write tool. Only write the file, nothing else.`;
           notifyApplied(ctx, n === 0
             ? "Max foreground concurrency set to unlimited"
             : `Max foreground concurrency set to ${n}`);
+        }
+      } else if (id === "maxConcurrentNested") {
+        const n = parseInt(value, 10);
+        if (n >= 0) {
+          manager.setMaxConcurrentNested(n);
+          notifyApplied(ctx, n === 0
+            ? "Max nested concurrency set to unlimited"
+            : `Max nested concurrency set to ${n}`);
         }
       } else if (id === "defaultMaxTurns") {
         const n = parseInt(value, 10);
@@ -4329,6 +4359,8 @@ Write the file using the write tool. Only write the file, nothing else.`;
         ? String(manager.getMaxConcurrent())
         : result === "maxConcurrentForeground"
           ? String(manager.getMaxConcurrentForeground())
+          : result === "maxConcurrentNested"
+            ? String(manager.getMaxConcurrentNested())
           : result === "defaultMaxTurns"
             ? String(getDefaultMaxTurns() ?? 0)
             : result === "maxSubagentDepth"
@@ -4336,9 +4368,11 @@ Write the file using the write tool. Only write the file, nothing else.`;
               : String(getGraceTurns());
 
       const label = result === "maxConcurrent"
-        ? "Max concurrency (1+)"
+        ? "Max background concurrency (1+)"
         : result === "maxConcurrentForeground"
           ? "Max foreground concurrency (0 = unlimited)"
+          : result === "maxConcurrentNested"
+            ? "Max nested concurrency (0 = unlimited)"
           : result === "defaultMaxTurns"
             ? "Default max turns (0 = unlimited)"
             : result === "maxSubagentDepth"
