@@ -2952,4 +2952,21 @@ describe("AgentManager — waitForSettled (#443)", () => {
 
     expect(await manager.waitForSettled(id, 1_000)).toBe(true);
   });
+
+  // What `get` reads as `settling`: the parent's own run is over and both
+  // records read "stopped", but the child's write is still in flight.
+  it("reports a stopped agent as settling until its owned child's run ends", async () => {
+    const { parentId, childId, openGate } = parentAndStubbornChild();
+
+    manager.abort(parentId);
+    await manager.getRecord(parentId)!.promise;
+    expect(manager.getRecord(parentId)!.status).toBe("stopped");
+    expect(manager.isSettling(parentId)).toBe(true);
+    expect(manager.isSettling(childId)).toBe(true);
+
+    openGate();
+    await manager.getRecord(childId)!.promise;
+    expect(manager.isSettling(parentId)).toBe(false);
+    expect(manager.isSettling(childId)).toBe(false);
+  });
 });

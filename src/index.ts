@@ -850,6 +850,7 @@ export default function (pi: ExtensionAPI) {
           // "Agent not found" a false from here used to be read as.
           abort: (id) => manager.abort(id),
           waitForSettled: (id, timeoutMs) => manager.waitForSettled(id, timeoutMs),
+          isSettling: (id) => manager.isSettling(id),
           consumeResult: (id) => {
             const record = resolveAgentRef(id);
             // Same guard as get_subagent_result: a running agent has no result

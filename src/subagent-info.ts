@@ -39,8 +39,16 @@ export interface SubagentInfo {
    * produced.
    */
   tokens?: { input: number; output: number; total: number };
-  /** The run's spend as a pi `Usage`. Omitted when nothing was spent. */
+  /**
+   * The run's spend as a pi `Usage`, its descendants' spend included, so
+   * summing it across a tree double-counts. Omitted when nothing was spent.
+   */
   usage?: ReportedUsage;
+  /**
+   * This agent's own spend, descendants excluded: the figure to sum across a
+   * tree. Omitted when the agent itself spent nothing.
+   */
+  ownUsage?: ReportedUsage;
 }
 
 /**
@@ -58,6 +66,7 @@ export function toSubagentInfo(record: AgentRecord, now = Date.now()): SubagentI
   // derives from the other. Both are ungated by `showCost`: that governs what
   // a human is shown, not what the event carries.
   const usage = toReportedUsage(u);
+  const ownUsage = toReportedUsage(record.ownUsage);
   return {
     id: record.id,
     type: record.type,
@@ -76,5 +85,6 @@ export function toSubagentInfo(record: AgentRecord, now = Date.now()): SubagentI
     ...(record.sessionFile !== undefined ? { sessionFile: record.sessionFile } : {}),
     ...(total > 0 ? { tokens: { input: u.input, output: u.output, total } } : {}),
     ...(usage !== undefined ? { usage } : {}),
+    ...(ownUsage !== undefined ? { ownUsage } : {}),
   };
 }

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type EventBus, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable, STOP_SETTLE_TIMEOUT_MS } from "../src/cross-extension-rpc.js";
+import { type EventBus, FEATURES, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable, STOP_SETTLE_TIMEOUT_MAX_MS, STOP_SETTLE_TIMEOUT_MS } from "../src/cross-extension-rpc.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 
 /** Simple in-process event bus for testing. */
@@ -33,6 +33,7 @@ describe("cross-extension RPC", () => {
       awaitStartup: vi.fn().mockResolvedValue(undefined),
       abort: vi.fn().mockReturnValue(true),
       waitForSettled: vi.fn().mockResolvedValue(true),
+      isSettling: vi.fn().mockReturnValue(false),
       getRecord: vi.fn().mockReturnValue({}),
       listAgents: vi.fn().mockReturnValue([]),
       isNotificationPending: vi.fn().mockReturnValue(false),
@@ -46,14 +47,22 @@ describe("cross-extension RPC", () => {
   // --- ping ---
 
   describe("ping RPC", () => {
-    it("replies with protocol version", async () => {
+    it("replies with protocol version and features", async () => {
       registerRpcHandlers(deps);
       const reply = vi.fn();
       events.on("subagents:rpc:ping:reply:req-1", reply);
       events.emit("subagents:rpc:ping", { requestId: "req-1" });
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
-      expect(reply).toHaveBeenCalledWith({ success: true, data: { version: PROTOCOL_VERSION } });
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { version: PROTOCOL_VERSION, features: [...FEATURES] } });
+    });
+
+    // Consumers feature-detect on these strings, so the list is a contract:
+    // adding, renaming or dropping one must be a deliberate change here.
+    it("pins the feature list", () => {
+      expect([...FEATURES]).toEqual([
+        "consume", "steer", "get", "list", "owned-lifecycle", "stop-settles", "settling", "notification-pending",
+      ]);
     });
 
     it("scopes replies — other requestIds do not receive it", async () => {
@@ -246,6 +255,48 @@ describe("cross-extension RPC", () => {
 
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       expect(reply).toHaveBeenCalledWith({ success: false, error: "Agent is not running" });
+    });
+
+    // A repeat stop after `settled: false`: the agent is no longer running, so
+    // there is nothing to abort, but its tree is still unwinding.
+    it("waits again when the agent has finished but its tree is still settling", async () => {
+      (manager.abort as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      (manager.isSettling as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st10", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st10", agentId: "agent-42" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { settled: true } });
+      expect(manager.isSettling).toHaveBeenCalledWith("agent-42");
+      expect(manager.waitForSettled).toHaveBeenCalledWith("agent-42", STOP_SETTLE_TIMEOUT_MS);
+    });
+
+    it.each([
+      [20, 20],
+      [0, 0],
+      [-5, 0],
+      [STOP_SETTLE_TIMEOUT_MAX_MS + 1, STOP_SETTLE_TIMEOUT_MAX_MS],
+    ])("waits settleTimeoutMs %s as %s ms", async (given, used) => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st11", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st11", agentId: "agent-42", settleTimeoutMs: given });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(manager.waitForSettled).toHaveBeenCalledWith("agent-42", used);
+    });
+
+    it.each([["5000"], [Number.NaN], [Number.POSITIVE_INFINITY], [null]])("rejects settleTimeoutMs %s without aborting", async (given) => {
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:stop:reply:req-st12", reply);
+      events.emit("subagents:rpc:stop", { requestId: "req-st12", agentId: "agent-42", settleTimeoutMs: given });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "settleTimeoutMs must be a number of milliseconds" });
+      expect(manager.abort).not.toHaveBeenCalled();
     });
 
     it("returns error when the agent is unknown to the manager", async () => {
@@ -504,6 +555,26 @@ describe("cross-extension RPC", () => {
       await vi.waitFor(() => expect(reply).toHaveBeenCalled());
       const agents = reply.mock.calls[0][0].data.agents;
       expect(agents.map((a: any) => [a.id, a.status, a.parentAgentId])).toEqual([["a1", "running", undefined], ["a2", "completed", "a1"]]);
+    });
+
+    // `settling` qualifies a terminal status; on a running agent it would only
+    // restate `status`, so it is left off.
+    it("marks a terminal agent whose tree is still running as settling, and only that one", async () => {
+      (manager.listAgents as ReturnType<typeof vi.fn>).mockReturnValue([
+        record({ id: "a1", status: "running", completedAt: undefined }),
+        record({ id: "a2", status: "stopped" }),
+        record({ id: "a3", status: "stopped" }),
+      ]);
+      (manager.isSettling as ReturnType<typeof vi.fn>).mockImplementation((id: string) => id !== "a3");
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:list:reply:req-l2", reply);
+      events.emit("subagents:rpc:list", { requestId: "req-l2" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      const agents = reply.mock.calls[0][0].data.agents;
+      expect(agents.map((a: any) => [a.id, a.settling])).toEqual([["a1", undefined], ["a2", true], ["a3", undefined]]);
+      expect(agents[2]).not.toHaveProperty("settling");
     });
 
     it("unsub stops responding to get and list", async () => {

@@ -273,6 +273,56 @@ describe("issue #142: RPC handlers + subagents:ready are gated on session_start"
     }
   });
 
+  // The way on after `settled: false`: `get` shows the tree is still settling,
+  // and a repeat stop waits again instead of answering "Agent is not running".
+  it("a stop that timed out can be repeated, and get shows settling until then", async () => {
+    const { pi, lifecycle, busHandlers } = makePi();
+    subagentsExtension(pi);
+    await lifecycle.get("session_start")({}, ctx());
+
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => { openGate = resolve; });
+    vi.mocked(runAgent).mockImplementation(async (_ctx: any, _type: any, prompt: any, opts: any) => {
+      if (prompt === "dig") await gate;
+      else await new Promise<void>((resolve) => opts.signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { responseText: "", session: { dispose: vi.fn() }, aborted: true, steered: false } as any;
+    });
+    const reply = (channel: string, requestId: string) =>
+      pi.events.emit.mock.calls.find((c: any[]) => c[0] === `${channel}:reply:${requestId}`)?.[1];
+    try {
+      await busHandlers.get("subagents:rpc:spawn")!({
+        requestId: "req-rs-spawn", type: "general-purpose", prompt: "go", options: { description: "owner" },
+      });
+      const topId: string = reply("subagents:rpc:spawn", "req-rs-spawn").data.id;
+      const { manager, parentAgentId } = vi.mocked(runAgent).mock.lastCall![3].nestedRuntime;
+      manager.spawn(pi, ctx(), "general-purpose", "dig", {
+        description: "nested dig", isBackground: true, parentAgentId, depth: 2, maxSubagentDepth: 2,
+      });
+
+      await busHandlers.get("subagents:rpc:stop")!({ requestId: "req-rs-stop1", agentId: topId, settleTimeoutMs: 20 });
+      expect(reply("subagents:rpc:stop", "req-rs-stop1")).toEqual({ success: true, data: { settled: false } });
+
+      await busHandlers.get("subagents:rpc:get")!({ requestId: "req-rs-get1", agentId: topId });
+      expect(reply("subagents:rpc:get", "req-rs-get1").data.agent).toMatchObject({ status: "stopped", settling: true });
+
+      const second = busHandlers.get("subagents:rpc:stop")!({ requestId: "req-rs-stop2", agentId: topId });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply("subagents:rpc:stop", "req-rs-stop2"), "still waiting on the child").toBeUndefined();
+      openGate();
+      await second;
+      expect(reply("subagents:rpc:stop", "req-rs-stop2")).toEqual({ success: true, data: { settled: true } });
+
+      await busHandlers.get("subagents:rpc:get")!({ requestId: "req-rs-get2", agentId: topId });
+      expect(reply("subagents:rpc:get", "req-rs-get2").data.agent).not.toHaveProperty("settling");
+
+      await busHandlers.get("subagents:rpc:stop")!({ requestId: "req-rs-stop3", agentId: topId });
+      expect(reply("subagents:rpc:stop", "req-rs-stop3")).toEqual({ success: false, error: "Agent is not running" });
+    } finally {
+      openGate();
+      await lifecycle.get("session_shutdown")();
+    }
+  });
+
   // #103: an orchestrator that resumes the parent once "nothing is active"
   // must also wait out a finished agent's held notification, which starts a
   // parent turn of its own when it is sent.

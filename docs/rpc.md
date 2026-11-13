@@ -22,7 +22,7 @@ flowchart LR
     I["toSubagentInfo()"]
   end
   C -- "subagents:rpc:ping / spawn / steer / consume / stop / get / list" --> R
-  R -- "subagents:rpc:CHANNEL:reply:REQUESTID<br/>{ success, data? } or { success: false, error }" --> C
+  R -- "subagents:rpc:CHANNEL:reply:REQUESTID<br/>{ success, data? } or { success: false, error }<br/>ping: { version: 2, features }" --> C
   R --> M
   M --> I
   I -- "subagents:created / started / completed /<br/>failed / steered / compacted" --> L
@@ -109,7 +109,8 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 | ``Cannot run with isolation: "worktree" — not a git repo, no commits yet, or `git worktree add` failed. Initialize git and commit at least once, or omit `isolation`.`` | `AgentManager.startAgent`, surfaced through `awaitStartup`. Every git failure ends here: `createWorktree` (`src/worktree.ts`) catches git's own error and returns nothing |
 | `Agent not found` | stop handler, `src/cross-extension-rpc.ts` |
 | `Agent is owned by another agent or workflow` | stop handler |
-| `Agent is not running` | stop handler. The record exists, so it has already settled |
+| `settleTimeoutMs must be a number of milliseconds` | stop handler — `settleTimeoutMs` present but not a finite number. Checked before the abort, so nothing is stopped |
+| `Agent is not running` | stop handler. The record exists, is neither running nor queued, and nothing in its tree is still settling |
 | `Agent not found or still running` | consume handler |
 | `Steer message must be a non-empty string` | steer handler — `message` missing, not a string, or whitespace |
 | `Agent not found` / `Agent is owned by another agent or workflow` / `Agent is not running` | steer handler — same lookup, ownership guard and settled check as stop |
@@ -124,7 +125,9 @@ Three things the table cannot show:
 
 `subagents:rpc:stop` aborts the agent, then replies only once its run and the runs of every agent it owns, directly or transitively, have settled (`waitForSettled` in `src/agent-manager.ts`, #443). Without the wait, a caller that started replacement work on the reply could have a write from the stopped work land on top of it. `abort()` marks the record `stopped` at once, but a tool call that does not stop on the signal, such as a file write in progress or a shell command, keeps running until it returns.
 
-The wait is bounded by `STOP_SETTLE_TIMEOUT_MS` (5 s, `src/cross-extension-rpc.ts`), kept below the 10 s pi-tasks gives the stop reply. `settled: false` means the bound passed first and something may still be running. Anything the tree spawns while it unwinds is waited for too. The lifecycle events are unaffected: `subagents:failed` for the stopped agent fires when its own run settles, as before, so it can precede the stop reply.
+The wait is bounded by `settleTimeoutMs` on the request: optional, clamped to `0`..`60000`, default `STOP_SETTLE_TIMEOUT_MS` (5 s, `src/cross-extension-rpc.ts`). The default sits below the 10 s pi-tasks gives the stop reply; a caller with a longer reply timeout of its own can ask for more. `0` replies at once with the current state. `settled: false` means the bound passed first and something may still be running. Anything the tree spawns while it unwinds is waited for too. The lifecycle events are unaffected: `subagents:failed` for the stopped agent fires when its own run settles, as before, so it can precede the stop reply.
+
+After `settled: false`, `get` shows the agent with `settling: true` (see [Reading agent state](#reading-agent-state)), and a second stop waits again: `abort()` has nothing left to abort, but the tree is still settling, so the handler skips straight to the wait and replies `{ settled }`. Only an agent whose tree has fully settled answers `Agent is not running`. `AgentManager` tracks every unsettled run promise (`trackRun`), and `isSettling` and `waitForSettled` read the same set.
 
 `reply.success` means what it always did; `data.settled` is additive, and a caller that never reads it sees only a later reply.
 
@@ -134,18 +137,25 @@ sequenceDiagram
   participant M as AgentManager
   participant A as Stopped agent
   participant N as Its nested child
-  C->>M: subagents:rpc:stop { agentId }
+  C->>M: subagents:rpc:stop { agentId, settleTimeoutMs? }
   M->>A: abort() marks it stopped
-  M->>M: waitForSettled(agentId, STOP_SETTLE_TIMEOUT_MS) starts
+  M->>M: waitForSettled(agentId, settleTimeoutMs) starts
   Note over N: in a tool call that ignores the abort
   A-->>M: run settles, abortOwnedChildren aborts N
   M-->>C: subagents:failed for A (unchanged timing)
-  N-->>M: tool call returns, run settles
-  M-->>C: reply { success: true, data: { settled: true } }
+  alt N settles within the bound
+    N-->>M: tool call returns, run settles
+    M-->>C: reply { success: true, data: { settled: true } }
+  else the bound passes first
+    M-->>C: reply { success: true, data: { settled: false } }
+    Note over C: get shows settling: true
+    C->>M: subagents:rpc:stop { agentId } again
+    M->>M: nothing to abort, tree still settling: wait again
+    N-->>M: tool call returns, run settles
+    M-->>C: reply { success: true, data: { settled: true } }
+  end
   Note over C: start replacement work here, not on subagents:failed
 ```
-
-If the bound passes before the last run settles, the reply is `{ settled: false }`. A second stop then answers `Agent is not running`, and `status` already reads `stopped`, so there is currently no bus call to keep waiting.
 
 ## Ownership
 
@@ -223,13 +233,30 @@ One related thing that lives nowhere else: on every top-level settle, pi-subagen
 
 `subagents:rpc:steer` `{ requestId, agentId, message }` delivers `message` into a running or queued agent's conversation, the bus-side half of the `steer_subagent` tool. It exists for the caller that spawned an agent over the bus and then learns something that agent needs mid-run — a second CI failure on the head it is already fixing, a review that landed while it works — and would otherwise have to choose between spawning a duplicate agent for the same work and dropping the fact.
 
-It takes an id only, enforces the same top-level ownership guard as stop, and answers `Agent is not running` for a record that has settled. A message queued before the agent's session exists is flushed when the session is created, exactly as the tool's steer is. A successful steer emits `subagents:steered` with the agent fields plus `message`, as every steer path does. Like `consume`, it is outside the `ping` version handshake: an older build has no handler and the request times out on your side, so give it a timeout and treat expiry as "not available here".
+It takes an id only, enforces the same top-level ownership guard as stop, and answers `Agent is not running` for a record that has settled. A message queued before the agent's session exists is flushed when the session is created, exactly as the tool's steer is. A successful steer emits `subagents:steered` with the agent fields plus `message`, as every steer path does. An older build has no handler and the request times out on your side: check `features.includes("steer")` on the `ping` reply first, or give it a timeout and treat expiry as "not available here".
 
 ## Reading agent state
 
-`subagents:rpc:get` `{ requestId, agentId }` replies `{ agent }`, and `subagents:rpc:list` `{ requestId }` replies `{ agents }`. Both return the [agent fields](../README.md#agent-fields) the lifecycle events carry, built by the same `toSubagentInfo` (`src/subagent-info.ts`). They are for a listener that joined after the events it needed had already fired. `list` returns every record the manager holds, in any status and owned agents included, so filter on `status`, `parentAgentId` and `workflowId` yourself. A record stays readable until the manager drops it: 10 minutes after it settles (`cleanup` in `src/agent-manager.ts`), or earlier at a session start or switch if its result was consumed (`clearCompleted(true)`, which keeps unconsumed records). After that, `get` answers `Agent not found`, and only a top-level agent's persisted `subagents:record` session entry remains. Both are outside the `ping` version handshake, like `consume` and `steer`.
+`subagents:rpc:get` `{ requestId, agentId }` replies `{ agent }`, and `subagents:rpc:list` `{ requestId }` replies `{ agents }`. Both return the [agent fields](../README.md#agent-fields) the lifecycle events carry, built by the same `toSubagentInfo` (`src/subagent-info.ts`). They are for a listener that joined after the events it needed had already fired. `list` returns every record the manager holds, in any status and owned agents included, so filter on `status`, `parentAgentId` and `workflowId` yourself. A record stays readable until the manager drops it: 10 minutes after it settles (`cleanup` in `src/agent-manager.ts`), or earlier at a session start or switch if its result was consumed (`clearCompleted(true)`, which keeps unconsumed records). After that, `get` answers `Agent not found`, and only a top-level agent's persisted `subagents:record` session entry remains. Detect them with `features.includes("get")` / `"list"` on the `ping` reply.
 
-They add one field the events cannot carry: `notificationPending: true` while a settled top-level agent's completion is still on its way to the parent (`isNotificationPending` in the `session_start` RPC wiring, `src/index.ts`). The notification waits in one of three places: the completion outbox (200 ms on an idle parent, until `turn_end` on a busy one, through an Esc), a `group` holding it for its siblings (up to 30 s), or a `group` spawn whose turn has not ended yet. When it is sent it starts a parent turn. So `hasRunning()` and every `status` read `completed` while a turn is still coming, which is the race in [#103](https://github.com/tintinweb/pi-subagents/issues/103). An orchestrator deciding whether to inject its own prompt treats an agent as active while it is `running`, `queued`, or `notificationPending`. The field is absent once the result has been read, since a read result is never notified, and on owned agents.
+They add two fields the events cannot carry, both computed at read time rather than stored on the record.
+
+`settling: true` marks an agent whose `status` is terminal while a run in its tree has not ended: a stopped agent whose tool call ignored the abort, or a nested child still unwinding after its parent finished (`isSettling` in `src/agent-manager.ts`). It is what a `{ settled: false }` stop reply leaves behind, and it clears once the last run ends. A running or queued agent never carries it, since its `status` already says so.
+
+```mermaid
+stateDiagram-v2
+  [*] --> Running
+  Running --> Settling: settles or is stopped, a run in its tree still going
+  Running --> Quiet: settles, nothing else in its tree running
+  Settling --> Quiet: the last run in the tree ends
+  Quiet --> [*]
+  note right of Settling
+    settling is true only here.
+    A repeat stop waits again.
+  end note
+```
+
+The other is `notificationPending: true` while a settled top-level agent's completion is still on its way to the parent (`isNotificationPending` in the `session_start` RPC wiring, `src/index.ts`). The notification waits in one of three places: the completion outbox (200 ms on an idle parent, until `turn_end` on a busy one, through an Esc), a `group` holding it for its siblings (up to 30 s), or a `group` spawn whose turn has not ended yet. When it is sent it starts a parent turn. So `hasRunning()` and every `status` read `completed` while a turn is still coming, which is the race in [#103](https://github.com/tintinweb/pi-subagents/issues/103). The field is absent once the result has been read, since a read result is never notified, and on owned agents.
 
 ```mermaid
 stateDiagram-v2
@@ -247,12 +274,12 @@ stateDiagram-v2
   end note
 ```
 
-The check, with `agents` from a `list` reply:
+The two are independent: a stopped background agent can be settling and have its notification held at once. An agent is quiet when its `status` is terminal and neither field is set. The check an orchestrator runs before injecting its own prompt, with `agents` from a `list` reply:
 
 ```typescript
 const active = agents.some((a) =>
   a.parentAgentId === undefined && a.workflowId === undefined &&
-  (a.status === "running" || a.status === "queued" || a.notificationPending));
+  (a.status === "running" || a.status === "queued" || a.settling || a.notificationPending));
 ```
 
 ## The manager registry
@@ -268,17 +295,27 @@ const active = agents.some((a) =>
 
 The slot is claimed by the first activation only; subagent sessions re-activate this extension in the same process, and unconditionally overwriting would point the registry at a short-lived child manager whose shutdown would then delete the root session's entry ([#128](https://github.com/tintinweb/pi-subagents/pull/128)). Child activations leave it alone, and shutdown releases it only if this activation claimed it (`ownsManagerRegistry`, checked in the `session_shutdown` handler).
 
-Prefer the bus. The registry has no reply envelope, no version, and no availability event — `globalThis[Symbol.for("pi-subagents:manager")] === undefined` is the only probe you get, and it is also `undefined` in a session that filtered pi-subagents out. `subagents:rpc:list` answers *what is still running*, including a finished agent whose notification is still on its way (`notificationPending`), and `subagents:rpc:get` hands a record back after its terminal event has passed, both with the public agent fields rather than the live `AgentRecord`. Reach for the registry only for a headless host that wants to block on `waitForAll()` before exiting.
+Prefer the bus. The registry has no reply envelope, no version, and no availability event — `globalThis[Symbol.for("pi-subagents:manager")] === undefined` is the only probe you get, and it is also `undefined` in a session that filtered pi-subagents out. `subagents:rpc:list` answers *what is still running*, including a finished agent whose notification is still on its way (`notificationPending`) or whose tree is still unwinding (`settling`), and `subagents:rpc:get` hands a record back after its terminal event has passed, both with the public agent fields rather than the live `AgentRecord`. Reach for the registry only for a headless host that wants to block on `waitForAll()` before exiting.
 
 ## Protocol versions
 
-`subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION }`, currently `2` (`src/cross-extension-rpc.ts`). The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors.
+`subagents:rpc:ping` replies `{ version: PROTOCOL_VERSION, features: FEATURES }`, with the version currently `2` (`src/cross-extension-rpc.ts`). The constant was introduced already equal to `2` in 0.5.0; "v1" is a retroactive name for the pre-envelope contract, where spawn replied with a bare `{ id }` or `{ error }`, stop replied `{ success: boolean }` with no message, and each handler caught its own errors.
 
-Everything added since shipped **without a bump**, because all of it is additive: stop's ownership refusal, stop waiting for settlement and replying `{ settled }`, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), and the whole `consume` and `steer` channels.
+Everything added since shipped **without a bump**, because all of it is additive: stop's ownership refusal, string-`model` resolution ([#59](https://github.com/tintinweb/pi-subagents/pull/59)/[#60](https://github.com/tintinweb/pi-subagents/issues/60)), `scopeModels` enforcement ([#240](https://github.com/tintinweb/pi-subagents/issues/240)), and the channels and fields below. `features` is how a caller tells them apart:
 
-> A `ping` that answers `2` does not tell you whether `consume`, `steer`, `get` or `list` exists, whether model scope is enforced, whether stop checks ownership, or whether stop waits for settlement.
+| Feature | Means |
+|---|---|
+| `consume` | `subagents:rpc:consume` exists |
+| `steer` | `subagents:rpc:steer` exists |
+| `get`, `list` | `subagents:rpc:get` and `subagents:rpc:list` exist |
+| `owned-lifecycle` | The lifecycle events fire for nested and workflow agents too |
+| `stop-settles` | The stop reply waits for settlement, carries `{ settled }`, and takes `settleTimeoutMs` |
+| `settling` | `get` / `list` set `settling`, and a repeat stop on a settling tree waits again |
+| `notification-pending` | `get` / `list` set `notificationPending` |
 
-So: send `consume` unconditionally and ignore the outcome — an older build has no handler and simply keeps notifying, which is exactly why it was left outside the handshake. And treat every error envelope as authoritative rather than trying to predict which checks are in force.
+Check with `features.includes(...)`. The list only grows, so a feature present today stays present. A reply with no `features` array comes from a build older than all of them. Model scope and stop's ownership check predate `features` and have no entry.
+
+`consume` still works unconditionally: an older build has no handler and simply keeps notifying, which is why it was left outside the handshake. For everything else, check the feature, and treat every error envelope as authoritative.
 
 ## Availability
 

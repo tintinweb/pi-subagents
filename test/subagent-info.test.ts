@@ -36,6 +36,7 @@ describe("toSubagentInfo", () => {
       structuredJson: '{"verdict":"FAIL"}',
       sessionFile: "/sessions/a1.jsonl",
       lifetimeUsage: { input: 100, output: 50, cacheWrite: 10, cacheRead: 900, cost: 0.01 },
+      ownUsage: { input: 40, output: 20, cacheWrite: 0, cacheRead: 300, cost: 0.004 },
       // Internal fields that must never reach a listener.
       outputFile: "/tmp/a1.output",
       resultConsumed: true,
@@ -43,7 +44,7 @@ describe("toSubagentInfo", () => {
     }));
 
     expect(Object.keys(info).sort()).toEqual([
-      "completedAt", "depth", "description", "durationMs", "error", "id", "parentAgentId",
+      "completedAt", "depth", "description", "durationMs", "error", "id", "ownUsage", "parentAgentId",
       "result", "sessionFile", "startedAt", "status", "structuredJson", "tokens", "toolUses",
       "type", "usage", "workflowId",
     ]);
@@ -57,6 +58,9 @@ describe("toSubagentInfo", () => {
       tokens: { input: 100, output: 50, total: 160 },
     });
     expect(info.usage?.totalTokens).toBe(1060);
+    // Its own turns only: what a listener sums across a tree without counting
+    // a child's spend twice.
+    expect(info.ownUsage).toMatchObject({ input: 40, output: 20, totalTokens: 360, cost: { total: 0.004 } });
   });
 
   it("omits every unknown value rather than carrying it as undefined", () => {
