@@ -2702,7 +2702,6 @@ Terse command-style prompts produce shallow, generic work.
     description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
-      "Use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",
       "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
       "A workflow runs in the background and notifies you when it finishes — do not poll or sleep waiting for it.",
     ],
