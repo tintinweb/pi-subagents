@@ -19,7 +19,7 @@ import type { AgentRecord } from "../types.js";
 import { type AgentDetail, agentDetailFromMessages } from "../workflow/agent-detail.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
 import { createViewerKeys } from "./viewer-keys.js";
-import { WorkflowDialog } from "./workflow-dialog.js";
+import { WORKFLOW_DIALOG_HEIGHT_PCT, WorkflowDialog } from "./workflow-dialog.js";
 
 /** Everything the menu and the inspector need from the extension around them. */
 export interface WorkflowMenuDeps {
@@ -97,8 +97,9 @@ export async function showWorkflowDialog(
   // Overlaid on the same terms as the conversation viewer, because they are
   // reached the same way: both are rows of the fleet list, and opening one
   // must not behave unlike opening the other. Inline, the frame would render
-  // into the conversation and stay in the scrollback after it closed.
-  const { VIEWPORT_HEIGHT_PCT } = await import("./conversation-viewer.js");
+  // into the conversation and stay in the scrollback after it closed. Taller
+  // than the viewer's share: the frame is drawn at a fixed height, and two
+  // panes need the rows more than one transcript does.
   /**
    * This dialog's own overlay, so `c` can hide it while the conversation is
    * up. Overlays stack, so the viewer would render *over* it either way —
@@ -186,7 +187,7 @@ export async function showWorkflowDialog(
       ),
     {
       overlay: true,
-      overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
+      overlayOptions: { anchor: "center", width: "90%", maxHeight: `${WORKFLOW_DIALOG_HEIGHT_PCT}%` },
       onHandle: handle => { overlay = handle; },
     },
   );

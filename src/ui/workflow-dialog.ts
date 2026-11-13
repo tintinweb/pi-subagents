@@ -90,21 +90,27 @@ const DEFAULT_WIDTH = 80;
 const LEFT_PANE_WIDTH = 18;
 
 /**
- * Most rows the frame will ever draw between its top and bottom edges.
- *
- * A cap, not a height: the box sizes itself to what it holds, and this is where
- * it stops growing so a 200-agent fan-out scrolls inside the pane instead of
- * pasting 200 rows into the conversation.
+ * Rows between the frame's top and bottom edges when the caller does not know
+ * the terminal's height. The overlay passes its own, from
+ * {@link workflowDialogBodyRows}.
  */
 export const DEFAULT_PANE_BODY_ROWS = 22;
-/**
- * Fewest rows the frame will draw.
- *
- * Below this a pane stops reading as a pane, and the box would resize on
- * nearly every keypress — most phases hold a handful of agents, so a floor here
- * absorbs the ordinary movement and leaves the height alone.
- */
+/** Fewest rows the frame will draw: below this a pane stops reading as a pane. */
 export const MIN_PANE_BODY_ROWS = 6;
+/** Share of the terminal's height the overlay takes. */
+export const WORKFLOW_DIALOG_HEIGHT_PCT = 85;
+/** Lines around the frame's body: the header's three, the frame's two edges, the footer. */
+export const WORKFLOW_DIALOG_CHROME_ROWS = 6;
+
+/**
+ * The frame's body height for a terminal `rows` tall: the overlay's share of
+ * it, less the chrome. Fixed for a given terminal, so the box keeps its size
+ * however much the panes hold — moving the selection, expanding the detail or
+ * a phase filling up never makes it jump.
+ */
+export function workflowDialogBodyRows(rows: number): number {
+  return Math.max(MIN_PANE_BODY_ROWS, Math.floor((rows * WORKFLOW_DIALOG_HEIGHT_PCT) / 100) - WORKFLOW_DIALOG_CHROME_ROWS);
+}
 /** Prompt lines shown before `expand` is offered. */
 export const PROMPT_COLLAPSED_LINES = 4;
 /** Outcome rows shown before `expand` is offered. */
@@ -362,10 +368,9 @@ export interface WorkflowDialogInput extends WorkflowDialogSource {
   ascii?: boolean;
   spinnerFrame?: number;
   /**
-   * Most rows the frame may use, overriding {@link DEFAULT_PANE_BODY_ROWS}.
-   *
-   * The frame still sizes to its content and still respects
-   * {@link MIN_PANE_BODY_ROWS}; this only moves the ceiling.
+   * Rows between the frame's edges, overriding {@link DEFAULT_PANE_BODY_ROWS};
+   * floored at {@link MIN_PANE_BODY_ROWS}. A height, not a cap: the frame is
+   * drawn at exactly this size whatever the panes hold.
    */
   bodyRows?: number;
 }
@@ -885,8 +890,7 @@ export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: Workfl
   const now = input.now ?? Date.now();
   const view = resolveWorkflowDialog(input);
   const { state } = input;
-  // What the panes may *hold*; the frame's actual height is settled below, once
-  // there is something to measure.
+  // The frame's body height, fixed: the panes are built against it and drawn at it.
   const capacity = Math.max(MIN_PANE_BODY_ROWS, input.bodyRows ?? DEFAULT_PANE_BODY_ROWS);
   const spinnerFrame = input.spinnerFrame ?? 0;
 
@@ -1020,11 +1024,10 @@ export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: Workfl
   // Indented one column, so the frame's left edge lines up under the name and
   // the description rather than hanging off the edge of them.
   const leftRows = inPhases ? phaseRows : agentRows;
-  const fullRightRows = inPhases ? agentRows : detailRows;
-  // Tall enough for whichever pane holds more, and no taller. The list panes
-  // were built against `capacity`; the detail is the one pane that can hold
-  // more, and it scrolls inside the frame rather than being cut by it.
-  const bodyRows = Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, fullRightRows.length));
+  // Always the full capacity, so the box never resizes under the reader. The
+  // list panes were built against it; the detail is the one pane that can
+  // hold more, and it scrolls inside the frame rather than being cut by it.
+  const bodyRows = capacity;
   const maxDetailScroll = inPhases ? 0 : Math.max(0, detailRows.length - bodyRows);
   const scroll = clampIndex(state.detailScroll, maxDetailScroll + 1);
   const rightRows = inPhases ? agentRows : detailRows.slice(scroll, scroll + bodyRows);
@@ -1305,6 +1308,9 @@ export class WorkflowDialog implements Component {
       },
       width,
       spinnerFrame: this.spinnerFrame,
+      // Sized to the overlay's share of the terminal, so the whole dialog fits
+      // its `maxHeight` and keeps one height while it is open.
+      bodyRows: workflowDialogBodyRows(this.tui.terminal.rows),
     });
     this.pane = { maxDetailScroll, detailPageRows };
     return styleWorkflowCardLines(lines, this.theme);

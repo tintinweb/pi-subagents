@@ -20,9 +20,11 @@ import {
   subStatusAnnotations,
   UNICODE_DIALOG_GLYPHS,
   WORKFLOW_DIALOG_COPY,
+  WORKFLOW_DIALOG_HEIGHT_PCT,
   WorkflowDialog,
   type WorkflowDialogInput,
   type WorkflowDialogState,
+  workflowDialogBodyRows,
   workflowDialogContentWidth,
 } from "../src/ui/workflow-dialog.js";
 import type { AgentDetail } from "../src/workflow/agent-detail.js";
@@ -825,21 +827,22 @@ describe("frame height", () => {
     ),
   ];
 
-  it("sizes the box to its content instead of a fixed height", () => {
-    // A three-agent run in a twenty-two row box is twenty rows of nothing,
-    // sitting in the conversation under everything else that happened.
-    expect(bodyHeight({ progress: phased(3) })).toBeLessThan(DEFAULT_PANE_BODY_ROWS);
+  it("draws the box at one fixed height, whatever the panes hold", () => {
+    // A box that grew and shrank with its content jumped under the reader
+    // every time the selection, a phase or the detail changed size.
+    for (const agents of [1, 3, 12]) expect(bodyHeight({ progress: phased(agents) })).toBe(DEFAULT_PANE_BODY_ROWS);
+    expect(bodyHeight({ progress: phased(3), state: { level: "agent", expanded: true } })).toBe(DEFAULT_PANE_BODY_ROWS);
   });
 
-  it("keeps a floor so a one-agent run still reads as a pane", () => {
-    expect(bodyHeight({ progress: phased(1) })).toBe(MIN_PANE_BODY_ROWS);
-  });
-
-  it("grows with the content", () => {
-    const small = bodyHeight({ progress: phased(3) });
-    const large = bodyHeight({ progress: phased(12) });
-    expect(large).toBeGreaterThan(small);
-    expect(large).toBe(12);
+  it("fits the overlay's share of the terminal, chrome included", () => {
+    for (const rows of [24, 40, 60]) {
+      const lines = dialog({ progress: phased(3), bodyRows: workflowDialogBodyRows(rows) });
+      expect(lines.length).toBeLessThanOrEqual(Math.floor((rows * WORKFLOW_DIALOG_HEIGHT_PCT) / 100));
+      expect(lines.at(-1)).toContain("esc close");
+    }
+    // A tall terminal gets a taller box; a tiny one keeps the floor.
+    expect(workflowDialogBodyRows(60)).toBeGreaterThan(workflowDialogBodyRows(40));
+    expect(workflowDialogBodyRows(5)).toBe(MIN_PANE_BODY_ROWS);
   });
 
   it("stops growing at the cap, however large the run", () => {
@@ -1118,7 +1121,7 @@ describe("WorkflowDialog component", () => {
   ): { dialog: WorkflowDialog; calls: string[]; closed: boolean[] } {
     const calls: string[] = [];
     const closed: boolean[] = [];
-    const tui = { requestRender: () => calls.push("render") } as unknown as never;
+    const tui = { requestRender: () => calls.push("render"), terminal: { rows: 40 } } as unknown as never;
     const instance = new WorkflowDialog(
       tui,
       from,
@@ -1138,10 +1141,15 @@ describe("WorkflowDialog component", () => {
   it("themes the layout and keeps its line count", () => {
     const { dialog: instance } = harness();
     const rendered = instance.render(86);
+    // Sized from the terminal (40 rows in the harness): exactly the overlay's share.
     expect(rendered).toHaveLength(
-      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86 }).length,
+      layoutWorkflowDialog({ ...source(), state: initialWorkflowDialogState(), width: 86, bodyRows: workflowDialogBodyRows(40) }).length,
     );
+    expect(rendered).toHaveLength(Math.floor((40 * WORKFLOW_DIALOG_HEIGHT_PCT) / 100));
     expect(rendered[0]).toContain("<toolTitle>*wf*</toolTitle>");
+    // A resize between frames resizes the box: a share of the terminal, not a row count.
+    (instance as unknown as { tui: { terminal: { rows: number } } }).tui.terminal.rows = 60;
+    expect(instance.render(86)).toHaveLength(Math.floor((60 * WORKFLOW_DIALOG_HEIGHT_PCT) / 100));
     expect(rendered.join("\n")).toContain("<success>✔</success>");
     instance.dispose();
   });
@@ -1305,7 +1313,7 @@ describe("key hints reflect the wired actions", () => {
 });
 
 describe("component availability", () => {
-  const tui = { requestRender: () => {} } as unknown as never;
+  const tui = { requestRender: () => {}, terminal: { rows: 40 } } as unknown as never;
   const liveSource = () => ({
     progress: [
       { type: "workflow_agent", index: 0, label: "a", phaseIndex: 0, state: "progress", startedAt: START },
