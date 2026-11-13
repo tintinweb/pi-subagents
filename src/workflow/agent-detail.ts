@@ -13,6 +13,7 @@
  */
 
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { extractText } from "../context.js";
 
 type AgentMessage = AgentSession["messages"][number];
@@ -50,7 +51,21 @@ export function toolCallHead(name: string, args: unknown): string {
   const value =
     SUMMARY_KEYS.map(key => record[key]).find((v): v is string => typeof v === "string" && v.trim() !== "")
     ?? Object.values(record).find((v): v is string => typeof v === "string" && v.trim() !== "");
-  return value === undefined ? name : `${name}(${oneLine(value)})`;
+  return value === undefined ? name : `${name}(${oneLine(displayText(value))})`;
+}
+
+/**
+ * Text made safe to place in a layout, as pi's tool renderers make it: tool
+ * output is stored raw, so a coloured test run or a `\r` progress line would
+ * otherwise reach the terminal — a reset cancels the row's dim, a carriage
+ * return draws over the left pane, a tab overruns the width the layout
+ * measured (pi-tui counts it as three cells).
+ */
+export function displayText(text: string): string {
+  return stripTerminalSequences(text)
+    .replace(/\r/g, "")
+    .replace(/\t/g, "   ")
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
 }
 
 const splitLines = (text: string) => (text === "" ? [] : text.split("\n"));
@@ -76,12 +91,12 @@ export function agentDetailFromMessages(messages: readonly AgentMessage[]): Agen
   for (const msg of messages) {
     if (msg.role === "user") {
       if (prompt !== undefined) continue;
-      const text = (typeof msg.content === "string" ? msg.content : extractText(msg.content)).trim();
+      const text = displayText(typeof msg.content === "string" ? msg.content : extractText(msg.content)).trim();
       if (text) prompt = text;
     } else if (msg.role === "assistant") {
       for (const part of msg.content) {
         if (part.type === "text") {
-          const text = part.text.trim();
+          const text = displayText(part.text).trim();
           if (!text) continue;
           const [head, ...body] = text.split("\n");
           items.push({ kind: "text", head, body });
@@ -91,7 +106,7 @@ export function agentDetailFromMessages(messages: readonly AgentMessage[]): Agen
           items.push({
             kind: "tool",
             head: toolCallHead(part.name, part.arguments),
-            body: result ? splitLines(extractText(result.content).trimEnd()) : [],
+            body: result ? splitLines(displayText(extractText(result.content)).trimEnd()) : [],
             settled: result !== undefined,
             ...(result?.isError ? { isError: true } : {}),
           });

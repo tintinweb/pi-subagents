@@ -69,6 +69,21 @@ describe("agentDetailFromMessages", () => {
   it("is empty for a session with no messages", () => {
     expect(agentDetailFromMessages(msgs([]))).toEqual({ items: [] });
   });
+
+  it("strips what would draw over the frame: escapes, carriage returns, tabs, controls", () => {
+    // Tool output is stored raw: a coloured test run, a `\r` progress line, a tab.
+    const raw = msgs([
+      { role: "user", content: "\x1b[1mgo\x1b[0m" },
+      { role: "assistant", content: [{ type: "text", text: "\x1b[32mok\x1b[0m" }, call("c1", "Bash", { command: "printf '\x1b[2J'" })] },
+      result("c1", "\x1b[31mFAIL\x1b[0m\tsuite\r\nprogress 10%\rprogress 100%\x07"),
+    ]);
+    const { prompt, items } = agentDetailFromMessages(raw);
+    expect(prompt).toBe("go");
+    expect(items).toEqual([
+      { kind: "text", head: "ok", body: [] },
+      { kind: "tool", head: "Bash(printf '')", body: ["FAIL   suite", "progress 10%progress 100%"], settled: true },
+    ]);
+  });
 });
 
 describe("createAgentDetailSource", () => {
