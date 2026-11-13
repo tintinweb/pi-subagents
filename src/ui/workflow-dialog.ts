@@ -14,7 +14,10 @@
  * ```
  *
  * Opening an agent swaps the panes: that phase's agents move left and the
- * right becomes the agent's Prompt / Activity / Outcome detail.
+ * right becomes the agent's Prompt / Activity / Outcome detail. Activity lists
+ * the child's tool calls from its transcript (`AgentDetail`, injected through
+ * the source); `⏎` expands all three sections, and `→` expands and focuses
+ * the detail so `↑↓` scroll it rather than moving between agents.
  *
  * A phase with no agents yet shows its number and nothing else. The single-pane
  * layout this replaced spelled that out as "Not started yet"; the left pane is
@@ -49,6 +52,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import type { AgentDetail, AgentDetailItem } from "../workflow/agent-detail.js";
 import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
@@ -62,6 +66,7 @@ import {
   type WorkflowEntry,
 } from "../workflow/progress.js";
 import { SPINNER, type Theme } from "./agent-widget.js";
+import { createViewerKeys, type ViewerKeys } from "./viewer-keys.js";
 import {
   ASCII_GLYPHS,
   clampLine,
@@ -85,23 +90,38 @@ const DEFAULT_WIDTH = 80;
 const LEFT_PANE_WIDTH = 18;
 
 /**
- * Most rows the frame will ever draw between its top and bottom edges.
- *
- * A cap, not a height: the box sizes itself to what it holds, and this is where
- * it stops growing so a 200-agent fan-out scrolls inside the pane instead of
- * pasting 200 rows into the conversation.
+ * Rows between the frame's top and bottom edges when the caller does not know
+ * the terminal's height. The overlay passes its own, from
+ * {@link workflowDialogBodyRows}.
  */
 export const DEFAULT_PANE_BODY_ROWS = 22;
-/**
- * Fewest rows the frame will draw.
- *
- * Below this a pane stops reading as a pane, and the box would resize on
- * nearly every keypress — most phases hold a handful of agents, so a floor here
- * absorbs the ordinary movement and leaves the height alone.
- */
+/** Fewest rows the frame will draw: below this a pane stops reading as a pane. */
 export const MIN_PANE_BODY_ROWS = 6;
+/** Share of the terminal's height the overlay takes. */
+export const WORKFLOW_DIALOG_HEIGHT_PCT = 85;
+/** Lines around the frame's body: the header's three, the frame's two edges, the footer. */
+export const WORKFLOW_DIALOG_CHROME_ROWS = 6;
+
+/**
+ * The frame's body height for a terminal `rows` tall: the overlay's share of
+ * it, less the chrome. Fixed for a given terminal, so the box keeps its size
+ * however much the panes hold — moving the selection, expanding the detail or
+ * a phase filling up never makes it jump.
+ */
+export function workflowDialogBodyRows(rows: number): number {
+  return Math.max(MIN_PANE_BODY_ROWS, Math.floor((rows * WORKFLOW_DIALOG_HEIGHT_PCT) / 100) - WORKFLOW_DIALOG_CHROME_ROWS);
+}
 /** Prompt lines shown before `expand` is offered. */
 export const PROMPT_COLLAPSED_LINES = 4;
+/** Outcome rows shown before `expand` is offered. */
+export const OUTCOME_COLLAPSED_LINES = 12;
+/** Most recent tool calls the collapsed Activity lists; earlier ones are counted. */
+export const ACTIVITY_COLLAPSED_CALLS = 8;
+/**
+ * Result lines shown under each call in the expanded transcript, so one
+ * 2000-line `cat` cannot bury every call after it.
+ */
+export const ACTIVITY_RESULT_LINES = 8;
 /** Spinner cadence. Unlike the card's 1s header tick, this row really animates. */
 export const WORKFLOW_DIALOG_SPINNER_MS = 80;
 
@@ -133,8 +153,19 @@ export interface WorkflowDialogGlyphs {
   };
   /** Trailing marker on a title the pane was too narrow to hold. */
   ellipsis: string;
+  /** `⏺` — one tool call in the Activity section. */
+  call: string;
+  /** `⎿` — the first line of a call's result in the expanded transcript. */
+  result: string;
+  /** The scrolled detail's `1–26 of 35 ↓` label: range dash, then the arrows. */
+  rangeDash: string;
+  moreAbove: string;
+  moreBelow: string;
   /** How the footer names the arrow keys and Enter. */
   upDown: string;
+  /** How the footer names the keys that move focus between the agent list and the detail. */
+  left: string;
+  right: string;
   enter: string;
 }
 
@@ -156,7 +187,14 @@ export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
     bottomTee: "┴",
   },
   ellipsis: "…",
+  call: "⏺",
+  result: "⎿",
+  rangeDash: "–",
+  moreAbove: "↑",
+  moreBelow: "↓",
   upDown: "↑↓",
+  left: "←",
+  right: "→",
   enter: "⏎",
 };
 
@@ -179,7 +217,14 @@ export const ASCII_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
     bottomTee: "+",
   },
   ellipsis: "~",
+  call: "*",
+  result: "|",
+  rangeDash: "-",
+  moreAbove: "^",
+  moreBelow: "v",
   upDown: "up/down",
+  left: "left",
+  right: "right",
   enter: "enter",
 };
 
@@ -267,8 +312,33 @@ export interface WorkflowDialogState {
   selectedAgent: number;
   level: WorkflowDialogLevel;
   filter: WorkflowDialogFilter;
-  promptExpanded: boolean;
+  /** Prompt, Activity and Outcome all expanded — one toggle, as in Claude Code. */
+  expanded: boolean;
+  /** First detail row shown; clamped on read against what the pane holds. */
+  detailScroll: number;
+  /**
+   * `→` moved focus into the detail, so `↑↓` scroll it instead of moving
+   * between agents. Only in effect while the detail overflows the pane — see
+   * {@link detailHasFocus} — and cleared by the component's next render when
+   * it does not, and by `⏎`/`e`.
+   */
+  detailFocused: boolean;
 }
+
+/** Focus is on the detail and there is something there to scroll. */
+const detailHasFocus = (state: WorkflowDialogState, maxDetailScroll: number) =>
+  state.level === "agent" && state.detailFocused && maxDetailScroll > 0;
+
+/**
+ * `⏎`/`e` on the detail. Drops the focus as well: only `→` focuses, so an
+ * expand that follows a collapse must not bring back a focus `→` gave earlier.
+ */
+const toggleExpanded = (state: WorkflowDialogState): WorkflowDialogState => ({
+  ...state,
+  expanded: !state.expanded,
+  detailScroll: 0,
+  detailFocused: false,
+});
 
 export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialogState {
   return {
@@ -276,7 +346,9 @@ export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialo
     selectedAgent: 0,
     level: "phases",
     filter: "all",
-    promptExpanded: false,
+    expanded: false,
+    detailScroll: 0,
+    detailFocused: false,
   };
 }
 
@@ -287,6 +359,11 @@ export interface WorkflowDialogSource {
   meta?: WorkflowMeta;
   /** Agents the runtime has scheduled, which can exceed those that reported. */
   agentCount?: number;
+  /**
+   * The child's transcript, by the entry's `recordId`. Undefined once the
+   * record has been swept, which falls back to the progress log's previews.
+   */
+  detail?(recordId: string): AgentDetail | undefined;
 }
 
 export interface WorkflowDialogInput extends WorkflowDialogSource {
@@ -303,10 +380,9 @@ export interface WorkflowDialogInput extends WorkflowDialogSource {
   ascii?: boolean;
   spinnerFrame?: number;
   /**
-   * Most rows the frame may use, overriding {@link DEFAULT_PANE_BODY_ROWS}.
-   *
-   * The frame still sizes to its content and still respects
-   * {@link MIN_PANE_BODY_ROWS}; this only moves the ceiling.
+   * Rows between the frame's edges, overriding {@link DEFAULT_PANE_BODY_ROWS};
+   * floored at {@link MIN_PANE_BODY_ROWS}. A height, not a cap: the frame is
+   * drawn at exactly this size whatever the panes hold.
    */
   bodyRows?: number;
 }
@@ -472,7 +548,7 @@ function padCell(line: WorkflowCardLine, width: number): WorkflowCardLine {
 }
 
 /** A title as it sits in the frame's top edge: ` Title ` then rule to `width`. */
-function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardSegment[] {
+function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs, focused = false): WorkflowCardSegment[] {
   const room = Math.max(0, width - 2);
   // Truncated with the marker rather than simply cut: `Discover · 1 ag…` has to
   // read as "there was more", not as a title that happens to end oddly. Pi's
@@ -487,7 +563,7 @@ function frameTitle(title: string, width: number, glyphs: WorkflowDialogGlyphs):
   return clampLine(
     [
       { text: " ", color: "dim" },
-      { text: shown, color: "muted", bold: true },
+      { text: shown, color: focused ? "accent" : "muted", bold: true },
       { text: ` ${glyphs.box.horizontal.repeat(rule)}`, color: "dim" },
     ],
     width,
@@ -506,6 +582,10 @@ function paneFrame(options: {
   rightTitle: string;
   leftRows: WorkflowCardLine[];
   rightRows: WorkflowCardLine[];
+  /** A label set into the bottom edge under the right pane, flush right. */
+  rightFooter?: string;
+  /** The right pane has the keyboard: its title is drawn in the accent colour. */
+  rightFocused?: boolean;
   width: number;
   bodyRows: number;
   glyphs: WorkflowDialogGlyphs;
@@ -520,7 +600,7 @@ function paneFrame(options: {
     { text: box.topLeft, color: "dim" },
     ...padTitle(frameTitle(options.leftTitle, left, glyphs), left, box.horizontal),
     { text: box.topTee, color: "dim" },
-    ...padTitle(frameTitle(options.rightTitle, right, glyphs), right, box.horizontal),
+    ...padTitle(frameTitle(options.rightTitle, right, glyphs, options.rightFocused), right, box.horizontal),
     { text: box.topRight, color: "dim" },
   ]);
 
@@ -538,10 +618,21 @@ function paneFrame(options: {
     { text: box.bottomLeft, color: "dim" },
     { text: box.horizontal.repeat(left), color: "dim" },
     { text: box.bottomTee, color: "dim" },
-    { text: box.horizontal.repeat(right), color: "dim" },
+    ...bottomEdge(options.rightFooter, right, box.horizontal),
     { text: box.bottomRight, color: "dim" },
   ]);
   return lines;
+}
+
+/** A bottom edge of `width` cells, with `label` set in flush right when it fits. */
+function bottomEdge(label: string | undefined, width: number, horizontal: string): WorkflowCardSegment[] {
+  const room = label === undefined ? 0 : visibleWidth(label) + 3;
+  if (label === undefined || room > width) return [{ text: horizontal.repeat(width), color: "dim" }];
+  return [
+    { text: `${horizontal.repeat(width - room)} `, color: "dim" },
+    { text: label, color: "dim" },
+    { text: ` ${horizontal}`, color: "dim" },
+  ];
 }
 
 /* ------------------------------------------------------------------------- *
@@ -551,7 +642,7 @@ function paneFrame(options: {
 /** Split a preview into lines, treating an empty preview as absent. */
 const previewLines = (preview: string | undefined) => (preview ? preview.split("\n") : []);
 
-/** What the Activity body says. There is a count of tool calls, never a list. */
+/** What the Activity body says when there is no transcript to list from. */
 function activityBody(entry: WorkflowAgentEntry, state: WorkflowDisplayState): string {
   if (state === "queued") return WORKFLOW_DIALOG_COPY.availableOnceStarted;
   if ((entry.toolCalls ?? 0) > 0) return WORKFLOW_DIALOG_COPY.noTranscript;
@@ -624,6 +715,120 @@ function detailHeading(title: string, suffixes: readonly string[], width: number
 const detailBody = (text: string, width: number): WorkflowCardLine =>
   clampLine([{ text: `   ${text}`, color: "dim" }], width);
 
+/** `3 lines` / `1 line`. */
+const lineCount = (n: number) => `${n} line${n === 1 ? "" : "s"}`;
+
+/** `⏺ Bash(ls -la)`, its glyph coloured by how the call came out. */
+function callRow(item: AgentDetailItem, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardLine {
+  const color: WorkflowCardColor = !item.settled ? "dim" : item.isError ? "error" : "success";
+  return clampLine([{ text: "   " }, { text: glyphs.call, color }, { text: ` ${item.head}`, color: "dim" }], width);
+}
+
+/**
+ * Prompt, Activity and Outcome for the selected agent.
+ *
+ * Collapsed, each section is a preview: the prompt's first lines, the most
+ * recent tool calls one per row, the outcome's first rows. Expanded — one
+ * toggle for all three, as in Claude Code — the prompt and outcome are whole
+ * and Activity becomes the transcript, each call followed by its result.
+ * The pane scrolls, so nothing here is sized to fit it.
+ *
+ * With no `detail` (the record was swept, or no caller supplied one) the
+ * sections fall back to the progress log's previews and counts.
+ */
+function detailSections(options: {
+  entry: WorkflowAgentEntry;
+  display: WorkflowDisplayState;
+  detail: AgentDetail | undefined;
+  expanded: boolean;
+  width: number;
+  glyphs: WorkflowDialogGlyphs;
+}): { rows: WorkflowCardLine[]; expandable: boolean } {
+  const { entry, display, detail, expanded, width, glyphs } = options;
+  const rows: WorkflowCardLine[] = [];
+  const toggle = `${glyphs.enter} ${expanded ? "collapse" : "expand"}`;
+  const wrapWidth = Math.max(1, width - 4);
+  const wrapped = (lines: readonly string[]) => lines.flatMap(line => wrapTextWithAnsi(line, wrapWidth));
+  const more = (hidden: number, noun = "line") =>
+    detailBody(`${glyphs.ellipsis} ${hidden} more ${noun}${hidden === 1 ? "" : "s"}`, width);
+
+  // ---- Prompt
+  const prompt = previewLines(detail?.prompt ?? entry.promptPreview);
+  const promptFolds = prompt.length > PROMPT_COLLAPSED_LINES;
+  const promptSuffix = prompt.length > 0 ? [lineCount(prompt.length)] : [];
+  if (promptFolds) promptSuffix.push(toggle);
+  rows.push([], detailHeading("Prompt", promptSuffix, width));
+  if (prompt.length === 0) {
+    rows.push(detailBody(WORKFLOW_DIALOG_COPY.availableOnceStarted, width));
+  } else if (expanded) {
+    // Wrapped once expanded: the point of expanding is to read every word.
+    for (const text of wrapped(prompt)) rows.push(detailBody(text, width));
+  } else {
+    for (const text of prompt.slice(0, PROMPT_COLLAPSED_LINES)) rows.push(detailBody(text, width));
+    // Named rather than silently cut: the reader has to know the prompt goes on.
+    if (promptFolds) rows.push(more(prompt.length - PROMPT_COLLAPSED_LINES));
+  }
+
+  // ---- Activity
+  const calls = detail?.items.filter(item => item.kind === "tool") ?? [];
+  const activityFolds =
+    detail !== undefined
+    && (calls.length > ACTIVITY_COLLAPSED_CALLS || detail.items.some(item => item.kind === "text" || item.body.length > 0));
+  const toolCalls = entry.toolCalls ?? calls.length;
+  const activitySuffix = toolCalls > 0 ? [`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`] : [];
+  if (activityFolds) activitySuffix.push(toggle);
+  rows.push([], detailHeading("Activity", activitySuffix, width));
+  if (detail === undefined) {
+    rows.push(detailBody(activityBody(entry, display), width));
+  } else if (expanded && detail.items.length > 0) {
+    for (const item of detail.items) {
+      if (item.kind === "text") {
+        for (const text of wrapped([item.head, ...item.body])) {
+          rows.push(clampLine([{ text: `   ${text}` }], width));
+        }
+        continue;
+      }
+      rows.push(callRow(item, width, glyphs));
+      const shown = item.body.slice(0, ACTIVITY_RESULT_LINES);
+      shown.forEach((text, i) => {
+        rows.push(clampLine([{ text: `     ${i === 0 ? glyphs.result : " "} ${text}`, color: "dim" }], width));
+      });
+      const hidden = item.body.length - shown.length;
+      if (hidden > 0) rows.push(clampLine([{ text: `       ${glyphs.ellipsis} ${hidden} more ${hidden === 1 ? "line" : "lines"}`, color: "dim" }], width));
+    }
+  } else if (calls.length > 0) {
+    // The most recent calls, because on a live agent that is what is happening.
+    const hidden = calls.length - ACTIVITY_COLLAPSED_CALLS;
+    if (hidden > 0) rows.push(detailBody(`${glyphs.ellipsis} ${hidden} earlier call${hidden === 1 ? "" : "s"}`, width));
+    for (const item of calls.slice(Math.max(0, hidden))) rows.push(callRow(item, width, glyphs));
+  } else {
+    rows.push(
+      detailBody(
+        display === "queued" ? WORKFLOW_DIALOG_COPY.availableOnceStarted
+        : isLive(entry) ? WORKFLOW_DIALOG_COPY.noToolCallsYet
+        : WORKFLOW_DIALOG_COPY.noToolCalls,
+        width,
+      ),
+    );
+  }
+
+  // ---- Outcome
+  // Wrapped, not clamped: the outcome is the thing the reader came for, and
+  // cutting it at the pane edge would hide the half that matters.
+  const outcomeText = display === "done" ? (detail?.outcome ?? outcomeBody(entry, display)) : outcomeBody(entry, display);
+  const outcomeLines = outcomeText.split("\n");
+  const outcomeRows = wrapped(outcomeLines);
+  const outcomeFolds = outcomeRows.length > OUTCOME_COLLAPSED_LINES;
+  const outcomeSuffix = outcomeLines.length > 1 ? [lineCount(outcomeLines.length)] : [];
+  if (outcomeFolds) outcomeSuffix.push(toggle);
+  rows.push([], detailHeading("Outcome", outcomeSuffix, width));
+  const shownOutcome = expanded || !outcomeFolds ? outcomeRows : outcomeRows.slice(0, OUTCOME_COLLAPSED_LINES);
+  for (const text of shownOutcome) rows.push(detailBody(text, width));
+  if (shownOutcome.length < outcomeRows.length) rows.push(more(outcomeRows.length - shownOutcome.length));
+
+  return { rows, expandable: promptFolds || activityFolds || outcomeFolds };
+}
+
 /** The row for one agent, as it appears in whichever pane is listing agents. */
 function agentRow(options: {
   entry: WorkflowAgentEntry;
@@ -675,13 +880,29 @@ function rowStatSegments(entry: WorkflowAgentEntry): string[] {
  * different sizes.
  */
 export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLine[] {
+  return buildWorkflowDialog(input).lines;
+}
+
+/** What the last layout knew about the detail pane, which the key handler needs to scroll it. */
+export interface DetailPaneMetrics {
+  /** Furthest the detail can scroll; 0 means it fits. */
+  maxDetailScroll: number;
+  /** Rows the pane shows at once — one page. */
+  detailPageRows: number;
+}
+
+/**
+ * The layout plus how far the detail pane can scroll, which only the layout
+ * knows — it depends on the width the rows wrapped at. The shell keeps it so
+ * `↓` stops at the last row instead of piling up offset nobody can see.
+ */
+export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: WorkflowCardLine[] } & DetailPaneMetrics {
   const glyphs = input.ascii ? ASCII_DIALOG_GLYPHS : UNICODE_DIALOG_GLYPHS;
   const width = workflowDialogContentWidth(input.width ?? DEFAULT_WIDTH);
   const now = input.now ?? Date.now();
   const view = resolveWorkflowDialog(input);
   const { state } = input;
-  // What the panes may *hold*; the frame's actual height is settled below, once
-  // there is something to measure.
+  // The frame's body height, fixed: the panes are built against it and drawn at it.
   const capacity = Math.max(MIN_PANE_BODY_ROWS, input.bodyRows ?? DEFAULT_PANE_BODY_ROWS);
   const spinnerFrame = input.spinnerFrame ?? 0;
 
@@ -765,6 +986,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
 
   // ---- The detail pane, in the subview only.
   const detailRows: WorkflowCardLine[] = [];
+  let expandable = false;
   if (!inPhases && entry) {
     const display = displayState(entry, view.workflowActive);
     // Prefers the canonical `provider/model-id` here — two providers can serve
@@ -797,45 +1019,10 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
       detailRows.push(clampLine([{ text: ` ${stats.join(" · ")}`, color: "dim" }], rightWidth));
     }
 
-    const prompt = previewLines(entry.promptPreview);
-    const collapsed = !state.promptExpanded && prompt.length > PROMPT_COLLAPSED_LINES;
-    const promptSuffix: string[] = [];
-    if (prompt.length > 0) promptSuffix.push(`${prompt.length} ${prompt.length === 1 ? "line" : "lines"}`);
-    if (prompt.length > PROMPT_COLLAPSED_LINES) {
-      promptSuffix.push(`${glyphs.enter} ${state.promptExpanded ? "collapse" : "expand"}`);
-    }
-    detailRows.push([]);
-    detailRows.push(detailHeading("Prompt", promptSuffix, rightWidth));
-    if (prompt.length === 0) {
-      detailRows.push(detailBody(WORKFLOW_DIALOG_COPY.availableOnceStarted, rightWidth));
-    } else {
-      const shown = collapsed ? prompt.slice(0, PROMPT_COLLAPSED_LINES) : prompt;
-      for (const text of shown) detailRows.push(detailBody(text, rightWidth));
-      // Named rather than silently cut: the reader has to know the prompt goes on.
-      if (collapsed) {
-        const hidden = prompt.length - PROMPT_COLLAPSED_LINES;
-        detailRows.push(detailBody(`${glyphs.ellipsis} ${hidden} more line${hidden === 1 ? "" : "s"}`, rightWidth));
-      }
-    }
-
-    const toolCalls = entry.toolCalls ?? 0;
-    detailRows.push([]);
-    detailRows.push(
-      detailHeading(
-        "Activity",
-        toolCalls > 0 ? [`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`] : [],
-        rightWidth,
-      ),
-    );
-    detailRows.push(detailBody(activityBody(entry, display), rightWidth));
-
-    detailRows.push([]);
-    detailRows.push(detailHeading("Outcome", [], rightWidth));
-    // Wrapped, not clamped: the outcome is the thing the reader came for, and
-    // cutting it at the pane edge would hide the half that matters.
-    for (const text of wrapTextWithAnsi(outcomeBody(entry, display), Math.max(1, rightWidth - 4))) {
-      detailRows.push(detailBody(text, rightWidth));
-    }
+    const detail = entry.recordId !== undefined ? input.detail?.(entry.recordId) : undefined;
+    const sections = detailSections({ entry, display, detail, expanded: state.expanded, width: rightWidth, glyphs });
+    detailRows.push(...sections.rows);
+    expandable = sections.expandable;
   }
 
   const phaseTitle = view.groups[view.clampedPhase]?.title ?? "Phases";
@@ -849,18 +1036,29 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // Indented one column, so the frame's left edge lines up under the name and
   // the description rather than hanging off the edge of them.
   const leftRows = inPhases ? phaseRows : agentRows;
-  const rightRows = inPhases ? agentRows : detailRows;
+  // Always the full capacity, so the box never resizes under the reader. The
+  // list panes were built against it; the detail is the one pane that can
+  // hold more, and it scrolls inside the frame rather than being cut by it.
+  const bodyRows = capacity;
+  const maxDetailScroll = inPhases ? 0 : Math.max(0, detailRows.length - bodyRows);
+  const scroll = clampIndex(state.detailScroll, maxDetailScroll + 1);
+  const rightRows = inPhases ? agentRows : detailRows.slice(scroll, scroll + bodyRows);
+  // `1–26 of 35 ↓` in the bottom edge, so a pane that runs on says so.
+  let rightFooter: string | undefined;
+  if (maxDetailScroll > 0) {
+    const arrows = `${scroll > 0 ? glyphs.moreAbove : ""}${scroll < maxDetailScroll ? glyphs.moreBelow : ""}`;
+    rightFooter = `${scroll + 1}${glyphs.rangeDash}${scroll + rightRows.length} of ${detailRows.length} ${arrows}`;
+  }
   lines.push(
     ...paneFrame({
       leftTitle: inPhases ? "Phases" : agentPaneTitle,
       rightTitle: inPhases ? agentPaneTitle : (entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents),
       leftRows,
       rightRows,
+      rightFooter,
+      rightFocused: detailHasFocus(state, maxDetailScroll),
       width: width - 1,
-      // Tall enough for whichever pane holds more, and no taller. Both panes
-      // were built against `capacity`, so neither can exceed it and nothing
-      // measured here is ever cut by the frame it is sizing.
-      bodyRows: Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, rightRows.length)),
+      bodyRows,
       glyphs,
     }).map(line => [{ text: " " }, ...line]),
   );
@@ -878,10 +1076,17 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
     if (view.visibleAgents.length > 0) hints.push(`${glyphs.enter} open`);
     hints.push("f filter");
   } else {
-    hints.push(`${glyphs.upDown} agent`);
-    if (previewLines(entry?.promptPreview).length > PROMPT_COLLAPSED_LINES) {
-      hints.push(`${glyphs.enter} prompt`);
+    // `↑↓` follow the focus: the agent list's cursor, or the detail once `→`
+    // moved into it. `→` also expands a collapsed detail, but is advertised
+    // only once there is something to scroll: on a collapsed one `⏎ expand`
+    // already says so, and every hint costs what an 80-column footer drops.
+    if (detailHasFocus(state, maxDetailScroll)) {
+      hints.push(`${glyphs.upDown} scroll`, `${glyphs.left} agents`);
+    } else {
+      hints.push(`${glyphs.upDown} agent`);
+      if (maxDetailScroll > 0) hints.push(`${glyphs.right} scroll`);
     }
+    if (expandable) hints.push(`${glyphs.enter} ${state.expanded ? "collapse" : "expand"}`);
     const actions = agentActions(entry, view.workflowActive);
     if (actions.skip && can("onSkipAgent")) hints.push("s skip");
     if (actions.retry && can("onRetryAgent")) hints.push("r retry");
@@ -905,7 +1110,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   }
   lines.push(clampLine([{ text: ` ${hints.join(" · ")}`, color: "dim" }], width));
 
-  return lines;
+  return { lines, maxDetailScroll, detailPageRows: bodyRows };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -926,7 +1131,12 @@ export function handleWorkflowDialogKey(
   data: string,
   state: WorkflowDialogState,
   view: ResolvedWorkflowDialog,
+  /** From the last layout (`buildWorkflowDialog`); the default is a detail that fits. */
+  pane: DetailPaneMetrics = { maxDetailScroll: 0, detailPageRows: 1 },
+  /** Page and jump keys, resolved through the user's keybindings as the conversation viewer's are. */
+  keys: ViewerKeys = createViewerKeys(),
 ): { state: WorkflowDialogState; action?: WorkflowDialogAction } | undefined {
+  const { maxDetailScroll } = pane;
   // Ctrl+C is the reflex for backing out of a full-screen overlay, so it closes
   // outright from EITHER level — the conversation viewer's #255 fix, which this
   // dialog is reached the same way as. Deliberately not folded into the `esc`
@@ -937,16 +1147,49 @@ export function handleWorkflowDialogKey(
   // Back one level before out of the dialog: `esc` in the subview returns to
   // the overview, and only closes from there. Anything else would make a wrong
   // turn cost the whole dialog.
-  if (matchesKey(data, "escape") || matchesKey(data, "q")) {
-    if (state.level === "agent") return { state: { ...state, level: "phases", promptExpanded: false } };
+  // A focused detail is the innermost level, so `esc` and `←` hand focus back
+  // to the agent list first — and fold the detail back to its compact view,
+  // undoing the expand that `→` did on the way in.
+  const focused = detailHasFocus(state, maxDetailScroll);
+  const back = matchesKey(data, "escape") || matchesKey(data, "q");
+  if (focused && (back || matchesKey(data, "left"))) {
+    return { state: { ...state, detailFocused: false, expanded: false, detailScroll: 0 } };
+  }
+  const toPhases = { ...state, level: "phases" as const, expanded: false, detailScroll: 0, detailFocused: false };
+  if (back) {
+    if (state.level === "agent") return { state: toPhases };
     return { state, action: { kind: "cancel" } };
   }
-  if (matchesKey(data, "left") && state.level === "agent") {
-    return { state: { ...state, level: "phases", promptExpanded: false } };
+  if (matchesKey(data, "left") && state.level === "agent") return { state: toPhases };
+  // `→` goes into the detail: expanded, so there is all of it to read, and
+  // focused, so `↑↓` scroll it. Whether the expanded detail overflows is only
+  // known once the next layout has wrapped it; if it fits, `detailHasFocus`
+  // stays false and the arrows keep moving between agents.
+  if (matchesKey(data, "right") && state.level === "agent") {
+    return { state: { ...state, expanded: true, detailFocused: true, detailScroll: state.expanded ? state.detailScroll : 0 } };
   }
 
+  // Paging and jumps, with the conversation viewer's keys: `PgUp`/`PgDn` (or
+  // `shift+↑`/`shift+↓`) a page, `Home`/`End` the ends. Checked before the
+  // arrows, and active whether or not the detail has focus, since nothing else
+  // in the subview uses them.
+  if (state.level === "agent" && maxDetailScroll > 0) {
+    const scrollTo = (row: number) => ({ state: { ...state, detailScroll: Math.min(Math.max(0, row), maxDetailScroll) } });
+    if (keys.pageDown(data)) return scrollTo(state.detailScroll + pane.detailPageRows);
+    if (keys.pageUp(data)) return scrollTo(state.detailScroll - pane.detailPageRows);
+    if (keys.top(data) || matchesKey(data, "home")) return scrollTo(0);
+    if (keys.bottom(data) || matchesKey(data, "end")) return scrollTo(maxDetailScroll);
+  }
+
+  // `j`/`k` are `↓`/`↑`. At the overview they move the phase cursor; in the
+  // subview they move between agents, or scroll the detail once `→` has
+  // focused it.
   const down = matchesKey(data, "j") || matchesKey(data, "down");
   const up = matchesKey(data, "k") || matchesKey(data, "up");
+  if (focused && (down || up)) {
+    const next = Math.min(Math.max(0, state.detailScroll + (down ? 1 : -1)), maxDetailScroll);
+    return { state: { ...state, detailScroll: next } };
+  }
   if (down || up) {
     const delta = down ? 1 : -1;
     if (state.level === "phases") {
@@ -955,23 +1198,25 @@ export function handleWorkflowDialogKey(
       // the old row index would be meaningless.
       return { state: next === view.clampedPhase ? state : { ...state, selectedPhase: next, selectedAgent: 0 } };
     }
-    return { state: { ...state, selectedAgent: clampIndex(view.clampedAgent + delta, view.visibleAgents.length) } };
+    const next = clampIndex(view.clampedAgent + delta, view.visibleAgents.length);
+    if (next === view.clampedAgent) return { state };
+    // A different agent's detail starts at its top, collapsed.
+    return { state: { ...state, selectedAgent: next, expanded: false, detailScroll: 0, detailFocused: false } };
   }
 
   // One key, two jobs, because the two levels are what it means at each: open
-  // the selected phase's agents, then expand the prompt of the one you opened.
+  // the selected phase's agents, then expand the detail of the one you opened.
+  // `→` opens a phase too; in the subview it moves focus instead (above).
   if (matchesKey(data, "enter") || matchesKey(data, "right")) {
     if (state.level === "phases") {
       // Nothing to open, so nothing happens — entering an empty pane would
       // strand the reader in a subview with no rows and no detail.
       if (view.visibleAgents.length === 0) return { state };
-      return { state: { ...state, level: "agent", promptExpanded: false } };
+      return { state: { ...state, level: "agent", expanded: false, detailScroll: 0 } };
     }
-    return { state: { ...state, promptExpanded: !state.promptExpanded } };
+    return { state: toggleExpanded(state) };
   }
-  if (matchesKey(data, "e")) {
-    return { state: { ...state, promptExpanded: !state.promptExpanded } };
-  }
+  if (matchesKey(data, "e")) return { state: toggleExpanded(state) };
 
   // The one key that opens something instead of changing the run, so unlike
   // skip/retry it works at both levels and on a settled agent: reading what a
@@ -1028,6 +1273,8 @@ export class WorkflowDialog implements Component {
   private spinnerFrame = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
+  /** How far the detail may scroll, and its page size, as of the last render. */
+  private pane: DetailPaneMetrics = { maxDetailScroll: 0, detailPageRows: 1 };
 
   constructor(
     private tui: TUI,
@@ -1036,6 +1283,7 @@ export class WorkflowDialog implements Component {
     private done: (result: undefined) => void,
     private actions: WorkflowDialogActions = {},
     initialPhaseIndex = 0,
+    private keys: ViewerKeys = createViewerKeys(),
   ) {
     this.state = initialWorkflowDialogState(initialPhaseIndex);
     this.timer = setInterval(() => {
@@ -1047,7 +1295,7 @@ export class WorkflowDialog implements Component {
 
   handleInput(data: string): void {
     const input: WorkflowDialogInput = { ...this.source(), state: this.state };
-    const result = handleWorkflowDialogKey(data, this.state, resolveWorkflowDialog(input));
+    const result = handleWorkflowDialogKey(data, this.state, resolveWorkflowDialog(input), this.pane, this.keys);
     if (!result) return;
     this.state = result.state;
     if (result.action) this.dispatch(result.action);
@@ -1055,7 +1303,7 @@ export class WorkflowDialog implements Component {
   }
 
   render(width: number): string[] {
-    const lines = layoutWorkflowDialog({
+    const { lines, maxDetailScroll, detailPageRows } = buildWorkflowDialog({
       ...this.source(),
       state: this.state,
       // Derived from what was actually injected, so the footer advertises only
@@ -1070,7 +1318,17 @@ export class WorkflowDialog implements Component {
       },
       width,
       spinnerFrame: this.spinnerFrame,
+      // Sized to the overlay's share of the terminal, so the whole dialog fits
+      // its `maxHeight` and keeps one height while it is open.
+      bodyRows: workflowDialogBodyRows(this.tui.terminal.rows),
     });
+    this.pane = { maxDetailScroll, detailPageRows };
+    // A focus with nothing to scroll is dropped, not kept dormant: otherwise a
+    // running agent whose transcript later outgrows the pane would turn `↑↓`
+    // into scroll keys under the reader, with no keypress. The render right
+    // after `→` already measures the expanded detail, so a detail that
+    // overflows keeps the focus `→` gave it.
+    if (this.state.detailFocused && maxDetailScroll === 0) this.state = { ...this.state, detailFocused: false };
     return styleWorkflowCardLines(lines, this.theme);
   }
 

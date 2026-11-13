@@ -137,9 +137,47 @@ describe("the limits it quotes", () => {
   });
 
   it("describes the concurrency formula the runtime actually applies", () => {
-    expect(description).toContain("min(16, available CPUs - 2)");
+    expect(description).toContain("max(1, min(16, available CPUs - 2))");
+    // The worked figure is derived, not typed: it has to agree with the formula.
+    expect(description).toContain(`(${workflowConcurrency(8)} on an 8-core machine)`);
     expect(workflowConcurrency(8)).toBe(6);
     expect(workflowConcurrency(64)).toBe(16);
+    expect(workflowConcurrency(1)).toBe(1);
+    // Claude Code's "~10" contradicts the formula on every common machine.
+    expect(description).not.toContain("~10 run");
+  });
+});
+
+describe("claims about pi's own surfaces", () => {
+  it("does not advertise a workflow list, or a phase model nothing displays", () => {
+    // Neither exists: `/agents → Workflows` lists runs, not saved workflows,
+    // and `meta.phases[].model` is accepted but rendered nowhere.
+    expect(description).not.toContain("workflow list");
+    expect(description).not.toContain("to a phase entry");
+  });
+
+  it("places log() lines where the card draws them — below the tree", () => {
+    expect(description).toContain("narrator line below the progress tree");
+    expect(readFileSync(fileURLToPath(new URL("../src/ui/workflow-card.ts", import.meta.url)), "utf8"))
+      .toContain("log() output, below the tree");
+  });
+
+  it("names the run id by the label the tool result prints", () => {
+    expect(description).toContain("The tool result's `Task ID` is the runId.");
+    expect(readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8"))
+      .toContain("`Task ID: ${runId}\\n`");
+  });
+
+  it("says pipeline() propagates a fatal error, as parallel() does", () => {
+    const line = description.split("\n").find(l => l.startsWith("- pipeline("));
+    expect(line).toContain("only a fatal run error");
+  });
+
+  it("warns that the return value must survive the JSON boundary", () => {
+    expect(description).toContain("It must survive JSON");
+    for (const rejected of ["cycle", "Map", "Date", "class instance", "function", "sparse array"]) {
+      expect(description).toContain(rejected);
+    }
   });
 });
 

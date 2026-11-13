@@ -67,6 +67,13 @@ function journalsFor(cwd: string): string[] {
 /** Everything the faux backend was ever asked, flattened for substring checks. */
 const asText = (context: { messages?: unknown[] }) => JSON.stringify(context.messages ?? []);
 
+/**
+ * True once the tool result is in the context. Matched on the result's own
+ * `Task ID: wf_` line, not the bare words: the context also carries the tool
+ * loadout, and the tool's description names the `Task ID` label too.
+ */
+const launched = (context: { messages?: unknown[] }) => asText(context).includes("Task ID: wf_");
+
 /** Poll until `predicate` holds or the deadline passes. */
 async function waitFor(predicate: () => boolean, timeoutMs = 20_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -111,7 +118,7 @@ describe("Workflow end to end", () => {
           return fauxText("SUBAGENT-DONE");
         }
         parentContexts.push(asText(context));
-        return asText(context).includes("Task ID")
+        return launched(context)
           ? fauxText("workflow launched")
           : workflowCall(script);
       },
@@ -208,7 +215,7 @@ describe("Workflow end to end", () => {
             ? fauxText("done")
             : fauxToolCall("StructuredOutput", { files: ["a.ts", "b.ts"] }, { id: "so-1" });
         }
-        return asText(context).includes("Task ID")
+        return launched(context)
           ? fauxText("workflow launched")
           : fauxToolCall("SubagentWorkflow", { name: "parent" }, { id: "wf-call-named" });
       },

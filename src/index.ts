@@ -2623,6 +2623,8 @@ Terse command-style prompts produce shallow, generic work.
       status: task.status,
       doneCount: task.doneCount,
       totalCount: task.agentCount,
+      // A settled run has no phase in progress; a paused one is still in its.
+      phase: task.status === "running" || task.status === "paused" ? task.phaseLabel : "",
       startedAt: task.startTime,
       ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
       tokens: task.totalTokens,

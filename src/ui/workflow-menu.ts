@@ -16,8 +16,10 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
+import { type AgentDetail, agentDetailFromMessages } from "../workflow/agent-detail.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
-import { WorkflowDialog } from "./workflow-dialog.js";
+import { createViewerKeys } from "./viewer-keys.js";
+import { WORKFLOW_DIALOG_HEIGHT_PCT, WorkflowDialog } from "./workflow-dialog.js";
 
 /** Everything the menu and the inspector need from the extension around them. */
 export interface WorkflowMenuDeps {
@@ -40,6 +42,44 @@ export interface WorkflowMenuDeps {
 }
 
 /**
+ * What the child answered, as the script received it: the structured JSON
+ * (pretty-printed, so the Outcome reads as an object rather than one long
+ * line) or the final text.
+ */
+function recordOutcome(record: AgentRecord): string | undefined {
+  if (record.structuredJson !== undefined) {
+    try {
+      return JSON.stringify(JSON.parse(record.structuredJson), null, 2);
+    } catch {
+      return record.structuredJson;
+    }
+  }
+  return record.result;
+}
+
+/**
+ * A `detail` lookup over the manager's records, memoised per record on its
+ * message count and status — the dialog re-reads its source on every 80ms
+ * spinner frame, and re-folding a long transcript that often would be waste.
+ */
+export function createAgentDetailSource(getRecord: (id: string) => AgentRecord | undefined): (id: string) => AgentDetail | undefined {
+  const cache = new Map<string, { key: string; detail: AgentDetail }>();
+  return id => {
+    const record = getRecord(id);
+    const messages = record?.session?.messages;
+    if (record === undefined || messages === undefined) return undefined;
+    const key = `${messages.length}:${record.status}`;
+    const hit = cache.get(id);
+    if (hit?.key === key) return hit.detail;
+    const folded = agentDetailFromMessages(messages);
+    const outcome = recordOutcome(record) ?? folded.outcome;
+    const detail: AgentDetail = { ...folded, ...(outcome !== undefined ? { outcome } : {}) };
+    cache.set(id, { key, detail });
+    return detail;
+  };
+}
+
+/**
  * Open the inspector for a workflow run.
  *
  * All six controls are wired: `onKill` aborts the run's controller, while
@@ -57,8 +97,9 @@ export async function showWorkflowDialog(
   // Overlaid on the same terms as the conversation viewer, because they are
   // reached the same way: both are rows of the fleet list, and opening one
   // must not behave unlike opening the other. Inline, the frame would render
-  // into the conversation and stay in the scrollback after it closed.
-  const { VIEWPORT_HEIGHT_PCT } = await import("./conversation-viewer.js");
+  // into the conversation and stay in the scrollback after it closed. Taller
+  // than the viewer's share: the frame is drawn at a fixed height, and two
+  // panes need the rows more than one transcript does.
   /**
    * This dialog's own overlay, so `c` can hide it while the conversation is
    * up. Overlays stack, so the viewer would render *over* it either way —
@@ -68,8 +109,9 @@ export async function showWorkflowDialog(
    * closes.
    */
   let overlay: { setHidden(hidden: boolean): void } | undefined;
+  const detail = createAgentDetailSource(deps.getRecord);
   await ctx.ui.custom<undefined>(
-    (tui, theme, _keybindings, done) =>
+    (tui, theme, keybindings, done) =>
       new WorkflowDialog(
         tui,
         // Re-read on every render: the run is in the background, so the
@@ -85,6 +127,7 @@ export async function showWorkflowDialog(
           },
           meta: task.meta,
           agentCount: task.agentCount,
+          detail,
         }),
         theme,
         done,
@@ -138,10 +181,13 @@ export async function showWorkflowDialog(
               .finally(() => overlay?.setHidden(false));
           },
         },
+        undefined,
+        // The conversation viewer's page and jump keys, so the two scroll alike.
+        createViewerKeys(keybindings),
       ),
     {
       overlay: true,
-      overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
+      overlayOptions: { anchor: "center", width: "90%", maxHeight: `${WORKFLOW_DIALOG_HEIGHT_PCT}%` },
       onHandle: handle => { overlay = handle; },
     },
   );
