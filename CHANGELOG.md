@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Asking for a number of subagents no longer starts a workflow** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A pi-only `SubagentWorkflow` guideline sent requests like "use 10 agents to …" to a workflow instead of parallel `Agent` calls, overriding the tool description's rule that a workflow needs an explicit opt-in. The guideline is removed, as Claude Code has none; "use a workflow" or a saved workflow name still starts one.
+
 ## [0.25.0] - 2026-11-13
 
 > **⚠️ Behavior change — `general-purpose` can now spawn subagents of its own** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). A `general-purpose` agent may delegate instead of doing all the work itself; its children count toward `maxConcurrentNested`. Depth stays at `maxSubagentDepth` `2`: a subagent's children cannot spawn again, unlike Claude Code's default of 3; set it to `3` to match. Inside a workflow it does not, as in Claude Code: the script does the fanning out. To keep `general-purpose` from delegating, add a `general-purpose.md` agent file without `allowed_subagents`; it replaces the built-in. A `general-purpose.md` you ejected earlier is such a file, so it keeps the old behavior: add `allowed_subagents: all` to it, or delete it to use the built-in. Set `maxSubagentDepth` to `1` to turn nesting off entirely.
