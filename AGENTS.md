@@ -84,6 +84,16 @@ Cite code by symbol or quoted string (`spawnTopLevel` in `src/index.ts`), never 
 
 See `CONTRIBUTING.md` for the contributor guidelines and quality bar.
 
+### Triaging
+
+Triage writes a snapshot of all open issues and PRs to `.scratch/TRIAGE.md` (gitignored), following the structure of the previous one. Before overwriting it, rename the old one to `.scratch/triage-<date>.md`.
+
+- Put a **Sponsors** section first: open items by current sponsors, which may be prioritized. Logins:
+  `gh api graphql -f query='{ viewer { sponsorshipsAsMaintainer(first: 100, activeOnly: true) { nodes { sponsorEntity { ... on User { login } ... on Organization { login } } } } } }' --jq '.data.viewer.sponsorshipsAsMaintainer.nodes[].sponsorEntity.login'`
+- Mark each item "confirmed" (checked against master) or "reported". It is a bug only once a failing test reproduces it; check `CHANGELOG.md`, `git log -S` and upstream pi's CHANGELOG before calling it one.
+- Closable means the fix is on master with a test that goes red without it. A release is not needed.
+- Draft replies for the user; post or close only when told to.
+
 ### Filing PRs
 
 Write the body to a temp file and pass `--body-file` (`gh pr create`, `gh pr edit`); never multi-line markdown via `--body`. Create or edit a PR only when the user asks.
