@@ -248,7 +248,7 @@ Spawns one subagent and resolves to its final text — or, with `schema`, to a v
 | `resume` | string | Continue the child that ran under that label instead of starting fresh |
 | `schema` | object | A JSON Schema with an object root. Resolves to the validated object instead of text |
 
-Any other key is rejected **by name** at the call. Note that this checks option *keys*, not option *values* — an `agentType` that names no known agent falls back to `general-purpose` silently.
+Any other key is rejected **by name** at the call. Note that this checks option *keys*, not option *values* — an `agentType` that names no known agent falls back to the [`fallbackSubagent`](../README.md#persistent-settings) agent (`general-purpose` by default) silently, or, under `fallbackSubagent: none`, fails and `agent()` returns `null`.
 
 Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
 
@@ -264,6 +264,8 @@ await parallel(thunks)             // barrier: waits for all of them
 **`pipeline` has no barrier.** Item A can be in stage 3 while item B is still in stage 1, so the total time is the slowest single *chain* rather than the sum of the slowest per stage. Each stage receives `(previousResult, originalItem, index)` — the original item and its index stay available in later stages, so you do not have to thread them through the return value. A stage that throws drops that one item to `null` and skips its remaining stages.
 
 **`parallel` is a barrier.** It waits for everything before anything moves on, so if five agents run and the slowest takes three times the fastest, four sit finished doing nothing. A thunk that throws becomes `null` without taking its siblings down.
+
+In both, a fatal run error is the exception: a cap breach, or a nested `workflow()` that could not load, propagates out of the call and fails the run rather than turning into a `null`.
 
 Prefer `pipeline` unless a stage genuinely needs every prior result *together* — deduplicating across the whole set, deciding whether to continue at all, or a prompt that compares one result against all the others. Needing to flatten, map or filter is not such a case; do that inside a pipeline stage.
 
@@ -308,7 +310,7 @@ Package directories are searched **last**, so a script of yours always wins the 
 | Agents per run, total | 1000 |
 | Items per `parallel`/`pipeline` **call** | 4096 |
 | Nested `workflow()` calls per run | 256 |
-| Script length | 512 KiB |
+| Script length | 524,288 characters |
 
 These are three different things and are easy to conflate: 1000 is a budget for the whole run, the concurrency figure is how many run *simultaneously*, and 4096 is per call rather than per run. Excess items queue rather than melting the machine.
 
@@ -386,7 +388,7 @@ The script called `Date.now()`, `new Date()` or `Math.random()`. A script that v
 A typo, or an option from a different tool. The supported set is `label`, `phase`, `model`, `agentType`, `isolation`, `gate`, `resume`, `effort`, `schema`.
 
 **An agent ran as the wrong type and nothing said so.**
-An `agentType` that names no known agent falls back to `general-purpose` **silently** — unlike the `Agent` tool, which tells you. Option *keys* are validated; option *values* are not. Check the spelling against `/agents`; matching is case-insensitive, and a disabled agent does not count.
+An `agentType` that names no known agent falls back to the [`fallbackSubagent`](../README.md#persistent-settings) agent — `general-purpose` unless you set another — **silently**, unlike the `Agent` tool, which tells you. Set `fallbackSubagent: none` to make it fail instead: the call returns `null`, and the inspector's **Outcome** for that agent lists the available types. Option *keys* are validated; option *values* are not. Check the spelling against `/agents`; matching is case-insensitive, and a disabled agent does not count.
 
 **`agent()` returned `null`.**
 The agent failed terminally, or you skipped it with `s` in the inspector. These are indistinguishable to the script. With `schema`, it also covers a child that never produced a payload matching the schema.
