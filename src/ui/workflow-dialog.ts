@@ -14,7 +14,10 @@
  * ```
  *
  * Opening an agent swaps the panes: that phase's agents move left and the
- * right becomes the agent's Prompt / Activity / Outcome detail.
+ * right becomes the agent's Prompt / Activity / Outcome detail. Activity lists
+ * the child's tool calls from its transcript (`AgentDetail`, injected through
+ * the source); `⏎` expands all three sections, and `j/k` scroll the detail
+ * while `↑↓` keep moving between agents.
  *
  * A phase with no agents yet shows its number and nothing else. The single-pane
  * layout this replaced spelled that out as "Not started yet"; the left pane is
@@ -49,6 +52,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import type { AgentDetail, AgentDetailItem } from "../workflow/agent-detail.js";
 import type { WorkflowMeta } from "../workflow/meta.js";
 import {
   buildPhaseGroups,
@@ -102,6 +106,15 @@ export const DEFAULT_PANE_BODY_ROWS = 22;
 export const MIN_PANE_BODY_ROWS = 6;
 /** Prompt lines shown before `expand` is offered. */
 export const PROMPT_COLLAPSED_LINES = 4;
+/** Outcome rows shown before `expand` is offered. */
+export const OUTCOME_COLLAPSED_LINES = 12;
+/** Most recent tool calls the collapsed Activity lists; earlier ones are counted. */
+export const ACTIVITY_COLLAPSED_CALLS = 8;
+/**
+ * Result lines shown under each call in the expanded transcript, so one
+ * 2000-line `cat` cannot bury every call after it.
+ */
+export const ACTIVITY_RESULT_LINES = 8;
 /** Spinner cadence. Unlike the card's 1s header tick, this row really animates. */
 export const WORKFLOW_DIALOG_SPINNER_MS = 80;
 
@@ -133,6 +146,14 @@ export interface WorkflowDialogGlyphs {
   };
   /** Trailing marker on a title the pane was too narrow to hold. */
   ellipsis: string;
+  /** `⏺` — one tool call in the Activity section. */
+  call: string;
+  /** `⎿` — the first line of a call's result in the expanded transcript. */
+  result: string;
+  /** The scrolled detail's `1–26 of 35 ↓` label: range dash, then the arrows. */
+  rangeDash: string;
+  moreAbove: string;
+  moreBelow: string;
   /** How the footer names the arrow keys and Enter. */
   upDown: string;
   enter: string;
@@ -156,6 +177,11 @@ export const UNICODE_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
     bottomTee: "┴",
   },
   ellipsis: "…",
+  call: "⏺",
+  result: "⎿",
+  rangeDash: "–",
+  moreAbove: "↑",
+  moreBelow: "↓",
   upDown: "↑↓",
   enter: "⏎",
 };
@@ -179,6 +205,11 @@ export const ASCII_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
     bottomTee: "+",
   },
   ellipsis: "~",
+  call: "*",
+  result: "|",
+  rangeDash: "-",
+  moreAbove: "^",
+  moreBelow: "v",
   upDown: "up/down",
   enter: "enter",
 };
@@ -267,7 +298,10 @@ export interface WorkflowDialogState {
   selectedAgent: number;
   level: WorkflowDialogLevel;
   filter: WorkflowDialogFilter;
-  promptExpanded: boolean;
+  /** Prompt, Activity and Outcome all expanded — one toggle, as in Claude Code. */
+  expanded: boolean;
+  /** First detail row shown; clamped on read against what the pane holds. */
+  detailScroll: number;
 }
 
 export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialogState {
@@ -276,7 +310,8 @@ export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialo
     selectedAgent: 0,
     level: "phases",
     filter: "all",
-    promptExpanded: false,
+    expanded: false,
+    detailScroll: 0,
   };
 }
 
@@ -287,6 +322,11 @@ export interface WorkflowDialogSource {
   meta?: WorkflowMeta;
   /** Agents the runtime has scheduled, which can exceed those that reported. */
   agentCount?: number;
+  /**
+   * The child's transcript, by the entry's `recordId`. Undefined once the
+   * record has been swept, which falls back to the progress log's previews.
+   */
+  detail?(recordId: string): AgentDetail | undefined;
 }
 
 export interface WorkflowDialogInput extends WorkflowDialogSource {
@@ -506,6 +546,8 @@ function paneFrame(options: {
   rightTitle: string;
   leftRows: WorkflowCardLine[];
   rightRows: WorkflowCardLine[];
+  /** A label set into the bottom edge under the right pane, flush right. */
+  rightFooter?: string;
   width: number;
   bodyRows: number;
   glyphs: WorkflowDialogGlyphs;
@@ -538,10 +580,21 @@ function paneFrame(options: {
     { text: box.bottomLeft, color: "dim" },
     { text: box.horizontal.repeat(left), color: "dim" },
     { text: box.bottomTee, color: "dim" },
-    { text: box.horizontal.repeat(right), color: "dim" },
+    ...bottomEdge(options.rightFooter, right, box.horizontal),
     { text: box.bottomRight, color: "dim" },
   ]);
   return lines;
+}
+
+/** A bottom edge of `width` cells, with `label` set in flush right when it fits. */
+function bottomEdge(label: string | undefined, width: number, horizontal: string): WorkflowCardSegment[] {
+  const room = label === undefined ? 0 : visibleWidth(label) + 3;
+  if (label === undefined || room > width) return [{ text: horizontal.repeat(width), color: "dim" }];
+  return [
+    { text: `${horizontal.repeat(width - room)} `, color: "dim" },
+    { text: label, color: "dim" },
+    { text: ` ${horizontal}`, color: "dim" },
+  ];
 }
 
 /* ------------------------------------------------------------------------- *
@@ -551,7 +604,7 @@ function paneFrame(options: {
 /** Split a preview into lines, treating an empty preview as absent. */
 const previewLines = (preview: string | undefined) => (preview ? preview.split("\n") : []);
 
-/** What the Activity body says. There is a count of tool calls, never a list. */
+/** What the Activity body says when there is no transcript to list from. */
 function activityBody(entry: WorkflowAgentEntry, state: WorkflowDisplayState): string {
   if (state === "queued") return WORKFLOW_DIALOG_COPY.availableOnceStarted;
   if ((entry.toolCalls ?? 0) > 0) return WORKFLOW_DIALOG_COPY.noTranscript;
@@ -624,6 +677,120 @@ function detailHeading(title: string, suffixes: readonly string[], width: number
 const detailBody = (text: string, width: number): WorkflowCardLine =>
   clampLine([{ text: `   ${text}`, color: "dim" }], width);
 
+/** `3 lines` / `1 line`. */
+const lineCount = (n: number) => `${n} line${n === 1 ? "" : "s"}`;
+
+/** `⏺ Bash(ls -la)`, its glyph coloured by how the call came out. */
+function callRow(item: AgentDetailItem, width: number, glyphs: WorkflowDialogGlyphs): WorkflowCardLine {
+  const color: WorkflowCardColor = !item.settled ? "dim" : item.isError ? "error" : "success";
+  return clampLine([{ text: "   " }, { text: glyphs.call, color }, { text: ` ${item.head}`, color: "dim" }], width);
+}
+
+/**
+ * Prompt, Activity and Outcome for the selected agent.
+ *
+ * Collapsed, each section is a preview: the prompt's first lines, the most
+ * recent tool calls one per row, the outcome's first rows. Expanded — one
+ * toggle for all three, as in Claude Code — the prompt and outcome are whole
+ * and Activity becomes the transcript, each call followed by its result.
+ * The pane scrolls, so nothing here is sized to fit it.
+ *
+ * With no `detail` (the record was swept, or no caller supplied one) the
+ * sections fall back to the progress log's previews and counts.
+ */
+function detailSections(options: {
+  entry: WorkflowAgentEntry;
+  display: WorkflowDisplayState;
+  detail: AgentDetail | undefined;
+  expanded: boolean;
+  width: number;
+  glyphs: WorkflowDialogGlyphs;
+}): { rows: WorkflowCardLine[]; expandable: boolean } {
+  const { entry, display, detail, expanded, width, glyphs } = options;
+  const rows: WorkflowCardLine[] = [];
+  const toggle = `${glyphs.enter} ${expanded ? "collapse" : "expand"}`;
+  const wrapWidth = Math.max(1, width - 4);
+  const wrapped = (lines: readonly string[]) => lines.flatMap(line => wrapTextWithAnsi(line, wrapWidth));
+  const more = (hidden: number, noun = "line") =>
+    detailBody(`${glyphs.ellipsis} ${hidden} more ${noun}${hidden === 1 ? "" : "s"}`, width);
+
+  // ---- Prompt
+  const prompt = previewLines(detail?.prompt ?? entry.promptPreview);
+  const promptFolds = prompt.length > PROMPT_COLLAPSED_LINES;
+  const promptSuffix = prompt.length > 0 ? [lineCount(prompt.length)] : [];
+  if (promptFolds) promptSuffix.push(toggle);
+  rows.push([], detailHeading("Prompt", promptSuffix, width));
+  if (prompt.length === 0) {
+    rows.push(detailBody(WORKFLOW_DIALOG_COPY.availableOnceStarted, width));
+  } else if (expanded) {
+    // Wrapped once expanded: the point of expanding is to read every word.
+    for (const text of wrapped(prompt)) rows.push(detailBody(text, width));
+  } else {
+    for (const text of prompt.slice(0, PROMPT_COLLAPSED_LINES)) rows.push(detailBody(text, width));
+    // Named rather than silently cut: the reader has to know the prompt goes on.
+    if (promptFolds) rows.push(more(prompt.length - PROMPT_COLLAPSED_LINES));
+  }
+
+  // ---- Activity
+  const calls = detail?.items.filter(item => item.kind === "tool") ?? [];
+  const activityFolds =
+    detail !== undefined
+    && (calls.length > ACTIVITY_COLLAPSED_CALLS || detail.items.some(item => item.kind === "text" || item.body.length > 0));
+  const toolCalls = entry.toolCalls ?? calls.length;
+  const activitySuffix = toolCalls > 0 ? [`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`] : [];
+  if (activityFolds) activitySuffix.push(toggle);
+  rows.push([], detailHeading("Activity", activitySuffix, width));
+  if (detail === undefined) {
+    rows.push(detailBody(activityBody(entry, display), width));
+  } else if (expanded && detail.items.length > 0) {
+    for (const item of detail.items) {
+      if (item.kind === "text") {
+        for (const text of wrapped([item.head, ...item.body])) {
+          rows.push(clampLine([{ text: `   ${text}` }], width));
+        }
+        continue;
+      }
+      rows.push(callRow(item, width, glyphs));
+      const shown = item.body.slice(0, ACTIVITY_RESULT_LINES);
+      shown.forEach((text, i) => {
+        rows.push(clampLine([{ text: `     ${i === 0 ? glyphs.result : " "} ${text}`, color: "dim" }], width));
+      });
+      const hidden = item.body.length - shown.length;
+      if (hidden > 0) rows.push(clampLine([{ text: `       ${glyphs.ellipsis} ${hidden} more ${hidden === 1 ? "line" : "lines"}`, color: "dim" }], width));
+    }
+  } else if (calls.length > 0) {
+    // The most recent calls, because on a live agent that is what is happening.
+    const hidden = calls.length - ACTIVITY_COLLAPSED_CALLS;
+    if (hidden > 0) rows.push(detailBody(`${glyphs.ellipsis} ${hidden} earlier call${hidden === 1 ? "" : "s"}`, width));
+    for (const item of calls.slice(Math.max(0, hidden))) rows.push(callRow(item, width, glyphs));
+  } else {
+    rows.push(
+      detailBody(
+        display === "queued" ? WORKFLOW_DIALOG_COPY.availableOnceStarted
+        : isLive(entry) ? WORKFLOW_DIALOG_COPY.noToolCallsYet
+        : WORKFLOW_DIALOG_COPY.noToolCalls,
+        width,
+      ),
+    );
+  }
+
+  // ---- Outcome
+  // Wrapped, not clamped: the outcome is the thing the reader came for, and
+  // cutting it at the pane edge would hide the half that matters.
+  const outcomeText = display === "done" ? (detail?.outcome ?? outcomeBody(entry, display)) : outcomeBody(entry, display);
+  const outcomeLines = outcomeText.split("\n");
+  const outcomeRows = wrapped(outcomeLines);
+  const outcomeFolds = outcomeRows.length > OUTCOME_COLLAPSED_LINES;
+  const outcomeSuffix = outcomeLines.length > 1 ? [lineCount(outcomeLines.length)] : [];
+  if (outcomeFolds) outcomeSuffix.push(toggle);
+  rows.push([], detailHeading("Outcome", outcomeSuffix, width));
+  const shownOutcome = expanded || !outcomeFolds ? outcomeRows : outcomeRows.slice(0, OUTCOME_COLLAPSED_LINES);
+  for (const text of shownOutcome) rows.push(detailBody(text, width));
+  if (shownOutcome.length < outcomeRows.length) rows.push(more(outcomeRows.length - shownOutcome.length));
+
+  return { rows, expandable: promptFolds || activityFolds || outcomeFolds };
+}
+
 /** The row for one agent, as it appears in whichever pane is listing agents. */
 function agentRow(options: {
   entry: WorkflowAgentEntry;
@@ -675,6 +842,15 @@ function rowStatSegments(entry: WorkflowAgentEntry): string[] {
  * different sizes.
  */
 export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLine[] {
+  return buildWorkflowDialog(input).lines;
+}
+
+/**
+ * The layout plus how far the detail pane can scroll, which only the layout
+ * knows — it depends on the width the rows wrapped at. The shell keeps it so
+ * `j` stops at the last row instead of piling up offset nobody can see.
+ */
+export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: WorkflowCardLine[]; maxDetailScroll: number } {
   const glyphs = input.ascii ? ASCII_DIALOG_GLYPHS : UNICODE_DIALOG_GLYPHS;
   const width = workflowDialogContentWidth(input.width ?? DEFAULT_WIDTH);
   const now = input.now ?? Date.now();
@@ -765,6 +941,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
 
   // ---- The detail pane, in the subview only.
   const detailRows: WorkflowCardLine[] = [];
+  let expandable = false;
   if (!inPhases && entry) {
     const display = displayState(entry, view.workflowActive);
     // Prefers the canonical `provider/model-id` here — two providers can serve
@@ -797,45 +974,10 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
       detailRows.push(clampLine([{ text: ` ${stats.join(" · ")}`, color: "dim" }], rightWidth));
     }
 
-    const prompt = previewLines(entry.promptPreview);
-    const collapsed = !state.promptExpanded && prompt.length > PROMPT_COLLAPSED_LINES;
-    const promptSuffix: string[] = [];
-    if (prompt.length > 0) promptSuffix.push(`${prompt.length} ${prompt.length === 1 ? "line" : "lines"}`);
-    if (prompt.length > PROMPT_COLLAPSED_LINES) {
-      promptSuffix.push(`${glyphs.enter} ${state.promptExpanded ? "collapse" : "expand"}`);
-    }
-    detailRows.push([]);
-    detailRows.push(detailHeading("Prompt", promptSuffix, rightWidth));
-    if (prompt.length === 0) {
-      detailRows.push(detailBody(WORKFLOW_DIALOG_COPY.availableOnceStarted, rightWidth));
-    } else {
-      const shown = collapsed ? prompt.slice(0, PROMPT_COLLAPSED_LINES) : prompt;
-      for (const text of shown) detailRows.push(detailBody(text, rightWidth));
-      // Named rather than silently cut: the reader has to know the prompt goes on.
-      if (collapsed) {
-        const hidden = prompt.length - PROMPT_COLLAPSED_LINES;
-        detailRows.push(detailBody(`${glyphs.ellipsis} ${hidden} more line${hidden === 1 ? "" : "s"}`, rightWidth));
-      }
-    }
-
-    const toolCalls = entry.toolCalls ?? 0;
-    detailRows.push([]);
-    detailRows.push(
-      detailHeading(
-        "Activity",
-        toolCalls > 0 ? [`${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`] : [],
-        rightWidth,
-      ),
-    );
-    detailRows.push(detailBody(activityBody(entry, display), rightWidth));
-
-    detailRows.push([]);
-    detailRows.push(detailHeading("Outcome", [], rightWidth));
-    // Wrapped, not clamped: the outcome is the thing the reader came for, and
-    // cutting it at the pane edge would hide the half that matters.
-    for (const text of wrapTextWithAnsi(outcomeBody(entry, display), Math.max(1, rightWidth - 4))) {
-      detailRows.push(detailBody(text, rightWidth));
-    }
+    const detail = entry.recordId !== undefined ? input.detail?.(entry.recordId) : undefined;
+    const sections = detailSections({ entry, display, detail, expanded: state.expanded, width: rightWidth, glyphs });
+    detailRows.push(...sections.rows);
+    expandable = sections.expandable;
   }
 
   const phaseTitle = view.groups[view.clampedPhase]?.title ?? "Phases";
@@ -849,18 +991,29 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   // Indented one column, so the frame's left edge lines up under the name and
   // the description rather than hanging off the edge of them.
   const leftRows = inPhases ? phaseRows : agentRows;
-  const rightRows = inPhases ? agentRows : detailRows;
+  const fullRightRows = inPhases ? agentRows : detailRows;
+  // Tall enough for whichever pane holds more, and no taller. The list panes
+  // were built against `capacity`; the detail is the one pane that can hold
+  // more, and it scrolls inside the frame rather than being cut by it.
+  const bodyRows = Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, fullRightRows.length));
+  const maxDetailScroll = inPhases ? 0 : Math.max(0, detailRows.length - bodyRows);
+  const scroll = clampIndex(state.detailScroll, maxDetailScroll + 1);
+  const rightRows = inPhases ? agentRows : detailRows.slice(scroll, scroll + bodyRows);
+  // `1–26 of 35 ↓` in the bottom edge, so a pane that runs on says so.
+  let rightFooter: string | undefined;
+  if (maxDetailScroll > 0) {
+    const arrows = `${scroll > 0 ? glyphs.moreAbove : ""}${scroll < maxDetailScroll ? glyphs.moreBelow : ""}`;
+    rightFooter = `${scroll + 1}${glyphs.rangeDash}${scroll + rightRows.length} of ${detailRows.length} ${arrows}`;
+  }
   lines.push(
     ...paneFrame({
       leftTitle: inPhases ? "Phases" : agentPaneTitle,
       rightTitle: inPhases ? agentPaneTitle : (entry?.label ?? WORKFLOW_DIALOG_COPY.noAgents),
       leftRows,
       rightRows,
+      rightFooter,
       width: width - 1,
-      // Tall enough for whichever pane holds more, and no taller. Both panes
-      // were built against `capacity`, so neither can exceed it and nothing
-      // measured here is ever cut by the frame it is sizing.
-      bodyRows: Math.min(capacity, Math.max(MIN_PANE_BODY_ROWS, leftRows.length, rightRows.length)),
+      bodyRows,
       glyphs,
     }).map(line => [{ text: " " }, ...line]),
   );
@@ -879,9 +1032,8 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
     hints.push("f filter");
   } else {
     hints.push(`${glyphs.upDown} agent`);
-    if (previewLines(entry?.promptPreview).length > PROMPT_COLLAPSED_LINES) {
-      hints.push(`${glyphs.enter} prompt`);
-    }
+    if (maxDetailScroll > 0) hints.push("j/k scroll");
+    if (expandable) hints.push(`${glyphs.enter} ${state.expanded ? "collapse" : "expand"}`);
     const actions = agentActions(entry, view.workflowActive);
     if (actions.skip && can("onSkipAgent")) hints.push("s skip");
     if (actions.retry && can("onRetryAgent")) hints.push("r retry");
@@ -905,7 +1057,7 @@ export function layoutWorkflowDialog(input: WorkflowDialogInput): WorkflowCardLi
   }
   lines.push(clampLine([{ text: ` ${hints.join(" · ")}`, color: "dim" }], width));
 
-  return lines;
+  return { lines, maxDetailScroll };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -926,6 +1078,8 @@ export function handleWorkflowDialogKey(
   data: string,
   state: WorkflowDialogState,
   view: ResolvedWorkflowDialog,
+  /** From the last layout (`buildWorkflowDialog`); 0 means the detail fits. */
+  maxDetailScroll = 0,
 ): { state: WorkflowDialogState; action?: WorkflowDialogAction } | undefined {
   // Ctrl+C is the reflex for backing out of a full-screen overlay, so it closes
   // outright from EITHER level — the conversation viewer's #255 fix, which this
@@ -938,39 +1092,51 @@ export function handleWorkflowDialogKey(
   // the overview, and only closes from there. Anything else would make a wrong
   // turn cost the whole dialog.
   if (matchesKey(data, "escape") || matchesKey(data, "q")) {
-    if (state.level === "agent") return { state: { ...state, level: "phases", promptExpanded: false } };
+    if (state.level === "agent") return { state: { ...state, level: "phases", expanded: false, detailScroll: 0 } };
     return { state, action: { kind: "cancel" } };
   }
   if (matchesKey(data, "left") && state.level === "agent") {
-    return { state: { ...state, level: "phases", promptExpanded: false } };
+    return { state: { ...state, level: "phases", expanded: false, detailScroll: 0 } };
   }
 
-  const down = matchesKey(data, "j") || matchesKey(data, "down");
-  const up = matchesKey(data, "k") || matchesKey(data, "up");
-  if (down || up) {
-    const delta = down ? 1 : -1;
+  const arrowDown = matchesKey(data, "down");
+  const arrowUp = matchesKey(data, "up");
+  const scrollDown = matchesKey(data, "j");
+  const scrollUp = matchesKey(data, "k");
+  // In the subview j/k scroll the detail and the arrows move between agents,
+  // as in Claude Code. At the overview there is nothing to scroll, so both
+  // pairs move the phase cursor.
+  if (state.level === "agent" && (scrollDown || scrollUp)) {
+    const next = Math.min(Math.max(0, state.detailScroll + (scrollDown ? 1 : -1)), maxDetailScroll);
+    return { state: { ...state, detailScroll: next } };
+  }
+  if (arrowDown || arrowUp || scrollDown || scrollUp) {
+    const delta = arrowDown || scrollDown ? 1 : -1;
     if (state.level === "phases") {
       const next = clampIndex(view.clampedPhase + delta, view.groups.length);
       // Changing phase re-points the agent list at a different set of rows, so
       // the old row index would be meaningless.
       return { state: next === view.clampedPhase ? state : { ...state, selectedPhase: next, selectedAgent: 0 } };
     }
-    return { state: { ...state, selectedAgent: clampIndex(view.clampedAgent + delta, view.visibleAgents.length) } };
+    const next = clampIndex(view.clampedAgent + delta, view.visibleAgents.length);
+    if (next === view.clampedAgent) return { state };
+    // A different agent's detail starts at its top, collapsed.
+    return { state: { ...state, selectedAgent: next, expanded: false, detailScroll: 0 } };
   }
 
   // One key, two jobs, because the two levels are what it means at each: open
-  // the selected phase's agents, then expand the prompt of the one you opened.
+  // the selected phase's agents, then expand the detail of the one you opened.
   if (matchesKey(data, "enter") || matchesKey(data, "right")) {
     if (state.level === "phases") {
       // Nothing to open, so nothing happens — entering an empty pane would
       // strand the reader in a subview with no rows and no detail.
       if (view.visibleAgents.length === 0) return { state };
-      return { state: { ...state, level: "agent", promptExpanded: false } };
+      return { state: { ...state, level: "agent", expanded: false, detailScroll: 0 } };
     }
-    return { state: { ...state, promptExpanded: !state.promptExpanded } };
+    return { state: { ...state, expanded: !state.expanded, detailScroll: 0 } };
   }
   if (matchesKey(data, "e")) {
-    return { state: { ...state, promptExpanded: !state.promptExpanded } };
+    return { state: { ...state, expanded: !state.expanded, detailScroll: 0 } };
   }
 
   // The one key that opens something instead of changing the run, so unlike
@@ -1028,6 +1194,8 @@ export class WorkflowDialog implements Component {
   private spinnerFrame = 0;
   private timer: ReturnType<typeof setInterval> | undefined;
   private closed = false;
+  /** How far `j` may scroll, as of the last render. */
+  private maxDetailScroll = 0;
 
   constructor(
     private tui: TUI,
@@ -1047,7 +1215,7 @@ export class WorkflowDialog implements Component {
 
   handleInput(data: string): void {
     const input: WorkflowDialogInput = { ...this.source(), state: this.state };
-    const result = handleWorkflowDialogKey(data, this.state, resolveWorkflowDialog(input));
+    const result = handleWorkflowDialogKey(data, this.state, resolveWorkflowDialog(input), this.maxDetailScroll);
     if (!result) return;
     this.state = result.state;
     if (result.action) this.dispatch(result.action);
@@ -1055,7 +1223,7 @@ export class WorkflowDialog implements Component {
   }
 
   render(width: number): string[] {
-    const lines = layoutWorkflowDialog({
+    const { lines, maxDetailScroll } = buildWorkflowDialog({
       ...this.source(),
       state: this.state,
       // Derived from what was actually injected, so the footer advertises only
@@ -1071,6 +1239,7 @@ export class WorkflowDialog implements Component {
       width,
       spinnerFrame: this.spinnerFrame,
     });
+    this.maxDetailScroll = maxDetailScroll;
     return styleWorkflowCardLines(lines, this.theme);
   }
 

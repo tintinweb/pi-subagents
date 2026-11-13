@@ -70,11 +70,11 @@ A **card in the transcript**, updating as the run goes:
 
 A running row's token and tool-call counts move as the child works: tool calls when each one completes, tokens when pi finalizes an assistant message, so a long response holds the count until it ends. A resumed row counts only its continuation; a retried row keeps the earlier attempt's spend.
 
-A **`workflow` row in FleetView**, above the agents, carrying its agent counts where a description would go. `⏎` on it opens the inspector rather than a conversation overlay.
+A **row in FleetView**, above the agents: the run's name and a progress bar of finished agents where a description would go (`audit-src  ▰▰▰▰▰▱▱▱…  3/7 · 1m12s`). `⏎` on it opens the inspector rather than a conversation overlay.
 
 Each row names the model the child *actually* ran on — read back from its session once pi has resolved its defaults, not the string the script asked for — so a fuzzy `model: "haiku"` reads as the model it resolved to, and an `agent()` that named no model still says what it inherited.
 
-The **inspector**, at `/agents → Workflows` — two panes, two levels: phases on the left, that phase's agents on the right, and `⏎` to descend into one agent's prompt, activity and outcome. The detail pane has room for the canonical `provider/model-id` and the thinking level, including a level pi clamped (`thinking: low (asked max)`). The full key table is in [the README](../README.md#commands); the four that change the run rather than the view are:
+The **inspector**, at `/agents → Workflows` — two panes, two levels: phases on the left, that phase's agents on the right, and `⏎` to descend into one agent's prompt, activity and outcome. Activity lists the agent's tool calls (`⏺ Bash(npm test)`) as it makes them. A second `⏎` expands all three sections into the full prompt, the transcript with each call's result, and the full outcome. `↑↓` move between agents and `j`/`k` scroll the detail. The detail pane has room for the canonical `provider/model-id` and the thinking level, including a level pi clamped (`thinking: low (asked max)`). The full key table is in [the README](../README.md#commands); the four that change the run rather than the view are:
 
 | Key | |
 |---|---|

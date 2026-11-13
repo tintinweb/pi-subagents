@@ -16,6 +16,7 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
+import { type AgentDetail, agentDetailFromMessages } from "../workflow/agent-detail.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
 import { WorkflowDialog } from "./workflow-dialog.js";
 
@@ -37,6 +38,44 @@ export interface WorkflowMenuDeps {
    * sessions, which is a no-op rather than an error.
    */
   getCtx(): ExtensionCommandContext | undefined;
+}
+
+/**
+ * What the child answered, as the script received it: the structured JSON
+ * (pretty-printed, so the Outcome reads as an object rather than one long
+ * line) or the final text.
+ */
+function recordOutcome(record: AgentRecord): string | undefined {
+  if (record.structuredJson !== undefined) {
+    try {
+      return JSON.stringify(JSON.parse(record.structuredJson), null, 2);
+    } catch {
+      return record.structuredJson;
+    }
+  }
+  return record.result;
+}
+
+/**
+ * A `detail` lookup over the manager's records, memoised per record on its
+ * message count and status — the dialog re-reads its source on every 80ms
+ * spinner frame, and re-folding a long transcript that often would be waste.
+ */
+export function createAgentDetailSource(getRecord: (id: string) => AgentRecord | undefined): (id: string) => AgentDetail | undefined {
+  const cache = new Map<string, { key: string; detail: AgentDetail }>();
+  return id => {
+    const record = getRecord(id);
+    const messages = record?.session?.messages;
+    if (record === undefined || messages === undefined) return undefined;
+    const key = `${messages.length}:${record.status}`;
+    const hit = cache.get(id);
+    if (hit?.key === key) return hit.detail;
+    const folded = agentDetailFromMessages(messages);
+    const outcome = recordOutcome(record) ?? folded.outcome;
+    const detail: AgentDetail = { ...folded, ...(outcome !== undefined ? { outcome } : {}) };
+    cache.set(id, { key, detail });
+    return detail;
+  };
 }
 
 /**
@@ -68,6 +107,7 @@ export async function showWorkflowDialog(
    * closes.
    */
   let overlay: { setHidden(hidden: boolean): void } | undefined;
+  const detail = createAgentDetailSource(deps.getRecord);
   await ctx.ui.custom<undefined>(
     (tui, theme, _keybindings, done) =>
       new WorkflowDialog(
@@ -85,6 +125,7 @@ export async function showWorkflowDialog(
           },
           meta: task.meta,
           agentCount: task.agentCount,
+          detail,
         }),
         theme,
         done,

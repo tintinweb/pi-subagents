@@ -99,6 +99,18 @@ export function formatFleetTokens(count: number): string {
   return `↓ ${compact} tokens`;
 }
 
+/** Cells in a workflow row's progress bar — Claude Code's width. */
+export const PROGRESS_BAR_CELLS = 20;
+
+/**
+ * `▰▰▰▱▱…` — a run's done share as filled cells, returned as two runs so the
+ * caller can colour them. A run with no agents yet is all empty.
+ */
+export function formatProgressBar(done: number, total: number, cells = PROGRESS_BAR_CELLS): { filled: string; empty: string } {
+  const n = total > 0 ? Math.min(cells, Math.max(0, Math.round((cells * done) / total))) : 0;
+  return { filled: "▰".repeat(n), empty: "▱".repeat(cells - n) };
+}
+
 /**
  * Place `right` flush to `width`, truncating `left` first so the stats survive.
  * The final clamp guarantees the line never exceeds `width` (which would wrap and
@@ -639,9 +651,10 @@ export class FleetList {
   }
 
   /**
-   * A run's row. Shaped like an agent's — gutter, dot, kind, name, stats flush
-   * right — so the two read as one list, with the agent count where an agent
-   * has its description and the same elapsed/token tail.
+   * A run's row, as Claude Code's FleetView draws it: gutter, dot, name, then a
+   * progress bar where an agent has its description, and the same
+   * elapsed/token tail flush right. `rightAlign` cuts the left side first, so a
+   * narrow terminal loses the bar before the counts.
    */
   private renderWorkflowRow(
     rosterIndex: number,
@@ -651,14 +664,14 @@ export class FleetList {
     theme: Theme,
   ): string {
     const selected = rosterIndex === cursor;
-    const kind = theme.fg(selected ? "text" : "muted", "workflow");
     const name = selected ? theme.fg("text", workflow.name) : workflow.name;
     const dot = this.dot(workflow.id === this.viewingWorkflowId, theme);
-    const left = `${this.gutter(rosterIndex, cursor, theme)}${dot} ${kind}  ${name}`;
+    const { filled, empty } = formatProgressBar(workflow.doneCount, workflow.totalCount);
+    const bar = theme.fg(workflow.status === "completed" ? "success" : "accent", filled) + theme.fg("dim", empty);
+    const left = `${this.gutter(rosterIndex, cursor, theme)}${dot} ${name}  ${bar}`;
     // Frozen once the run settles, exactly as an agent's clock is.
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
-    const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
-    const stats = `${agents} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`;
+    const stats = `${workflow.doneCount}/${workflow.totalCount} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`;
     return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
   }
 

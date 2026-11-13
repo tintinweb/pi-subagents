@@ -11,6 +11,7 @@ import {
   type FleetWorkflow,
   formatFleetElapsed,
   formatFleetTokens,
+  formatProgressBar,
 } from "../src/ui/fleet-list.js";
 
 // ---- Key sequences (see node_modules/@earendil-works/pi-tui/dist/keys.js) ----
@@ -1176,17 +1177,36 @@ describe("FleetList workflow rows", () => {
     const rows = h.render().map(plain).filter(row => row.trim() !== "");
     const run = rows.find(row => row.includes("audit-src"))!;
     const agent = rows.findIndex(row => row.includes("one"));
-    expect(run).toContain("workflow");
-    expect(run).toContain("1/3 agents");
+    // The bar sits where the kind label used to: 1/3 of 20 cells rounds to 7.
+    expect(run).toContain(`audit-src  ${"▰".repeat(7)}${"▱".repeat(13)}`);
+    expect(run).not.toContain("workflow");
+    expect(run).toContain("1/3 · ");
     expect(run).toContain("26.4k tokens");
     // A run owns most of the agents under it, so the container comes first.
     expect(rows.findIndex(row => row.includes("audit-src"))).toBeLessThan(agent);
   });
 
-  it("agrees with itself about a single-agent run", () => {
+  it("fills the bar completely on a finished single-agent run", () => {
     const h = harness([]);
     h.setWorkflows([makeWorkflow({ doneCount: 1, totalCount: 1 })]);
-    expect(h.render().map(plain).join("\n")).toContain("1/1 agent ");
+    const out = h.render().map(plain).join("\n");
+    expect(out).toContain("▰".repeat(20));
+    expect(out).not.toContain("▱");
+    expect(out).toContain("1/1 · ");
+  });
+
+  it("formatProgressBar scales done/total into 20 cells", () => {
+    const cells = (done: number, total: number) => {
+      const bar = formatProgressBar(done, total);
+      return [bar.filled.length, bar.empty.length];
+    };
+    expect(cells(0, 9)).toEqual([0, 20]);
+    expect(cells(8, 9)).toEqual([18, 2]);
+    expect(cells(9, 9)).toEqual([20, 0]);
+    // No agents scheduled yet: all empty, not NaN cells.
+    expect(cells(0, 0)).toEqual([0, 20]);
+    // A count that overshoots never draws past the bar.
+    expect(cells(12, 9)).toEqual([20, 0]);
   });
 
   it("hides the run's own agents — the run is the row that represents them", () => {

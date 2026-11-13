@@ -3,13 +3,17 @@ import { describe, expect, it } from "vitest";
 import { SPINNER } from "../src/ui/agent-widget.js";
 import { styleWorkflowCardLines, type WorkflowCardTask } from "../src/ui/workflow-card.js";
 import {
+  ACTIVITY_COLLAPSED_CALLS,
+  ACTIVITY_RESULT_LINES,
   ASCII_DIALOG_GLYPHS,
+  buildWorkflowDialog,
   DEFAULT_PANE_BODY_ROWS,
   dialogRowGlyph,
   handleWorkflowDialogKey,
   initialWorkflowDialogState,
   layoutWorkflowDialog,
   MIN_PANE_BODY_ROWS,
+  OUTCOME_COLLAPSED_LINES,
   PROMPT_COLLAPSED_LINES,
   plainWorkflowDialogLines,
   resolveWorkflowDialog,
@@ -21,6 +25,7 @@ import {
   type WorkflowDialogState,
   workflowDialogContentWidth,
 } from "../src/ui/workflow-dialog.js";
+import type { AgentDetail } from "../src/workflow/agent-detail.js";
 import type { WorkflowMeta } from "../src/workflow/meta.js";
 import type { WorkflowAgentEntry, WorkflowEntry } from "../src/workflow/progress.js";
 
@@ -436,7 +441,7 @@ describe("per-agent detail", () => {
 
     const expanded = detail({
       progress: [agentEntry({ index: 0, state: "done", promptPreview: long })],
-      state: { promptExpanded: true },
+      state: { expanded: true },
     });
     expect(rightRows(expanded).map(bare).find(l => l.includes("Prompt"))).toContain("Prompt · 9 lines · ⏎ collapse");
     expect(section(expanded, "Prompt")).toHaveLength(9);
@@ -527,12 +532,32 @@ describe("keys", () => {
     expect(press("k", { selectedPhase: 0 })?.state.selectedPhase).toBe(0);
   });
 
-  it("moves the agent selection with j/k and clamps at both ends", () => {
+  it("moves the agent selection with the arrows and clamps at both ends", () => {
     const agents = { level: "agent" as const };
-    expect(press("j", agents)?.state.selectedAgent).toBe(1);
-    expect(press("j", { ...agents, selectedAgent: 1 })?.state.selectedAgent).toBe(1);
-    expect(press("k", { ...agents, selectedAgent: 1 })?.state.selectedAgent).toBe(0);
-    expect(press("k", { ...agents, selectedAgent: 0 })?.state.selectedAgent).toBe(0);
+    const DOWN = "\x1b[B";
+    const UP = "\x1b[A";
+    expect(press(DOWN, agents)?.state.selectedAgent).toBe(1);
+    expect(press(DOWN, { ...agents, selectedAgent: 1 })?.state.selectedAgent).toBe(1);
+    expect(press(UP, { ...agents, selectedAgent: 1 })?.state.selectedAgent).toBe(0);
+    expect(press(UP, { ...agents, selectedAgent: 0 })?.state.selectedAgent).toBe(0);
+  });
+
+  it("scrolls the detail with j/k in the subview instead of moving the agent", () => {
+    const full = input({ progress, state: { level: "agent" } });
+    const view = resolveWorkflowDialog(full);
+    const j = handleWorkflowDialogKey("j", full.state, view, 3);
+    expect(j?.state.detailScroll).toBe(1);
+    expect(j?.state.selectedAgent).toBe(0);
+    // Clamped at both ends: no offset past the last row, none above the first.
+    expect(handleWorkflowDialogKey("j", { ...full.state, detailScroll: 3 }, view, 3)?.state.detailScroll).toBe(3);
+    expect(handleWorkflowDialogKey("k", full.state, view, 3)?.state.detailScroll).toBe(0);
+    // A detail that fits does not scroll at all.
+    expect(handleWorkflowDialogKey("j", full.state, view)?.state.detailScroll).toBe(0);
+  });
+
+  it("starts a newly selected agent at the top, collapsed", () => {
+    const moved = press("\x1b[B", { level: "agent", detailScroll: 5, expanded: true });
+    expect(moved?.state).toMatchObject({ selectedAgent: 1, detailScroll: 0, expanded: false });
   });
 
   it("re-points the agent cursor at the top when the phase changes", () => {
@@ -581,11 +606,11 @@ describe("keys", () => {
   });
 
   it("toggles the prompt expansion", () => {
-    expect(press("e")?.state.promptExpanded).toBe(true);
-    expect(press("e", { promptExpanded: true })?.state.promptExpanded).toBe(false);
+    expect(press("e")?.state.expanded).toBe(true);
+    expect(press("e", { expanded: true })?.state.expanded).toBe(false);
     // Enter means "open" at the overview and "expand" once opened, which is the
     // only reading under which one key does the obvious thing at both levels.
-    expect(press("\r", { level: "agent" })?.state.promptExpanded).toBe(true);
+    expect(press("\r", { level: "agent" })?.state.expanded).toBe(true);
   });
 
   it("cancels on escape from the overview", () => {
@@ -780,9 +805,9 @@ describe("frame height", () => {
   });
 
   /**
-   * The detail pane is the one thing in the dialog that is never windowed — an
-   * expanded prompt is however many lines the prompt has — so it is where the
-   * cap has to actually hold.
+   * The detail pane is the one pane built without a window — an expanded
+   * prompt is however many lines the prompt has — so it is where the cap has
+   * to actually hold. It scrolls inside the frame instead.
    */
   const longPrompt: WorkflowEntry[] = [
     { type: "workflow_phase", index: 0, title: "Review" },
@@ -794,7 +819,7 @@ describe("frame height", () => {
       promptPreview: Array.from({ length: 60 }, (_, i) => `prompt line ${i}`).join("\n"),
     }),
   ];
-  const expanded = { level: "agent" as const, promptExpanded: true };
+  const expanded = { level: "agent" as const, expanded: true };
 
   it("caps the detail pane when a long prompt is expanded", () => {
     expect(bodyHeight({ progress: longPrompt, state: expanded })).toBe(DEFAULT_PANE_BODY_ROWS);
@@ -803,6 +828,123 @@ describe("frame height", () => {
   it("honours an explicit cap from the caller", () => {
     expect(bodyHeight({ progress: longPrompt, state: expanded, bodyRows: 9 })).toBe(9);
     expect(bodyHeight({ progress: phased(200), bodyRows: 9 })).toBe(9);
+  });
+
+  it("scrolls an overflowing detail and labels the window in the bottom edge", () => {
+    const built = buildWorkflowDialog(input({ progress: longPrompt, state: expanded }));
+    // Status row, blank, heading, 60 prompt lines, then Activity and Outcome.
+    expect(built.maxDetailScroll).toBeGreaterThan(0);
+    const top = plainWorkflowDialogLines(built.lines);
+    const total = built.maxDetailScroll + DEFAULT_PANE_BODY_ROWS;
+    expect(top.join("\n")).toContain(`1–${DEFAULT_PANE_BODY_ROWS} of ${total} ↓`);
+    expect(rightRows(top).map(bare).join("\n")).toContain("prompt line 0");
+
+    const scrolled = dialog({ progress: longPrompt, state: { ...expanded, detailScroll: 10 } });
+    expect(scrolled.join("\n")).toContain(`11–${10 + DEFAULT_PANE_BODY_ROWS} of ${total} ↑↓`);
+    expect(rightRows(scrolled).map(bare).join("\n")).not.toContain("prompt line 0\n");
+
+    // A stale offset past the end clamps to the last window, not an empty pane.
+    const past = dialog({ progress: longPrompt, state: { ...expanded, detailScroll: 999 } });
+    expect(past.join("\n")).toContain(`of ${total} ↑`);
+    expect(rightRows(past).map(bare).join("\n")).toContain("Outcome");
+  });
+
+  it("advertises j/k scroll only when the detail overflows", () => {
+    const hints = (state: Partial<WorkflowDialogState>) => dialog({ progress: longPrompt, state, width: 120 }).at(-1) ?? "";
+    expect(hints(expanded)).toContain("j/k scroll");
+    expect(hints({ level: "agent" })).not.toContain("j/k scroll");
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * Activity from the child's transcript
+ * ------------------------------------------------------------------------- */
+
+describe("activity from the transcript", () => {
+  const entry = agentEntry({ index: 0, state: "done", recordId: "rec-1", toolCalls: 2, resultPreview: "short preview" });
+  const transcript: AgentDetail = {
+    prompt: "full prompt line 1\nfull prompt line 2",
+    outcome: "the whole answer",
+    items: [
+      { kind: "text", head: "Reading the module first.", body: [] },
+      { kind: "tool", head: "Bash(cat src/math.js)", body: ["export const add = 1;", "export const sub = 2;"], settled: true },
+      { kind: "tool", head: "Read(src/x.ts)", body: ["boom"], settled: true, isError: true },
+    ],
+  };
+  // Tall enough that no section here is cut by the scroll window.
+  const withDetail = (state: Partial<WorkflowDialogState> = {}, d: AgentDetail | undefined = transcript) =>
+    detail({ progress: [entry], detail: id => (id === "rec-1" ? d : undefined), state, bodyRows: 80 });
+
+  it("lists each tool call, one row apiece, when collapsed", () => {
+    expect(section(withDetail(), "Activity")).toEqual(["  ⏺ Bash(cat src/math.js)", "  ⏺ Read(src/x.ts)"]);
+    expect(rightRows(withDetail()).map(bare).find(l => l.startsWith("Activity"))?.trim())
+      .toBe("Activity · 2 tool calls · ⏎ expand");
+  });
+
+  it("colours a call by how it came out", () => {
+    const rows = styleWorkflowCardLines(
+      layoutWorkflowDialog(input({ progress: [entry], detail: () => transcript, state: { level: "agent" } })),
+      theme,
+    ).join("\n");
+    expect(rows).toContain("<success>⏺</success><dim> Bash(cat src/math.js)");
+    expect(rows).toContain("<error>⏺</error><dim> Read(src/x.ts)");
+  });
+
+  it("expands into the transcript: text, each call, and its result", () => {
+    expect(section(withDetail({ expanded: true }), "Activity")).toEqual([
+      "  Reading the module first.",
+      "  ⏺ Bash(cat src/math.js)",
+      "    ⎿ export const add = 1;",
+      "      export const sub = 2;",
+      "  ⏺ Read(src/x.ts)",
+      "    ⎿ boom",
+    ]);
+  });
+
+  it("caps each call's result in the transcript and counts what it cut", () => {
+    const long: AgentDetail = {
+      items: [{ kind: "tool", head: "Bash(cat big)", body: Array.from({ length: 30 }, (_, i) => `l${i}`), settled: true }],
+    };
+    const rows = section(withDetail({ expanded: true }, long), "Activity");
+    expect(rows).toHaveLength(1 + ACTIVITY_RESULT_LINES + 1);
+    expect(rows.at(-1)).toContain(`… ${30 - ACTIVITY_RESULT_LINES} more lines`);
+  });
+
+  it("shows only the most recent calls when collapsed, and counts the earlier ones", () => {
+    const many: AgentDetail = {
+      items: Array.from({ length: 11 }, (_, i) => ({ kind: "tool" as const, head: `Bash(step ${i})`, body: [], settled: true })),
+    };
+    const rows = section(withDetail({}, many), "Activity");
+    expect(rows[0]).toContain("… 3 earlier calls");
+    expect(rows).toHaveLength(1 + ACTIVITY_COLLAPSED_CALLS);
+    expect(rows.at(-1)).toContain("Bash(step 10)");
+  });
+
+  it("prefers the record's full prompt and outcome over the 200-char previews", () => {
+    const lines = withDetail();
+    expect(section(lines, "Prompt")).toEqual(["  full prompt line 1", "  full prompt line 2"]);
+    expect(section(lines, "Outcome")).toEqual(["  the whole answer"]);
+  });
+
+  it("falls back to the progress log once the record is gone", () => {
+    // The record was swept: the lookup has nothing for this id.
+    const lines = detail({ progress: [entry], detail: () => undefined });
+    expect(section(lines, "Activity")).toEqual([`  ${WORKFLOW_DIALOG_COPY.noTranscript}`]);
+    expect(section(lines, "Outcome")).toEqual(["  short preview"]);
+  });
+
+  it("collapses a long outcome and offers to expand it", () => {
+    const long: AgentDetail = { outcome: Array.from({ length: 30 }, (_, i) => `o${i}`).join("\n"), items: [] };
+    const collapsed = withDetail({}, long);
+    expect(rightRows(collapsed).map(bare).find(l => l.startsWith("Outcome"))?.trim())
+      .toBe("Outcome · 30 lines · ⏎ expand");
+    expect(section(collapsed, "Outcome")).toHaveLength(OUTCOME_COLLAPSED_LINES + 1);
+    expect(section(collapsed, "Outcome").at(-1)).toContain(`… ${30 - OUTCOME_COLLAPSED_LINES} more lines`);
+    // Expanded on the scrolling pane; read the full rows, not the window.
+    const built = buildWorkflowDialog(input({
+      progress: [entry], detail: () => long, state: { level: "agent", expanded: true }, bodyRows: 80,
+    }));
+    expect(section(plainWorkflowDialogLines(built.lines), "Outcome")).toHaveLength(30);
   });
 });
 
@@ -1085,7 +1227,7 @@ describe("key hints reflect the wired actions", () => {
 
   it("shows every hint once the terminal has room", () => {
     const wide = dialog({ progress: everyKey, width: 100, state: { level: "agent" } }).at(-1) ?? "";
-    for (const key of ["↑↓ agent", "⏎ prompt", "s skip", "r retry", "p pause", "x stop", "esc back", "c convo"]) {
+    for (const key of ["↑↓ agent", "⏎ expand", "s skip", "r retry", "p pause", "x stop", "esc back", "c convo"]) {
       expect(wide).toContain(key);
     }
     expect(wide).not.toContain("…");
