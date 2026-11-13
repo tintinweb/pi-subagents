@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Behavior change — a workflow starts only when you ask for one** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A request for a number of agents, like "use 10 agents to …", now runs parallel `Agent` calls instead of a `SubagentWorkflow`. To run a workflow, say so ("use a workflow") or name a saved workflow.
+
 ### Fixed
 - **Asking for a number of subagents no longer starts a workflow** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A pi-only `SubagentWorkflow` guideline sent requests like "use 10 agents to …" to a workflow instead of parallel `Agent` calls, overriding the tool description's rule that a workflow needs an explicit opt-in. The guideline is removed, as Claude Code has none; "use a workflow" or a saved workflow name still starts one.
 - **Running workflow agents show live tool-call and token counts** ([#298](https://github.com/tintinweb/pi-subagents/issues/298), [#453](https://github.com/tintinweb/pi-subagents/pull/453), superseding [#299](https://github.com/tintinweb/pi-subagents/pull/299) — thanks [@cgngtr](https://github.com/cgngtr)). A row, its inspector **Activity** and the totals stayed at zero until the agent settled, including on resumed agents. Counts now update as each tool completes and each assistant message ends. `budget.spent()` now includes attempts stopped by a retry, so a script guarding on it sees a higher number after one. A resumed agent's row and `budget.spent()` now count only its continuation; both used to count the earlier run again.
