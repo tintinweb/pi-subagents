@@ -439,6 +439,23 @@ export function resolveEffectiveMaxTurns(type: string, explicit?: number): numbe
 }
 
 /**
+ * The turn limit for resuming an agent, counted afresh from the resume prompt
+ * (#368). Same precedence as a spawn, frontmatter authoritative: the agent
+ * file's `max_turns`, else the resume call's, else the limit the agent was
+ * spawned with, else the project default. `undefined` = unlimited.
+ *
+ * `configMaxTurns` comes from the registry that owns the agent: the
+ * process-global one for a top-level resume, the branch's own for a nested one.
+ */
+export function resolveResumeTurnLimit(
+  configMaxTurns: number | undefined,
+  explicit: number | undefined,
+  spawnedMaxTurns: number | undefined,
+): number | undefined {
+  return normalizeMaxTurns(configMaxTurns ?? explicit ?? spawnedMaxTurns ?? defaultMaxTurns);
+}
+
+/**
  * Project default for `persist_session`, from the `rememberAgents` setting.
  * On by default: a persisted session is what lets `@handle` reopen an agent's
  * conversation after its record has been evicted, which is the whole point of
@@ -503,6 +520,11 @@ export interface RunOptions {
   /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
   agentId?: string;
   model?: Model<any>;
+  /**
+   * The turn limit to enforce, already resolved by the caller
+   * (`resolveEffectiveMaxTurns`, or a branch's own registry for a nested
+   * spawn). `undefined` = unlimited; it is never looked up again here.
+   */
   maxTurns?: number;
   signal?: AbortSignal;
   /** Applies only when the agent file leaves `isolated:` unset — frontmatter is authoritative. */
@@ -1335,7 +1357,7 @@ export async function runAgent(
 
   options.onSessionCreated?.(session);
 
-  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
+  const run = observeRun(session, { ...options, maxTurns: normalizeMaxTurns(options.maxTurns) });
 
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
@@ -1399,17 +1421,13 @@ export async function runAgent(
 
 /**
  * Send a new prompt to an existing session (resume). A fresh run of the same
- * agent: the turn limit is resolved as `runAgent` resolves it — an explicit
- * `maxTurns`, else the agent type's own `max_turns`, else the project default
- * — and counted from this prompt (#368).
+ * agent: `maxTurns` is the caller's resolved limit (`resolveResumeTurnLimit`),
+ * counted from this prompt (#368). `undefined` = unlimited.
  */
 export async function resumeAgent(
   session: AgentSession,
   prompt: string,
-  options: Pick<RunOptions, "maxTurns" | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onCompaction" | "signal"> & {
-    /** The agent's type, for its own `max_turns`. */
-    type: SubagentType;
-  },
+  options: Pick<RunOptions, "maxTurns" | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onCompaction" | "signal">,
 ): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
@@ -1417,7 +1435,7 @@ export async function resumeAgent(
   const startLen = session.messages.length;
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
-  const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(options.type, options.maxTurns) });
+  const run = observeRun(session, { ...options, maxTurns: normalizeMaxTurns(options.maxTurns) });
 
   try {
     // Already aborted: not prompted, as in `runAgent`.

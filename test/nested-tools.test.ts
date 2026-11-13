@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getDefaultMaxTurns, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
@@ -303,6 +304,67 @@ describe("child-safe nested Agent tools", () => {
     await execute(agent, { resume: "child-1", subagent_type: "scout", description: "continue", prompt: "Continue", max_turns: 3 });
 
     expect(manager.resume).toHaveBeenCalledWith("child-1", "Continue", undefined, expect.objectContaining({ maxTurns: 3 }));
+  });
+
+  // The runner enforces the budget it is handed, so a nested branch must resolve
+  // the whole precedence itself, against ITS registry. Left to the runner, an
+  // unset budget was looked up in the process-global registry, where a
+  // same-named main-session agent capped the child.
+  describe("turn budget resolved against the branch's own registry", () => {
+    let prevDefault: number | undefined;
+
+    beforeEach(() => {
+      prevDefault = getDefaultMaxTurns();
+      setDefaultMaxTurns(undefined);
+      // The main session's `scout` has a limit; the branch's file sets none.
+      const global = loadCustomAgents(cwd);
+      global.set("scout", { ...global.get("scout")!, maxTurns: 11 });
+      registerAgents(global);
+    });
+
+    afterEach(() => {
+      setDefaultMaxTurns(prevDefault);
+    });
+
+    function resumable(invocation?: { maxTurns?: number }) {
+      records.set("child-1", { id: "child-1", type: "scout", status: "completed", parentAgentId: "parent-1", session: {}, invocation });
+    }
+
+    async function resume(params: Record<string, unknown> = {}) {
+      const [agent] = tools(["scout"]);
+      await execute(agent, { resume: "child-1", subagent_type: "scout", description: "continue", prompt: "Continue", ...params });
+      return vi.mocked(manager.resume).mock.calls.at(-1)![3]!.maxTurns;
+    }
+
+    it("resumes with the limit the child was spawned with when the branch file and call set none", async () => {
+      resumable({ maxTurns: 4 });
+      expect(await resume()).toBe(4);
+    });
+
+    it("falls back to the project default, never the main session's agent", async () => {
+      setDefaultMaxTurns(6);
+      resumable();
+      expect(await resume()).toBe(6);
+    });
+
+    it("lets the branch file outrank the call and the spawn limit", async () => {
+      writeAgent("scout", "max_turns: 7\n");
+      resumable({ maxTurns: 4 });
+      expect(await resume({ max_turns: 3 })).toBe(7);
+    });
+
+    it("keeps a branch file's max_turns: 0 unlimited over the spawn limit", async () => {
+      writeAgent("scout", "max_turns: 0\n");
+      resumable({ maxTurns: 4 });
+      expect(await resume()).toBeUndefined();
+    });
+
+    it("spawns with the project default when the branch file and call set none", async () => {
+      setDefaultMaxTurns(6);
+      const [agent] = tools(["scout"]);
+      await execute(agent, { subagent_type: "scout", description: "find files", prompt: "Find them" });
+      expect(spawnAndWait.mock.calls.at(-1)![4].maxTurns).toBe(6);
+    });
   });
 
   it("reports a background child that fails to start as a tool error", async () => {

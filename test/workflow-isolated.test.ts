@@ -12,10 +12,10 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../src/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-  resumeAgent: vi.fn(),
-}));
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),

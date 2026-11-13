@@ -876,7 +876,7 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       return id;
     }
 
-    it("hands the record's type, the explicit limit and the turn counter to the runner", async () => {
+    it("hands the explicit limit and the turn counter to the runner", async () => {
       const id = await spawnSettled();
       vi.mocked(resumeAgent).mockResolvedValue({ text: "second", aborted: false, steered: false });
       const onTurnEnd = vi.fn();
@@ -884,12 +884,15 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       await manager.resume(id, "more", undefined, { maxTurns: 3, onTurnEnd });
 
       const opts = vi.mocked(resumeAgent).mock.calls.at(-1)![2]!;
-      expect(opts.type).toBe("general-purpose");
       expect(opts.maxTurns).toBe(3);
       expect(opts.onTurnEnd).toBe(onTurnEnd);
     });
 
-    it("falls back to the limit the agent was spawned with when the caller passes none", async () => {
+    // The caller resolves the resume budget, spawn limit included (#368), so an
+    // unlimited verdict reaches the runner as unlimited. Filling `undefined`
+    // in from the spawn limit here turned an explicit `max_turns: 0` back into
+    // the limit the agent was spawned with.
+    it("forwards the caller's limit as given, never the one the agent was spawned with", async () => {
       manager = new AgentManager();
       vi.mocked(runAgent).mockResolvedValue({ responseText: "first", session: mockSession() as any, aborted: false, steered: false });
       const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
@@ -900,11 +903,11 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
       await manager.getRecord(id)!.promise;
       vi.mocked(resumeAgent).mockResolvedValue({ text: "second", aborted: false, steered: false });
 
-      await manager.resume(id, "more");
-      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]!.maxTurns).toBe(50);
+      await manager.resume(id, "more", undefined, { maxTurns: undefined });
+      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]!.maxTurns).toBeUndefined();
 
-      await (await manager.resume(id, "again", undefined, { isBackground: true }))!.promise;
-      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]!.maxTurns).toBe(50);
+      await (await manager.resume(id, "again", undefined, { isBackground: true, maxTurns: undefined }))!.promise;
+      expect(vi.mocked(resumeAgent).mock.calls.at(-1)![2]!.maxTurns).toBeUndefined();
     });
 
     it("inline: abort() reaches the resumed run and the record stays stopped", async () => {

@@ -19,7 +19,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { AgentManager } from "../src/agent-manager.js";
 import { agentRecordEntryData, worktreeLost } from "../src/agent-record-entry.js";
-import { runAgent } from "../src/agent-runner.js";
+import { getDefaultMaxTurns, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
 import { createWorkflowHost } from "../src/workflow/host.js";
@@ -308,7 +308,7 @@ describe("a workflow's resume once the manager evicted the child", () => {
       return { id: record.id, record };
     });
     const resume = vi.fn(async () => undefined);
-    return { manager: { spawnAndWait, resume, abort: vi.fn() } as unknown as AgentManager, spawnAndWait, resume };
+    return { manager: { spawnAndWait, resume, getRecord: vi.fn(), abort: vi.fn() } as unknown as AgentManager, spawnAndWait, resume };
   }
 
   const request = { agentId: "wf-agent-0", index: 0, prompt: "build it", label: "worker", agentType: "general-purpose" };
@@ -325,6 +325,24 @@ describe("a workflow's resume once the manager evicted the child", () => {
     expect(prompt).toBe("fix the review findings");
     expect(options).toMatchObject({ resumeSessionFile: sessionFile, reclaim: { id: "child-7" }, workflowId: "wf-1" });
     expect(resumed).toMatchObject({ ok: true, text: "fixed" });
+  });
+
+  // The runner enforces what it is handed, so the reopen carries the agent's
+  // resolved limit — here the project default, as `general-purpose` sets none.
+  it("reopens under the agent's resolved turn limit", async () => {
+    const prevMax = getDefaultMaxTurns();
+    setDefaultMaxTurns(8);
+    try {
+      const stub = evictingManager(sessionFile);
+      const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager, workflowId: "wf-1" });
+
+      await host.spawnAgent(request);
+      await host.resumeAgent?.("wf-agent-0", "fix the review findings");
+
+      expect(stub.spawnAndWait.mock.calls[1][4].maxTurns).toBe(8);
+    } finally {
+      setDefaultMaxTurns(prevMax);
+    }
   });
 
   const wt = { path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };

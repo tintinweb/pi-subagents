@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
+import { getDefaultMaxTurns, normalizeMaxTurns, resolveResumeTurnLimit } from "./agent-runner.js";
 import {
   buildAgentRegistry,
   getAgentConfigIn,
@@ -189,10 +190,15 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
-        // Frontmatter authoritative, as on the spawn path; the manager falls
-        // back to the limit the child was spawned with, then the default.
+        // The whole precedence is resolved here, against THIS branch's
+        // registry: the runner enforces what it is handed, so a value left
+        // for it to fill in would come from the main session's registry.
         const resumed = await context.manager.resume(params.resume, params.prompt, signal, {
-          maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
+          maxTurns: resolveResumeTurnLimit(
+            getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns,
+            params.max_turns,
+            existing.invocation?.maxTurns,
+          ),
         });
         return resumed
           ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
@@ -265,7 +271,9 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       const options: NestedSpawnOptions = {
         description: params.description,
         model,
-        maxTurns: invocation.maxTurns,
+        // `invocation.maxTurns` already holds this branch's file, then the
+        // call; only the default is left to apply.
+        maxTurns: normalizeMaxTurns(invocation.maxTurns ?? getDefaultMaxTurns()),
         isolated: invocation.isolated,
         inheritContext: invocation.inheritContext,
         thinkingLevel: invocation.thinking,

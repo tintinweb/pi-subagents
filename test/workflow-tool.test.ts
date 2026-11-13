@@ -63,14 +63,17 @@ function stubManager(
 ): StubManager {
   const abort = vi.fn();
   const resume = vi.fn(async () => record({ id: "agent-1", result: "resumed" }));
+  const settledRecords = new Map<string, AgentRecord>();
   const spawnAndWait = vi.fn(
     async (_pi: any, _ctx: any, type: string, prompt: string, options: any, onSpawned?: (id: string) => void) => {
       const settled = await settle(type, prompt, options);
+      settledRecords.set(settled.id, settled);
       onSpawned?.(settled.id);
       return { id: settled.id, record: settled };
     },
   );
-  return { manager: { spawnAndWait, abort, resume } as unknown as AgentManager, spawnAndWait, abort, resume };
+  const getRecord = (id: string) => settledRecords.get(id);
+  return { manager: { spawnAndWait, abort, resume, getRecord } as unknown as AgentManager, spawnAndWait, abort, resume };
 }
 
 const request = (overrides: Partial<WorkflowSpawnRequest> = {}): WorkflowSpawnRequest => ({
@@ -538,8 +541,22 @@ describe("createWorkflowHost — abort, resume and gate", () => {
     await host.spawnAgent(request({ agentId: "wf-agent-0" }));
     const resumed = await host.resumeAgent?.("wf-agent-0", "and now this");
 
-    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined);
+    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined, { maxTurns: undefined });
     expect(resumed).toMatchObject({ ok: true, text: "resumed" });
+  });
+
+  // The runner enforces the budget it is handed, so the host resolves the
+  // agent's own `max_turns` (then the project default) on every path.
+  it("hands the agent file's max_turns to the spawn and to the resume", async () => {
+    registerAgents(new Map([["capped", { name: "capped", description: "capped", maxTurns: 9, systemPrompt: "", promptMode: "replace" } as any]]));
+    const stub = stubManager(() => record({ id: "manager-id-7", type: "capped" }));
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request({ agentType: "capped" }));
+    expect(stub.spawnAndWait.mock.calls[0][4].maxTurns).toBe(9);
+
+    await host.resumeAgent?.("wf-agent-0", "and now this");
+    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined, { maxTurns: 9 });
   });
 
   it("refuses to resume an agent the run never spawned", async () => {

@@ -150,6 +150,7 @@ import {
   parseExtSelectors,
   resolveDefaultModel,
   resolveEffectiveMaxTurns,
+  resolveResumeTurnLimit,
   resumeAgent,
   runAgent,
   SUBAGENT_TOOL_NAMES,
@@ -426,7 +427,7 @@ describe("agent-runner final output capture", () => {
   it("resumeAgent also falls back to the final assistant message text", async () => {
     const { session } = createSession("RESUMED");
 
-    const result = await resumeAgent(session as any, "Continue", { type: "Explore" });
+    const result = await resumeAgent(session as any, "Continue", {});
 
     expect(result.text).toBe("RESUMED");
     expect(result.failure).toBeUndefined();
@@ -557,7 +558,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       session.messages.push(errorFinal);
     }) as any;
 
-    const result = await resumeAgent(session as any, "Continue", { type: "Explore" });
+    const result = await resumeAgent(session as any, "Continue", {});
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
   });
@@ -574,7 +575,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       session.messages.push({ role: "user", content: "follow-up" }, errorFinal);
     }) as any;
 
-    const result = await resumeAgent(session as any, "follow-up", { type: "Explore" });
+    const result = await resumeAgent(session as any, "follow-up", {});
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
     expect(result.text).toBe(""); // NOT "PREVIOUS ANSWER"
@@ -593,7 +594,7 @@ describe("agent-runner failed-final-turn detection (#144)", () => {
       );
     }) as any;
 
-    const result = await resumeAgent(session as any, "go", { type: "Explore" });
+    const result = await resumeAgent(session as any, "go", {});
 
     expect(result.failure).toBe("retries exhausted: 529 overloaded");
     expect(result.text).toBe("new partial"); // this resume's progress, not the prior answer
@@ -1924,7 +1925,7 @@ describe("agent-runner async extension tool registration", () => {
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "go", { pi });
-    await resumeAgent(session as any, "keep going", { type: "Explore" });
+    await resumeAgent(session as any, "keep going", {});
 
     registerLate("/ext/foo.ts", "foo_late");
     registerLate("/ext/bar.ts", "bar_late");
@@ -3135,6 +3136,42 @@ describe("resolveEffectiveMaxTurns", () => {
   });
 });
 
+// A resume's precedence (#368): the agent file, else the call, else the limit
+// the agent was spawned with, else the default. The caller picks the registry
+// the file value comes from — a nested branch reads its own.
+describe("resolveResumeTurnLimit", () => {
+  let prevDefault: number | undefined;
+
+  beforeEach(() => {
+    prevDefault = getDefaultMaxTurns();
+    setDefaultMaxTurns(20);
+  });
+
+  afterEach(() => {
+    setDefaultMaxTurns(prevDefault);
+  });
+
+  it("lets the agent file outrank the call, the spawn budget and the default", () => {
+    expect(resolveResumeTurnLimit(7, 3, 4)).toBe(7);
+  });
+
+  it("uses the call when the file sets none, then the spawn budget, then the default", () => {
+    expect(resolveResumeTurnLimit(undefined, 3, 4)).toBe(3);
+    expect(resolveResumeTurnLimit(undefined, undefined, 4)).toBe(4);
+    expect(resolveResumeTurnLimit(undefined, undefined, undefined)).toBe(20);
+  });
+
+  it("treats an explicit 0 as unlimited at whichever level sets it", () => {
+    expect(resolveResumeTurnLimit(0, 3, 4)).toBeUndefined();
+    expect(resolveResumeTurnLimit(undefined, 0, 4)).toBeUndefined();
+  });
+
+  it("is unlimited when nothing sets a limit", () => {
+    setDefaultMaxTurns(undefined);
+    expect(resolveResumeTurnLimit(undefined, undefined, undefined)).toBeUndefined();
+  });
+});
+
 // The soft-limit → grace → hard-abort machine (agent-runner.ts, the `turn_end`
 // branch) has never executed in a test: every consumer of the `steered`/`aborted`
 // flags mocks `runAgent` outright, so the flags are asserted but never produced.
@@ -3227,11 +3264,18 @@ describe("agent-runner turn limits", () => {
     expect(session.abort).not.toHaveBeenCalled();
   });
 
-  it("falls back to the global default when the call sets no limit", async () => {
-    setDefaultMaxTurns(4);
-    setGraceTurns(5);
-    const { session } = await runWithTurns(4);
-    expect(session.steer).toHaveBeenCalledTimes(1);
+  // The caller resolves the budget; `undefined` is its verdict of unlimited,
+  // not a gap to fill. Re-resolving here read the process-global registry and
+  // the project default, so an explicit `max_turns: 0` became the default and a
+  // nested child took the limit of a same-named main-session agent.
+  it("enforces the limit it is given and never fills an unlimited one in", async () => {
+    setDefaultMaxTurns(2);
+    setGraceTurns(1);
+    vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ maxTurns: 2 }) as any);
+    const { session } = await runWithTurns(6, { maxTurns: undefined });
+    expect(session.steer).not.toHaveBeenCalled();
+    expect(session.abort).not.toHaveBeenCalled();
+    vi.mocked(getAgentConfig).mockReset();
   });
 
   it("an explicit maxTurns beats the global default", async () => {
@@ -3261,7 +3305,7 @@ describe("agent-runner turn limits", () => {
         }
         session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
       });
-      const result = await resumeAgent(session as any, "keep going", { type: "Explore", ...options });
+      const result = await resumeAgent(session as any, "keep going", { ...options });
       return { session, result };
     }
 
@@ -3296,6 +3340,17 @@ describe("agent-runner turn limits", () => {
       await resumeWithTurns(3, { maxTurns: 10, onTurnEnd });
       expect(onTurnEnd.mock.calls.map(c => c[0])).toEqual([1, 2, 3]);
     });
+
+    it("enforces the limit it is given and never fills an unlimited one in", async () => {
+      setDefaultMaxTurns(2);
+      setGraceTurns(1);
+      vi.mocked(getAgentConfig).mockReturnValue(makeAgentConfig({ maxTurns: 2 }) as any);
+      const { session, result } = await resumeWithTurns(6, { maxTurns: undefined });
+      expect(session.steer).not.toHaveBeenCalled();
+      expect(session.abort).not.toHaveBeenCalled();
+      expect(result.steered).toBe(false);
+      vi.mocked(getAgentConfig).mockReset();
+    });
   });
 });
 
@@ -3324,7 +3379,7 @@ describe("agent-runner abort signal forwarding", () => {
     controller.abort();
     const { session } = createSession("SHOULD NOT RUN");
 
-    await resumeAgent(session as any, "continue", { type: "Explore", signal: controller.signal });
+    await resumeAgent(session as any, "continue", { signal: controller.signal });
 
     expect(session.prompt).not.toHaveBeenCalled();
   });

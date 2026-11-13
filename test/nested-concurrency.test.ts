@@ -5,10 +5,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentManager } from "../src/agent-manager.js";
 import { createNestedSubagentTools } from "../src/nested-tools.js";
 
-vi.mock("../src/agent-runner.js", () => ({
-  runAgent: vi.fn(),
-  resumeAgent: vi.fn(),
-}));
+vi.mock("../src/agent-runner.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
+  return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
+});
 
 vi.mock("../src/worktree.js", () => ({
   createWorktree: vi.fn(),

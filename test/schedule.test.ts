@@ -14,6 +14,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getDefaultMaxTurns, setDefaultMaxTurns } from "../src/agent-runner.js";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
@@ -405,15 +406,36 @@ describe("SubagentScheduler — fire path", () => {
     });
   });
 
-  it("fire normalizes an unlimited turn budget out of the snapshot", () => {
-    // 0 means unlimited; "max turns: 0" would read as a limit of none.
+  it("fire records an unlimited turn budget as 0 in the snapshot", () => {
+    // The stored limit is already resolved, so no limit means unlimited. A
+    // resume falls back to the snapshot's limit, and only `0` tells it
+    // "unlimited" rather than "none given, use the default". The viewer hides 0.
+    // No `max_turns`: the Agent tool stores its resolved limit, and stores
+    // nothing for unlimited.
     scheduler.addJob({
       name: "unlimited", description: "x", schedule: "1s",
-      subagent_type: "general-purpose", prompt: "x", max_turns: 0,
+      subagent_type: "general-purpose", prompt: "x",
     });
 
     vi.advanceTimersByTime(1_000);
-    expect(manager.spawn.mock.calls[0][4].invocation.maxTurns).toBeUndefined();
+    expect(manager.spawn.mock.calls[0][4].invocation.maxTurns).toBe(0);
+  });
+
+  it("fire hands the stored turn limit over as given", () => {
+    // Stored already resolved: no `max_turns` on a job is the verdict
+    // "unlimited", so firing must not swap the project default in.
+    const prevMax = getDefaultMaxTurns();
+    setDefaultMaxTurns(9);
+    try {
+      scheduler.addJob({
+        name: "unlimited", description: "x", schedule: "1s",
+        subagent_type: "general-purpose", prompt: "x",
+      });
+      vi.advanceTimersByTime(1_000);
+      expect(manager.spawn.mock.calls[0][4].maxTurns).toBeUndefined();
+    } finally {
+      setDefaultMaxTurns(prevMax);
+    }
   });
 
   it("disabled jobs do not fire", () => {
