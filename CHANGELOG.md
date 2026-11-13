@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-11-13
+
 > **⚠️ Behavior change — `general-purpose` can now spawn subagents of its own** ([#448](https://github.com/tintinweb/pi-subagents/pull/448)). A `general-purpose` agent may delegate instead of doing all the work itself; its children count toward `maxConcurrentNested`. Depth stays at `maxSubagentDepth` `2`: a subagent's children cannot spawn again, unlike Claude Code's default of 3; set it to `3` to match. Inside a workflow it does not, as in Claude Code: the script does the fanning out. To keep `general-purpose` from delegating, add a `general-purpose.md` agent file without `allowed_subagents`; it replaces the built-in. A `general-purpose.md` you ejected earlier is such a file, so it keeps the old behavior: add `allowed_subagents: all` to it, or delete it to use the built-in. Set `maxSubagentDepth` to `1` to turn nesting off entirely.
 
 > **⚠️ Behavior change — `/agents` → Settings writes the global file unless the project has its own** ([#391](https://github.com/tintinweb/pi-subagents/issues/391), [#419](https://github.com/tintinweb/pi-subagents/pull/419)). Changes used to land in `<cwd>/.pi/subagents.json`, creating it in every repo you opened Settings in. They now go to `~/.pi/agent/subagents.json` unless that project file already exists; press Tab on the page to write the project file instead.
