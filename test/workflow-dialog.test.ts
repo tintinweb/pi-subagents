@@ -580,6 +580,9 @@ describe("keys", () => {
 
     // The expanded detail fits: focus has nothing to scroll, so the arrows still move between agents.
     expect(key(DOWN, focused, 0)?.selectedAgent).toBe(1);
+    // ⏎ and e drop the focus, so expanding again after a collapse leaves ↑↓ on the agent list.
+    expect(key("\r", focused)?.detailFocused).toBe(false);
+    expect(key("e", focused)?.detailFocused).toBe(false);
   });
 
   it("pages and jumps the detail with the conversation viewer's keys", () => {
@@ -1152,6 +1155,30 @@ describe("WorkflowDialog component", () => {
     expect(instance.render(86)).toHaveLength(Math.floor((60 * WORKFLOW_DIALOG_HEIGHT_PCT) / 100));
     expect(rendered.join("\n")).toContain("<success>✔</success>");
     instance.dispose();
+  });
+
+  it("drops a focus that has nothing to scroll, so a growing transcript cannot take ↑↓", () => {
+    const items: AgentDetail["items"] = [{ kind: "tool", head: "Read(a)", body: [], settled: true }];
+    const live = () => ({
+      progress: [
+        agentEntry({ index: 0, label: "a", state: "progress", recordId: "rec-a", queuedAt: START, startedAt: START }),
+        agentEntry({ index: 1, label: "b", state: "progress", recordId: "rec-b", queuedAt: START, startedAt: START }),
+      ],
+      task: { status: "running" as const, workflowName: "wf", startTime: START },
+      detail: () => ({ prompt: "p", items }),
+    });
+    const { dialog } = harness(live as unknown as typeof source);
+    const state = () => (dialog as unknown as { state: WorkflowDialogState }).state;
+    dialog.handleInput("\r"); // open the phase: agent a's subview
+    dialog.handleInput("\x1b[C"); // → on a detail that fits
+    dialog.render(100);
+    // The transcript outgrows the pane while the dialog is open.
+    for (let i = 0; i < 60; i++) items.push({ kind: "tool", head: `Read(f${i})`, body: [], settled: true });
+    expect(dialog.render(100).at(-1)).toContain("↑↓ agent");
+    // ↓ moves to agent b rather than scrolling a's detail.
+    dialog.handleInput("\x1b[B");
+    expect(state()).toMatchObject({ selectedAgent: 1, detailScroll: 0 });
+    dialog.dispose();
   });
 
   it("dispatches the injected actions and closes on escape", () => {

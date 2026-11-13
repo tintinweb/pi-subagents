@@ -319,7 +319,8 @@ export interface WorkflowDialogState {
   /**
    * `→` moved focus into the detail, so `↑↓` scroll it instead of moving
    * between agents. Only in effect while the detail overflows the pane — see
-   * {@link detailHasFocus}.
+   * {@link detailHasFocus} — and cleared by the component's next render when
+   * it does not, and by `⏎`/`e`.
    */
   detailFocused: boolean;
 }
@@ -327,6 +328,17 @@ export interface WorkflowDialogState {
 /** Focus is on the detail and there is something there to scroll. */
 const detailHasFocus = (state: WorkflowDialogState, maxDetailScroll: number) =>
   state.level === "agent" && state.detailFocused && maxDetailScroll > 0;
+
+/**
+ * `⏎`/`e` on the detail. Drops the focus as well: only `→` focuses, so an
+ * expand that follows a collapse must not bring back a focus `→` gave earlier.
+ */
+const toggleExpanded = (state: WorkflowDialogState): WorkflowDialogState => ({
+  ...state,
+  expanded: !state.expanded,
+  detailScroll: 0,
+  detailFocused: false,
+});
 
 export function initialWorkflowDialogState(initialPhaseIndex = 0): WorkflowDialogState {
   return {
@@ -1202,11 +1214,9 @@ export function handleWorkflowDialogKey(
       if (view.visibleAgents.length === 0) return { state };
       return { state: { ...state, level: "agent", expanded: false, detailScroll: 0 } };
     }
-    return { state: { ...state, expanded: !state.expanded, detailScroll: 0 } };
+    return { state: toggleExpanded(state) };
   }
-  if (matchesKey(data, "e")) {
-    return { state: { ...state, expanded: !state.expanded, detailScroll: 0 } };
-  }
+  if (matchesKey(data, "e")) return { state: toggleExpanded(state) };
 
   // The one key that opens something instead of changing the run, so unlike
   // skip/retry it works at both levels and on a settled agent: reading what a
@@ -1313,6 +1323,12 @@ export class WorkflowDialog implements Component {
       bodyRows: workflowDialogBodyRows(this.tui.terminal.rows),
     });
     this.pane = { maxDetailScroll, detailPageRows };
+    // A focus with nothing to scroll is dropped, not kept dormant: otherwise a
+    // running agent whose transcript later outgrows the pane would turn `↑↓`
+    // into scroll keys under the reader, with no keypress. The render right
+    // after `→` already measures the expanded detail, so a detail that
+    // overflows keeps the focus `→` gave it.
+    if (this.state.detailFocused && maxDetailScroll === 0) this.state = { ...this.state, detailFocused: false };
     return styleWorkflowCardLines(lines, this.theme);
   }
 
