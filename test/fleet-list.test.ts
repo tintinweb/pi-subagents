@@ -116,6 +116,7 @@ function makeWorkflow(over: Partial<FleetWorkflow> = {}): FleetWorkflow {
     status: "running",
     doneCount: 1,
     totalCount: 3,
+    phase: "",
     startedAt: Date.now() - 32_000,
     tokens: 26_400,
     ...over,
@@ -1174,26 +1175,36 @@ describe("FleetList workflow rows", () => {
     const h = harness([makeRecord({ id: "a1", description: "one" })]);
     h.setWorkflows([makeWorkflow()]);
 
-    const rows = h.render().map(plain).filter(row => row.trim() !== "");
+    // Wide enough that the test theme's `<tag>` markup, which counts toward
+    // the width, does not truncate the row.
+    const rows = h.render(200).map(plain).filter(row => row.trim() !== "");
     const run = rows.find(row => row.includes("audit-src"))!;
     const agent = rows.findIndex(row => row.includes("one"));
-    // The bar sits where the kind label used to: 1/3 of 20 cells rounds to 7.
-    expect(run).toContain(`audit-src  ${"▰".repeat(7)}${"▱".repeat(13)}`);
-    expect(run).not.toContain("workflow");
-    expect(run).toContain("1/3 · ");
+    // Labelled like an agent's type; 1/3 of 20 cells rounds to 7, and the count
+    // follows the bar rather than heading the flush-right stats.
+    expect(run).toContain(`○ workflow  audit-src  ${"▰".repeat(7)}${"▱".repeat(13)} 1/3 agents `);
+    expect(run).not.toContain("1/3 · ");
     expect(run).toContain("26.4k tokens");
     // A run owns most of the agents under it, so the container comes first.
     expect(rows.findIndex(row => row.includes("audit-src"))).toBeLessThan(agent);
   });
 
+  it("names the active phases after the count", () => {
+    const h = harness([]);
+    h.setWorkflows([makeWorkflow({ phase: "Reviewing (2/3)" })]);
+    const run = h.render(200).map(plain).find(row => row.includes("audit-src"))!;
+    expect(run).toContain("1/3 agents · Reviewing (2/3) ");
+  });
+
   it("fills the bar completely on a finished single-agent run", () => {
     const h = harness([]);
     h.setWorkflows([makeWorkflow({ doneCount: 1, totalCount: 1 })]);
-    const out = h.render().map(plain).join("\n");
+    const out = h.render(200).map(plain).join("\n");
     expect(out).toContain("▰".repeat(20));
     expect(out).not.toContain("▱");
-    expect(out).toContain("1/1 · ");
+    expect(out).toContain(`${"▰".repeat(20)} 1/1 agents `);
   });
+
 
   it("formatProgressBar scales done/total into 20 cells", () => {
     const cells = (done: number, total: number) => {

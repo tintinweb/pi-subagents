@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowMeta } from "../src/workflow/meta.js";
 import {
+  activePhaseLabel,
   buildPhaseGroups,
   collapse,
   displayState,
@@ -508,5 +509,36 @@ describe("footerPhaseLabel", () => {
 
   it("returns empty when no phase is active", () => {
     expect(footerPhaseLabel({ titles: [], positionStart: 0, totalPhases: 0 })).toBe("");
+  });
+});
+
+describe("activePhaseLabel", () => {
+  const phase = (index: number, title: string): WorkflowEntry => ({ type: "workflow_phase", index, title });
+  const meta = [{ title: "Scan" }, { title: "Review" }, { title: "Report" }];
+
+  it("names the phase with work outstanding, and where it sits among the declared ones", () => {
+    const log = collapse([
+      phase(0, "Scan"),
+      agentEntry({ index: 0, phaseIndex: 0, state: "done" }),
+      phase(1, "Review"),
+      agentEntry({ index: 1, phaseIndex: 1, state: "start" }),
+    ]);
+    expect(activePhaseLabel(log, meta)).toBe("Reviewing (2/3)");
+  });
+
+  it("joins phases a pipeline has in flight at once", () => {
+    const log = collapse([
+      phase(0, "Scan"),
+      agentEntry({ index: 0, phaseIndex: 0, state: "start" }),
+      phase(1, "Review"),
+      agentEntry({ index: 1, phaseIndex: 1, state: "start" }),
+    ]);
+    expect(activePhaseLabel(log, meta)).toBe("Scanning & Reviewing");
+  });
+
+  it("is empty for a run without phases, and once every phase settles", () => {
+    expect(activePhaseLabel(collapse([unphasedEntry(0)]), meta)).toBe("");
+    const settled = collapse([phase(0, "Scan"), agentEntry({ index: 0, phaseIndex: 0, state: "done" })]);
+    expect(activePhaseLabel(settled, meta)).toBe("");
   });
 });

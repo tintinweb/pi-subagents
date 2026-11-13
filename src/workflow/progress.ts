@@ -300,7 +300,14 @@ export function buildPhaseGroups(
   progress: readonly WorkflowEntry[],
   declared?: readonly WorkflowPhaseMeta[],
 ): PhaseGroup[] {
-  const { agents, phaseTitles } = collapse(progress);
+  return phaseGroupsOf(collapse(progress), declared);
+}
+
+/** {@link buildPhaseGroups} over a log the caller has already collapsed. */
+export function phaseGroupsOf(
+  { agents, phaseTitles }: CollapsedProgress,
+  declared?: readonly WorkflowPhaseMeta[],
+): PhaseGroup[] {
   const observed = groupByPhase(agents, phaseTitles) ?? [];
   const merged = mergePhases(declared, observed);
   if (merged.length === 0 && agents.length > 0) {
@@ -497,7 +504,7 @@ const GERUND_CANDIDATE = /^[A-Za-z]{3,12}$/;
 /**
  * Render a phase title as an activity: `Scan` → `Scanning`.
  *
- * Only applied in the footer, where the line reads as "what is happening now".
+ * Only applied to the active-phase label, which reads as "what is happening now".
  * Anything that is not a plain short word is left untouched.
  */
 export function gerund(word: string): string {
@@ -533,7 +540,7 @@ const truncate = (text: string, width: number) =>
   text.length <= width ? text : `${text.slice(0, Math.max(1, width - 1))}…`;
 
 /**
- * The footer's "what is this run doing" label.
+ * The "what is this run doing" label, shown on a run's FleetView row.
  *
  * One active phase shows its position; two concurrent phases are joined, since
  * a barrier-free pipeline routinely has work in more than one at a time.
@@ -549,4 +556,21 @@ export function footerPhaseLabel(input: {
     return `${truncate(titles[0], FOOTER_TITLE_WIDTH)} (${input.positionStart}/${input.totalPhases})`;
   }
   return titles.map(t => truncate(t, FOOTER_TITLE_WIDTH)).join(" & ");
+}
+
+/**
+ * {@link footerPhaseLabel} for the phases that still have work outstanding:
+ * `Reviewing (2/3)`. Empty when the run has no phases — the single "Agents"
+ * group a phase-less run collapses into is not one.
+ */
+export function activePhaseLabel(collapsed: CollapsedProgress, declared?: readonly WorkflowPhaseMeta[]): string {
+  if (!collapsed.agents.some(agent => agent.phaseIndex != null)) return "";
+  const groups = phaseGroupsOf(collapsed, declared);
+  const active = groups.flatMap((group, i) => (group.status === "running" ? [i] : []));
+  if (active.length === 0) return "";
+  return footerPhaseLabel({
+    titles: active.map(i => groups[i].title),
+    positionStart: active[0] + 1,
+    totalPhases: groups.length,
+  });
 }

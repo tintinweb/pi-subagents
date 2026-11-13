@@ -67,6 +67,8 @@ export interface FleetWorkflow {
   status: "running" | "completed" | "failed" | "killed" | "paused";
   doneCount: number;
   totalCount: number;
+  /** `Reviewing (2/3)` — the run's active phases, or "" for none. */
+  phase: string;
   startedAt: number;
   /** Set once the run settles, which is what freezes its clock. */
   completedAt?: number;
@@ -651,10 +653,13 @@ export class FleetList {
   }
 
   /**
-   * A run's row, as Claude Code's FleetView draws it: gutter, dot, name, then a
-   * progress bar where an agent has its description, and the same
-   * elapsed/token tail flush right. `rightAlign` cuts the left side first, so a
-   * narrow terminal loses the bar before the counts.
+   * A run's row: gutter, dot, a `workflow` label where an agent has its type,
+   * the name, then a progress bar, `done/total agents` and the active phases
+   * where an agent has its description, and the same elapsed/token tail flush right. Claude Code
+   * has no label and runs its stats inline after the bar; the label says what
+   * the row is, and the flush-right tail lines up with the agent rows.
+   * `rightAlign` cuts the left side first, so a narrow terminal loses the
+   * count and bar before the elapsed/token tail.
    */
   private renderWorkflowRow(
     rosterIndex: number,
@@ -668,11 +673,13 @@ export class FleetList {
     const dot = this.dot(workflow.id === this.viewingWorkflowId, theme);
     const { filled, empty } = formatProgressBar(workflow.doneCount, workflow.totalCount);
     const bar = theme.fg(workflow.status === "completed" ? "success" : "accent", filled) + theme.fg("dim", empty);
-    const left = `${this.gutter(rosterIndex, cursor, theme)}${dot} ${name}  ${bar}`;
+    const muted = (text: string) => theme.fg(selected ? "text" : "dim", text);
+    const kind = theme.fg(selected ? "text" : "muted", "workflow");
+    const count = muted(`${workflow.doneCount}/${workflow.totalCount} agents${workflow.phase ? ` · ${workflow.phase}` : ""}`);
+    const left = `${this.gutter(rosterIndex, cursor, theme)}${dot} ${kind}  ${name}  ${bar} ${count}`;
     // Frozen once the run settles, exactly as an agent's clock is.
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
-    const stats = `${workflow.doneCount}/${workflow.totalCount} · ${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`;
-    return rightAlign(left, selected ? theme.fg("text", stats) : theme.fg("dim", stats), width);
+    return rightAlign(left, muted(`${formatFleetElapsed(elapsed)} · ${formatFleetTokens(workflow.tokens)}`), width);
   }
 
   private renderAgentRow(

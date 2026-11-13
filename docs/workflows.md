@@ -70,7 +70,7 @@ A **card in the transcript**, updating as the run goes:
 
 A running row's token and tool-call counts move as the child works: tool calls when each one completes, tokens when pi finalizes an assistant message, so a long response holds the count until it ends. A resumed row counts only its continuation; a retried row keeps the earlier attempt's spend.
 
-A **row in FleetView**, above the agents: the run's name and a progress bar of finished agents where a description would go (`audit-src  ▰▰▰▰▰▱▱▱…  3/7 · 1m12s`). `⏎` on it opens the inspector rather than a conversation overlay.
+A **row in FleetView**, above the agents: a `workflow` label, the run's name, and a progress bar of finished agents with their count and the active phases where a description would go (`workflow  audit-src  ▰▰▰▰▰▱▱▱… 3/7 agents · Reviewing (2/3)  1m12s`). A phase's title reads as an activity there — `phase("Review")` shows as `Reviewing`. `⏎` on it opens the inspector rather than a conversation overlay.
 
 Each row names the model the child *actually* ran on — read back from its session once pi has resolved its defaults, not the string the script asked for — so a fuzzy `model: "haiku"` reads as the model it resolved to, and an `agent()` that named no model still says what it inherited.
 
