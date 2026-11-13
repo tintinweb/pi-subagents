@@ -330,8 +330,10 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
   it("keeps nested get and steer ownership-scoped to the calling parent", async () => {
     // #164 aborts nested children when their owner settles, so the owner must
     // stay running while a foreign peer probes the live nested record. Spawn
-    // both owner and probe as top-level background agents (hold:false so the
-    // root can continue); the nested tools themselves enforce ownership.
+    // both owner and probe as top-level background agents; the nested tools
+    // themselves enforce ownership. The root releases the owner once it has the
+    // probe's verdict: a headless root waits for its background agents before
+    // it settles, so holding the owner past that would never end.
     const probeResults: { get?: string; steer?: string } = {};
     let ownedChildBlocked = false;
     let releaseOwnedChild = () => {};
@@ -443,28 +445,21 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
               "await-probe",
             );
           }
+          // The probe has reported: the owner and its nested child can finish.
+          releaseOwnedChild();
+          releaseOwner();
           return lastToolResult(ctx, "get_subagent_result");
         },
         { prompt: "root-ownership", maxModelCalls: 32, hold: false },
       ));
 
-      await waitForChildReady(ownedChildReady, 5_000);
       expect(ownedChildBlocked).toBe(true);
       expect(run.manager).toBeDefined();
       const manager = run.manager;
       if (!manager) throw new Error("Print-mode manager was not published");
-      // Owner (and its nested child) are still live — root finished without hold.
-      expect(manager.hasRunning()).toBe(true);
+      // The headless root settled only after its background agents did.
+      expect(manager.hasRunning()).toBe(false);
       waitForAll = manager.waitForAll();
-      let waitTimer: ReturnType<typeof setTimeout> | undefined;
-      const waitState = await Promise.race([
-        waitForAll.then(() => "settled" as const),
-        new Promise<"pending">((resolve) => {
-          waitTimer = setTimeout(() => resolve("pending"), 50);
-        }),
-      ]);
-      if (waitTimer) clearTimeout(waitTimer);
-      expect(waitState).toBe("pending");
 
       expect(run.responseText).toContain("OWNERSHIP_PROBE_DONE");
       expect(probeResults.get).toBeDefined();
@@ -477,11 +472,7 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
       );
       expect(probeResults.get).not.toContain("OWNED_NESTED_RESULT");
       expect(probeResults.steer).not.toContain("Steering message sent");
-
-      releaseOwnedChild();
-      releaseOwner();
       await expect(waitForAll).resolves.toBeUndefined();
-      expect(manager.hasRunning()).toBe(false);
     } finally {
       releaseOwnedChild();
       releaseOwner();
