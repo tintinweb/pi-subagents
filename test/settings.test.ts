@@ -462,6 +462,20 @@ describe("settings persistence", () => {
       }
     });
 
+    it("keeps headlessWaitMinutes, including 0 (explicit no limit) and the 24 h ceiling", () => {
+      for (const ok of [0, 10, 1440]) {
+        writeProject({ headlessWaitMinutes: ok });
+        expect(loadSettings(projectDir)).toEqual({ headlessWaitMinutes: ok });
+      }
+    });
+
+    it("drops out-of-range or non-integer headlessWaitMinutes", () => {
+      for (const bad of [-1, 1441, 1.5, "ten", null]) {
+        writeProject({ headlessWaitMinutes: bad });
+        expect(loadSettings(projectDir).headlessWaitMinutes).toBeUndefined();
+      }
+    });
+
     it("accepts defaultMaxTurns: 0 (explicit unlimited)", () => {
       writeProject({ defaultMaxTurns: 0 });
       expect(loadSettings(projectDir)).toEqual({ defaultMaxTurns: 0 });

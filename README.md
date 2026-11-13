@@ -159,7 +159,7 @@ Restrictions:
 - `schedule` cannot be combined with `inherit_context` (no parent conversation exists at fire time) or `resume` (schedules create fresh agents).
 - `run_in_background: false` is refused — scheduled jobs always run in the background. Omitting it, or passing `true`, is fine.
 - Scheduled fires bypass the `maxConcurrent` queue so a 5-minute interval cannot be deferred behind long-running manual agents.
-- **Headless `pi -p` doesn't wait for scheduled subagents.**
+- **Headless `pi -p` doesn't wait for scheduled fires that haven't happened yet.** A scheduled agent already running when the turn ends is waited for like any other [background work](#headless-mode-pi--p).
 
 ## UI
 
@@ -651,7 +651,11 @@ Skipping is immediate for a running agent and for one held at a pause; an agent 
 |------|-------------|
 | `--subagents-workflow-file=<path>` | Run a workflow script at session start |
 
-Use the `=` form. The bare `--flag value` spelling consumes the next argument, so `pi --subagents-workflow-file review.js "do the thing"` would take the prompt as the flag's value. Composes with headless mode: `pi -p --subagents-workflow-file=review.js`. With no tool call to attach to, the run renders as a session entry and its result is handed to the model as context for its next turn.
+Use the `=` form. The bare `--flag value` spelling consumes the next argument, so `pi --subagents-workflow-file review.js "do the thing"` would take the prompt as the flag's value. The run goes alongside the session, like background work the model started: with no tool call to attach to, it renders as a session entry, and when it finishes the model is notified and reacts in a turn of its own. Headless, give it a prompt: `pi -p --subagents-workflow-file=review.js "Report the result."` runs the workflow and the turn together, then the model answers with the result. Without a prompt pi starts no turn to report into, so the run is stopped at exit with a warning, as `claude -p` refuses to run without input.
+
+### Headless mode (`pi -p`)
+
+In print and JSON mode, a turn that ends while background agents or workflows are still running does not end the run. pi-subagents waits for that work, writing `Waiting for background work to finish (…). Press Ctrl+C to exit now.` to stderr, and hands the completions to the model, which reacts in a further turn. The printed answer is that reaction, as with Claude Code's `-p`. This is done at pi's `agent_before_settle` boundary, so it also applies to SDK hosts that bind extensions without a mode, which pi treats as print. The wait has no limit by default; [`headlessWaitMinutes`](#persistent-settings) stops the work after that many minutes instead. Nested background children follow their own rule: they are stopped when the agent that started them ends its run, unless it collected them first ([Nested subagents](#nested-subagents)).
 
 The `/agents` command opens an interactive menu:
 
@@ -749,7 +753,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, headless wait, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides.
@@ -762,7 +766,9 @@ Rows are ordered by category: limits, dispatch, features, agent files, display. 
 
 A row whose value comes from a settings file is tagged with that file (`project` or `global`, in a column after the labels); an untagged row is at its built-in default. With the cursor on a tagged row, Delete (or Backspace) removes that setting from the tagged file, so the row shows what the next start would load: the other file's value if it sets one, otherwise the built-in default. With the cursor in the filter, those keys edit the filter instead. Enter on a number row opens an input under the list, with the accepted range: Enter saves, Esc returns to the list, and a value outside the range is refused. The ranges match what loading accepts, so a value the menu saves survives a restart.
 
-**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max background concurrency `10`, max foreground concurrency `0` = unlimited, max nested concurrency `10`, default max turns unlimited, grace turns `5`, nested depth `2`, join mode `smart`, defaults enabled).
+**Precedence:** project overrides global on any field present in both. Missing fields fall back to the hardcoded defaults (max background concurrency `10`, max foreground concurrency `0` = unlimited, max nested concurrency `10`, default max turns unlimited, grace turns `5`, headless wait `0` = no limit, nested depth `2`, join mode `smart`, defaults enabled).
+
+**Headless wait** (`headlessWaitMinutes`, default `0` = no limit): how long a [headless](#headless-mode-pi--p) parent waits for background work after its turn ends. When the limit passes, pi-subagents writes `Background work still running after <n> min (…); stopping it.` to stderr, stops the agents and workflows, and lets pi exit without another model turn. `10` matches Claude Code's default ceiling (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`). Each wait gets the full limit: a turn in between restarts it. Interactive and RPC sessions never wait, so the setting does nothing there.
 
 **Nested depth** (`maxSubagentDepth`, default `2`): the hard ceiling on [nested delegation](#nested-subagents), counted from the main session (main = 0, its subagents = 1). `0` or `1` disables nested subagents entirely, even for agents that set `allowed_subagents` — see the [depth table](#nested-subagents). Read when a subagent session is built, so a change applies to agents started after it.
 
