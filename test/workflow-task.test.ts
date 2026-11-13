@@ -10,6 +10,7 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
+import { collapse, type WorkflowEntry } from "../src/workflow/progress.js";
 import type { WorkflowControl } from "../src/workflow/runtime.js";
 import {
   completeWorkflowTask,
@@ -17,6 +18,7 @@ import {
   failWorkflowTask,
   pauseWorkflowTask,
   resumeWorkflowTask,
+  updateWorkflowProgressBatch,
   type WorkflowTask,
 } from "../src/workflow/task.js";
 
@@ -128,5 +130,35 @@ describe("settling a run", () => {
 
     expect(task.control).toBeUndefined();
     expect(task.status).toBe("failed");
+  });
+});
+
+describe("updateWorkflowProgressBatch", () => {
+  const agent = (index: number, state: "start" | "done", tokens: number): WorkflowEntry => ({
+    type: "workflow_agent",
+    index,
+    label: `a${index}`,
+    state,
+    tokens,
+  });
+
+  it("keeps one entry per agent however often a running row is re-emitted (#298)", () => {
+    const task = createWorkflowTask({ id: "wf-1", script: "" });
+    const all: WorkflowEntry[] = [];
+    const apply = (entries: WorkflowEntry[]) => {
+      all.push(...entries);
+      updateWorkflowProgressBatch(task, entries);
+    };
+
+    apply([{ type: "workflow_phase", index: 0, title: "scan" }, agent(0, "start", 0), agent(1, "start", 0)]);
+    // Two children interleaving live counter updates, as a fan-out does.
+    for (let i = 1; i <= 50; i++) apply([agent(0, "start", i), agent(1, "start", i * 2)]);
+    apply([{ type: "workflow_log", message: "halfway" }, agent(0, "done", 60), agent(1, "done", 120)]);
+
+    expect(task.workflowProgress).toHaveLength(4);
+    // Lossless for every reader: they all go through collapse.
+    expect(collapse(task.workflowProgress)).toEqual(collapse(all));
+    expect(task.totalTokens).toBe(180);
+    expect(task.doneCount).toBe(2);
   });
 });
