@@ -416,6 +416,13 @@ export class AgentManager {
   private startups = new Map<string, Promise<void>>();
 
   /**
+   * Every `record.promise` that has not settled yet. A settled promise stays on
+   * its record, so this is what tells `isSettling` and `waitForSettled` a run is
+   * over.
+   */
+  private unsettled = new Set<Promise<unknown>>();
+
+  /**
    * Evicted agents that can still be reached by name, keyed by handle. Outlives
    * the 10-minute record cleanup — that timer exists to bound memory, not to
    * expire a conversation the user might still want — and is cleared alongside
@@ -1042,7 +1049,7 @@ export class AgentManager {
         return "";
       });
 
-    record.promise = promise;
+    this.trackRun(record, promise);
 
     // Notify caller that spawn is complete (record is in the map, promise is set).
     // Called synchronously — onSessionCreated fires asynchronously inside runAgent.
@@ -1487,7 +1494,7 @@ export class AgentManager {
         return "";
       });
 
-    record.promise = promise;
+    this.trackRun(record, promise);
   }
 
   /**
@@ -1748,6 +1755,69 @@ export class AgentManager {
       }
     }
     return count;
+  }
+
+  /**
+   * Resolve once `id`'s run and the runs of every agent it owns, directly or
+   * transitively, have settled — true then, or false if `timeoutMs` passes
+   * first. Unlike `waitForAll`, it reads promises, not status: `abort()` marks
+   * a record "stopped" at once, while a tool call that ignores the signal can
+   * still be running, and only the promise says when it is not (#443).
+   *
+   * Loops until a pass finds nothing unsettled: a descendant can be spawned,
+   * and a record resumed with a new promise, while the tree unwinds.
+   */
+  async waitForSettled(id: string, timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const expired = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    const settled = (async () => {
+      for (let pending = this.unsettledInTree(id); pending.length > 0; pending = this.unsettledInTree(id)) {
+        await Promise.allSettled(pending);
+      }
+      return true;
+    })();
+    try {
+      return await Promise.race([settled, expired]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Whether anything in `id`'s tree — the agent itself or an agent it owns,
+   * transitively — is still starting up or running, whatever its status says.
+   * A stopped agent reads true until the tool call that ignored the abort ends.
+   */
+  isSettling(id: string): boolean {
+    return this.unsettledInTree(id).length > 0;
+  }
+
+  /** The startups and runs in `id`'s tree that have not settled yet. */
+  private unsettledInTree(id: string): Promise<unknown>[] {
+    const pending: Promise<unknown>[] = [];
+    for (const record of this.agents.values()) {
+      if (!this.isInTree(record, id)) continue;
+      const startup = this.startups.get(record.id);
+      if (startup) pending.push(startup);
+      if (record.promise && this.unsettled.has(record.promise)) pending.push(record.promise);
+    }
+    return pending;
+  }
+
+  /** Set `record.promise`, and track it in `unsettled` until it settles. */
+  private trackRun(record: AgentRecord, promise: Promise<string>): void {
+    record.promise = promise;
+    this.unsettled.add(promise);
+    const done = () => { this.unsettled.delete(promise); };
+    promise.then(done, done);
+  }
+
+  /** Whether `record` is `rootId` itself or one of the agents it owns. */
+  private isInTree(record: AgentRecord, rootId: string): boolean {
+    for (let r: AgentRecord | undefined = record; r; r = r.parentAgentId ? this.agents.get(r.parentAgentId) : undefined) {
+      if (r.id === rootId) return true;
+    }
+    return false;
   }
 
   /** Wait for all running and queued agents to complete (including queued ones). */

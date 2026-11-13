@@ -54,6 +54,7 @@ import {
   type ToolDescriptionMode,
 } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
+import { toSubagentInfo } from "./subagent-info.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
@@ -538,60 +539,19 @@ export default function (pi: ExtensionAPI) {
     30_000,
   );
 
-  /** Helper: build event data for lifecycle events from an AgentRecord. */
-  function buildEventData(record: AgentRecord) {
-    const durationMs = record.completedAt ? record.completedAt - record.startedAt : Date.now() - record.startedAt;
-    // All three fields are lifetime-accumulated (Σ over every assistant message_end),
-    // so they survive compaction together — input + output ≤ total always.
-    // tokens is omitted when nothing was ever produced (e.g. agent errored before
-    // any message_end fired), preserving prior payload shape.
-    const u = record.lifetimeUsage;
-    const total = getLifetimeTotal(u);
-    const tokens = total > 0
-      ? { input: u.input, output: u.output, total }
-      : undefined;
-    // The whole run's spend as a pi `Usage` — pi's convention for handing spend
-    // to a consumer, so `usage.cost.total` and `usage.cacheRead` are where a
-    // listener already expects them and anything pi adds to `Usage` arrives
-    // without a change here. Omitted when nothing was spent, so "spent nothing"
-    // and "never ran" stay distinguishable. Ungated by `showCost`: that setting
-    // governs what a human is shown, not what the event carries.
-    //
-    // `tokens` above is the other convention, kept as it shipped: a flat view
-    // model like pi's own `SessionStats`, carrying the DISPLAY total, which
-    // excludes cacheRead (#38). The two answer different questions and neither
-    // derives from the other.
-    const usage = toReportedUsage(u);
-    return {
-      id: record.id,
-      type: record.type,
-      description: record.description,
-      result: record.result,
-      error: record.error,
-      status: record.status,
-      toolUses: record.toolUses,
-      durationMs,
-      tokens,
-      usage,
-    };
-  }
-
   // Background completion: route through group join or send individual nudge
   const manager = new AgentManager((record) => {
-    // Owned children — nested, or a workflow's — report only through their
-    // owner: the parent's scoped tools, or the workflow's card, notification
-    // and dialog. Keep them out of top-level lifecycle, transcript,
-    // notification, and UI channels.
-    if (!isTopLevelAgent(record)) return;
-
-    // Emit lifecycle event based on terminal status
+    // The lifecycle events cover every agent, owned ones included: they carry
+    // `parentAgentId` / `workflowId`, so a listener that wants only the
+    // session's own agents filters on those (#442).
     const isError = record.status === "error" || record.status === "stopped" || record.status === "aborted";
-    const eventData = buildEventData(record);
-    if (isError) {
-      pi.events.emit("subagents:failed", eventData);
-    } else {
-      pi.events.emit("subagents:completed", eventData);
-    }
+    pi.events.emit(isError ? "subagents:failed" : "subagents:completed", toSubagentInfo(record));
+
+    // Everything below is for the session's own agents only. Owned children —
+    // nested, or a workflow's — report to the model through their owner: the
+    // parent's scoped tools, or the workflow's card, notification and dialog.
+    // Keep them out of the transcript, notification, and UI channels.
+    if (!isTopLevelAgent(record)) return;
 
     // Persist the final record: get_subagent_result answers from it once the
     // live record is gone, and other extensions reconstruct history from it.
@@ -621,7 +581,17 @@ export default function (pi: ExtensionAPI) {
     // 'delivered' → group callback already fired
     widget.update();
   }, undefined, (record) => {
-    if (!isTopLevelAgent(record)) return;
+    if (!isTopLevelAgent(record)) {
+      // An owned agent never queues (it takes no pool slot) and has no
+      // `subagents:created` emit site of its own, so it is announced here, the
+      // moment it starts: a startup that fails first leaves no record and so
+      // announces nothing. A resume re-announces the id, as a detached
+      // top-level resume does.
+      const info = toSubagentInfo(record);
+      pi.events.emit("subagents:created", info);
+      pi.events.emit("subagents:started", info);
+      return;
+    }
     // Agent-tool spawns refresh these surfaces in their tool handler, but RPC
     // and scheduler spawns enter through the manager directly.
     if (currentCtx?.hasUI) {
@@ -631,18 +601,11 @@ export default function (pi: ExtensionAPI) {
       fleet.update();
     }
     // Emit started event when agent transitions to running (including from queue)
-    pi.events.emit("subagents:started", {
-      id: record.id,
-      type: record.type,
-      description: record.description,
-    });
+    pi.events.emit("subagents:started", toSubagentInfo(record));
   }, (record, info) => {
-    if (!isTopLevelAgent(record)) return;
     // Emit compacted event when agent's session compacts (preserves count on record).
     pi.events.emit("subagents:compacted", {
-      id: record.id,
-      type: record.type,
-      description: record.description,
+      ...toSubagentInfo(record),
       reason: info.reason,
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
@@ -687,8 +650,7 @@ export default function (pi: ExtensionAPI) {
       usage: reported,
     });
   }, (record, message) => {
-    if (!isTopLevelAgent(record)) return;
-    pi.events.emit("subagents:steered", { id: record.id, message });
+    pi.events.emit("subagents:steered", { ...toSubagentInfo(record), message });
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -872,10 +834,23 @@ export default function (pi: ExtensionAPI) {
           spawn: spawnTopLevel,
           awaitStartup: (id) => manager.awaitStartup(id),
           getRecord: (id) => manager.getRecord(id),
+          listAgents: () => manager.listAgents(),
+          isNotificationPending: (id) => {
+            const record = manager.getRecord(id);
+            // Owned agents are never notified, and a read result never will be.
+            if (!record || !isTopLevelAgent(record) || record.resultConsumed) return false;
+            if (record.status === "running" || record.status === "queued") return false;
+            // The three places a settled agent's completion waits: the outbox,
+            // a `group` holding it for its siblings, and a `group` spawn whose
+            // turn has not ended yet (see the manager's onComplete).
+            return outbox.has(id) || groupJoin.isHolding(id) || turnGroupSpawns.includes(id);
+          },
           // Unguarded on purpose: the stop handler now runs the top-level check
           // itself off `getRecord`, and reports the refusal instead of the
           // "Agent not found" a false from here used to be read as.
           abort: (id) => manager.abort(id),
+          waitForSettled: (id, timeoutMs) => manager.waitForSettled(id, timeoutMs),
+          isSettling: (id) => manager.isSettling(id),
           consumeResult: (id) => {
             const record = resolveAgentRef(id);
             // Same guard as get_subagent_result: a running agent has no result
@@ -1157,6 +1132,8 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubPing();
     rpcHandle?.unsubConsume();
     rpcHandle?.unsubSteer();
+    rpcHandle?.unsubGet();
+    rpcHandle?.unsubList();
     rpcHandle = undefined;
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child
@@ -1229,12 +1206,7 @@ export default function (pi: ExtensionAPI) {
       // detached resume re-announces an existing id.
       const record = manager.getRecord(id);
       if (record) {
-        pi.events.emit("subagents:created", {
-          id,
-          type: record.type,
-          description: record.description,
-          isBackground: true,
-        });
+        pi.events.emit("subagents:created", { ...toSubagentInfo(record), isBackground: true });
       }
     }
     if (sent > 0) {
@@ -1511,12 +1483,7 @@ export default function (pi: ExtensionAPI) {
     // spawned with), so report the record's own identity — a "created"
     // event carrying the caller's type would re-register the agent under
     // the wrong one in cross-extension mirrors keyed by id.
-    pi.events.emit("subagents:created", {
-      id,
-      type: existing.type,
-      description: existing.description,
-      isBackground: true,
-    });
+    pi.events.emit("subagents:created", { ...toSubagentInfo(existing), isBackground: true });
 
     return record;
   }
@@ -2367,13 +2334,7 @@ Terse command-style prompts produce shallow, generic work.
         fleet.ensureTimer();
         fleet.update();
 
-        // Emit created event
-        pi.events.emit("subagents:created", {
-          id,
-          type: subagentType,
-          description: params.description,
-          isBackground: true,
-        });
+        if (record) pi.events.emit("subagents:created", { ...toSubagentInfo(record), isBackground: true });
 
         return backgroundResult(id, record);
       }

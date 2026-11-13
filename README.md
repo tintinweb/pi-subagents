@@ -76,7 +76,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`) and a per-message spend ledger (`subagents:usage`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
-- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`). Standardized reply envelopes with protocol versioning. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
+- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`). Standardized reply envelopes with protocol versioning and feature detection. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results arrive as the same completion notification as a manual background agent; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
 
@@ -877,13 +877,13 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 
 | Event | When | Key fields |
 |-------|------|------------|
-| `subagents:created` | `Agent`-tool background spawn, a detached resume, or a foreground `Agent` call handed to the background (after its `started`) — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started` | `id`, `type`, `description`, `isBackground` (always `true`) |
-| `subagents:started` | Agent transitions to running (including queued→running) | `id`, `type`, `description` |
-| `subagents:completed` | Agent finished successfully (background and foreground) | `id`, `type`, `description`, `status`, `durationMs`, `tokens` (display total, `{ input, output, total }` — see the note below), `usage` (the run's spend as a pi `Usage`: token components including `cacheRead`, plus `cost.total` in USD; absent when nothing was spent), `toolUses`, `result` |
-| `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | identical payload to `subagents:completed` — both are built by the same formatter, so `error` and `status` are present on that row too, just empty |
-| `subagents:steered` | Steering message accepted from any path (`steer_subagent`, `@handle`, the viewers, `subagents:rpc:steer`) — fires for a *queued* steer as well as a delivered one | `id`, `message` |
+| `subagents:created` | Top-level: an `Agent`-tool background spawn, a detached resume, or a foreground `Agent` call handed to the background — each after its `started`, unless the spawn queued — **not** cross-extension RPC, scheduler, or `@handle` spawns, which are first seen at `subagents:started`. Nested and workflow agents: when the agent starts, just before its `started`, and again on each resume | [agent fields](#agent-fields); `isBackground` (always `true`) on top-level agents |
+| `subagents:started` | Agent transitions to running (including queued→running) | [agent fields](#agent-fields) |
+| `subagents:completed` | Agent finished successfully (background and foreground) | [agent fields](#agent-fields) |
+| `subagents:failed` | Agent errored, stopped, or aborted (background and foreground) | [agent fields](#agent-fields); `status` is `error`, `stopped` or `aborted` |
+| `subagents:steered` | Steering message accepted from any path (`steer_subagent`, `@handle`, the viewers, `subagents:rpc:steer`) — fires for a *queued* steer as well as a delivered one | [agent fields](#agent-fields), `message` |
 | `subagents:usage` | Every assistant message any agent spends on — top-level, nested and workflow children alike, live while it runs | Always: `id`, `type`, `description`, `depth`, `usage` (that one message's spend as a pi `Usage`; never emitted for a message that spent nothing). Omitted when unknown, never `undefined`: `model` (`provider/id`) and `thinking` (the effective level) until the session has reported them; `requestedThinking`, only when the agent did not get the level it asked for; `parentAgentId`, nested agents only; `workflowId`, a workflow's agents only |
-| `subagents:compacted` | Agent's session successfully compacted | `id`, `type`, `description`, `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
+| `subagents:compacted` | Agent's session successfully compacted | [agent fields](#agent-fields), `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
 | `subagents:disposed` | End of `session_shutdown`, after every agent is stopped and every child session has shut down — no `subagents:usage` can follow it. A ledger flushing in its own `session_shutdown` may run before the agents are aborted; flush again here, **synchronously** (`writeFileSync`, not `fs.promises`): `emit` does not await listeners and pi calls `process.exit` once the shutdown handlers return, so nothing after a listener's first `await` is guaranteed to run | `{}` |
 | `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
@@ -891,7 +891,26 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:settings_loaded` | Persisted settings applied at extension init | `settings` (merged global + project) |
 | `subagents:settings_changed` | `/agents` → Settings mutation was applied | `settings`, `persisted` (`boolean` — `false` on write failure) |
 
-The four agent-lifecycle events — `subagents:started`, `:completed`, `:failed`, `:compacted` — are emitted for **top-level agents only**; nested subagents and a workflow's children report through the parent or workflow that owns them. `subagents:usage` is the one event that is not scoped, on purpose: it is a ledger, not a lifecycle. It fires once per message for every agent, so summing `usage.cost.total` across it gives what this session's subagents spent, each message counted exactly once under the agent that spent it — unlike the ancestor records, which fold a nested child's spend into every parent. It fires regardless of `reportUsage`, which decides only whether the parent session's own totals include the spend.
+### Agent fields
+
+Every agent-lifecycle event (`created`, `started`, `completed`, `failed`, `steered`, `compacted`) carries the same agent fields, plus the event's own. A field with no value is left out, not sent as `undefined`.
+
+| Field | When present |
+|---|---|
+| `id`, `type`, `description`, `status`, `depth` (top-level = 1), `startedAt`, `durationMs` (time so far, until the agent finishes), `toolUses` | Always |
+| `completedAt` | Once the agent has finished |
+| `result`, `error` | When the run produced them |
+| `structuredJson` | The validated `StructuredOutput` report as JSON text. Only when the spawn passed a schema (`options.structuredOutput`) and the agent produced a valid report. Use it instead of parsing `result`, which is prose and can have extra text appended, such as the worktree branch note |
+| `sessionFile` | The agent's pi session file. Only when the session is saved to disk |
+| `tokens` | Display total, `{ input, output, total }` — see the note below. Absent when nothing was produced |
+| `usage` | The run's spend as a pi `Usage`: token counts including `cacheRead`, plus `cost.total` in USD. Includes the spend of every agent below this one. Absent when nothing was spent |
+| `ownUsage` | Same shape as `usage`, for this agent's own spend only. Absent when this agent spent nothing |
+| `parentAgentId` | Nested agents only: the agent that started this one with its `Agent` tool |
+| `workflowId` | Workflow agents only: the workflow run that started this one |
+
+The agent-lifecycle events fire for **every agent**, including nested agents and workflow agents. To see only the session's own agents, ignore events where `parentAgentId` or `workflowId` is set. Nested and workflow agents appear nowhere else: no completion message, no saved record, no widget row. They report to the model through the agent or workflow that started them.
+
+An agent's `tokens` and `usage` include the spend of every agent below it, so adding them up across a tree counts a nested agent's spend more than once. Add up `ownUsage` instead. Or use `subagents:usage`, the per-message log: it fires once per message for every agent, so adding up `usage.cost.total` gives what this session's subagents spent, each message counted once. `subagents:usage` fires whatever `reportUsage` is set to, which decides only whether the parent session's own totals include the spend.
 
 `tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it as a measure of work done. Use `contextUsage.percent` (surfaced as `(NN%)` in the widget) for current context size.
 
@@ -899,7 +918,7 @@ The four agent-lifecycle events — `subagents:started`, `:completed`, `:failed`
 
 ## Cross-Extension RPC
 
-Other pi extensions can spawn and stop subagents programmatically via the `pi.events` event bus, without importing this package directly.
+Other pi extensions can spawn, stop, steer and inspect subagents programmatically via the `pi.events` event bus, without importing this package directly.
 
 All RPC replies use a standardized envelope: `{ success: true, data?: T }` on success, `{ success: false, error: string }` on failure.
 
@@ -919,16 +938,21 @@ pi.events.on("subagents:ready", () => {
 
 ### Ping
 
-Check if the subagents extension is loaded and get the protocol version:
+Check if the subagents extension is loaded, and what it supports:
 
 ```typescript
 const requestId = crypto.randomUUID();
 const unsub = pi.events.on(`subagents:rpc:ping:reply:${requestId}`, (reply) => {
   unsub();
-  if (reply.success) console.log("Protocol version:", reply.data.version);
+  if (!reply.success) return;
+  console.log("Protocol version:", reply.data.version); // 2
+  const features: string[] = reply.data.features ?? []; // absent on older builds
+  if (features.includes("settling")) { /* get/list flag a stopped agent whose tool call is still running */ }
 });
 pi.events.emit("subagents:rpc:ping", { requestId });
 ```
+
+`features` lists what this build supports beyond the base protocol 2: `consume`, `steer`, `get`, `list`, `owned-lifecycle` (lifecycle events fire for nested and workflow agents), `stop-settles` (the stop reply waits for the work to stop), `settling` and `notification-pending` (the `get` / `list` fields). Entries are only ever added. A reply without `features` comes from an older build.
 
 ### Spawn
 
@@ -969,7 +993,15 @@ const unsub = pi.events.on(`subagents:rpc:stop:reply:${requestId}`, (reply) => {
   if (!reply.success) console.error("Stop failed:", reply.error);
 });
 pi.events.emit("subagents:rpc:stop", { requestId, agentId: "agent-id-here" });
+// optional: settleTimeoutMs (default 5000, clamped to 0..60000)
 ```
+
+The reply waits until the agent and every agent below it have finished, so nothing from the stopped work can land after it. This matters if you start replacement work in the same directory.
+
+- `data.settled` is `false` if that took longer than `settleTimeoutMs`. A tool call that ignores the abort may still be running, and `get` shows the agent with `settling: true`.
+- To keep waiting, send stop again. While anything is still running it waits again and replies `{ settled }`. `Agent is not running` means everything has finished.
+- `settleTimeoutMs: 0` replies immediately with the current state. A non-number is rejected with `settleTimeoutMs must be a number of milliseconds`.
+- If you don't need to wait, don't await the reply.
 
 ### Consume
 
@@ -990,6 +1022,35 @@ pi.events.emit("subagents:rpc:steer", { requestId: crypto.randomUUID(), agentId:
 ```
 
 Same ownership guard as stop; `Agent is not running` once the agent has settled. A successful steer emits `subagents:steered`.
+
+### Get and list
+
+Read the current state of agents. Use this when your extension loaded after the events it needed had already fired:
+
+```typescript
+pi.events.emit("subagents:rpc:get", { requestId: crypto.randomUUID(), agentId: "agent-id-here" });
+// reply data: { agent: SubagentInfo }
+
+pi.events.emit("subagents:rpc:list", { requestId: crypto.randomUUID() });
+// reply data: { agents: SubagentInfo[] }
+```
+
+Both return the same [agent fields](#agent-fields) the lifecycle events carry. Unlike stop and steer, they work on any agent: nested and workflow agents are included, with `parentAgentId` or `workflowId` set, and `list` returns every status. Filter on those fields yourself. A record stays readable for 10 minutes after the agent finishes. A consumed one is removed sooner, at the next session start or switch. After that, `get` returns `Agent not found`.
+
+Both add two fields the events do not have:
+
+- `settling: true`: the agent's status is final, but something below it is still running. For example, a stopped agent whose tool call ignored the abort, or a nested agent still shutting down. It clears once everything has finished.
+- `notificationPending: true`: the agent finished, but its completion message has not reached the parent yet. The message waits for the parent's turn to end, or for the rest of its `group`, and starts a parent turn when it is sent.
+
+An extension that continues the parent once nothing is active should wait for both:
+
+```typescript
+const active = agents.some(a =>
+  a.parentAgentId === undefined && a.workflowId === undefined &&
+  (a.status === "running" || a.status === "queued" || a.settling || a.notificationPending));
+```
+
+`notificationPending` never appears on nested or workflow agents, which get no completion message, or on an agent whose result was read with `subagents:rpc:consume` or `get_subagent_result`. Neither field is on the lifecycle events: `subagents:completed` fires before either can become true.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 
@@ -1124,6 +1185,7 @@ src/
   status-note.ts      # Honest status note + salvaged partial output for non-normal outcomes
   agent-record-entry.ts # The `subagents:record` session entry a finished agent leaves; get_subagent_result's fallback, and what resume reopens an evicted agent from
   usage.ts            # Token usage shapes, accumulators, session-stats readers
+  subagent-info.ts    # `SubagentInfo`: the agent fields every lifecycle event carries
 
   # Invocation surface
   invocation-config.ts # Shared tool-parameter schemas (isolation, join, thinking, ...)
@@ -1132,7 +1194,7 @@ src/
   model-scope.ts      # scopeModels allowlist policy, shared by top-level and nested tools
   mention.ts          # `@handle message` grammar: suggestion triggers and send parsing
   mention-clone.ts    # Run a mention's turn in a cloned conversation, off the main chat
-  cross-extension-rpc.ts # ping/spawn/stop/consume/steer RPC handlers over pi.events
+  cross-extension-rpc.ts # ping/spawn/stop/consume/steer/get/list RPC handlers over pi.events
 
   # Scheduling
   schedule.ts         # SubagentScheduler: cron / +10m / interval / ISO dispatch

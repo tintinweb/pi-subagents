@@ -126,6 +126,12 @@ export class GroupJoinManager {
     this.groups.delete(groupId);
   }
 
+  /** Whether `agentId` has completed and its group is holding the result back. */
+  isHolding(agentId: string): boolean {
+    const groupId = this.agentToGroup.get(agentId);
+    return groupId !== undefined && this.groups.get(groupId)?.completedRecords.has(agentId) === true;
+  }
+
   /** Check if an agent is in a group. */
   isGrouped(agentId: string): boolean {
     return this.agentToGroup.has(agentId);

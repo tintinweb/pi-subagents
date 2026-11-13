@@ -1,7 +1,7 @@
 /**
  * Cross-extension RPC handlers for the subagents extension.
  *
- * Exposes ping, spawn, stop, consume, and steer RPCs over the pi.events event bus,
+ * Exposes ping, spawn, stop, consume, steer, get, and list RPCs over the pi.events event bus,
  * using per-request scoped reply channels.
  *
  * Reply envelope follows pi-mono convention:
@@ -16,6 +16,7 @@
 import { isTopLevelAgent } from "./agent-manager.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
+import { toSubagentInfo } from "./subagent-info.js";
 import type { AgentRecord } from "./types.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
@@ -32,6 +33,33 @@ export type RpcReply<T = void> =
 /** RPC protocol version — bumped when the envelope or method contracts change. */
 export const PROTOCOL_VERSION = 2;
 
+/**
+ * How long `subagents:rpc:stop` waits for the stopped agent and the agents it
+ * owns to settle before replying `{ settled: false }`. Below the 10 s pi-tasks
+ * gives the stop reply, so a slow settle never reads to it as a failed stop.
+ */
+export const STOP_SETTLE_TIMEOUT_MS = 5_000;
+
+/** The largest `settleTimeoutMs` a `subagents:rpc:stop` caller can ask for. */
+export const STOP_SETTLE_TIMEOUT_MAX_MS = 60_000;
+
+/**
+ * What this build supports, on the `ping` reply. The envelope and spawn
+ * contract are still `PROTOCOL_VERSION` 2; these name the additions a caller
+ * may need to detect. A missing `features` array means a build older than all
+ * of them. Append only: a consumer checks `features.includes(...)`.
+ */
+export const FEATURES = [
+  "consume",
+  "steer",
+  "get",
+  "list",
+  "owned-lifecycle",
+  "stop-settles",
+  "settling",
+  "notification-pending",
+] as const;
+
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
 export interface SpawnCapable {
   spawn(pi: unknown, ctx: unknown, type: string, prompt: string, options: any): string;
@@ -39,11 +67,29 @@ export interface SpawnCapable {
   awaitStartup(id: string): Promise<void>;
   abort(id: string): boolean;
   /**
-   * The record behind an id, for the stop handler's ownership check. Narrowed
-   * to the two fields `isTopLevelAgent` reads, so the RPC layer keeps its
-   * deliberately shallow view of the manager.
+   * Resolves true once the agent's run and every owned descendant's run have
+   * settled, false if `timeoutMs` passes first.
    */
-  getRecord(id: string): Pick<AgentRecord, "parentAgentId" | "workflowId"> | undefined;
+  waitForSettled(id: string, timeoutMs: number): Promise<boolean>;
+  /**
+   * Whether the agent or an agent it owns is still starting up or running,
+   * whatever its status says — a stopped agent whose tool call ignored the
+   * abort reads true until that call ends.
+   */
+  isSettling(id: string): boolean;
+  /**
+   * The record behind an id: the stop and steer handlers' ownership check, and
+   * what `get` turns into a `SubagentInfo`. Unfiltered — owned agents included.
+   */
+  getRecord(id: string): AgentRecord | undefined;
+  /** Every record the manager holds, owned agents included, any status. */
+  listAgents(): AgentRecord[];
+  /**
+   * Whether the agent has settled but the parent has not been sent its
+   * completion notification yet — still held for the parent's next boundary
+   * or for its `group`. A notification that will start a parent turn.
+   */
+  isNotificationPending(id: string): boolean;
   /**
    * Mark a settled agent's result as read by the caller, suppressing the
    * completion notification — what `get_subagent_result` does when it returns
@@ -70,6 +116,8 @@ export interface RpcHandle {
   unsubStop: () => void;
   unsubConsume: () => void;
   unsubSteer: () => void;
+  unsubGet: () => void;
+  unsubList: () => void;
 }
 
 /**
@@ -97,14 +145,14 @@ function handleRpc<P extends { requestId: string }>(
 }
 
 /**
- * Register ping, spawn, stop, consume, and steer RPC handlers on the event bus.
+ * Register ping, spawn, stop, consume, steer, get, and list RPC handlers on the event bus.
  * Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   const { events, pi, getCtx, manager } = deps;
 
   const unsubPing = handleRpc(events, "subagents:rpc:ping", () => {
-    return { version: PROTOCOL_VERSION };
+    return { version: PROTOCOL_VERSION, features: [...FEATURES] };
   });
 
   const unsubSpawn = handleRpc<{ requestId: string; type: string; prompt: string; options?: any }>(
@@ -173,23 +221,33 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // Only the session's own agents are this RPC's to stop or steer. A nested
   // child or a workflow's agent is owned by something that is *waiting on it*,
   // and aborting or redirecting it out from under that owner turns another
-  // extension's request into a failed step here. Defence in depth rather than
-  // a live hole: no RPC hands out agent ids, so a caller has no ordinary way to
-  // name one it does not own — but the guard is cheap and the id may leak some
-  // other way. Same refuse-what-we-should-not-touch stance as `consume` below.
+  // extension's request into a failed step here. A live boundary: the
+  // lifecycle events and `list` hand out every agent's id, owned ones
+  // included, so a caller can name one it does not own. Same
+  // refuse-what-we-should-not-touch stance as `consume` below.
   const assertOwned = (agentId: string): void => {
     const record = manager.getRecord(agentId);
     if (!record) throw new Error("Agent not found");
     if (!isTopLevelAgent(record)) throw new Error("Agent is owned by another agent or workflow");
   };
 
-  const unsubStop = handleRpc<{ requestId: string; agentId: string }>(
-    events, "subagents:rpc:stop", ({ agentId }) => {
+  const unsubStop = handleRpc<{ requestId: string; agentId: string; settleTimeoutMs?: unknown }>(
+    events, "subagents:rpc:stop", async ({ agentId, settleTimeoutMs }) => {
+      if (settleTimeoutMs !== undefined && (typeof settleTimeoutMs !== "number" || !Number.isFinite(settleTimeoutMs))) {
+        throw new Error("settleTimeoutMs must be a number of milliseconds");
+      }
+      const timeoutMs = Math.min(Math.max(settleTimeoutMs ?? STOP_SETTLE_TIMEOUT_MS, 0), STOP_SETTLE_TIMEOUT_MAX_MS);
       assertOwned(agentId);
-      // Not "not found" — the lookup above already proved it exists. `abort`
-      // returns false only for a record that is neither running nor queued,
-      // which is an agent that has already finished.
-      if (!manager.abort(agentId)) throw new Error("Agent is not running");
+      // `abort` returns false for a record that is neither running nor queued.
+      // If its tree is still settling, this is a repeat stop after
+      // `settled: false`, and it waits again. Otherwise the agent has finished:
+      // not "not found", since the lookup above proved it exists.
+      if (!manager.abort(agentId) && !manager.isSettling(agentId)) throw new Error("Agent is not running");
+      // Stop means stopped: the reply waits until no tool call of this agent
+      // or of any agent it owns can still land (#443). A caller that does not
+      // care need not await it. `settled: false` says the bound passed first
+      // and something may still be running; `get` then shows `settling`.
+      return { settled: await manager.waitForSettled(agentId, timeoutMs) };
     },
   );
 
@@ -207,8 +265,8 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // An extension that spawned an agent over the bus and then learns something
   // that agent needs — a second CI failure on the head it is already fixing, a
   // review that landed mid-run — can hand it over instead of spawning a second
-  // agent for the same work or dropping the fact. Outside the ping version
-  // handshake, like consume: additive and best-effort.
+  // agent for the same work or dropping the fact. Additive: a caller detects
+  // it through `FEATURES` on ping, not the version.
   const unsubSteer = handleRpc<{ requestId: string; agentId: string; message: unknown }>(
     events, "subagents:rpc:steer", ({ agentId, message }) => {
       if (typeof message !== "string" || message.trim().length === 0) throw new Error("Steer message must be a non-empty string");
@@ -217,5 +275,44 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     },
   );
 
-  return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer };
+  // Snapshots, for a listener that joined after the lifecycle events it needed
+  // had already fired — bound late, or reloaded mid-run. Reads only, so owned
+  // agents are included: they carry `parentAgentId` / `workflowId` exactly as
+  // on the events, and the caller filters. `assertOwned` guards only the
+  // mutations. Detected through `FEATURES` on ping, like steer.
+  //
+  // Snapshots also say what the events cannot: `notificationPending`, set while
+  // a settled agent's completion is still on its way to the parent. An
+  // orchestrator that waits for "nothing active" must wait for it too, or the
+  // notification starts a parent turn right after it concluded none would
+  // (#103). Not on the events: `completed` fires before the notification is
+  // queued, so there it would always read false.
+  //
+  // `settling` is the other half: set while a terminal agent's tree still has
+  // a run in flight — a stopped agent whose tool call ignored the abort, or a
+  // child still unwinding (#443). Not on the events either: the terminal
+  // event fires from inside the settle path.
+  const snapshot = (record: AgentRecord, now?: number) => {
+    const terminal = record.status !== "running" && record.status !== "queued";
+    return {
+      ...toSubagentInfo(record, now),
+      ...(terminal && manager.isSettling(record.id) ? { settling: true } : {}),
+      ...(manager.isNotificationPending(record.id) ? { notificationPending: true } : {}),
+    };
+  };
+
+  const unsubGet = handleRpc<{ requestId: string; agentId: string }>(
+    events, "subagents:rpc:get", ({ agentId }) => {
+      const record = manager.getRecord(agentId);
+      if (!record) throw new Error("Agent not found");
+      return { agent: snapshot(record) };
+    },
+  );
+
+  const unsubList = handleRpc(events, "subagents:rpc:list", () => {
+    const now = Date.now();
+    return { agents: manager.listAgents().map(record => snapshot(record, now)) };
+  });
+
+  return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubGet, unsubList };
 }
