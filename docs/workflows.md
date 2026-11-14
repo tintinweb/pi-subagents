@@ -274,6 +274,22 @@ if (result === null) {
 - **Untrusted text:** it can contain whatever the provider or the gate printed. Treat it as data, and escape it where you render it.
 - **Portability:** Claude Code has no such global. The `typeof` check keeps one script running on both.
 
+Read it right after the `null`, to put the reason next to the item it belongs to. It holds one reason per label, not a run-wide record, so a script that wants every reason in its result collects them as calls fail. A wrapper does it once for every call:
+
+```js
+const errors = []
+const run = async (prompt, opts) => {
+  const result = await agent(prompt, opts)
+  if (result === null) errors.push({ label: opts.label, reason: agentError(opts.label) })
+  return result
+}
+
+const reviews = await pipeline(files, file => run(`Review ${file}.`, { label: `review:${file}` }))
+return { reviews: reviews.filter(Boolean), errors }
+```
+
+Give every call an explicit, unique label: an unlabeled call is keyed by its derived display label, and calls sharing a label overwrite each other. A `pipeline` stage or `parallel` thunk that throws is not an `agent()` failure, so `agentError` never sees it; it drops to `null` with a `pipeline[i] failed: …` line. To keep that reason too, catch inside the stage and push it to `errors` yourself.
+
 Every failure also reaches the parent model without any script code: the completion notification lists each one in `<failures>` (`[label] failed: reason`, `pipeline[i] failed: …`, `parallel[i] failed: …`), as Claude Code's does. Skips are not listed.
 
 ### `pipeline()` and `parallel()`
