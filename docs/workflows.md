@@ -211,9 +211,9 @@ export const meta = {
 }
 ```
 
-**The body is an async function body.** Top-level `await` and a bare top-level `return` are both allowed — the runtime wraps it. (This is also why a workflow script is not valid standalone JavaScript, and why your editor may complain about the `return`.)
+**The body is an async function body, in strict mode.** Top-level `await` and a bare top-level `return` are both allowed — the runtime wraps it. (This is also why a workflow script is not valid standalone JavaScript, and why your editor may complain about the `return`.) Assigning to an undeclared variable throws.
 
-**What you `return` crosses a JSON boundary.** It is checked for cycles, non-finite numbers, sparse arrays, symbol keys and exotic prototypes. Return something useful on its own — the caller sees your return value, not the individual agent outputs.
+**What you `return` is copied.** The copy takes own enumerable keys only and never calls `toJSON`, so a `Date`, `Map`, `Set` or class instance arrives as `{}` plus its own fields — call `.toISOString()` or `Object.fromEntries()` yourself. Functions and `undefined` fields are dropped; a function or hole in an array, `NaN` and `Infinity` become `null`. Only a cycle or a `BigInt` fails the run, as does returning a bare function. Return something useful on its own — the caller sees your return value, not the individual agent outputs.
 
 ## Reference
 
@@ -242,15 +242,16 @@ Spawns one subagent and resolves to its final text — or, with `schema`, to a v
 | `phase` | string | Put this agent in a named group, overriding the ambient `phase()`. **Use it inside `pipeline`/`parallel` stages**, where the ambient phase races |
 | `agentType` | string | Which agent definition to use. Defaults to `general-purpose`; built-ins are `general-purpose`, `Explore`, `Plan`, plus your custom agents. The built-in `general-purpose` gets no nested `Agent` tool here; a custom agent with `allowed_subagents` keeps its own |
 | `model` | string | `provider/modelId`, or fuzzy like `haiku` |
-| `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Omitted, the agent definition's own `thinking` decides, then the parent's |
+| `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, in any case; `med` means `medium`. Omitted or `""`, the agent definition's own `thinking` decides, then the parent's. Anything else throws at the call |
 | `isolation` | `"worktree"` | Run in a throwaway git worktree. Only when agents write files in parallel and would collide — it costs setup time and disk per agent. Only this option decides, as in Claude Code — an agent file's `isolation:` does not apply to workflow children |
 | `gate` | string | A shell command run after the agent finishes; a non-zero exit fails the agent and its output becomes the error |
 | `resume` | string | Continue the child that ran under that label instead of starting fresh |
-| `schema` | object | A JSON Schema with an object root. Resolves to the validated object instead of text |
+| `schema` | object | A draft-07 JSON Schema with an object root. Resolves to the validated object instead of text. A schema that is invalid (including an unknown keyword or an unresolvable `$ref`) or that no value could satisfy fails the run at the call, before the agent starts — see troubleshooting |
+| `disallowedTools` | string[] | Tools denied to this agent, on top of its definition's own deny list — e.g. `['Bash', 'Write']`, in Claude Code's or pi's spelling. A non-array, or an empty or whitespace-padded entry, throws rather than running the agent un-narrowed; `[]` means none |
 
 Any other key is rejected **by name** at the call. Note that this checks option *keys*, not option *values* — an `agentType` that names no known agent falls back to the [`fallbackSubagent`](../README.md#persistent-settings) agent (`general-purpose` by default) silently, or, under `fallbackSubagent: none`, fails and `agent()` returns `null`.
 
-Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
+Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `disallowedTools`, `gate` or `schema` — a resumed child keeps the agent type, model, tools and tree it was started with, and its session predates the `StructuredOutput` tool.
 
 A child stays resumable for the whole run. The manager evicts a finished child's record about ten minutes after it settles, and a review or a merge queue easily takes longer; `resume` then reopens the child's saved session under the same id, still owned by the run. That reopen runs under the agent type's current definition, so the model and tree the script chose for the first run are not carried over. It fails, resolving to `null` with the reason on that agent's row in the card and the inspector, when the child's session was never saved (`rememberAgents` off, or `persist_session: false`), its file is gone, or it ran with `isolation: "worktree"` and left changes: that worktree was removed when the child finished, with its changes on a branch, and continuing the work anywhere else would split it. A child whose worktree held no changes reopens in the run's directory, as in Claude Code.
 
@@ -261,27 +262,31 @@ await pipeline(items, ...stages)   // no barrier between stages
 await parallel(thunks)             // barrier: waits for all of them
 ```
 
-**`pipeline` has no barrier.** Item A can be in stage 3 while item B is still in stage 1, so the total time is the slowest single *chain* rather than the sum of the slowest per stage. Each stage receives `(previousResult, originalItem, index)` — the original item and its index stay available in later stages, so you do not have to thread them through the return value. A stage that throws drops that one item to `null` and skips its remaining stages.
+**`pipeline` has no barrier.** Item A can be in stage 3 while item B is still in stage 1, so the total time is the slowest single *chain* rather than the sum of the slowest per stage. Each stage receives `(previousResult, originalItem, index)` — the original item and its index stay available in later stages, so you do not have to thread them through the return value. A stage that throws drops that one item to `null` and skips its remaining stages. A stage that *returns* `null` ends that item's chain too, and so does a `null` item — the next stage never sees it, so a "verify" stage does not spend an agent on nothing. An item that is a promise is awaited before the first stage, which gets the resolved value; `originalItem` stays the promise itself, so `await` it in a later stage that reads it.
 
 **`parallel` is a barrier.** It waits for everything before anything moves on, so if five agents run and the slowest takes three times the fastest, four sit finished doing nothing. A thunk that throws becomes `null` without taking its siblings down.
 
-In both, a fatal run error is the exception: a cap breach, or a nested `workflow()` that could not load, propagates out of the call and fails the run rather than turning into a `null`.
+A thunk or stage that throws leaves a log line — `parallel[1] failed: <message>` or `pipeline[0] failed: <message>` — so a dropped item shows in the progress view rather than vanishing. A stage that returns `null`, or a `null` item, ends its chain without one.
+
+In both, a fatal run error is the exception: a cap breach, an unusable `schema`, or a nested `workflow()` that could not load, propagates out of the call and fails the run rather than turning into a `null`.
 
 Prefer `pipeline` unless a stage genuinely needs every prior result *together* — deduplicating across the whole set, deciding whether to continue at all, or a prompt that compares one result against all the others. Needing to flatten, map or filter is not such a case; do that inside a pipeline stage.
 
 ### `workflow(nameOrRef, args?)`
 
-Runs a saved workflow inline and returns its value. Pass a name, or `{ scriptPath }`. `args` becomes the child's `args` global.
+Runs a saved workflow inline and returns a copy of its value, made the same way as a script's own [return value](#writing-the-script-yourself). Pass a name, or `{ scriptPath }`. A copy of `args` becomes the child's `args` global.
 
 The child runs in the *same* worker and vm context under its own globals, so it shares this run's concurrency cap, agent counter, abort signal, journal and budget by construction — its agents are simply this run's agents, controllable from the same inspector. What it does not share is phase state: the child's phases render as their own `▸ <name>` group.
 
 **One level only** — `workflow()` inside a child throws saying so. An unknown name, an unreadable path, a child carrying no `meta`, or a child that will not parse all throw into the calling script, so `try`/`catch` if you want to handle them. Capped at 256 nested calls per run.
 
-### `phase()`, `log()`, `args`, `budget`
+### `phase()`, `log()`, `console`, `args`, `setTimeout()`, `budget`
 
 - **`phase(title)`** — start a new progress group; subsequent `agent()` calls are grouped under it. Inside `pipeline`/`parallel` stages use the `phase` *option* instead, since the ambient phase races.
 - **`log(message)`** — a progress line under the tree, for you to read.
-- **`args`** — whatever was passed as the tool's `args`, verbatim; `undefined` if none.
+- **`console.log/info/warn/error/debug(...values)`** — the same progress line as `log()`, the values joined with spaces, so pasted helper code that logs does not throw.
+- **`args`** — whatever was passed as the tool's `args`, verbatim; `undefined` if none. A nested `workflow(name, args)` child gets a copy, so it cannot mutate the parent's object.
+- **`setTimeout(fn, ms)` / `clearTimeout(id)`** — for a pause between polls. A callback that throws is ignored rather than failing the run.
 - **`budget`** — `{ total, spent(), remaining() }`. **`total` is always `null` here**: it comes from a token-target directive pi does not have. That is deliberate rather than broken — Claude Code scripts guard on it (`while (budget.total && budget.remaining() > 50_000)`), and those guards correctly do not fire instead of throwing on a missing global. `remaining()` is `Infinity` with no target. `spent()` is real, and counts output tokens this run's agents have used, including attempts stopped by a retry.
 
 ### Where files live
@@ -378,20 +383,39 @@ See [`compose.js`](../examples/workflows/compose.js).
 
 ## Troubleshooting
 
-**The run failed with `… is unavailable in workflow scripts (breaks resume)`.**
-The script called `Date.now()`, `new Date()` or `Math.random()`. A script that varies run to run cannot be replayed from its journal, so these throw. Use the loop index for ids, pass timestamps in through `args`, or stamp them after the workflow returns. This most often bites pasted-in helper code, and it throws at the line that calls it — *after* you have already paid for the preceding agents.
+**The run failed with `… unavailable in workflow scripts (breaks resume)`.**
+The script called `Date.now()`, `new Date()`, `Date()` or `Math.random()` — through `globalThis` too. A script that varies run to run cannot be replayed from its journal, so these throw. Use the loop index for ids, pass timestamps in through `args`, or stamp them after the workflow returns. This most often bites pasted-in helper code, and it throws at the line that calls it — *after* you have already paid for the preceding agents.
 
 **`The meta object must be a PURE LITERAL — no variables, function calls, spreads, or template interpolation.`**
 `meta` is evaluated before the script runs, in an empty context, so it cannot reference anything. Move the dynamic part into the body.
 
 **`agent() opts.<key> is not a recognised option.`**
-A typo, or an option from a different tool. The supported set is `label`, `phase`, `model`, `agentType`, `isolation`, `gate`, `resume`, `effort`, `schema`.
+A typo, or an option from a different tool. The supported set is `label`, `phase`, `model`, `agentType`, `isolation`, `gate`, `resume`, `effort`, `schema`, `disallowedTools`.
 
 **An agent ran as the wrong type and nothing said so.**
 An `agentType` that names no known agent falls back to the [`fallbackSubagent`](../README.md#persistent-settings) agent — `general-purpose` unless you set another — **silently**, unlike the `Agent` tool, which tells you. Set `fallbackSubagent: none` to make it fail instead: the call returns `null`, and the inspector's **Outcome** for that agent lists the available types. Option *keys* are validated; option *values* are not. Check the spelling against `/agents`; matching is case-insensitive, and a disabled agent does not count.
 
 **`agent()` returned `null`.**
 The agent failed terminally, or you skipped it with `s` in the inspector. These are indistinguishable to the script. With `schema`, it also covers a child that never produced a payload matching the schema.
+
+**The run failed with `agent({schema}) received an invalid JSON Schema`.**
+The schema is not one the validator can use, and the agent was not started. Schemas and payloads are checked by Ajv, and the message is Ajv's:
+- not valid draft-07 — `data/properties/a/type must be equal to one of the allowed values`
+- a keyword Ajv does not know, usually a typo — `strict mode: unknown keyword: "minLenght"`
+- a `pattern` that is not a valid regular expression, or a `$ref` that resolves to nothing
+- `$async`, or a schema past 100,000 values or 10,000 levels deep — `schema too large`
+
+`format` is never checked, in the schema or in the answer: `format: "email"` documents intent, nothing more.
+
+**The run failed with `agent({schema}) received an unusable JSON Schema`.**
+The schema contradicts itself, so no answer could ever pass it, and the agent was not started. The message names the check that failed:
+- a root without `type: "object"` (a string, not `["object"]`): wrap an array or a primitive in an object property
+- a name in `required` that is missing from `properties` while `additionalProperties` is `false`
+- an `enum` with no value of the declared `type`
+- a `const` of the wrong type, or one outside its `enum`
+- crossed bounds: `minimum` above `maximum` (or equal, if either is exclusive), `minLength` above `maxLength`, `minItems` above `maxItems`, `minProperties` above `maxProperties`, or more `required` names than `maxProperties`
+
+The checks follow `properties` and `items` and stop at a `$ref`. A contradiction in an optional property or an array item is refused too, because the child could only succeed by leaving that field out. A `required` name missing from `properties` is fine while `additionalProperties` is not `false`, since the child can still send it — but declare it, so the child knows its type.
 
 **A `schema` call came back as `null` even though the agent clearly answered.**
 `schema` is pressure, not a guarantee. The child gets a `StructuredOutput` tool, `constrainedSampling` set to `strict: "prefer"`, and a validation-and-retry round trip — three soft pressures, where Claude Code has one hard one (it can force the tool call; this cannot, because `toolChoice` is not plumbed through pi's `AgentSession`). Keep schemas small and flat, and `.filter(Boolean)` after every schema stage.
@@ -423,18 +447,22 @@ The sandbox is a determinism and accident boundary, not a defence against a deli
 
 ## Coming from Claude Code
 
-This is a port of Claude Code's `Workflow` tool down to its state model, so **a script written for Claude Code runs here unchanged.** `test/workflow-claude-code-compat.test.ts` runs the canonical `review-changes` example from that tool's own description, verbatim.
+This runtime attempts compatibility with Claude Code's `Workflow` tool, down to its state model: a script written for Claude Code runs here with the differences listed below. `test/workflow-claude-code-compat.test.ts` runs the canonical `review-changes` example from that tool's own description, verbatim.
 
-Identical: `agent()`, `pipeline()`, `parallel()`, `workflow()`, `phase()`, `log()`, `args`, `budget`; the `meta` block; `schema` returning a validated object; one-level `workflow()` nesting; the determinism throws.
+The same as Claude Code: `pipeline()` (including the stop on `null`) and `parallel()` (including the `failed:` log lines), `phase()`, `log()`, `args`, `setTimeout`; the `meta` block; `schema` returning a validated object, and which schemas and answers it refuses, with the same messages; one-level `workflow()` nesting; strict mode; the determinism throws and their messages; how the return value is copied; `disallowedTools`.
 
 Different:
 
 - The tool is **`SubagentWorkflow`**, not `Workflow` — pi's tool registry is flat across extensions, and the winner of a name clash also overwrites the loser's description.
 - **`budget.total` is always `null`**, because pi has no token-target directive. Claude Code's `budget.total`-guarded patterns therefore run unchanged, just without firing.
 - **`schema` is pressured, not forced** — see the troubleshooting entry above.
+- **`agentType` matches case-insensitively**, and an unknown one falls back to `fallbackSubagent` — see the troubleshooting entry above. Claude Code matches exactly and throws.
+- **An unknown `effort` throws** at the call. Claude Code ignores it and uses the default effort.
+- **An unknown option key throws** at the call, by name. Claude Code ignores it.
+- **`parallel` and `pipeline` propagate a fatal run error** — a cap breach, an unusable `schema`, or a nested `workflow()` that could not load — instead of folding it into a `null`. Claude Code throws the same schema error at `agent()`, but inside `parallel` or `pipeline` it becomes a `null`.
 - If both extensions are loaded, this one **stands down** rather than offering the model two orchestrators.
 
-Additions on this side: `gate`, `resume`, `effort`, journal-backed `resumeFromRunId`, and the un-awaited-`agent()` check. All are optional, which is what keeps a Claude Code script portable.
+Additions on this side: `gate`, `resume`, `effort: "minimal"`, and the un-awaited-`agent()` check. All are optional, which is what keeps a Claude Code script portable.
 
 ## Examples
 

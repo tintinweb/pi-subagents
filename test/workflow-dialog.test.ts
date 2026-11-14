@@ -138,7 +138,7 @@ function section(lines: string[], heading: string): string[] {
   if (start < 0) throw new Error(`no ${heading} section in:\n${lines.join("\n")}`);
   const rest = rows.slice(start + 1);
   const end = rest.findIndex(row => row.trim() === "");
-  // Body rows are indented three columns under their heading; the recovered
+  // Body rows are indented three columns under their heading; the reference
   // copy carries its own two, so one is dropped to compare against it.
   return (end < 0 ? rest : rest.slice(0, end)).map(row => row.replace(/^ {3}/, "  "));
 }

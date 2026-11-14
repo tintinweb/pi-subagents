@@ -67,6 +67,8 @@ export interface WorkflowSpawnRequest {
    */
   effort?: string;
   isolation?: "worktree";
+  /** Tools denied to this child, on top of its agent type's own deny list. */
+  disallowedTools?: string[];
   /** Absolute counters for this spawn/resume invocation, not per-event deltas. */
   onProgress?(info: Pick<WorkflowSpawnResult, "tokens" | "toolCalls">): void;
   /**
@@ -452,6 +454,8 @@ interface AgentCallPayload {
   effort?: string;
   /** Raw JSON Schema from `agent({ schema })`, compiled before anything spawns. */
   schema?: unknown;
+  /** Deduped and sorted worker-side; absent when the script passed none or `[]`. */
+  disallowedTools?: string[];
 }
 
 type WorkerMessage =
@@ -1047,6 +1051,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     agentType,
                     ...(model !== undefined ? { model } : {}),
                     ...(payload.effort !== undefined ? { effort: payload.effort } : {}),
+                    ...(payload.disallowedTools !== undefined ? { disallowedTools: payload.disallowedTools } : {}),
                     ...(compiledSchema !== undefined ? { schema: compiledSchema } : {}),
                     ...(isolation !== undefined ? { isolation } : {}),
                     ...(payload.phaseIndex !== undefined ? { phaseIndex: payload.phaseIndex } : {}),

@@ -253,6 +253,11 @@ interface SpawnOptions {
    * compiled schema. Set only by the workflow host, for `agent({ schema })`.
    */
   structuredOutput?: CompiledSchema;
+  /**
+   * Tools denied to this spawn on top of the agent definition's own list. Set
+   * only by the workflow host, for `agent({ disallowedTools })`.
+   */
+  disallowedTools?: string[];
   /** Isolation mode — "worktree" creates a temp git worktree for the agent. */
   isolation?: IsolationMode;
   /**
@@ -886,6 +891,7 @@ export class AgentManager {
       inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
       structuredOutput: options.structuredOutput,
+      disallowedTools: options.disallowedTools,
       resumeSessionFile: options.resumeSessionFile,
       nested: options.parentAgentId !== undefined,
       workflow: options.workflowId !== undefined,

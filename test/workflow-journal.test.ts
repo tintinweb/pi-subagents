@@ -11,6 +11,7 @@
  * prove that everything from there on is spawned for real.
  */
 
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,6 +68,17 @@ describe("journalKey", () => {
       journalKey({ ...base, label: "one" }),
     ]);
     expect(keys.size).toBe(7);
+  });
+
+  it("keys disallowedTools only when present, so older journals still replay", () => {
+    // The slot is conditional like the schema one: an unconditional slot
+    // would re-key every entry already on disk.
+    const legacy = createHash("sha256").update(JSON.stringify(["a", null, null, null, null, null, null, null])).digest("hex");
+    expect(journalKey({ prompt: "a" })).toBe(legacy.slice(0, 32));
+    expect(journalKey({ prompt: "a", disallowedTools: ["Bash"] })).not.toBe(journalKey({ prompt: "a" }));
+    expect(journalKey({ prompt: "a", disallowedTools: ["Bash"] })).not.toBe(
+      journalKey({ prompt: "a", disallowedTools: ["Write"] }),
+    );
   });
 
   it("ignores which phase the row is filed under", () => {

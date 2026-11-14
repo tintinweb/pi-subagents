@@ -31,7 +31,7 @@
  * the card draws a static `⟳`.
  *
  * **The phases pane is stranger still**: a phase that has not finished shows
- * *its number*, not a glyph. That is deliberate, recovered behaviour.
+ * *its number*, not a glyph. That is deliberate.
  *
  * **The layout is pure.** `layoutWorkflowDialog` returns coloured segments and
  * `handleWorkflowDialogKey` maps a keypress to the next state plus an optional
@@ -229,7 +229,7 @@ export const ASCII_DIALOG_GLYPHS: WorkflowDialogGlyphs = {
 };
 
 /**
- * The recovered dialog mapping — keyed on the *display* state.
+ * The dialog's glyphs and colours — keyed on the *display* state.
  *
  * Claude Code's `permission` colour has no pi equivalent; a blocked agent is
  * waiting on the user, so it maps to `warning` (selection maps to `accent`).

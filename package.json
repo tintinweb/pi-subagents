@@ -30,6 +30,7 @@
     "typebox": "*"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
     "croner": "^10.0.1",
     "nanoid": "^5.1.16"
   },

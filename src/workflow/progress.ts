@@ -1,5 +1,5 @@
 /**
- * progress.ts — the workflow progress model, ported from Claude Code.
+ * progress.ts — the workflow progress model, aiming for compatibility with Claude Code's.
  *
  * Progress is an **event log**, not a tree. Agent entries are keyed by `index`
  * and last-write-wins, so a running agent is updated by emitting a fresh entry

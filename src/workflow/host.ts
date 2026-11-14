@@ -432,6 +432,7 @@ export function createWorkflowHost(deps: WorkflowHostOptions): WorkflowHost {
             onSessionCreated: () => { sessionReady = true; reportResolved(); },
             ...progressHooks(reportProgress),
             ...(request.schema !== undefined ? { structuredOutput: request.schema } : {}),
+            ...(request.disallowedTools !== undefined ? { disallowedTools: request.disallowedTools } : {}),
             ...(request.isolation !== undefined ? { isolation: request.isolation } : {}),
             ...(deps.signal !== undefined ? { signal: deps.signal } : {}),
             ...(deps.rootSessionId !== undefined ? { rootSessionId: deps.rootSessionId } : {}),

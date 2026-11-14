@@ -235,6 +235,17 @@ describe("createWorkflowHost — spawn mapping", () => {
     expect(result).toMatchObject({ ok: true, text: '{"a":"x"}' });
   });
 
+  it("forwards disallowedTools to the spawn, and leaves it off when unset", async () => {
+    const stub = stubManager(() => record({ result: "ok" }));
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request({ disallowedTools: ["Bash"] }));
+    await host.spawnAgent(request({}));
+
+    expect(stub.spawnAndWait.mock.calls[0][4].disallowedTools).toEqual(["Bash"]);
+    expect(stub.spawnAndWait.mock.calls[1][4]).not.toHaveProperty("disallowedTools");
+  });
+
   it("falls back to the prose when no schema was asked for", async () => {
     const stub = stubManager(() => record({ result: "here you go" }));
     const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });

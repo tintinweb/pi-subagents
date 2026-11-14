@@ -165,19 +165,13 @@ describe("claims about pi's own surfaces", () => {
   it("names the run id by the label the tool result prints", () => {
     expect(description).toContain("The tool result's `Task ID` is the runId.");
     expect(readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8"))
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text of the template is the subject under test
       .toContain("`Task ID: ${runId}\\n`");
   });
 
   it("says pipeline() propagates a fatal error, as parallel() does", () => {
     const line = description.split("\n").find(l => l.startsWith("- pipeline("));
     expect(line).toContain("only a fatal run error");
-  });
-
-  it("warns that the return value must survive the JSON boundary", () => {
-    expect(description).toContain("It must survive JSON");
-    for (const rejected of ["cycle", "Map", "Date", "class instance", "function", "sparse array"]) {
-      expect(description).toContain(rejected);
-    }
   });
 });
 

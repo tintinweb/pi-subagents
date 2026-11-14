@@ -64,13 +64,16 @@ export function createStructuredOutputTool(
   return defineTool({
     name: STRUCTURED_OUTPUT_TOOL_NAME,
     label: "Structured Output",
+    // The guidelines below carry what a forced call would make unnecessary:
+    // prose outside the call is discarded, and a rejected call should be made
+    // again.
     description:
-      "Report your final answer. Call this exactly once, with the complete result, and put everything the "
-      + "caller needs inside the arguments — text written outside this call is discarded. If a call is "
-      + "rejected for not matching the schema, fix the reported fields and call it again.",
+      "Use this tool to return your final response in the requested structured format. You MUST call this "
+      + "tool exactly once at the end of your response to provide the structured output.",
     promptSnippet: "Report your final answer as structured data",
     promptGuidelines: [
       "Your final answer MUST be reported by calling StructuredOutput. Prose outside that call is discarded.",
+      "If a StructuredOutput call is rejected for not matching the schema, fix the reported fields and call it again.",
     ],
     // The caller's schema *is* the tool's input schema, verbatim — that is what
     // makes the provider fill the fields. pi types this as TypeBox's `TSchema`,
@@ -99,10 +102,7 @@ export function createStructuredOutputTool(
         // it can correct itself inside this same run. This is where most
         // mismatches are resolved; the prompt-level retry is the backstop.
         return {
-          content: [{
-            type: "text",
-            text: `StructuredOutput did not match the required schema:\n${verdict}\nCall it again with a corrected value.`,
-          }],
+          content: [{ type: "text", text: `Output does not match required schema: ${verdict}` }],
           isError: true,
           details: {},
         };
@@ -110,7 +110,7 @@ export function createStructuredOutputTool(
       // Last valid call wins: a model that calls twice meant the second one.
       capture.json = JSON.stringify(params);
       capture.lastError = undefined;
-      return { content: [{ type: "text", text: "Recorded." }], details: {} };
+      return { content: [{ type: "text", text: "Structured output provided successfully" }], details: {} };
     },
   }) as ToolDefinition;
 }
