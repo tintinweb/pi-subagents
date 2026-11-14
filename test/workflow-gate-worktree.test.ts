@@ -102,7 +102,7 @@ function initRepo(): string {
   execFileSync("git", ["config", "user.name", "Test"], { cwd: dir, stdio: "pipe" });
   writeFileSync(join(dir, "README.md"), "# gate");
   execFileSync("git", ["add", "README.md"], { cwd: dir, stdio: "pipe" });
-  execFileSync("git", ["commit", "-m", "initial"], { cwd: dir, stdio: "pipe" });
+  execFileSync("git", ["commit", "--no-gpg-sign", "-m", "initial"], { cwd: dir, stdio: "pipe" });
   return dir;
 }
 
