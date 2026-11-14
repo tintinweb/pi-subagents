@@ -94,6 +94,8 @@ export interface WorkflowTask {
   /** The script's return value, once the run produced one. */
   value?: unknown;
   error?: string;
+  /** The run's failure lines, for the notification's `<failures>`. */
+  failures?: string[];
 }
 
 export function createWorkflowTask(init: {
@@ -230,6 +232,7 @@ export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResu
   task.replayedCount = result.replayedCount;
   task.value = result.value;
   task.error = result.error;
+  task.failures = result.failures;
   task.endTime = Date.now();
 }
 
@@ -321,6 +324,9 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
       task.replayedCount > 0 ? `, ${task.replayedCount} replayed from ${escapeXml(task.resumedFrom ?? "an earlier run")}` : ""
     }</summary>`,
     `<result>${escapeXml(result.length > 4000 ? `${result.slice(0, 4000)}\n...(truncated)` : result)}</result>`,
+    // Compatible with Claude Code's: every failure line, capped, and absent
+    // when nothing failed.
+    task.failures?.length ? `<failures>${escapeXml(task.failures.join("\n").slice(0, 40_000))}</failures>` : null,
     `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join("\n");

@@ -362,6 +362,12 @@ const SELFTEST_SCRIPT = [
   'const dropped = await agent("Reply with exactly the token SELFTEST_GATE and nothing else.", { label: "gate-fail", gate: "false" });',
   'check("gate", typeof kept === "string" && /SELFTEST_GATE/.test(kept) && dropped === null, { kept, dropped });',
   "",
+  "// agentError(label) says why that null happened, and a later success clears it.",
+  'const gateReason = agentError("gate-fail");',
+  'await agent("Reply with exactly the token SELFTEST_CLEAR and nothing else.", { label: "gate-fail" });',
+  'const cleared = agentError("gate-fail");',
+  'check("errors", typeof gateReason === "string" && /gate/i.test(gateReason) && cleared === undefined, { gateReason, cleared });',
+  "",
   "// resume continues the same child, so it still knows what it was told.",
   'await agent("Remember the code word PELICAN-42 for later. Reply with exactly STORED.", { label: "memory" });',
   "const recalled = await agent(",
@@ -392,16 +398,19 @@ const unescapeXml = (text: string) =>
  * received, or undefined while none has arrived. It carries the script's own
  * return value.
  */
-function notifiedResult(session: { messages?: unknown[] }): string | undefined {
-  for (const message of session.messages ?? []) {
+/** Every text part of every message, in order. */
+function messageTexts(session: { messages?: unknown[] }): string[] {
+  return (session.messages ?? []).flatMap(message => {
     const content = (message as { content?: unknown }).content;
-    const texts = typeof content === "string"
-      ? [content]
-      : Array.isArray(content) ? content.map(part => String((part as { text?: unknown }).text ?? "")) : [];
-    for (const text of texts) {
-      const match = text.includes("<task-notification>") ? text.match(/<result>([\s\S]*?)<\/result>/) : null;
-      if (match) return unescapeXml(match[1]);
-    }
+    if (typeof content === "string") return [content];
+    return Array.isArray(content) ? content.map(part => String((part as { text?: unknown }).text ?? "")) : [];
+  });
+}
+
+function notifiedResult(session: { messages?: unknown[] }): string | undefined {
+  for (const text of messageTexts(session)) {
+    const match = text.includes("<task-notification>") ? text.match(/<result>([\s\S]*?)<\/result>/) : null;
+    if (match) return unescapeXml(match[1]);
   }
   return undefined;
 }
@@ -581,7 +590,7 @@ describe.runIf(LIVE)("Workflow end to end (live LLM, opt-in)", () => {
           "Pass it as the `name` parameter — do not write a script of your own. " +
           "Then tell me the task id it returned.",
         cwd,
-        // Nine agents back to back, one of them a resumed session.
+        // Ten agents back to back, one of them a resumed session.
         timeoutMs: LIVE_TIMEOUT * 2,
       });
 
@@ -603,8 +612,12 @@ describe.runIf(LIVE)("Workflow end to end (live LLM, opt-in)", () => {
       // Named, so a failure says which check and the run's log line says why.
       expect(verdict.failed, `checks: ${JSON.stringify(verdict.checks)}`).toEqual([]);
       expect(Object.keys(verdict.checks ?? {}).sort()).toEqual(
-        ["gate", "nested", "parallel", "pipeline", "resume", "schema", "text"],
+        ["errors", "gate", "nested", "parallel", "pipeline", "resume", "schema", "text"],
       );
+      // The run's failures reach the parent without any script code.
+      const notified = messageTexts(session).find(text => text.includes("<task-notification>")) ?? "";
+      expect(notified).toMatch(/<failures>[\s\S]*\[gate-fail\] failed: [\s\S]*<\/failures>/);
+      expect(notified).toMatch(/<failures>[\s\S]*parallel\[1\] failed: deliberate[\s\S]*<\/failures>/);
       expect(verdict.passed).toBe(true);
     },
     LIVE_VITEST_TIMEOUT * 2,

@@ -585,6 +585,8 @@ return await pipeline(
 
 Concurrency is capped at `max(1, min(16, cpus - 2))` — the run's own limit, independent of the session's `maxConcurrent` pool, which its agents do not enter. There are 1000 agents per run and 4096 items per `parallel`/`pipeline` call.
 
+A failed `agent()` call returns `null`. The completion notification lists every failure in `<failures>`, as Claude Code's does, and a script can read the reason itself with [`agentError(label)`](docs/workflows.md#agenterrorlabel), a pi addition.
+
 **Full guide:** [`docs/workflows.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/workflows.md) — how the model writes the script for you, how to edit and re-run it, how to save one as a reusable named workflow, plus the complete `agent()` option reference, recipes and troubleshooting.
 
 ### `get_subagent_result`

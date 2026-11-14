@@ -94,6 +94,13 @@ let nextCallId = 1;
 const pendingCalls = new Map();
 
 /**
+ * Label → why the most recent agent() call under it failed, for
+ * \`agentError(label)\`. Per worker, so a nested workflow shares it the way it
+ * shares resume labels; a success under the label clears it.
+ */
+const agentErrors = new Map();
+
+/**
  * Output tokens this run has spent, as last reported by the host.
  *
  * A mirror, not a tally: every response carries the host's current total, so
@@ -121,6 +128,12 @@ port.on("message", function (message) {
   if (!waiter) return;
   pendingCalls.delete(message.callId);
   if (message.ok) {
+    // Before resolving, so the script can read the reason as soon as agent()
+    // hands it the null.
+    if (typeof message.agentLabel === "string") {
+      if (message.value === null && typeof message.error === "string") agentErrors.set(message.agentLabel, message.error);
+      else agentErrors.delete(message.agentLabel);
+    }
     waiter.resolve(message.value);
     return;
   }
@@ -551,6 +564,12 @@ function logIn(scope, message) {
   emit({ type: "workflow_log", message: logPrefix(scope) + describe(message) });
 }
 
+/** A slot that dropped to null: a log line now, and a \`<failures>\` line in the notification. */
+function reportFailure(scope, line) {
+  logIn(scope, line);
+  port.postMessage({ type: "failure", message: logPrefix(scope) + line });
+}
+
 function makeConsole(scope) {
   const write = function () {
     const parts = [];
@@ -694,7 +713,7 @@ async function parallelIn(scope, thunks) {
         return await thunk();
       } catch (error) {
         if (isFatal(error)) throw error;
-        logIn(scope, "parallel[" + index + "] failed: " + describe(error));
+        reportFailure(scope, "parallel[" + index + "] failed: " + describe(error));
         return null;
       }
     })
@@ -732,7 +751,7 @@ async function pipelineIn(scope, items, stages) {
         return value;
       } catch (error) {
         if (isFatal(error)) throw error;
-        logIn(scope, "pipeline[" + index + "] failed: " + describe(error));
+        reportFailure(scope, "pipeline[" + index + "] failed: " + describe(error));
         return null;
       }
     })
@@ -916,6 +935,14 @@ async function main() {
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
   };
+  // Read-only: a script that assigned over it would silently read its own
+  // stand-in instead of the host's answer.
+  Object.defineProperty(sandbox, "agentError", {
+    value: function agentError(label) {
+      return agentErrors.get(requireText(label, "agentError(label)"));
+    },
+    enumerable: true,
+  });
   const context = vm.createContext(sandbox, {
     name: "workflow",
     codeGeneration: { strings: false, wasm: false },
