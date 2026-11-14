@@ -86,6 +86,32 @@ describe("memory", () => {
     it("allows hyphens, underscores, and dots in names", () => {
       expect(() => resolveMemoryDir("my-agent_v2.1", "project", "/workspace")).not.toThrow();
     });
+
+    it("throws on a symlinked .pi without creating or reading through it", () => {
+      const project = join(tmpDir, "project");
+      const outside = join(tmpDir, "outside");
+      mkdirSync(project);
+      mkdirSync(join(outside, "agent-memory", "auditor"), { recursive: true });
+      writeFileSync(join(outside, "agent-memory", "auditor", "MEMORY.md"), "outside");
+      symlinkSync(outside, join(project, ".pi"));
+      expect(() => buildMemoryBlock("new-agent", "project", project)).toThrow("symlinked memory directory");
+      expect(() => buildReadOnlyMemoryBlock("auditor", "project", project)).toThrow("symlinked memory directory");
+      expect(existsSync(join(outside, "agent-memory", "new-agent"))).toBe(false);
+    });
+
+    it("throws on a symlinked memory root", () => {
+      const project = join(tmpDir, "project");
+      mkdirSync(join(project, ".pi"), { recursive: true });
+      mkdirSync(join(tmpDir, "outside"));
+      symlinkSync(join(tmpDir, "outside"), join(project, ".pi", "agent-memory-local"));
+      expect(() => resolveMemoryDir("auditor", "local", project)).toThrow("symlinked memory directory");
+    });
+
+    it("allows a cwd that is itself a symlink", () => {
+      mkdirSync(join(tmpDir, "project"));
+      symlinkSync(join(tmpDir, "project"), join(tmpDir, "link"));
+      expect(resolveMemoryDir("auditor", "project", join(tmpDir, "link"))).toBe(join(tmpDir, "link", ".pi", "agent-memory", "auditor"));
+    });
   });
 
   describe("isUnsafeName (whitelist validation)", () => {
