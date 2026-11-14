@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   BUILTIN_TOOL_NAMES,
@@ -23,6 +26,9 @@ import {
 import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import type { AgentConfig } from "../src/types.js";
 
+let agentDir: string;
+let previousAgentDir: string | undefined;
+
 function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
     name: "test-agent",
@@ -41,7 +47,16 @@ function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
 
 describe("agent type registry", () => {
   beforeEach(() => {
+    agentDir = mkdtempSync(join(tmpdir(), "agent-types-test-"));
+    previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = agentDir;
     registerAgents(new Map());
+  });
+
+  afterEach(() => {
+    if (previousAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    rmSync(agentDir, { recursive: true, force: true });
   });
 
   describe("default agents", () => {
