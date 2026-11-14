@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
-import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
+import { type AgentActivity, AgentWidget, describeActivity, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
 
 describe("formatSessionTokens", () => {
   const theme = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
@@ -39,6 +39,37 @@ describe("formatSessionTokens", () => {
     expect(fgPreservingNestedStyles(ansiTheme, "accent", tokenText)).toBe(
       "\u001b[35m1.2k token (\u001b[33m70%\u001b[39m\u001b[35m)\u001b[39m",
     );
+  });
+});
+describe("describeActivity", () => {
+  it("keeps short response text as is", () => {
+    const notVeryLong = "x".repeat(50);
+    const result = describeActivity(new Map(), notVeryLong);
+    // Should be the same
+    expect(result).toMatch(/^x{50}$/);
+  });
+
+  it("returns middle-truncated string for very long response", () => {
+    const veryLong = "x".repeat(200);
+    const result = describeActivity(new Map(), veryLong);
+    // Should be middle-truncated, not tail-truncated
+    expect(result).toMatch(/^x{30}…x{30}$/);
+  });
+  it("collapses multi-line response into single line before truncating", () => {
+    const multi = "first line\n\nsecond line\nthird line";
+    const result = describeActivity(new Map(), multi);
+    expect(result).toBe("first line second line third line");
+  });
+
+  it("truncates collapsed multi-line response in the middle", () => {
+    const multi = "a".repeat(30) + "\n" + "b".repeat(30) + "\n" + "c".repeat(30);
+    const result = describeActivity(new Map(), multi);
+    // Normalized length = 90 + 2 spaces = 92 > 60, so middle-truncated
+    // More precise: first 30 chars of normalized, then …, then last 30 chars
+    const normalized = "a".repeat(30) + " " + "b".repeat(30) + " " + "c".repeat(30);
+    const startLen = Math.floor(60 / 2);
+    const endLen = 60 - startLen;
+    expect(result).toBe(`${normalized.slice(0, startLen)}…${normalized.slice(normalized.length - endLen)}`);
   });
 });
 
