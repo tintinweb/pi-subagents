@@ -743,13 +743,14 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
     };
 
     const respond = (callId: number, ok: boolean, value?: unknown, error?: string, fatal?: boolean) => {
+      const agentLabel = openLaunches.get(callId);
       // Cleared before the settled check: a launch answered by a run that is
       // already finishing is not an unawaited launch either.
       openLaunches.delete(callId);
       if (settled) return;
       // `spent` rides on every response, so the worker's `budget.spent()` is a
       // mirror of this number rather than a second tally of its own.
-      worker.postMessage({ type: "response", callId, ok, value, error, fatal, spent: spentOutputTokens });
+      worker.postMessage({ type: "response", callId, ok, value, error, fatal, agentLabel, spent: spentOutputTokens });
     };
 
     const finish = (result: Omit<WorkflowRunResult, "meta" | "progress" | "agentCount" | "replayedCount">) => {
@@ -934,11 +935,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
       /** A skip the user asked for, before the child ever started. */
       const settleSkipped = (extra: Partial<WorkflowAgentEntry>) => {
-        recordJournal?.({ index, key, ok: false, ...resumeMark });
+        recordJournal?.({ index, key, ok: false, error: "Skipped by user.", ...resumeMark });
         emit([{ ...base, queuedAt, ...extra, state: "error", skipped: true, error: "Skipped by user." }]);
         // `null`, exactly as a terminal failure gives — a skipped agent is one
         // the script's `.filter(Boolean)` was already written to survive.
-        respond(callId, true, null);
+        respond(callId, true, null, "Skipped by user.");
       };
 
       // Registered for exactly as long as the call is unanswered, which is the
@@ -1128,7 +1129,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           // Recorded as a failure rather than left out: a gap would be read as an
           // unchanged prefix on the next resume, silently skipping the retry this
           // whole mechanism exists to make cheap.
-          recordJournal?.({ index, key, ok: false, ...resumeMark });
+          // Provider and gate text is untrusted and potentially large. Bound
+          // the diagnostic stored on disk and handed to the script alike.
+          const error = (result.error ?? "Agent failed.").slice(0, 500);
+          recordJournal?.({ index, key, ok: false, error, ...resumeMark });
           // A dead agent is a null in the script, not a thrown error: Claude Code
           // scripts .filter(Boolean) rather than try/catch around every call.
           emit([
@@ -1143,7 +1147,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
               ...(result.skipped ? { skipped: true } : {}),
             },
           ]);
-          respond(callId, true, null);
+          respond(callId, true, null, error);
           return;
         }
       } finally {

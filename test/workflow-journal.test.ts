@@ -111,6 +111,17 @@ describe("journal files", () => {
     writeFileSync(path, '{"index":"one","key":"k","ok":true}\n[]\nnull\n', "utf-8");
     expect(readJournal(path)).toEqual([]);
   });
+
+  it("reads failure diagnostics alongside old entries and rejects non-string errors", () => {
+    const path = join(dir, "failures.jsonl");
+    const entries: WorkflowJournalEntry[] = [
+      { index: 0, key: "old", ok: false },
+      { index: 1, key: "new", ok: false, error: "rate_limit_error" },
+    ];
+    for (const entry of entries) appendJournal(path, entry);
+    writeFileSync(path, `${readFileSync(path, "utf-8")}{"index":2,"key":"bad","ok":false,"error":42}\n`, "utf-8");
+    expect(readJournal(path)).toEqual(entries);
+  });
 });
 
 describe("replay", () => {
@@ -179,7 +190,7 @@ describe("replay", () => {
     const failing = stubHost(() => (attempt++ === 1 ? { ok: false, error: "boom" } : { ok: true, text: "fine" }));
     await run(twoAgents, { host: failing.host, journal: first });
 
-    expect(first.entries[1]).toEqual({ index: 1, key: first.entries[1].key, ok: false });
+    expect(first.entries[1]).toEqual({ index: 1, key: first.entries[1].key, ok: false, error: "boom" });
 
     const second = stubHost(() => ({ ok: true, text: "retried" }));
     const result = await run(twoAgents, { host: second.host, journal: { entries: first.entries } });

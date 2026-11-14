@@ -57,6 +57,8 @@ export interface WorkflowJournalEntry {
   ok: boolean;
   /** The agent's answer, when it had one. */
   text?: string;
+  /** Bounded failure reason. Diagnostic only; never used to match a replay. */
+  error?: string;
   /**
    * Whether the call continued an earlier child (`agent({ resume })`).
    *
@@ -159,6 +161,7 @@ function isEntry(value: unknown): value is WorkflowJournalEntry {
     typeof entry.key === "string" &&
     typeof entry.ok === "boolean" &&
     (entry.text === undefined || typeof entry.text === "string") &&
+    (entry.error === undefined || typeof entry.error === "string") &&
     (entry.resumed === undefined || entry.resumed === true)
   );
 }

@@ -234,7 +234,7 @@ At least one of `script` / `scriptPath` / `name` is required; `scriptPath` wins 
 
 Spawns one subagent and resolves to its final text — or, with `schema`, to a validated object.
 
-**Returns `null` if the agent failed terminally *or* if you skipped it from the inspector**, indistinguishably. Filter with `.filter(Boolean)` when a `null` would break a later stage, and be careful with in-script retry loops: retrying on `null` will re-run something you deliberately skipped.
+**Returns `null` if the agent failed terminally *or* if you skipped it from the inspector.** Read `agentError(label)` for the reason. Filter with `.filter(Boolean)` when a `null` would break a later stage, and be careful with in-script retry loops: retrying on `null` will re-run something you deliberately skipped.
 
 | Option | Type | Notes |
 |---|---|---|
@@ -253,6 +253,25 @@ Any other key is rejected **by name** at the call. Note that this checks option 
 Combination rules: `resume` cannot be combined with `agentType`, `model`, `effort`, `isolation`, `gate` or `schema` — a resumed child keeps the agent type, model and tree it was started with, and its session predates the `StructuredOutput` tool.
 
 A child stays resumable for the whole run. The manager evicts a finished child's record about ten minutes after it settles, and a review or a merge queue easily takes longer; `resume` then reopens the child's saved session under the same id, still owned by the run. That reopen runs under the agent type's current definition, so the model and tree the script chose for the first run are not carried over. It fails, resolving to `null` with the reason on that agent's row in the card and the inspector, when the child's session was never saved (`rememberAgents` off, or `persist_session: false`), its file is gone, or it ran with `isolation: "worktree"` and left changes: that worktree was removed when the child finished, with its changes on a branch, and continuing the work anywhere else would split it. A child whose worktree held no changes reopens in the run's directory, as in Claude Code.
+
+### `agentError(label)`
+
+Returns the last failure reason for that label in this run, or `undefined` if none has settled. It is a read-only global; `agent()` still returns `null` on failure. Use an explicit `label` to make lookups predictable. Without one, the key is the display label in the progress tree; a resumed call inherits its original label unless overridden.
+
+Reasons include provider errors, thrown host errors, schema failures and gate output. A call skipped before it starts records `"Skipped by user."`; a stopped child reports the host's reason. Failure messages are capped at 500 characters in both the journal's optional `error` field and this function. They can contain untrusted provider text: treat them as data and escape them for the surface where you render them.
+
+Labels are shared across nested `workflow()` calls. If concurrent calls use the same label, the last failure to settle wins. A later success does not clear an earlier failure, so consult the reason after checking the current call's result. Each new run starts empty; old journal errors are diagnostic only, do not affect cache keys, and are not restored on replay. Failed journal entries still end the replayable prefix and are retried.
+
+```js
+const result = await agent('Review the changed files.', { label: 'review' })
+if (result === null) {
+  const reason = typeof agentError === 'function' ? agentError('review') : undefined
+  return { failed: true, reason: reason ?? 'Review failed.' }
+}
+return result
+```
+
+The feature check lets the same script run on older hosts without adding an unsupported `agent()` option.
 
 ### `pipeline()` and `parallel()`
 
@@ -389,7 +408,7 @@ A typo, or an option from a different tool. The supported set is `label`, `phase
 An `agentType` that names no known agent falls back to `general-purpose` **silently** — unlike the `Agent` tool, which tells you. Option *keys* are validated; option *values* are not. Check the spelling against `/agents`; matching is case-insensitive, and a disabled agent does not count.
 
 **`agent()` returned `null`.**
-The agent failed terminally, or you skipped it with `s` in the inspector. These are indistinguishable to the script. With `schema`, it also covers a child that never produced a payload matching the schema.
+The agent failed terminally, or you skipped it with `s` in the inspector. With `schema`, it also covers a child that never produced a payload matching the schema. Read `agentError(label)` for the bounded reason, also recorded in the journal's `error` field.
 
 **A `schema` call came back as `null` even though the agent clearly answered.**
 `schema` is pressure, not a guarantee. The child gets a `StructuredOutput` tool, `constrainedSampling` set to `strict: "prefer"`, and a validation-and-retry round trip — three soft pressures, where Claude Code has one hard one (it can force the tool call; this cannot, because `toolChoice` is not plumbed through pi's `AgentSession`). Keep schemas small and flat, and `.filter(Boolean)` after every schema stage.
@@ -432,7 +451,7 @@ Different:
 - **`schema` is pressured, not forced** — see the troubleshooting entry above.
 - If both extensions are loaded, this one **stands down** rather than offering the model two orchestrators.
 
-Additions on this side: `gate`, `resume`, `effort`, journal-backed `resumeFromRunId`, and the un-awaited-`agent()` check. All are optional, which is what keeps a Claude Code script portable.
+Additions on this side: `gate`, `resume`, `effort`, `agentError(label)`, journal-backed `resumeFromRunId`, and the un-awaited-`agent()` check. All are optional, which is what keeps a Claude Code script portable.
 
 ## Examples
 
