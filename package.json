@@ -40,6 +40,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "vitest run e2e --reporter=verbose",
+    "test:e2e:workflow": "vitest run e2e/workflow --reporter=verbose",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src/ test/",
     "lint:fix": "biome check --fix src/ test/",
