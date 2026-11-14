@@ -6,5 +6,5 @@ export function installSubagentCacheRetention(session: AgentSession, cwd: string
   if (cacheRetention === undefined || cacheRetention === "inherit") return;
   const streamFunction = session.agent.streamFunction;
   session.agent.streamFunction = (model, context, options) =>
-    streamFunction(model, context, { ...options, cacheRetention });
+    streamFunction(model, context, { ...options, cacheRetention: options?.cacheRetention ?? cacheRetention });
 }

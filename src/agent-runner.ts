@@ -1296,6 +1296,7 @@ export async function runAgent(
   }
 
   const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  installSubagentCacheRetention(session, configCwd, agentDir);
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(
@@ -1334,7 +1335,6 @@ export async function runAgent(
     });
   }
 
-  installSubagentCacheRetention(session, configCwd, agentDir);
   options.onSessionCreated?.(session);
 
   const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(type, options.maxTurns) });
