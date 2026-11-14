@@ -15,7 +15,7 @@
  * the prose fails here, which is the point.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -25,7 +25,16 @@ import {
 } from "../src/workflow/runtime.js";
 import { fullWorkflowToolDescription } from "../src/workflow/tool-description.js";
 
-const description = fullWorkflowToolDescription;
+const SKILL_FILE = fileURLToPath(new URL("../skills/workflow-authoring/SKILL.md", import.meta.url));
+
+/**
+ * What the model ends up reading: the tool description plus the authoring
+ * skill it points at. The contract holds for the pair, wherever a sentence
+ * lives.
+ */
+const description = existsSync(SKILL_FILE)
+  ? `${fullWorkflowToolDescription}\n\n${readFileSync(SKILL_FILE, "utf8")}`
+  : fullWorkflowToolDescription;
 const workerSource = readFileSync(
   fileURLToPath(new URL("../src/workflow/worker-source.ts", import.meta.url)),
   "utf8",
@@ -176,15 +185,16 @@ describe("claims about pi's own surfaces", () => {
 });
 
 describe("rendering", () => {
+  // The tool description alone: it is the only part that is templated.
   it("keeps the placeholder the live agent roster is substituted into", () => {
-    expect(description).toContain("{{typeList}}");
+    expect(fullWorkflowToolDescription).toContain("{{typeList}}");
   });
 
   it("leaves no unescaped template interpolation from the source literal", () => {
     // A bare `${...}` in the .ts literal would interpolate at module load and
     // reach the model as a value (or throw), not as the example text.
-    expect(description).not.toContain("[object Object]");
+    expect(fullWorkflowToolDescription).not.toContain("[object Object]");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal placeholder is the subject under test
-    expect(description).toContain("${f.title}");
+    expect(fullWorkflowToolDescription).toContain("${f.title}");
   });
 });

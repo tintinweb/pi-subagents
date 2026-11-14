@@ -587,6 +587,17 @@ describe("settings persistence", () => {
       }
     });
 
+    it("accepts both workflowReference values, and drops anything else", () => {
+      for (const mode of ["skill", "inline"] as const) {
+        writeProject({ workflowReference: mode });
+        expect(loadSettings(projectDir)).toEqual({ workflowReference: mode });
+      }
+      for (const bad of ["full", true, null]) {
+        writeProject({ workflowReference: bad });
+        expect(loadSettings(projectDir).workflowReference).toBeUndefined();
+      }
+    });
+
     it("drops invalid toolDescriptionMode", () => {
       writeProject({ toolDescriptionMode: "tiny" });
       expect(loadSettings(projectDir).toolDescriptionMode).toBeUndefined();

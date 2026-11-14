@@ -201,6 +201,8 @@ The finished script ships as [`examples/workflows/fan-out-audit.js`](../examples
 
 Occasionally you will want to write or heavily edit one. The rules are short.
 
+The model works from the same reference: the bundled `workflow-authoring` skill ([`skills/workflow-authoring/SKILL.md`](../skills/workflow-authoring/SKILL.md)), which is part of the `SubagentWorkflow` tool description by default. pi also lists it among the available skills, and `/skill:workflow-authoring` loads it by hand. Setting `workflowReference` to `"skill"` ([settings](../README.md#persistent-settings)) saves about 4k tokens per session: the description keeps only the opt-in rule, the `meta` rules and one starting pattern, and points at the skill file by path. That pointer works without the skill listing (`--no-skills`, or `pi -e` on a single file), but the model needs a `read` tool and has to choose to use it — a model that skips it writes the script without the reference.
+
 **`meta` must be a pure literal** — no variables, function calls, spreads, or template interpolation. It is read *before* the script runs, which is what lets the phases appear on screen from the first frame instead of materializing one at a time as agents happen to start. `name` and `description` are required; `phases` and `whenToUse` are optional.
 
 ```js
@@ -331,7 +333,7 @@ A run's concurrency limit is its own, independent of the session's `maxConcurren
 
 ## Recipes
 
-The orchestration patterns themselves — adversarial verification, judge panels, loop-until-dry — live in exactly one place: the tool description the model reads on every turn. It already knows them. So these are not instructions for writing scripts by hand; they are **what to ask for**, and what the resulting script looks like so you can recognize it in the file.
+The orchestration patterns themselves — adversarial verification, judge panels, loop-until-dry — live in exactly one place: the bundled `workflow-authoring` skill, which by default is part of the tool description the model reads on every turn. It already knows them. So these are not instructions for writing scripts by hand; they are **what to ask for**, and what the resulting script looks like so you can recognize it in the file.
 
 ### Fan out over a list you don't have yet
 
@@ -449,7 +451,7 @@ The sandbox is a determinism and accident boundary, not a defence against a deli
 
 This runtime attempts compatibility with Claude Code's `Workflow` tool, down to its state model: a script written for Claude Code runs here with the differences listed below. `test/workflow-claude-code-compat.test.ts` runs the canonical `review-changes` example from that tool's own description, verbatim.
 
-The same as Claude Code: `pipeline()` (including the stop on `null`) and `parallel()` (including the `failed:` log lines), `phase()`, `log()`, `args`, `setTimeout`; the `meta` block; `schema` returning a validated object, and which schemas and answers it refuses, with the same messages; one-level `workflow()` nesting; strict mode; the determinism throws and their messages; how the return value is copied; `disallowedTools`.
+The same as Claude Code: `pipeline()` (including the stop on `null`) and `parallel()` (including the `failed:` log lines), `phase()`, `log()`, `args`, `setTimeout`; the `meta` block; `schema` returning a validated object, and which schemas and answers it refuses, with the same messages; one-level `workflow()` nesting; strict mode; the determinism throws and their messages; how the return value is copied; `disallowedTools`; the script reference as a `workflow-authoring` skill the tool description points at.
 
 Different:
 

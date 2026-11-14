@@ -52,6 +52,7 @@ import {
   settingSources,
   settingsFilePath,
   type ToolDescriptionMode,
+  type WorkflowReferenceMode,
 } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
@@ -91,7 +92,7 @@ import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
-import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
+import { workflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
 
@@ -1378,6 +1379,8 @@ export default function (pi: ExtensionAPI) {
   let toolDescriptionMode: ToolDescriptionMode = "full";
   function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
   function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
+  let workflowReference: WorkflowReferenceMode = "inline";
+  function getWorkflowReference(): WorkflowReferenceMode { return workflowReference; }
 
   // ---- Turn batches for `group` join mode ----
   // Background spawns the parent made in its current turn. The turn's end is
@@ -1588,6 +1591,7 @@ export default function (pi: ExtensionAPI) {
     setStrictAgentFiles: (b) => { strictAgentFiles = b; },
     setDisableDefaultAgents: setDisableDefaultAgents,
     setToolDescriptionMode: setToolDescriptionMode,
+    setWorkflowReference: (mode) => { workflowReference = mode; },
     setFleetView: setFleetViewEnabled,
     setAgentMentions: setAgentMentionMode,
     setRememberAgents,
@@ -2701,7 +2705,7 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
-    description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
+    description: renderToolDescriptionTemplate(workflowToolDescription(getWorkflowReference())),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
       "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
@@ -3256,6 +3260,7 @@ Terse command-style prompts produce shallow, generic work.
       strictAgentFiles,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
+      workflowReference: getWorkflowReference(),
       fleetView: isFleetViewEnabled(),
       agentMentions: getAgentMentionMode(),
       rememberAgents: getRememberAgents(),
@@ -3493,6 +3498,16 @@ Terse command-style prompts produce shallow, generic work.
             + "(off keeps the SubagentWorkflow tool out of the tool spec; applies on next pi session)",
           currentValue: isWorkflowsEnabled() ? "on" : "off",
           values: ["on", "off"],
+        },
+        {
+          id: "workflowReference",
+          label: "Workflow reference",
+          description:
+            "Where the SubagentWorkflow script reference reaches the model: inline (default — in the tool description, "
+            + "always read) or skill (~4k fewer tokens per session; the description points at the bundled skill file, "
+            + "which the model must choose to read before writing a script). Applies on next pi session",
+          currentValue: getWorkflowReference(),
+          values: ["skill", "inline"],
         },
         {
           id: "worktreeIsolation",
@@ -3755,6 +3770,9 @@ Terse command-style prompts produce shallow, generic work.
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
         notifyApplied(ctx, target, `Tool description set to ${value}. Takes effect on next pi session.`);
+      } else if (id === "workflowReference") {
+        workflowReference = value as WorkflowReferenceMode;
+        notifyApplied(ctx, target, `Workflow reference set to ${value}. Takes effect on next pi session.`);
       } else if (id === "reportUsage") {
         const enabled = value === "on";
         setReportUsage(enabled);
