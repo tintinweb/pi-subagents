@@ -11,6 +11,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { CacheRetention } from "@earendil-works/pi-ai";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
 import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
@@ -354,6 +355,10 @@ export interface SubagentsSettings {
   viewerMarkdown?: ViewerMarkdownMode;
 }
 
+export interface SubagentsFileSettings extends SubagentsSettings {
+  cacheRetention?: CacheRetention | "inherit";
+}
+
 export type ToolDescriptionMode = "full" | "compact" | "custom";
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
@@ -487,10 +492,13 @@ function sanitizePackageGate(val: unknown): boolean | string[] | undefined {
 }
 
 /** Drop fields that don't match the expected shape. Silent — garbage becomes absent. */
-function sanitize(raw: unknown): SubagentsSettings {
+function sanitize(raw: unknown): SubagentsFileSettings {
   if (!raw || typeof raw !== "object") return {};
   const r = raw as Record<string, unknown>;
-  const out: SubagentsSettings = {};
+  const out: SubagentsFileSettings = {};
+  if (r.cacheRetention === "inherit" || r.cacheRetention === "none" || r.cacheRetention === "short" || r.cacheRetention === "long") {
+    out.cacheRetention = r.cacheRetention;
+  }
   for (const [key, { min, max }] of Object.entries(NUMERIC_SETTING_BOUNDS) as [NumericSettingKey, NumericBounds][]) {
     const v = r[key];
     if (Number.isInteger(v) && (v as number) >= min && (v as number) <= max) out[key] = v as number;
@@ -570,8 +578,8 @@ function sanitize(raw: unknown): SubagentsSettings {
   return out;
 }
 
-function globalPath(): string {
-  return join(getAgentDir(), "subagents.json");
+function globalPath(agentDir: string = getAgentDir()): string {
+  return join(agentDir, "subagents.json");
 }
 
 function projectPath(cwd: string): string {
@@ -583,7 +591,7 @@ function projectPath(cwd: string): string {
  * exists but can't be parsed emits a warning to stderr so users aren't
  * silently reverted to defaults — and still returns `{}` so startup proceeds.
  */
-function readSettingsFile(path: string): SubagentsSettings {
+function readSettingsFile(path: string): SubagentsFileSettings {
   if (!existsSync(path)) return {};
   try {
     return sanitize(JSON.parse(readFileSync(path, "utf-8")));
@@ -608,8 +616,8 @@ export function settingsFilePath(scope: SettingsScope, cwd: string = process.cwd
 }
 
 /** Load merged settings: global provides defaults, project overrides. */
-export function loadSettings(cwd: string = process.cwd()): SubagentsSettings {
-  return { ...readSettingsFile(globalPath()), ...readSettingsFile(projectPath(cwd)) };
+export function loadSettings(cwd: string = process.cwd(), agentDir?: string): SubagentsFileSettings {
+  return { ...readSettingsFile(globalPath(agentDir)), ...readSettingsFile(projectPath(cwd)) };
 }
 
 /**
