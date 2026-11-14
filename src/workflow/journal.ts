@@ -1,47 +1,21 @@
 /**
- * journal.ts — the record a workflow run leaves so a later run can skip work.
+ * journal.ts — cached workflow answers, not a checkpoint of their effects.
  *
- * ## What resume actually buys
+ * Calls are identified by structural position, not arrival order: the root,
+ * each parallel thunk, each pipeline item's stage chain, and each nested
+ * workflow body number their own slots. Unchanged pipelines can then replay
+ * even when their items finish in a different order.
  *
- * The documented iteration loop is "edit the persisted script and re-run it".
- * Without a journal that re-pays every agent from scratch, which for a 40-agent
- * audit is the entire cost of the run — to change one line of the last stage.
- * With one, the unchanged prefix comes back from disk and only the edit runs.
+ * At the first missing, changed, failed, or invalid answer, the whole run stops
+ * replaying. Structural branches can share files and other effects; a static
+ * prompt does not prove independence from changed sibling or child work.
  *
- * ## Why a *prefix*, and not a lookup table
+ * Replay does not rerun tools or restore files. Use a fresh run after changing
+ * external inputs, agent definitions, models, or the workspace. A run that used
+ * agent({ resume }) cannot replay: cached text leaves no live child to resume.
  *
- * Each entry is keyed by both its position in the run and a hash of everything
- * that decides what that agent does. A replay walks positions in order and
- * stops reusing at the first entry that does not match — every call from there
- * on runs live. Reusing later matches out of order would be reusing a result
- * produced under different upstream conditions: the same prompt at position 12
- * of a *different* run is not the same work, because what fed it changed.
- *
- * A failed agent is journaled as a failure and never replayed as one. Resuming
- * a run that died at agent 5 exists to retry agent 5, so the prefix ends there
- * and 5 onwards run live — the alternative would make a failure permanent.
- *
- * ## Runs that use `agent({ resume })`
- *
- * Those are not replayed at all. A replayed agent is text from a file, not a
- * live child, so there is no conversation in this run for a later `resume` to
- * continue — and the id map that would find one belongs to the run that did
- * the spawning. Rather than replay a prefix that strands the first `resume`
- * call, a journal carrying one declines the whole cache and the run pays in
- * full. Coarse on purpose: the alternative is tracking which label each entry
- * ran under and capping the prefix below the earliest one that gets resumed,
- * which is a second key concept for a case that costs one run.
- *
- * ## Ordering under concurrency
- *
- * Positions are assigned as calls arrive, and with `pipeline` that order
- * depends on which agent finished first. A replay usually reproduces it, since
- * cached calls answer in journal order, but it is not guaranteed. That is why
- * the key is checked as well as the position: a run that interleaves
- * differently loses cache hits, it never returns another agent's answer.
- *
- * The file is JSON Lines, appended as each agent settles, so a run that is
- * killed mid-flight still leaves everything it had finished.
+ * The JSON Lines file is appended as calls settle, preserving finished answers
+ * if the run is interrupted. Old journals without structural paths are ignored.
  */
 
 import { createHash } from "node:crypto";
@@ -49,33 +23,20 @@ import { appendFileSync, readFileSync } from "node:fs";
 
 /** One settled agent call, as replayed. */
 export interface WorkflowJournalEntry {
-  /** Position in the run — the same counter that names `wf-agent-N`. */
+  /** Structural identity: root #k, parallel /k:p:i, pipeline /k:l:i, child /k:w. */
+  path: string;
+  /** Arrival order, retained for displaying the journal, not for matching calls. */
   index: number;
-  /** Hash of the call's payload; a mismatch ends the replayable prefix. */
+  /** Hash of the call's payload; a mismatch stops further replay. */
   key: string;
-  /** Whether the agent succeeded. A failure ends the prefix on replay. */
+  /** A failure stops further replay and is retried live. */
   ok: boolean;
-  /** The agent's answer, when it had one. */
   text?: string;
-  /**
-   * Whether the call continued an earlier child (`agent({ resume })`).
-   *
-   * A replayed agent leaves no session behind in the run that replays it — the
-   * conversation belongs to the run that actually spawned it, and the host's
-   * id map is per-run — so a later `resume` would have nothing to continue.
-   * Recording it lets the next run decline to replay at all rather than fail
-   * partway through, which is why the flag is on the journal and not derived.
-   */
+  /** A replayed answer leaves no conversation for a later agent({ resume }). */
   resumed?: true;
 }
 
-/**
- * The fields that decide what an agent does.
- *
- * Deliberately not the whole payload: `phaseIndex` and `phaseTitle` move the
- * row around in the progress tree without changing a single token the agent
- * sees, so re-grouping phases should not throw away an hour of results.
- */
+/** Fields affecting a call; progress phase grouping does not affect its answer. */
 export interface JournalKeyInput {
   prompt: string;
   label?: string;
@@ -85,7 +46,6 @@ export interface JournalKeyInput {
   isolation?: string;
   gate?: string;
   resume?: string;
-  /** Serialized `agent({ schema })`, when the call asked for one. */
   schema?: string;
 }
 
@@ -100,22 +60,15 @@ export function journalKey(input: JournalKeyInput): string {
     input.isolation ?? null,
     input.gate ?? null,
     input.resume ?? null,
-    // Appended only when present, which looks like a hack and is not: adding a
-    // ninth slot unconditionally would change the canonical form of every entry
-    // and invalidate every journal already on disk. Conditional, a schema-less
-    // call keys exactly as it always did, and adding or changing a schema still
-    // produces a different key.
     ...(input.schema !== undefined ? [input.schema] : []),
   ]);
   return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
 
 /**
- * Read a journal file into position order.
- *
- * Never throws: a missing, truncated or hand-mangled journal means "nothing to
- * replay", which costs tokens. Refusing to run would cost the whole run.
- * A partial last line is normal — the file is appended to while agents settle.
+ * Read valid entries in arrival order. A missing or malformed record is a cache
+ * miss, never a reason to refuse a new run. Truncated final lines are expected
+ * after interruption; completed entries before them remain usable.
  */
 export function readJournal(path: string): WorkflowJournalEntry[] {
   let raw: string;
@@ -129,12 +82,10 @@ export function readJournal(path: string): WorkflowJournalEntry[] {
   for (const line of raw.split("\n")) {
     if (line.trim() === "") continue;
     try {
-      const parsed = JSON.parse(line) as unknown;
-      if (!isEntry(parsed)) continue;
-      entries.push(parsed);
+      const parsed: unknown = JSON.parse(line);
+      if (isEntry(parsed)) entries.push(parsed);
     } catch {
-      // A half-written final line, or someone editing the file. Skipping it
-      // keeps what came before, and a shorter prefix is still a useful one.
+      // A torn line loses a cache hit, not the rest of the journal.
     }
   }
   entries.sort((a, b) => a.index - b.index);
@@ -154,11 +105,13 @@ function isEntry(value: unknown): value is WorkflowJournalEntry {
   if (typeof value !== "object" || value === null) return false;
   const entry = value as Record<string, unknown>;
   return (
-    Number.isInteger(entry.index) &&
+    typeof entry.path === "string" &&
+    /^(?:\/\d+:(?:p:\d+|l:\d+|w))*#\d+$/.test(entry.path) &&
+    Number.isSafeInteger(entry.index) &&
     (entry.index as number) >= 0 &&
     typeof entry.key === "string" &&
     typeof entry.ok === "boolean" &&
-    (entry.text === undefined || typeof entry.text === "string") &&
+    (entry.ok ? typeof entry.text === "string" : entry.text === undefined || typeof entry.text === "string") &&
     (entry.resumed === undefined || entry.resumed === true)
   );
 }
