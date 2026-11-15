@@ -14,9 +14,11 @@
  *     discovery (`--no-skills`, `pi -e <file>`). Listed in every session, it
  *     says in its description that it applies only where this tool exists.
  *
- * By default (`workflowReference: "inline"`) the skill's body is appended in
+ * By default (`workflowToolExposure: "inline"`) the skill's body is appended in
  * place of the pointer, because a model can skip the pointer; `"skill"` keeps
- * the split and several thousand tokens out of every session. The roster stays here because the skill is a static file
+ * the split and several thousand tokens out of every session. `"deferred"`
+ * carries the inline body too: the tool is declared only once `tool_search`
+ * loads it, and a pointer would then cost a second round trip. The roster stays here because the skill is a static file
  * and `{{typeList}}` can only be substituted into this text.
  *
  * Omitted because pi has no such feature: the `ultracode` opt-in, MCP tools
@@ -43,7 +45,7 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { WorkflowReferenceMode } from "../settings.js";
+import type { WorkflowToolExposureMode } from "../settings.js";
 
 /**
  * The shipped skill, resolved from this module: `src/workflow/` and
@@ -99,19 +101,20 @@ Agent types for agent(prompt, {agentType}):
 {{typeList}}`;
 
 /**
- * The description for the `workflowReference` setting. `inline` (the default)
+ * The description for the `workflowToolExposure` setting. `inline` (the default)
  * puts the skill's body where the pointer was, so the model cannot skip it;
  * `skill` keeps the pointer, about 4k tokens lighter, for a model that follows it.
+ * `deferred` gets the inline body: exposure, not this text, is what it saves.
  * Read from the shipped file, so the reference still has one source. A missing
  * or unreadable file falls back to the pointer, with a warning.
  */
-export function workflowToolDescription(mode: WorkflowReferenceMode): string {
+export function workflowToolDescription(mode: WorkflowToolExposureMode): string {
   if (mode === "skill") return fullWorkflowToolDescription;
   let body: string;
   try {
     body = readFileSync(WORKFLOW_SKILL_PATH, "utf8").replace(/^---\n[\s\S]*?\n---\n/, "").trim();
   } catch (error) {
-    console.warn(`[pi-subagents] workflowReference is "inline" but ${WORKFLOW_SKILL_PATH} could not be read — using "skill": ${String(error)}`);
+    console.warn(`[pi-subagents] workflowToolExposure is "inline" but ${WORKFLOW_SKILL_PATH} could not be read — using "skill": ${String(error)}`);
     return fullWorkflowToolDescription;
   }
   return fullWorkflowToolDescription.replace(WORKFLOW_SKILL_POINTER, () => body);

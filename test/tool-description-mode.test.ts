@@ -443,9 +443,9 @@ describe("toolDescriptionMode", () => {
     });
   });
 
-  describe("workflowReference picks where the SubagentWorkflow reference lives", () => {
+  describe("workflowToolExposure picks where the SubagentWorkflow reference lives", () => {
     it("skill points at the skill instead of carrying the reference", () => {
-      const desc: string = setup({ workflowReference: "skill" }).get("SubagentWorkflow").description;
+      const desc: string = setup({ workflowToolExposure: "skill" }).get("SubagentWorkflow").description;
       expect(desc).toContain("load the `workflow-authoring` skill (read `");
       expect(desc).not.toContain("Script body hooks:");
     });
@@ -464,8 +464,14 @@ describe("toolDescriptionMode", () => {
       expect(desc).toContain("- general-purpose:");
     });
 
+    it("deferred carries the inline reference: a pointer would cost a second round trip after the search", () => {
+      const desc: string = setup({ workflowToolExposure: "deferred" }).get("SubagentWorkflow").description;
+      expect(desc).toContain("Script body hooks:");
+      expect(desc).not.toContain("load the `workflow-authoring` skill");
+    });
+
     it("an invalid value is dropped — the inline default", () => {
-      const desc: string = setup({ workflowReference: "both" }).get("SubagentWorkflow").description;
+      const desc: string = setup({ workflowToolExposure: "both" }).get("SubagentWorkflow").description;
       expect(desc).toContain("Script body hooks:");
       expect(desc).not.toContain("load the `workflow-authoring` skill");
     });

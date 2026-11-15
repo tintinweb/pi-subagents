@@ -52,7 +52,7 @@ import {
   settingSources,
   settingsFilePath,
   type ToolDescriptionMode,
-  type WorkflowReferenceMode,
+  type WorkflowToolExposureMode,
 } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
@@ -1380,8 +1380,8 @@ export default function (pi: ExtensionAPI) {
   let toolDescriptionMode: ToolDescriptionMode = "full";
   function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
   function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
-  let workflowReference: WorkflowReferenceMode = "inline";
-  function getWorkflowReference(): WorkflowReferenceMode { return workflowReference; }
+  let workflowToolExposure: WorkflowToolExposureMode = "inline";
+  function getWorkflowToolExposure(): WorkflowToolExposureMode { return workflowToolExposure; }
 
   // ---- Turn batches for `group` join mode ----
   // Background spawns the parent made in its current turn. The turn's end is
@@ -1592,7 +1592,7 @@ export default function (pi: ExtensionAPI) {
     setStrictAgentFiles: (b) => { strictAgentFiles = b; },
     setDisableDefaultAgents: setDisableDefaultAgents,
     setToolDescriptionMode: setToolDescriptionMode,
-    setWorkflowReference: (mode) => { workflowReference = mode; },
+    setWorkflowToolExposure: (mode) => { workflowToolExposure = mode; },
     setFleetView: setFleetViewEnabled,
     setAgentMentions: setAgentMentionMode,
     setRememberAgents,
@@ -2722,7 +2722,9 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
-    description: renderToolDescriptionTemplate(workflowToolDescription(getWorkflowReference())),
+    // `deferred`: not declared to the model until pi's `tool_search` loads it.
+    ...(getWorkflowToolExposure() === "deferred" ? { exposure: "deferred" as const } : {}),
+    description: renderToolDescriptionTemplate(workflowToolDescription(getWorkflowToolExposure())),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
       "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
@@ -2945,9 +2947,15 @@ Terse command-style prompts produce shallow, generic work.
         ownDescription: workflowTool.description,
         pinned: isWorkflowsPinned(),
       });
-      if (verdict.kind === "none") return;
-      if (verdict.kind === "report") {
-        warn(verdict.message);
+      if (verdict.kind === "none" || verdict.kind === "report") {
+        if (verdict.kind === "report") warn(verdict.message);
+        // pi's own warning for unreachable deferred tools covers MCP servers only.
+        if (workflowTool.exposure === "deferred" && !pi.getActiveTools().includes("tool_search")) {
+          warn(
+            'workflowToolExposure is "deferred" but tool_search is inactive, so the model cannot load SubagentWorkflow. '
+            + 'Add "+tool_search" to defaultTools in .pi/settings.json, or set workflowToolExposure to "skill".',
+          );
+        }
         return;
       }
 
@@ -2957,6 +2965,9 @@ Terse command-style prompts produce shallow, generic work.
       warn(verdict.message);
 
       if (!verdict.withdraw) return;
+      // An inactive deferred tool stays searchable and callable; only `hidden`
+      // exposure takes it out of reach, and tools cannot be unregistered.
+      if (workflowTool.exposure === "deferred") pi.registerTool({ ...workflowTool, exposure: "hidden" });
       const active = pi.getActiveTools();
       if (active.includes(SUBAGENT_TOOL_NAMES.WORKFLOW)) {
         pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.WORKFLOW));
@@ -3285,7 +3296,7 @@ Terse command-style prompts produce shallow, generic work.
       strictAgentFiles,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
-      workflowReference: getWorkflowReference(),
+      workflowToolExposure: getWorkflowToolExposure(),
       fleetView: isFleetViewEnabled(),
       agentMentions: getAgentMentionMode(),
       rememberAgents: getRememberAgents(),
@@ -3525,14 +3536,15 @@ Terse command-style prompts produce shallow, generic work.
           values: ["on", "off"],
         },
         {
-          id: "workflowReference",
-          label: "Workflow reference",
+          id: "workflowToolExposure",
+          label: "Workflow tool exposure",
           description:
             "Where the SubagentWorkflow script reference reaches the model: inline (default — in the tool description, "
             + "always read) or skill (~4k fewer tokens per session; the description points at the bundled skill file, "
-            + "which the model must choose to read before writing a script). Applies on next pi session",
-          currentValue: getWorkflowReference(),
-          values: ["skill", "inline"],
+            + "which the model must choose to read before writing a script) or deferred (not in the tool spec until "
+            + "pi's tool_search loads it, then inline; requires tool_search). Applies on next pi session",
+          currentValue: getWorkflowToolExposure(),
+          values: ["inline", "skill", "deferred"],
         },
         {
           id: "worktreeIsolation",
@@ -3795,9 +3807,9 @@ Terse command-style prompts produce shallow, generic work.
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
         notifyApplied(ctx, target, `Tool description set to ${value}. Takes effect on next pi session.`);
-      } else if (id === "workflowReference") {
-        workflowReference = value as WorkflowReferenceMode;
-        notifyApplied(ctx, target, `Workflow reference set to ${value}. Takes effect on next pi session.`);
+      } else if (id === "workflowToolExposure") {
+        workflowToolExposure = value as WorkflowToolExposureMode;
+        notifyApplied(ctx, target, `Workflow tool exposure set to ${value}. Takes effect on next pi session.`);
       } else if (id === "reportUsage") {
         const enabled = value === "on";
         setReportUsage(enabled);

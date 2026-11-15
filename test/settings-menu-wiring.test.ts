@@ -643,13 +643,22 @@ describe("/agents → Settings filter and height", () => {
     expect(twice.page.closedItself).toBe(true);
   });
 
-  it("Enter on the Workflow reference row saves skill", async () => {
+  it("Enter on the Workflow tool exposure row saves skill", async () => {
     const agents = boot();
-    const { ctx } = drivePage([..."workflow ref", DOWN, ENTER]);
+    const { ctx } = drivePage([..."workflow tool exp", DOWN, ENTER]);
 
     await agents(ctx);
 
-    expect(readJson(globalFile())).toEqual({ workflowReference: "skill" });
+    expect(readJson(globalFile())).toEqual({ workflowToolExposure: "skill" });
+  });
+
+  it("Enter twice on the Workflow tool exposure row saves deferred", async () => {
+    const agents = boot();
+    const { ctx } = drivePage([..."workflow tool exp", DOWN, ENTER, ENTER]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ workflowToolExposure: "deferred" });
   });
 
   it("Enter on a filtered number row opens the editor for that row", async () => {

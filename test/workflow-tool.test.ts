@@ -1689,6 +1689,68 @@ describe("collisions with another extension", () => {
     expect(warnings(context).filter(m => /disabled for this session/.test(m))).toEqual([]);
   });
 
+  /* ----------------------------------------------------------------------- *
+   * workflowToolExposure: "deferred"
+   * ----------------------------------------------------------------------- */
+
+  const workflowRegistrations = (booted: ReturnType<typeof boot>) =>
+    booted.pi.registerTool.mock.calls.map((c: any[]) => c[0]).filter((t: any) => t.name === "SubagentWorkflow");
+
+  it("registers the tool deferred only when workflowToolExposure is deferred", () => {
+    expect(workflowRegistrations(boot({ workflowToolExposure: "deferred" })).map((t: any) => t.exposure)).toEqual(["deferred"]);
+    hermetic.restore();
+    expect(workflowRegistrations(boot({})).map((t: any) => t.exposure)).toEqual([undefined]);
+  });
+
+  it("re-registers a deferred tool as hidden when it stands down", async () => {
+    // An inactive deferred tool stays searchable and callable, so taking it
+    // out of the active set alone would leave tool_search a way back in.
+    const booted = boot({ workflowToolExposure: "deferred" });
+    booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
+
+    await booted.lifecycle.get("session_start")?.({}, uiContext());
+
+    expect(workflowRegistrations(booted).map((t: any) => t.exposure)).toEqual(["deferred", "hidden"]);
+  });
+
+  it("does not re-register a direct tool when it stands down", async () => {
+    const booted = bootAuto();
+    booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
+
+    await booted.lifecycle.get("session_start")?.({}, uiContext());
+
+    expect(workflowRegistrations(booted)).toHaveLength(1);
+  });
+
+  it("warns when deferred but tool_search is inactive", async () => {
+    // pi only warns about unreachable deferred MCP tools, not extension tools.
+    const booted = boot({ workflowToolExposure: "deferred" });
+    const context = uiContext();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    expect(warnings(context).some(m => /tool_search is inactive/.test(m) && /\+tool_search/.test(m))).toBe(true);
+  });
+
+  it("stays quiet when deferred and tool_search is active", async () => {
+    const booted = boot({ workflowToolExposure: "deferred" });
+    booted.pi.setActiveTools([...booted.pi.getActiveTools(), "tool_search"]);
+    const context = uiContext();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    expect(warnings(context).filter(m => /tool_search/.test(m))).toEqual([]);
+  });
+
+  it("does not mention tool_search unless deferred", async () => {
+    const booted = boot();
+    const context = uiContext();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    expect(warnings(context).filter(m => /tool_search/.test(m))).toEqual([]);
+  });
+
   /**
    * Drive `/agents → Settings` far enough to write the settings file.
    *
