@@ -68,6 +68,10 @@ A **card in the transcript**, updating as the run goes:
   ⎿  auditing 6 route files
 ```
 
+The card redraws when the run reports progress, at most once a second, and once more when it ends. That holds in pi's default fullscreen mode. In regular mode (`tuiMode: "regular"`), redrawing a card that has scrolled off screen clears the terminal's scrollback. So while the run goes, the card shows `⎿  Running in background (ID: …) · /agents → Workflows`, and the tree appears when the run ends. Switching modes mid-run redraws the card for the new mode.
+
+The mode is read from the TUI FleetView is drawn into, and falls back to pi's `tuiMode` setting until then. With `--tui-mode regular` on the command line and FleetView turned off, that setting says fullscreen, so the card redraws live anyway.
+
 A running row's token and tool-call counts move as the child works: tool calls when each one completes, tokens when pi finalizes an assistant message, so a long response holds the count until it ends. A resumed row counts only its continuation; a retried row keeps the earlier attempt's spend.
 
 A **row in FleetView**, above the agents: a `workflow` label, the run's name, and a progress bar of finished agents with their count and the active phases where a description would go (`workflow  audit-src  ▰▰▰▰▰▱▱▱… 3/7 agents · Reviewing (2/3)  1m12s`). A phase's title reads as an activity there — `phase("Review")` shows as `Reviewing`. `⏎` on it opens the inspector rather than a conversation overlay.

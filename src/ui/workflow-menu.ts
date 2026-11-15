@@ -39,6 +39,8 @@ export interface WorkflowMenuDeps {
    * sessions, which is a no-op rather than an error.
    */
   getCtx(): ExtensionCommandContext | undefined;
+  /** A run's status changed from here (pause, resume), so its inline card is stale. */
+  onTaskChange(task: WorkflowTask): void;
 }
 
 /**
@@ -139,13 +141,17 @@ export async function showWorkflowDialog(
           },
           onPause: () => {
             if (pauseWorkflowTask(task)) {
+              deps.onTaskChange(task);
               // Named rather than implied: "paused" on a run whose agents are
               // still finishing reads as a stronger promise than it is.
               ctx.ui.notify("Paused — running agents finish, no new ones start.", "info");
             }
           },
           onResume: () => {
-            if (resumeWorkflowTask(task)) ctx.ui.notify("Resumed.", "info");
+            if (resumeWorkflowTask(task)) {
+              deps.onTaskChange(task);
+              ctx.ui.notify("Resumed.", "info");
+            }
           },
           onSkipAgent: index => {
             if (task.control?.skip(index) !== true) {

@@ -1111,6 +1111,127 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 });
 
 /* ------------------------------------------------------------------------- *
+ * The inline card following a background run (#284)
+ * ------------------------------------------------------------------------- */
+
+describe("SubagentWorkflow card — redraws while the run goes", () => {
+  let hermetic: Hermetic;
+  let booted: ReturnType<typeof makePi>;
+
+  beforeEach(() => {
+    hermetic = hermeticDir({ settings: { schedulingEnabled: false, workflowsEnabled: true } });
+    booted = makePi();
+    subagentsExtension(booted.pi);
+  });
+
+  afterEach(async () => {
+    await flush();
+    hermetic.restore();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A UI whose widgets are drawn into a TUI of the given mode. The fleet list
+   * learns pi's renderer mode from the TUI its widget factory receives, which
+   * is the only place an extension can read it.
+   */
+  function uiCtx(mode: "fullscreen" | "regular") {
+    const tui = { mode, requestRender: vi.fn(), terminal: { columns: 80, rows: 24 } };
+    /** The components the factories returned, by widget key. */
+    const widgets = new Map<string, { invalidate(): void }>();
+    const context = ctx({
+      cwd: hermetic.dir,
+      hasUI: true,
+      ui: {
+        setStatus: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn(),
+        onTerminalInput: vi.fn(() => vi.fn()),
+        setWidget: vi.fn((key: string, factory: unknown) => {
+          if (typeof factory === "function") widgets.set(key, factory(tui, plainTheme));
+        }),
+      },
+    });
+    return { context, tui, widgets };
+  }
+
+  /** Launch `body` as a workflow in `mode`, and draw its card once. */
+  async function launch(mode: "fullscreen" | "regular", body: string) {
+    const { context, tui, widgets } = uiCtx(mode);
+    await booted.lifecycle.get("tool_execution_start")?.({}, context);
+    const tool = booted.tools.get("SubagentWorkflow");
+    const result = await tool.execute("tc-card", { script: `${inlineScript}${body}` }, undefined, undefined, context);
+    const invalidate = vi.fn();
+    const render = () =>
+      String(tool.renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false, invalidate }).text ?? "");
+    const first = render();
+    const taskId = /Task ID: (\S+)/.exec(textOf(result))![1];
+    const settled = () =>
+      vi.waitFor(
+        () => expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => String(c[0]?.content).includes(taskId))).toBe(true),
+        { timeout: 10_000 },
+      );
+    return { context, tui, widgets, invalidate, render, first, settled };
+  }
+
+  const sleep = (ms: number) => `await new Promise(r => setTimeout(r, ${ms}));\n`;
+
+  it("redraws the card when the run reports progress", async () => {
+    const { context, invalidate } = await launch("fullscreen", `${sleep(50)}log("scanning");\nawait new Promise(() => {});\n`);
+
+    await vi.waitFor(() => expect(invalidate).toHaveBeenCalled(), { timeout: 5_000 });
+
+    await booted.lifecycle.get("session_shutdown")?.({}, context);
+  });
+
+  it("re-renders every live card when pi switches renderer mid-run", async () => {
+    const { context, tui, widgets, invalidate, render } = await launch(
+      "fullscreen",
+      `${sleep(50)}log("scanning");\nawait new Promise(() => {});\n`,
+    );
+    await vi.waitFor(() => expect(invalidate).toHaveBeenCalled(), { timeout: 5_000 });
+    const before = invalidate.mock.calls.length;
+
+    // What pi does on a switch: a new TUI, and an invalidate that drops the
+    // list's widget until it registers again on its next tick.
+    tui.mode = "regular";
+    widgets.get("fleet")!.invalidate();
+    await vi.waitFor(() => expect(invalidate.mock.calls.length).toBeGreaterThan(before), { timeout: 2_000 });
+    expect(render()).toContain("Running in background");
+
+    await booted.lifecycle.get("session_shutdown")?.({}, context);
+  });
+
+  it("before any widget has drawn, follows pi's tuiMode setting", async () => {
+    booted.pi.getSettings.mockReturnValue({ tuiMode: "regular" });
+    const tool = booted.tools.get("SubagentWorkflow");
+    const context = ctx({ cwd: hermetic.dir });
+    const result = await tool.execute("tc-card", { script: `${inlineScript}await new Promise(() => {});\n` }, undefined, undefined, context);
+
+    const card = String(tool.renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false, invalidate: vi.fn() }).text ?? "");
+    expect(card).toContain("Running in background");
+
+    await booted.lifecycle.get("session_shutdown")?.({}, context);
+  });
+
+  it("in pi's regular renderer, shows a launch line and redraws only once the run settles", async () => {
+    const { invalidate, render, first, settled } = await launch(
+      "regular",
+      `${sleep(50)}log("one");\n${sleep(50)}log("two");\nreturn "done";\n`,
+    );
+
+    // An off-screen redraw there clears the terminal's scrollback, so a running
+    // card must not claim to be live.
+    expect(first).toContain("Running in background");
+    expect(first).not.toMatch(/\d+\/\d+ agents/);
+
+    await settled();
+    expect(invalidate, "progress does not redraw; settle does, once").toHaveBeenCalledTimes(1);
+    const card = render();
+    expect(card).toContain("from-inline");
+    expect(card).toContain("two");
+  });
+});
+
+/* ------------------------------------------------------------------------- *
  * The CLI flag
  * ------------------------------------------------------------------------- */
 

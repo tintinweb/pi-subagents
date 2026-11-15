@@ -129,6 +129,7 @@ function rightAlign(left: string, right: string, width: number): string {
 export class FleetList {
   private ui: FleetUICtx | undefined;
   private tui: any | undefined;
+  private onTuiMode?: (mode: string) => void;
   private inputUnsub: (() => void) | undefined;
   private widgetRegistered = false;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -211,6 +212,15 @@ export class FleetList {
     this.update();
   }
 
+  /**
+   * Told pi's renderer mode (`"fullscreen"` | `"regular"`) each time the list is
+   * drawn into a TUI. pi hands over a new TUI on a mode switch, so this is how
+   * the extension learns of one.
+   */
+  setTuiModeObserver(observer: (mode: string) => void): void {
+    this.onTuiMode = observer;
+  }
+
   /** Capture the UI context and (re)register the global input handler. */
   setUICtx(ui: FleetUICtx): void {
     if (ui === this.ui) return;
@@ -279,6 +289,7 @@ export class FleetList {
     if (!this.widgetRegistered) {
       this.ui.setWidget(FLEET_KEY, (tui, theme) => {
         this.tui = tui;
+        if (typeof tui?.mode === "string") this.onTuiMode?.(tui.mode);
         return {
           render: (w: number) => this.renderBar(w, theme),
           invalidate: () => { this.widgetRegistered = false; this.tui = undefined; },

@@ -1197,6 +1197,7 @@ src/
     settings-menu.ts      # /agents → Settings page: filter, focus, number editor, terminal-sized list
     select-item.ts        # Collision-safe ctx.ui.select wrapper (numbered rows)
     workflow-card.ts      # Inline workflow card (tool result and session entry)
+    workflow-card-redraw.ts # When a background run's inline card redraws (per renderer mode)
     workflow-dialog.ts    # /agents → Workflows two-pane inspector
 ```
 

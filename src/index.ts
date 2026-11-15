@@ -81,6 +81,7 @@ import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroun
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
 import { createSettingsPage, type SettingsPageDeps } from "./ui/settings-menu.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
+import { WorkflowCardRedraws } from "./ui/workflow-card-redraw.js";
 import { openWorkflowFromFleet, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
@@ -2610,6 +2611,17 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTasks = new Map<string, WorkflowTask>();
 
   /**
+   * pi's renderer mode, as last seen on a TUI the fleet list was drawn into.
+   * Remembered rather than read off the list's live handle, which pi clears on
+   * every theme change and mode switch until the list registers again. Before
+   * any draw, pi's own setting, normalized as its `getTuiMode()` does; that
+   * misses a `--tui-mode` flag, which no extension API exposes.
+   */
+  let seenTuiMode: string | undefined;
+  const tuiMode = () => seenTuiMode ?? (pi.getSettings().tuiMode === "regular" ? "regular" : "fullscreen");
+  const workflowCards = new WorkflowCardRedraws(() => tuiMode() === "fullscreen");
+
+  /**
    * Workflow runs as the fleet list wants them.
    *
    * Mapped here rather than handing `WorkflowTask` over the seam: the list is
@@ -2655,7 +2667,11 @@ Terse command-style prompts produce shallow, generic work.
           rootSessionId: ctx.sessionManager.getSessionId(),
           workflowId: task.id,
         }),
-        onProgress: entries => updateWorkflowProgressBatch(task, entries),
+        onProgress: entries => {
+          if (entries.length === 0) return;
+          updateWorkflowProgressBatch(task, entries);
+          workflowCards.request(task.id);
+        },
         // The dialog's pause / skip / retry keys run through this; it is dropped
         // again when the task settles.
         onControl: control => { task.control = control; },
@@ -2680,6 +2696,7 @@ Terse command-style prompts produce shallow, generic work.
   function notifyWorkflowFinished(task: WorkflowTask) {
     widget.update();
     fleet.update();
+    workflowCards.flush(task.id);
     const result = workflowResultText(task);
     const message = {
       content: formatWorkflowNotification(task),
@@ -2769,6 +2786,14 @@ Terse command-style prompts produce shallow, generic work.
       // No task means the run predates this session (a reloaded transcript) or
       // the call never started one — show what `execute` said instead.
       if (renderContext.isError || !task) return new Text(text, 0, 0);
+      if (task.status === "running" || task.status === "paused") {
+        workflowCards.track(task.id, renderContext.invalidate);
+        // A card that cannot follow the run says where to watch it instead of
+        // showing a launch-time snapshot that reads as live.
+        if (tuiMode() !== "fullscreen") {
+          return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${task.id}) · /agents → Workflows`), 0, 0);
+        }
+      }
       return renderWorkflowCard(
         {
           progress: task.workflowProgress,
@@ -3910,9 +3935,15 @@ Terse command-style prompts produce shallow, generic work.
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
+    onTaskChange: task => workflowCards.request(task.id),
   };
 
   fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
+  fleet.setTuiModeObserver(mode => {
+    const was = tuiMode();
+    seenTuiMode = mode;
+    if (mode !== was) workflowCards.redrawAll();
+  });
 
   const { showAgentsMenu } = createAgentsMenu({
     pi,
