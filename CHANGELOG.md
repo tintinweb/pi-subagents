@@ -7,10 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Behavior change — a workflow starts only when you ask for one** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A request for a number of agents, like "use 10 agents to …", now runs parallel `Agent` calls instead of a `SubagentWorkflow`. To run a workflow, say so ("use a workflow") or name a saved workflow.
+
 ### Added
 - **`subagents:workflow_started`, `subagents:workflow_progress` and `subagents:workflow_settled` events for workflow runs.** A background `SubagentWorkflow` run emitted nothing on `pi.events`, so an extension mirroring background work, such as a host UI or a ledger, could not tell a run was still going after the parent's turn ended, or what it was doing. Each run now emits one event when it starts, one per progress batch (the same phase, log and per-agent entries the workflows dialog renders), and one when it settles, keyed by its `wf_` id. See [Events](README.md#events).
-
-> **⚠️ Behavior change — a workflow starts only when you ask for one** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A request for a number of agents, like "use 10 agents to …", now runs parallel `Agent` calls instead of a `SubagentWorkflow`. To run a workflow, say so ("use a workflow") or name a saved workflow.
 
 ### Fixed
 - **Asking for a number of subagents no longer starts a workflow** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A pi-only `SubagentWorkflow` guideline sent requests like "use 10 agents to …" to a workflow instead of parallel `Agent` calls, overriding the tool description's rule that a workflow needs an explicit opt-in. The guideline is removed, as Claude Code has none; "use a workflow" or a saved workflow name still starts one.
