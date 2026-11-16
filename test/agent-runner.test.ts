@@ -1737,6 +1737,22 @@ describe("agent-runner master tool allowlist", () => {
     expect(tools).toEqual(BUILTINS_7.filter((t) => t !== "bash"));
   });
 
+  it("a spawn's disallowedTools adds to the definition's, in either tool spelling", async () => {
+    // `agent({ disallowedTools })` from a workflow: `Bash` must
+    // deny pi's `bash`, and the agent file's own list must still apply.
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, disallowedTools: ["write"] }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, disallowedTools: ["Bash"] });
+
+    expect(lastToolsPassed()).toEqual(BUILTINS_7.filter((t) => t !== "bash" && t !== "write"));
+  });
+
   it("dynamic mode: leaves the allowlist unset, denies via excludeTools, activates post-bind", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
     vi.mocked(getAgentConfig).mockReturnValueOnce(

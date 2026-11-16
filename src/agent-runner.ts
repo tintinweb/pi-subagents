@@ -24,6 +24,7 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
+import { deniedToolNames } from "./custom-agents.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
@@ -587,6 +588,11 @@ export interface RunOptions {
    * fails at the call that wrote it rather than inside the child.
    */
   structuredOutput?: CompiledSchema;
+  /**
+   * Tools to deny this one spawn, on top of the agent definition's own
+   * `disallowedTools`. Set by the workflow host, for `agent({ disallowedTools })`.
+   */
+  disallowedTools?: string[];
   /** Runtime bridge for opt-in child-safe nested delegation. */
   nestedRuntime?: {
     manager: NestedAgentManager;
@@ -843,12 +849,16 @@ export async function runAgent(
 
   let toolNames = getToolNamesForType(type);
 
+  // The definition's deny list plus this spawn's. Built once: the memory check
+  // below and the tool scoping after it must agree on what is denied.
+  const deniedNames = [...(agentConfig?.disallowedTools ?? []), ...(deniedToolNames(options.disallowedTools) ?? [])];
+  const disallowedSet = deniedNames.length > 0 ? new Set(deniedNames) : undefined;
+
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
   if (agentConfig?.memory) {
     const existingNames = new Set(toolNames);
-    const denied = agentConfig.disallowedTools ? new Set(agentConfig.disallowedTools) : undefined;
-    const effectivelyHas = (name: string) => existingNames.has(name) && !denied?.has(name);
+    const effectivelyHas = (name: string) => existingNames.has(name) && !disallowedSet?.has(name);
     const hasWriteTools = effectivelyHas("write") || effectivelyHas("edit");
 
     if (hasWriteTools) {
@@ -863,10 +873,6 @@ export async function runAgent(
       extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
     }
   }
-
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
 
   // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
   // set `allowed_subagents` and a nestedRuntime was provided — and never when

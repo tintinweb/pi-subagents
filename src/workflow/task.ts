@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import { escapeXml } from "../xml.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
-import { collapse, elapsedMs, stats, type WorkflowEntry, type WorkflowRunStatus } from "./progress.js";
+import { activePhaseLabel, collapse, elapsedMs, stats, type WorkflowEntry, type WorkflowRunStatus } from "./progress.js";
 import type { WorkflowControl, WorkflowRunResult } from "./runtime.js";
 
 /** `wf_` + hex, matching Claude Code's `^wf_[a-z0-9-]{6,}$` run ids. */
@@ -79,6 +79,8 @@ export interface WorkflowTask {
    * tick, which for a thousand-agent run is real work in the render loop.
    */
   doneCount: number;
+  /** `Reviewing (2/3)` — the phases with work outstanding, or "". Cached like {@link doneCount}. */
+  phaseLabel: string;
   totalTokens: number;
   totalToolCalls: number;
   logs: string[];
@@ -92,6 +94,8 @@ export interface WorkflowTask {
   /** The script's return value, once the run produced one. */
   value?: unknown;
   error?: string;
+  /** The run's failure lines, for the notification's `<failures>`. */
+  failures?: string[];
 }
 
 export function createWorkflowTask(init: {
@@ -125,6 +129,7 @@ export function createWorkflowTask(init: {
     progressVersion: 0,
     agentCount: 0,
     doneCount: 0,
+    phaseLabel: "",
     totalTokens: 0,
     totalToolCalls: 0,
     logs: [],
@@ -163,8 +168,10 @@ export function updateWorkflowProgressBatch(
   }
   task.progressVersion++;
 
-  const { agents, logs } = collapse(task.workflowProgress);
+  const collapsed = collapse(task.workflowProgress);
+  const { agents, logs } = collapsed;
   task.logs = logs;
+  task.phaseLabel = activePhaseLabel(collapsed, task.meta?.phases);
   // `agentCount` is what the runtime has scheduled, which can lead what the log
   // has seen — never let a recompute walk it backwards.
   task.agentCount = Math.max(task.agentCount, agents.length);
@@ -225,6 +232,7 @@ export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResu
   task.replayedCount = result.replayedCount;
   task.value = result.value;
   task.error = result.error;
+  task.failures = result.failures;
   task.endTime = Date.now();
 }
 
@@ -316,6 +324,9 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
       task.replayedCount > 0 ? `, ${task.replayedCount} replayed from ${escapeXml(task.resumedFrom ?? "an earlier run")}` : ""
     }</summary>`,
     `<result>${escapeXml(result.length > 4000 ? `${result.slice(0, 4000)}\n...(truncated)` : result)}</result>`,
+    // Compatible with Claude Code's: every failure line, capped, and absent
+    // when nothing failed.
+    task.failures?.length ? `<failures>${escapeXml(task.failures.join("\n").slice(0, 40_000))}</failures>` : null,
     `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join("\n");

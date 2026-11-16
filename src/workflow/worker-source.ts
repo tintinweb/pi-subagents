@@ -31,40 +31,47 @@
  * `EvalError`, so a captured host `Function` cannot compile anything. Treat this
  * as a determinism boundary, not a security boundary against a hostile script.
  *
- * ## Why determinism is a prelude and not a stub
+ * ## Why determinism is a shim and not a stub
  *
  * Because `Date` and `Math` come *from the realm*, they cannot be neutered by
- * injection — there is nothing to inject over. So the compiled source is
- * prefixed with a prelude that runs inside the realm and reassigns `Date.now`
- * and `Math.random` in place, then lexically shadows `Date` with a subclass
- * whose zero-argument constructor throws. Lexical shadowing rather than a global
- * assignment because a `const` in the IIFE scope cannot be reached around.
+ * injection — there is nothing to inject over. So before the script runs, a
+ * shim runs inside the realm: it replaces
+ * `globalThis.Date` with a constructor whose zero-argument and call forms
+ * throw, points `Date.prototype.constructor` at it, makes `Date.now` and
+ * `Math.random` throw, and freezes the real constructor. A global rather than
+ * a lexical shadow, because a lexical `const Date` left `new globalThis.Date()`
+ * reading the real clock.
  *
  * Determinism is enforced because a workflow's journal is replayed by prefix on
  * resume: a script that reads the clock produces a different prefix on the
  * second run and the replay silently diverges.
  */
 
-/**
- * Runs inside the realm, ahead of the script body, on a single line.
- *
- * One line matters: the body is compiled at `\n` + line 1, and the host passes
- * `lineOffset: -1` so reported line numbers match the file the author wrote. Any
- * newline in here shifts every stack frame in every workflow script.
- */
-const DETERMINISM_PRELUDE =
-  "const Date = (function () {" +
-  " const RealDate = globalThis.Date;" +
-  " const die = function (what) {" +
-  " throw new Error(what + \" is unavailable in workflow scripts (breaks resume)." +
-  " Stamp results after the workflow returns, or pass timestamps via `args`.\");" +
-  " };" +
-  " RealDate.now = function () { return die(\"Date.now()\"); };" +
-  " Math.random = function () { return die(\"Math.random()\"); };" +
-  " return class WorkflowDate extends RealDate {" +
-  " constructor() { if (arguments.length === 0) die(\"new Date()\"); super(...arguments); }" +
-  " };" +
-  "})();";
+const NOW_ERROR =
+  "Date.now() / new Date() are unavailable in workflow scripts (breaks resume). Stamp results after the workflow returns, or pass timestamps via args.";
+const RANDOM_ERROR =
+  "Math.random() is unavailable in workflow scripts (breaks resume). For N independent samples, include the index in the agent label or prompt.";
+
+/** Runs once per vm context, before any script is compiled into it. Messages match what Claude Code scripts see, for compatibility. */
+const DETERMINISM_SHIM = `(() => {
+  "use strict";
+  const NOW_ERROR = ${JSON.stringify(NOW_ERROR)};
+  const RANDOM_ERROR = ${JSON.stringify(RANDOM_ERROR)};
+  Math.random = function random() { throw new Error(RANDOM_ERROR); };
+  const RealDate = Date;
+  RealDate.now = function now() { throw new Error(NOW_ERROR); };
+  function WorkflowDate(...args) {
+    if (!new.target || args.length === 0) throw new Error(NOW_ERROR);
+    return Reflect.construct(RealDate, args, new.target);
+  }
+  WorkflowDate.now = RealDate.now;
+  WorkflowDate.parse = RealDate.parse;
+  WorkflowDate.UTC = RealDate.UTC;
+  WorkflowDate.prototype = RealDate.prototype;
+  RealDate.prototype.constructor = WorkflowDate;
+  Object.freeze(RealDate);
+  globalThis.Date = WorkflowDate;
+})()`;
 
 export const WORKER_SOURCE = `"use strict";
 
@@ -73,7 +80,7 @@ const vm = require("node:vm");
 
 const port = parentPort;
 const ITEM_CAP = workerData.itemCap;
-const PRELUDE = ${JSON.stringify(DETERMINISM_PRELUDE)};
+const DETERMINISM_SHIM = ${JSON.stringify(DETERMINISM_SHIM)};
 
 /* ------------------------------------------------------------------ *
  * RPC to the host
@@ -85,6 +92,13 @@ const PRELUDE = ${JSON.stringify(DETERMINISM_PRELUDE)};
 
 let nextCallId = 1;
 const pendingCalls = new Map();
+
+/**
+ * Label → why the most recent agent() call under it failed, for
+ * \`agentError(label)\`. Per worker, so a nested workflow shares it the way it
+ * shares resume labels; a success under the label clears it.
+ */
+const agentErrors = new Map();
 
 /**
  * Output tokens this run has spent, as last reported by the host.
@@ -114,6 +128,12 @@ port.on("message", function (message) {
   if (!waiter) return;
   pendingCalls.delete(message.callId);
   if (message.ok) {
+    // Before resolving, so the script can read the reason as soon as agent()
+    // hands it the null.
+    if (typeof message.agentLabel === "string") {
+      if (message.value === null && typeof message.error === "string") agentErrors.set(message.agentLabel, message.error);
+      else agentErrors.delete(message.agentLabel);
+    }
     waiter.resolve(message.value);
     return;
   }
@@ -157,11 +177,83 @@ function flushProgress() {
 /* ------------------------------------------------------------------ *
  * The JSON boundary
  *
- * Checked here rather than relying on structured clone, which happily
- * carries cycles, BigInt and Maps that the progress log and the resume
- * journal cannot represent. Rejecting loudly beats writing a journal
- * that will not replay.
+ * Two directions, two policies. What the *script hands out* — its return
+ * value, a child's args and result — is copied for compatibility with Claude
+ * Code, so a script written there returns the same value here. What it hands
+ * *in* as configuration — \`opts.schema\` — is checked strictly, because a
+ * schema that changes shape in transit is a schema the journal key and the
+ * tool's parameters disagree about.
  * ------------------------------------------------------------------ */
+
+/**
+ * The VM-boundary copy Claude Code scripts expect: own enumerable keys only, so \`toJSON\` is
+ * never called and a Date, Map, Set or class instance arrives as \`{}\` plus its
+ * own fields. A function property is dropped and a function array slot becomes
+ * \`undefined\`; a \`__proto__\` key is skipped; a getter that throws loses its
+ * property. Shared references and cycles are preserved, which is what lets the
+ * stringify that follows reject a cycle instead of recursing forever.
+ */
+function toPlain(root) {
+  const seen = new Map();
+  function copy(value) {
+    if (typeof value === "function") return undefined;
+    if (value === null || typeof value !== "object") return value;
+    const hit = seen.get(value);
+    if (hit !== undefined) return hit;
+    if (Array.isArray(value)) {
+      const out = [];
+      seen.set(value, out);
+      const length = value.length;
+      for (let i = 0; i < length; i++) {
+        let item;
+        try {
+          item = value[i];
+        } catch {
+          item = undefined;
+        }
+        out[i] = copy(item);
+      }
+      return out;
+    }
+    const out = {};
+    seen.set(value, out);
+    let keys;
+    try {
+      keys = Object.keys(value);
+    } catch {
+      return out;
+    }
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      if (key === "__proto__") continue;
+      let item;
+      try {
+        item = value[key];
+      } catch {
+        continue;
+      }
+      if (typeof item === "function") continue;
+      out[key] = copy(item);
+    }
+    return out;
+  }
+  return copy(root);
+}
+
+/** The copy as JSON. Only a cycle or a BigInt can fail here. */
+function toJson(value, what) {
+  try {
+    return JSON.stringify(toPlain(value));
+  } catch (error) {
+    throw new Error(what + " cannot be serialized: " + describe(error));
+  }
+}
+
+/** The copy re-materialised in the script's realm, for a child's args and result. */
+function toRealmCopy(value, what) {
+  const json = toJson(value, what);
+  return json === undefined ? undefined : realmParse(json);
+}
 
 let realmObjectPrototype = null;
 /**
@@ -208,10 +300,7 @@ function assertBoundary(value, path, seen) {
     if (!Number.isFinite(value)) throw boundaryError("a non-finite number", path);
     return;
   }
-  if (kind === "undefined") {
-    if (path === "the workflow result") return;
-    throw boundaryError("undefined", path);
-  }
+  if (kind === "undefined") throw boundaryError("undefined", path);
   if (kind === "bigint") throw boundaryError("a BigInt", path);
   if (kind === "symbol") throw boundaryError("a symbol", path);
   if (kind === "function") throw boundaryError("a function", path);
@@ -312,6 +401,44 @@ function optionalText(value, what) {
 const EFFORT_LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
 
 /**
+ * \`opts.effort\`, read for compatibility with Claude Code: empty means unset, case does not
+ * matter, \`med\` means \`medium\`. An unknown level still throws here where
+ * Claude Code drops it to the default — the same typo guard unknown option
+ * keys get.
+ */
+function normalizeEffort(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const lower = String(value).toLowerCase();
+  const level = lower === "med" ? "medium" : lower;
+  if (EFFORT_LEVELS.indexOf(level) === -1) {
+    throw new Error("agent() opts.effort must be one of: " + EFFORT_LEVELS.join(", ") + ".");
+  }
+  return level;
+}
+
+/**
+ * \`opts.disallowedTools\`, validated for compatibility with Claude Code: a
+ * malformed list refuses the spawn rather than running it un-narrowed. Empty
+ * means unset; otherwise deduped and sorted, so the journal key does not
+ * depend on the order the script listed them in.
+ */
+function normalizeDisallowedTools(value) {
+  if (value === undefined) return undefined;
+  const malformed = function (entry) {
+    return typeof entry !== "string" || entry === "" || entry !== entry.trim();
+  };
+  if (!Array.isArray(value) || value.some(malformed)) {
+    throw new Error(
+      "agent() opts.disallowedTools must be an array of non-empty tool-name strings (e.g. ['Bash', 'Write']); got "
+        + (Array.isArray(value) ? "an array with non-string, empty, or whitespace-padded entries" : typeof value)
+        + ". Refusing the spawn rather than running it un-narrowed."
+    );
+  }
+  if (value.length === 0) return undefined;
+  return Array.from(new Set(value)).sort();
+}
+
+/**
  * Every option \`agent()\` understands.
  *
  * Checked rather than ignored, because the alternative is the worst failure a
@@ -331,6 +458,7 @@ const AGENT_OPTIONS = [
   "resume",
   "effort",
   "schema",
+  "disallowedTools",
 ];
 
 /** Claude Code options this runtime does not have, and why. */
@@ -379,6 +507,12 @@ function makeScope(name, depth) {
   };
   scope.workflow = function (ref, args) {
     return workflowIn(scope, ref, args);
+  };
+  scope.parallel = function (thunks) {
+    return parallelIn(scope, thunks);
+  };
+  scope.pipeline = function (items, ...stages) {
+    return pipelineIn(scope, items, stages);
   };
   scope.console = makeConsole(scope);
   return scope;
@@ -430,6 +564,12 @@ function logIn(scope, message) {
   emit({ type: "workflow_log", message: logPrefix(scope) + describe(message) });
 }
 
+/** A slot that dropped to null: a log line now, and a \`<failures>\` line in the notification. */
+function reportFailure(scope, line) {
+  logIn(scope, line);
+  port.postMessage({ type: "failure", message: logPrefix(scope) + line });
+}
+
 function makeConsole(scope) {
   const write = function () {
     const parts = [];
@@ -466,7 +606,8 @@ async function agentIn(scope, prompt, opts) {
   }
   const gate = optionalText(options.gate, "agent() opts.gate");
   const resume = optionalText(options.resume, "agent() opts.resume");
-  const effort = optionalText(options.effort, "agent() opts.effort");
+  const effort = normalizeEffort(options.effort);
+  const disallowedTools = normalizeDisallowedTools(options.disallowedTools);
   const schema = options.schema;
   if (schema !== undefined) {
     if (typeof schema !== "object" || schema === null || Array.isArray(schema)) {
@@ -476,9 +617,6 @@ async function agentIn(scope, prompt, opts) {
     // journal key nor the tool's parameters can survive. Same check the return
     // value gets.
     checkBoundary(schema, "agent() opts.schema");
-  }
-  if (effort !== undefined && EFFORT_LEVELS.indexOf(effort) === -1) {
-    throw new Error("agent() opts.effort must be one of: " + EFFORT_LEVELS.join(", ") + ".");
   }
 
   // resume revives a child that already exists, so anything describing how to
@@ -512,6 +650,11 @@ async function agentIn(scope, prompt, opts) {
           + "already had, whose tool set was fixed when it started — it has no StructuredOutput tool to answer through."
       );
     }
+    if (disallowedTools !== undefined) {
+      throw new Error(
+        "agent() opts.resume and opts.disallowedTools are mutually exclusive: a resumed agent keeps the tool set it was started with."
+      );
+    }
     if (gate !== undefined) {
       throw new Error("agent() opts.gate cannot be combined with opts.resume.");
     }
@@ -535,12 +678,13 @@ async function agentIn(scope, prompt, opts) {
     resume: resume,
     effort: effort,
     schema: schema,
+    disallowedTools: disallowedTools,
   });
   if (result === undefined || result === null) return null;
   if (schema === undefined) return result;
   // Parsed with the realm's own JSON.parse so the script gets an object whose
   // prototype is its own — \`x instanceof Object\` and \`x.list instanceof Array\`
-  // both hold, and it survives assertBoundary if the script returns it.
+  // both hold.
   try {
     return realmParse(result);
   } catch (error) {
@@ -552,9 +696,11 @@ async function agentIn(scope, prompt, opts) {
 /**
  * A barrier: every thunk starts now, and nothing past the await runs until all
  * of them have settled. A thunk that throws resolves to null rather than
- * failing its siblings — the script filters, it does not try/catch.
+ * failing its siblings — the script filters, it does not try/catch — and
+ * leaves a \`parallel[i] failed: …\` log line, so the null
+ * is not silent. Per scope, so a nested child's line carries its prefix.
  */
-async function parallel(thunks) {
+async function parallelIn(scope, thunks) {
   const list = toList(thunks, "parallel(thunks)");
   for (let i = 0; i < list.length; i++) {
     if (typeof list[i] !== "function") {
@@ -562,11 +708,12 @@ async function parallel(thunks) {
     }
   }
   const settled = await Promise.all(
-    list.map(async function (thunk) {
+    list.map(async function (thunk, index) {
       try {
         return await thunk();
       } catch (error) {
         if (isFatal(error)) throw error;
+        reportFailure(scope, "parallel[" + index + "] failed: " + describe(error));
         return null;
       }
     })
@@ -580,10 +727,14 @@ async function parallel(thunks) {
  * a barrier makes every stage wait on its slowest sibling, and with agents in
  * the stages that latency is measured in minutes.
  *
- * A stage that throws drops that item to null and skips its remaining stages.
- * Every stage sees (previousResult, originalItem, index).
+ * A stage that throws drops that item to null, skips its remaining stages and
+ * logs \`pipeline[i] failed: …\`. A stage that *returns* null also ends the
+ * item's chain — the next stage would otherwise spend an
+ * agent on "verify null" — and so does a null item. An item that is a promise
+ * is awaited before stage one. Every stage sees (previousResult,
+ * originalItem, index).
  */
-async function pipeline(items, ...stages) {
+async function pipelineIn(scope, items, stages) {
   const list = toList(items, "pipeline(items, ...stages)");
   for (let i = 0; i < stages.length; i++) {
     if (typeof stages[i] !== "function") {
@@ -592,16 +743,17 @@ async function pipeline(items, ...stages) {
   }
   const settled = await Promise.all(
     list.map(async function (item, index) {
-      let value = item;
-      for (let s = 0; s < stages.length; s++) {
-        try {
+      try {
+        let value = await item;
+        for (let s = 0; s < stages.length && value !== null; s++) {
           value = await stages[s](value, item, index);
-        } catch (error) {
-          if (isFatal(error)) throw error;
-          return null;
         }
+        return value;
+      } catch (error) {
+        if (isFatal(error)) throw error;
+        reportFailure(scope, "pipeline[" + index + "] failed: " + describe(error));
+        return null;
       }
-      return value;
     })
   );
   return toRealmArray(settled);
@@ -644,7 +796,9 @@ async function workflowIn(scope, nameOrRef, args) {
   }
 
   const label = ref.name !== undefined ? ref.name : ref.scriptPath;
-  if (args !== undefined) checkBoundary(args, 'workflow("' + label + '") args');
+  // A copy, as Claude Code scripts expect: the child must not be able to
+  // mutate the parent's object through its \`args\`.
+  const childArgs = toRealmCopy(args, 'workflow("' + label + '") args');
 
   if (nestedCount >= workerData.nestedCap) {
     // Fatal, like the agent cap: a limit that silently drops work would be
@@ -678,10 +832,14 @@ async function workflowIn(scope, nameOrRef, args) {
   let run;
   try {
     const compiled = new vm.Script(
-      // \`meta\` is deliberately not a parameter: the body still opens with its
-      // own \`const meta = { ... }\` (extractMeta strips only the \`export\`), so a
-      // parameter of that name would collide with it.
-      "(async (agent, phase, log, workflow, console, args) => {" + PRELUDE + "\\n" + loaded.body + "\\n})",
+      // The body runs in an inner function, so its own declarations shadow
+      // these parameters instead of colliding with them — Claude Code hands a
+      // child the same names as globals, which a \`const pipeline\` may shadow.
+      // \`meta\` is not a parameter: the body opens with its own
+      // \`const meta = { ... }\` (extractMeta strips only the \`export\`).
+      "(async (agent, phase, log, workflow, console, args, parallel, pipeline) => {'use strict'; return (async () => {\\n"
+        + loaded.body
+        + "\\n})(); })",
       { filename: "workflow:" + loaded.name + ".js", lineOffset: -1 }
     );
     run = compiled.runInContext(realmContext);
@@ -689,9 +847,12 @@ async function workflowIn(scope, nameOrRef, args) {
     throw new Error('workflow("' + label + '"): ' + describe(error));
   }
 
-  const value = await run(child.agent, child.phase, child.log, child.workflow, child.console, args);
-  checkBoundary(value, 'the result of workflow("' + label + '")');
-  return value;
+  const value = await run(
+    child.agent, child.phase, child.log, child.workflow, child.console, childArgs, child.parallel, child.pipeline
+  );
+  // Refused as a script's own result is, rather than copied to undefined.
+  if (typeof value === "function") throw new Error('workflow("' + label + '") result cannot be a function');
+  return toRealmCopy(value, 'the result of workflow("' + label + '")');
 }
 
 /**
@@ -721,27 +882,77 @@ function makeBudget() {
   };
 }
 
+/**
+ * The \`setTimeout\` / \`clearTimeout\` globals, for compatibility with Claude
+ * Code scripts: the delay coerced to a number, ids rather than handles, and a
+ * callback that throws — or, being async, rejects — swallowed rather than
+ * failing the run. Nothing clears them on
+ * settle or abort because nothing has to — the host terminates this worker
+ * either way.
+ */
+function makeTimers() {
+  const handles = new Map();
+  let nextId = 1;
+  return {
+    setTimeout: function (callback, ms) {
+      if (typeof callback !== "function") {
+        throw new TypeError("setTimeout(callback, ms) expects a function.");
+      }
+      const id = nextId++;
+      handles.set(
+        id,
+        setTimeout(function () {
+          handles.delete(id);
+          // A timer callback cannot fail the run. Through a promise, so an
+          // async callback's rejection is caught too rather than surfacing as
+          // an unhandled rejection that kills the worker.
+          Promise.resolve().then(callback).catch(function () {});
+        }, Number(ms) || 0)
+      );
+      return id;
+    },
+    clearTimeout: function (id) {
+      const handle = handles.get(id);
+      if (handle === undefined) return;
+      handles.delete(id);
+      clearTimeout(handle);
+    },
+  };
+}
+
 /* ------------------------------------------------------------------ *
  * Run
  * ------------------------------------------------------------------ */
 
 async function main() {
   rootScope = makeScope(undefined, 0);
+  const timers = makeTimers();
   const sandbox = {
     agent: rootScope.agent,
-    parallel: parallel,
-    pipeline: pipeline,
+    parallel: rootScope.parallel,
+    pipeline: rootScope.pipeline,
     phase: rootScope.phase,
     log: rootScope.log,
     workflow: rootScope.workflow,
     budget: makeBudget(),
     console: rootScope.console,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
   };
+  // Read-only: a script that assigned over it would silently read its own
+  // stand-in instead of the host's answer.
+  Object.defineProperty(sandbox, "agentError", {
+    value: function agentError(label) {
+      return agentErrors.get(requireText(label, "agentError(label)"));
+    },
+    enumerable: true,
+  });
   const context = vm.createContext(sandbox, {
     name: "workflow",
     codeGeneration: { strings: false, wasm: false },
   });
 
+  vm.runInContext(DETERMINISM_SHIM, context);
   realmObjectPrototype = vm.runInContext("Object.prototype", context);
   realmNewArray = vm.runInContext("(function () { return []; })", context);
   realmPush = vm.runInContext("(function (array, value) { array.push(value); })", context);
@@ -754,20 +965,21 @@ async function main() {
   sandbox.meta = realmParse(workerData.metaJson);
   sandbox.args = workerData.argsJson === undefined ? undefined : realmParse(workerData.argsJson);
 
-  const script = new vm.Script("(async () => {" + PRELUDE + "\\n" + workerData.body + "\\n})()", {
+  const script = new vm.Script("(async () => {'use strict';\\n" + workerData.body + "\\n})()", {
     filename: "workflow.js",
-    // The wrapper adds exactly one line above the body; undo it so a thrown
-    // error points at the line the author wrote.
+    // The wrapper, strict directive included, adds exactly one line above the
+    // body; undo it so a thrown error points at the line the author wrote.
+    // Strict: a Claude Code workflow script must not be relying on
+    // sloppy-mode leniency here.
     lineOffset: -1,
   });
 
   const value = await script.runInContext(context);
-  checkBoundary(value, "the workflow result");
+  // The one value refused outright; everything else is copied.
+  if (typeof value === "function") throw new Error("workflow result cannot be a function");
+  const resultJson = toJson(value, "the workflow result");
   flushProgress();
-  port.postMessage({
-    type: "complete",
-    resultJson: value === undefined ? undefined : JSON.stringify(value),
-  });
+  port.postMessage({ type: "complete", resultJson: resultJson });
 }
 
 main().catch(function (error) {

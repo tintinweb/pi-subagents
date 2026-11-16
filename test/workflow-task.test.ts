@@ -161,4 +161,12 @@ describe("updateWorkflowProgressBatch", () => {
     expect(task.totalTokens).toBe(180);
     expect(task.doneCount).toBe(2);
   });
+
+  it("keeps the active-phase label current, against the declared phases", () => {
+    const task = createWorkflowTask({ id: "wf-1", script: "", meta: { name: "w", description: "d", phases: [{ title: "Scan" }, { title: "Fix" }] } });
+    updateWorkflowProgressBatch(task, [{ type: "workflow_phase", index: 0, title: "Scan" }, { ...agent(0, "start", 0), phaseIndex: 0 }]);
+    expect(task.phaseLabel).toBe("Scanning (1/2)");
+    updateWorkflowProgressBatch(task, [{ ...agent(0, "done", 1), phaseIndex: 0 }]);
+    expect(task.phaseLabel).toBe("");
+  });
 });

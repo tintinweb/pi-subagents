@@ -187,10 +187,9 @@ describe("parseMention", () => {
 
 describe("agentMentionReminder", () => {
   it("is Claude Code's string, byte for byte", () => {
-    // Ported from the 2.1.233 bundle rather than paraphrased, so the model gets
-    // the wording it was trained against. Asserted whole — including the
-    // trailing space before the closing newline, which is in the original
-    // template literal and is exactly the kind of thing a tidy-up would drop.
+    // Fixed wording rather than a paraphrase, so the model gets the
+    // wording it was trained against. Asserted whole — including the trailing
+    // space before the closing newline, which is in the original and is exactly the kind of thing a tidy-up would drop.
     expect(agentMentionReminder("code-review")).toBe(
       '<system-reminder>\nThe user has expressed a desire to invoke the agent "code-review". Please invoke the agent appropriately, passing in the required context to it. \n</system-reminder>',
     );

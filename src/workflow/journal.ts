@@ -57,6 +57,8 @@ export interface WorkflowJournalEntry {
   ok: boolean;
   /** The agent's answer, when it had one. */
   text?: string;
+  /** Why the call failed, capped. Diagnostic only: never part of a replay match. */
+  error?: string;
   /**
    * Whether the call continued an earlier child (`agent({ resume })`).
    *
@@ -87,6 +89,8 @@ export interface JournalKeyInput {
   resume?: string;
   /** Serialized `agent({ schema })`, when the call asked for one. */
   schema?: string;
+  /** `agent({ disallowedTools })`, already deduped and sorted worker-side. */
+  disallowedTools?: string[];
 }
 
 /** Stable hash of a call's payload. Field order is fixed here, not by the caller. */
@@ -106,6 +110,9 @@ export function journalKey(input: JournalKeyInput): string {
     // call keys exactly as it always did, and adding or changing a schema still
     // produces a different key.
     ...(input.schema !== undefined ? [input.schema] : []),
+    // Same reasoning. An array never equals the string a schema slot holds, so
+    // the two cannot be confused by position.
+    ...(input.disallowedTools !== undefined ? [input.disallowedTools] : []),
   ]);
   return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }
@@ -159,6 +166,7 @@ function isEntry(value: unknown): value is WorkflowJournalEntry {
     typeof entry.key === "string" &&
     typeof entry.ok === "boolean" &&
     (entry.text === undefined || typeof entry.text === "string") &&
+    (entry.error === undefined || typeof entry.error === "string") &&
     (entry.resumed === undefined || entry.resumed === true)
   );
 }
