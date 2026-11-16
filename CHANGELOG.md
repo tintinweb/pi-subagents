@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-11-16
+
 > **⚠️ Behavior change — a workflow starts only when you ask for one** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A request for a number of agents, like "use 10 agents to …", now runs parallel `Agent` calls instead of a `SubagentWorkflow`. To run a workflow, say so ("use a workflow") or name a saved workflow.
+
+> **⚠️ Behavior change — `agent({ schema })` is validated strictly against draft-07** ([#455](https://github.com/tintinweb/pi-subagents/pull/455)). A schema with an unknown keyword (`prefixItems`, `x-*`) or a non-draft-07 `$schema` is now refused and the run ends before the agent starts; such schemas used to run. Remove the unsupported keywords, or express them in draft-07 (`items` as an array instead of `prefixItems`).
 
 ### Added
 - **Token optimization: the `SubagentWorkflow` script reference can move out of the tool description.** The reference now ships as a `workflow-authoring` skill (`/skill:workflow-authoring`), and the new `workflowToolExposure` setting picks where the model gets it. The default, `"inline"`, keeps it in the tool description as before. Set `"skill"` in `subagents.json` or `/agents` → Settings to save about 4k tokens per session: the description then carries one line pointing at the skill file, which works only with a model that reads it before writing a script.
