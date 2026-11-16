@@ -112,4 +112,19 @@ describe("createAgentDetailSource", () => {
     rec.status = "completed";
     expect(source("r")).not.toBe(grown);
   });
+
+  it("follows the record's result after it settles", () => {
+    // The manager appends a worktree's merge note to `result` once cleanup
+    // ends — after the status and the transcript have stopped changing.
+    const rec = record({ status: "completed", result: "done", session: { messages: msgs([{ role: "user", content: "p" }]) } as never });
+    const source = createAgentDetailSource(() => rec);
+    expect(source("r")?.outcome).toBe("done");
+    rec.result = "done\n\nChanges saved to branch `b`.";
+    expect(source("r")?.outcome).toBe("done\n\nChanges saved to branch `b`.");
+  });
+
+  it("strips terminal control from the record's result, as from the transcript", () => {
+    const rec = record({ result: "a\tb\r\x1b[31mred\x1b[0m", session: { messages: [] } as never });
+    expect(createAgentDetailSource(() => rec)("r")?.outcome).toBe("a   bred");
+  });
 });

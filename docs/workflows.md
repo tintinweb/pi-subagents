@@ -107,7 +107,7 @@ Re-running normally re-pays for every agent. `resumeFromRunId` avoids that:
 
 > Its unchanged leading `agent()` calls return their recorded results instantly; the first changed or failed call, and everything after it, runs live.
 
-Every run journals each settled `agent()` call beside its script as `<run id>.workflow.jsonl`, and the resume replays the **unchanged prefix** of that journal. It is a prefix and not a lookup table on purpose: a later call that still matches came from a run whose earlier stages no longer exist, so its recorded answer was produced downstream of work that has changed.
+Every run journals each settled `agent()` call as `<run id>.workflow.jsonl` in the session's tasks directory — beside an inline script, not beside a saved one ([Where files live](#where-files-live)) — and the resume replays the **unchanged prefix** of that journal. It is a prefix and not a lookup table on purpose: a later call that still matches came from a run whose earlier stages no longer exist, so its recorded answer was produced downstream of work that has changed.
 
 Four things it will not do:
 
@@ -309,7 +309,7 @@ await parallel(thunks)             // barrier: waits for all of them
 
 A thunk or stage that throws leaves a log line — `parallel[1] failed: <message>` or `pipeline[0] failed: <message>` — so a dropped item shows in the progress view rather than vanishing. A stage that returns `null`, or a `null` item, ends its chain without one.
 
-In both, a fatal run error is the exception: a cap breach, an unusable `schema`, or a nested `workflow()` that could not load, propagates out of the call and fails the run rather than turning into a `null`.
+In both, a fatal run error is the exception: a cap breach, an unusable `schema`, or a `resume` label no agent has completed under, propagates out of the call and fails the run rather than turning into a `null`.
 
 Prefer `pipeline` unless a stage genuinely needs every prior result *together* — deduplicating across the whole set, deciding whether to continue at all, or a prompt that compares one result against all the others. Needing to flatten, map or filter is not such a case; do that inside a pipeline stage.
 
@@ -500,7 +500,7 @@ Different:
 - **`agentType` matches case-insensitively**, and an unknown one falls back to `fallbackSubagent` — see the troubleshooting entry above. Claude Code matches exactly and throws.
 - **An unknown `effort` throws** at the call. Claude Code ignores it and uses the default effort.
 - **An unknown option key throws** at the call, by name. Claude Code ignores it.
-- **`parallel` and `pipeline` propagate a fatal run error** — a cap breach, an unusable `schema`, or a nested `workflow()` that could not load — instead of folding it into a `null`. Claude Code throws the same schema error at `agent()`, but inside `parallel` or `pipeline` it becomes a `null`.
+- **`parallel` and `pipeline` propagate a fatal run error** — a cap breach, an unusable `schema`, or a `resume` label no agent has completed under — instead of folding it into a `null`. Claude Code throws the same schema error at `agent()`, but inside `parallel` or `pipeline` it becomes a `null`.
 - If both extensions are loaded, this one **stands down** rather than offering the model two orchestrators.
 
 Additions on this side: `gate`, `resume`, `effort: "minimal"`, `agentError(label)`, the journal entry's `error`, and the un-awaited-`agent()` check. All are optional, which is what keeps a Claude Code script portable.

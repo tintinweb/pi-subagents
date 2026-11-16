@@ -42,16 +42,14 @@ export interface AgentDetail {
  */
 const SUMMARY_KEYS = ["command", "pattern", "query", "url", "file_path", "path", "description", "prompt"] as const;
 
-/** `cat a && cat b` from a multi-line argument: whitespace collapsed to one line. */
-const oneLine = (text: string) => text.replace(/\s+/g, " ").trim();
-
 /** `Name(summary)` — the argument that says what the call does, on one line. */
 export function toolCallHead(name: string, args: unknown): string {
   const record = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
   const value =
     SUMMARY_KEYS.map(key => record[key]).find((v): v is string => typeof v === "string" && v.trim() !== "")
     ?? Object.values(record).find((v): v is string => typeof v === "string" && v.trim() !== "");
-  return value === undefined ? name : `${name}(${oneLine(displayText(value))})`;
+  // `cat a && cat b` from a multi-line argument: whitespace collapsed to one line.
+  return value === undefined ? name : `${name}(${displayText(value).replace(/\s+/g, " ").trim()})`;
 }
 
 /**
@@ -67,8 +65,6 @@ export function displayText(text: string): string {
     .replace(/\t/g, "   ")
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
 }
-
-const splitLines = (text: string) => (text === "" ? [] : text.split("\n"));
 
 /**
  * Fold a session's messages into prompt, transcript items and outcome.
@@ -103,10 +99,11 @@ export function agentDetailFromMessages(messages: readonly AgentMessage[]): Agen
           outcome = text;
         } else if (part.type === "toolCall") {
           const result = results.get(part.id);
+          const resultText = result ? displayText(extractText(result.content)).trimEnd() : "";
           items.push({
             kind: "tool",
             head: toolCallHead(part.name, part.arguments),
-            body: result ? splitLines(displayText(extractText(result.content)).trimEnd()) : [],
+            body: resultText ? resultText.split("\n") : [],
             settled: result !== undefined,
             ...(result?.isError ? { isError: true } : {}),
           });

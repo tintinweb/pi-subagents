@@ -1360,6 +1360,22 @@ describe("nested workflow()", () => {
     expect(logs).toEqual(["▸ c: parallel[0] failed: boom", "▸ c: pipeline[0] failed: bust"]);
   });
 
+  it("lets a child redeclare the names it is handed, as a root script can", async () => {
+    // Claude Code makes these globals of the child's context, so a child
+    // declaring its own `pipeline` or `log` compiles there.
+    const { host } = nestingHost({ c: child("c", "const pipeline = 1;\nconst log = 2;\nreturn pipeline + log;") });
+    const result = await run('return await workflow("c");', { host });
+    expect(result.status).toBe("completed");
+    expect(result.value).toBe(3);
+  });
+
+  it("reports a child's line numbers against the file the author wrote", async () => {
+    // `child()` puts meta on line 1, so the Error is constructed on line 2.
+    const { host } = nestingHost({ c: child("c", 'return new Error("x").stack;') });
+    const result = await run('return await workflow("c");', { host });
+    expect(result.value).toContain("workflow:c.js:2:");
+  });
+
   it("holds the determinism shim inside the child, which shares the context", async () => {
     const { host } = nestingHost({ c: child("c", "try { new Date(); return 'leaked'; } catch (error) { return error.message; }") });
     const result = await run('return await workflow("c");', { host });

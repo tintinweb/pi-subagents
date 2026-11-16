@@ -16,7 +16,7 @@
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import type { AgentRecord } from "../types.js";
-import { type AgentDetail, agentDetailFromMessages } from "../workflow/agent-detail.js";
+import { type AgentDetail, agentDetailFromMessages, displayText } from "../workflow/agent-detail.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
 import { createViewerKeys } from "./viewer-keys.js";
 import { WORKFLOW_DIALOG_HEIGHT_PCT, WorkflowDialog } from "./workflow-dialog.js";
@@ -53,30 +53,32 @@ function recordOutcome(record: AgentRecord): string | undefined {
     try {
       return JSON.stringify(JSON.parse(record.structuredJson), null, 2);
     } catch {
-      return record.structuredJson;
+      return displayText(record.structuredJson);
     }
   }
-  return record.result;
+  return record.result === undefined ? undefined : displayText(record.result);
 }
 
 /**
- * A `detail` lookup over the manager's records, memoised per record on its
- * message count and status — the dialog re-reads its source on every 80ms
- * spinner frame, and re-folding a long transcript that often would be waste.
+ * A `detail` lookup over the manager's records. The transcript fold is
+ * memoised per record on its message count and status — the dialog re-reads
+ * its source on every 80ms spinner frame, and re-folding a long transcript
+ * that often would be waste. The outcome is read every time: the manager
+ * appends a worktree's merge note to `result` after both have settled.
  */
 export function createAgentDetailSource(getRecord: (id: string) => AgentRecord | undefined): (id: string) => AgentDetail | undefined {
-  const cache = new Map<string, { key: string; detail: AgentDetail }>();
+  const cache = new Map<string, { key: string; folded: AgentDetail; detail: AgentDetail }>();
   return id => {
     const record = getRecord(id);
     const messages = record?.session?.messages;
     if (record === undefined || messages === undefined) return undefined;
     const key = `${messages.length}:${record.status}`;
     const hit = cache.get(id);
-    if (hit?.key === key) return hit.detail;
-    const folded = agentDetailFromMessages(messages);
+    const folded = hit?.key === key ? hit.folded : agentDetailFromMessages(messages);
     const outcome = recordOutcome(record) ?? folded.outcome;
+    if (hit?.folded === folded && hit.detail.outcome === outcome) return hit.detail;
     const detail: AgentDetail = { ...folded, ...(outcome !== undefined ? { outcome } : {}) };
-    cache.set(id, { key, detail });
+    cache.set(id, { key, folded, detail });
     return detail;
   };
 }

@@ -832,10 +832,14 @@ async function workflowIn(scope, nameOrRef, args) {
   let run;
   try {
     const compiled = new vm.Script(
-      // \`meta\` is deliberately not a parameter: the body still opens with its
-      // own \`const meta = { ... }\` (extractMeta strips only the \`export\`), so a
-      // parameter of that name would collide with it.
-      "(async (agent, phase, log, workflow, console, args, parallel, pipeline) => {'use strict';\\n" + loaded.body + "\\n})",
+      // The body runs in an inner function, so its own declarations shadow
+      // these parameters instead of colliding with them — Claude Code hands a
+      // child the same names as globals, which a \`const pipeline\` may shadow.
+      // \`meta\` is not a parameter: the body opens with its own
+      // \`const meta = { ... }\` (extractMeta strips only the \`export\`).
+      "(async (agent, phase, log, workflow, console, args, parallel, pipeline) => {'use strict'; return (async () => {\\n"
+        + loaded.body
+        + "\\n})(); })",
       { filename: "workflow:" + loaded.name + ".js", lineOffset: -1 }
     );
     run = compiled.runInContext(realmContext);

@@ -106,7 +106,9 @@ export const WORKFLOW_DIALOG_CHROME_ROWS = 6;
  * The frame's body height for a terminal `rows` tall: the overlay's share of
  * it, less the chrome. Fixed for a given terminal, so the box keeps its size
  * however much the panes hold — moving the selection, expanding the detail or
- * a phase filling up never makes it jump.
+ * a phase filling up never makes it jump. Never below `MIN_PANE_BODY_ROWS`:
+ * in a terminal under 14 rows that floor wins, and the overlay's `maxHeight`
+ * cuts the footer off.
  */
 export function workflowDialogBodyRows(rows: number): number {
   return Math.max(MIN_PANE_BODY_ROWS, Math.floor((rows * WORKFLOW_DIALOG_HEIGHT_PCT) / 100) - WORKFLOW_DIALOG_CHROME_ROWS);
@@ -639,9 +641,6 @@ function bottomEdge(label: string | undefined, width: number, horizontal: string
  * Detail sections
  * ------------------------------------------------------------------------- */
 
-/** Split a preview into lines, treating an empty preview as absent. */
-const previewLines = (preview: string | undefined) => (preview ? preview.split("\n") : []);
-
 /** What the Activity body says when there is no transcript to list from. */
 function activityBody(entry: WorkflowAgentEntry, state: WorkflowDisplayState): string {
   if (state === "queued") return WORKFLOW_DIALOG_COPY.availableOnceStarted;
@@ -753,7 +752,9 @@ function detailSections(options: {
     detailBody(`${glyphs.ellipsis} ${hidden} more ${noun}${hidden === 1 ? "" : "s"}`, width);
 
   // ---- Prompt
-  const prompt = previewLines(detail?.prompt ?? entry.promptPreview);
+  // An empty preview is absent, not one blank line.
+  const promptText = detail?.prompt ?? entry.promptPreview;
+  const prompt = promptText ? promptText.split("\n") : [];
   const promptFolds = prompt.length > PROMPT_COLLAPSED_LINES;
   const promptSuffix = prompt.length > 0 ? [lineCount(prompt.length)] : [];
   if (promptFolds) promptSuffix.push(toggle);
@@ -1137,6 +1138,9 @@ export function handleWorkflowDialogKey(
   keys: ViewerKeys = createViewerKeys(),
 ): { state: WorkflowDialogState; action?: WorkflowDialogAction } | undefined {
   const { maxDetailScroll } = pane;
+  // Where the layout drew the detail: the stored offset can outrun a detail
+  // that has since shrunk, and stepping from it would swallow a keypress.
+  const scroll = Math.min(state.detailScroll, maxDetailScroll);
   // Ctrl+C is the reflex for backing out of a full-screen overlay, so it closes
   // outright from EITHER level — the conversation viewer's #255 fix, which this
   // dialog is reached the same way as. Deliberately not folded into the `esc`
@@ -1166,7 +1170,7 @@ export function handleWorkflowDialogKey(
   // known once the next layout has wrapped it; if it fits, `detailHasFocus`
   // stays false and the arrows keep moving between agents.
   if (matchesKey(data, "right") && state.level === "agent") {
-    return { state: { ...state, expanded: true, detailFocused: true, detailScroll: state.expanded ? state.detailScroll : 0 } };
+    return { state: { ...state, expanded: true, detailFocused: true, detailScroll: state.expanded ? scroll : 0 } };
   }
 
   // Paging and jumps, with the conversation viewer's keys: `PgUp`/`PgDn` (or
@@ -1175,8 +1179,8 @@ export function handleWorkflowDialogKey(
   // in the subview uses them.
   if (state.level === "agent" && maxDetailScroll > 0) {
     const scrollTo = (row: number) => ({ state: { ...state, detailScroll: Math.min(Math.max(0, row), maxDetailScroll) } });
-    if (keys.pageDown(data)) return scrollTo(state.detailScroll + pane.detailPageRows);
-    if (keys.pageUp(data)) return scrollTo(state.detailScroll - pane.detailPageRows);
+    if (keys.pageDown(data)) return scrollTo(scroll + pane.detailPageRows);
+    if (keys.pageUp(data)) return scrollTo(scroll - pane.detailPageRows);
     if (keys.top(data) || matchesKey(data, "home")) return scrollTo(0);
     if (keys.bottom(data) || matchesKey(data, "end")) return scrollTo(maxDetailScroll);
   }
@@ -1187,7 +1191,7 @@ export function handleWorkflowDialogKey(
   const down = matchesKey(data, "j") || matchesKey(data, "down");
   const up = matchesKey(data, "k") || matchesKey(data, "up");
   if (focused && (down || up)) {
-    const next = Math.min(Math.max(0, state.detailScroll + (down ? 1 : -1)), maxDetailScroll);
+    const next = Math.min(Math.max(0, scroll + (down ? 1 : -1)), maxDetailScroll);
     return { state: { ...state, detailScroll: next } };
   }
   if (down || up) {
@@ -1319,7 +1323,8 @@ export class WorkflowDialog implements Component {
       width,
       spinnerFrame: this.spinnerFrame,
       // Sized to the overlay's share of the terminal, so the whole dialog fits
-      // its `maxHeight` and keeps one height while it is open.
+      // its `maxHeight` (bar a terminal under 14 rows) and keeps one height
+      // while it is open.
       bodyRows: workflowDialogBodyRows(this.tui.terminal.rows),
     });
     this.pane = { maxDetailScroll, detailPageRows };

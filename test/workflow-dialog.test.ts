@@ -604,6 +604,16 @@ describe("keys", () => {
     expect(handleWorkflowDialogKey(PGDN, full.state, view, pane)?.state.selectedAgent).toBe(0);
   });
 
+  it("steps from where the detail is drawn after it shrinks, not from a stale offset", () => {
+    // Scrolled to the end of a longer detail; it has since shrunk to 29 rows of
+    // scroll, so the layout draws offset 29 and the first key must move from there.
+    const full = input({ progress, state: { level: "agent", expanded: true, detailFocused: true, detailScroll: 39 } });
+    const view = resolveWorkflowDialog(full);
+    const pane = { maxDetailScroll: 29, detailPageRows: 10 };
+    expect(handleWorkflowDialogKey("\x1b[A", full.state, view, pane)?.state.detailScroll).toBe(28);
+    expect(handleWorkflowDialogKey("\x1b[5~", full.state, view, pane)?.state.detailScroll).toBe(19);
+  });
+
   it("starts a newly selected agent at the top, collapsed", () => {
     const moved = press("\x1b[B", { level: "agent", detailScroll: 5, expanded: true });
     expect(moved?.state).toMatchObject({ selectedAgent: 1, detailScroll: 0, expanded: false });
