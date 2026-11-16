@@ -2636,6 +2636,17 @@ Terse command-style prompts produce shallow, generic work.
    * detached — a rejection would surface as an unhandled one.
    */
   async function runWorkflowTask(ctx: ExtensionContext, task: WorkflowTask): Promise<void> {
+    const name = task.meta?.name ?? task.workflowName ?? task.id;
+    // The run outlives a session replacement, after which the captured `pi` throws on emit.
+    const announce = (event: string, data: unknown) => {
+      try { pi.events.emit(event, data); } catch { /* stale after session replacement */ }
+    };
+    announce("subagents:workflow_started", {
+      id: task.id,
+      name,
+      description: task.meta?.description ?? "",
+      ...(task.toolCallId !== undefined ? { toolCallId: task.toolCallId } : {}),
+    });
     try {
       const result = await runWorkflow({
         script: task.script,
@@ -2649,7 +2660,10 @@ Terse command-style prompts produce shallow, generic work.
           rootSessionId: ctx.sessionManager.getSessionId(),
           workflowId: task.id,
         }),
-        onProgress: entries => updateWorkflowProgressBatch(task, entries),
+        onProgress: entries => {
+          updateWorkflowProgressBatch(task, entries);
+          announce("subagents:workflow_progress", { id: task.id, entries });
+        },
         // The dialog's pause / skip / retry keys run through this; it is dropped
         // again when the task settles.
         onControl: control => { task.control = control; },
@@ -2664,6 +2678,15 @@ Terse command-style prompts produce shallow, generic work.
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
     }
+    announce("subagents:workflow_settled", {
+      id: task.id,
+      name,
+      status: task.status,
+      durationMs: elapsedMs(task, Date.now()),
+      agentCount: task.agentCount,
+      doneCount: task.doneCount,
+      ...(task.error !== undefined ? { error: task.error } : {}),
+    });
   }
 
   /**
