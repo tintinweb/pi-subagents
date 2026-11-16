@@ -1337,36 +1337,46 @@ export class AgentManager {
     // holds for a resume issued on a call that was cancelled first.
     if (signal?.aborted) this.abort(id);
 
-    try {
-      this.settleOutcome(record, await resumeAgent(record.session, prompt, {
-        type: record.type,
-        maxTurns: options?.maxTurns ?? record.invocation?.maxTurns,
-        onTurnEnd: options?.onTurnEnd,
-        onToolActivity: (activity) => {
-          if (activity.type === "end") record.toolUses++;
-          options?.onToolActivity?.(activity);
-        },
-        onAssistantUsage: (usage) => {
-          addUsage(record.lifetimeUsage, usage);
-          addUsage(record.ownUsage, usage);
-          this.onUsage?.(record, usage);
-          options?.onAssistantUsage?.(usage);
-        },
-        onCompaction: (info) => {
-          record.compactionCount++;
-          this.onCompact?.(record, info);
-          options?.onCompaction?.(info);
-        },
-        signal: abortController.signal,
-      }));
-    } catch (err) {
-      this.failResume(record, err);
-    }
-    this.detachParentAbort(record);
+    // `record.promise` is the in-flight run's, as on every other path: left on
+    // the spawn's settled promise, `waitForAll` spins on it without yielding
+    // and `get_subagent_result` with `wait` returns mid-run. Cleanup runs
+    // before it resolves, so no waiter wakes with the turn's children alive.
+    const session = record.session;
+    const run = (async () => {
+      try {
+        this.settleOutcome(record, await resumeAgent(session, prompt, {
+          type: record.type,
+          maxTurns: options?.maxTurns ?? record.invocation?.maxTurns,
+          onTurnEnd: options?.onTurnEnd,
+          onToolActivity: (activity) => {
+            if (activity.type === "end") record.toolUses++;
+            options?.onToolActivity?.(activity);
+          },
+          onAssistantUsage: (usage) => {
+            addUsage(record.lifetimeUsage, usage);
+            addUsage(record.ownUsage, usage);
+            this.onUsage?.(record, usage);
+            options?.onAssistantUsage?.(usage);
+          },
+          onCompaction: (info) => {
+            record.compactionCount++;
+            this.onCompact?.(record, info);
+            options?.onCompaction?.(info);
+          },
+          signal: abortController.signal,
+        }));
+      } catch (err) {
+        this.failResume(record, err);
+      }
+      this.detachParentAbort(record);
 
-    // Same contract as the spawn settle paths: children spawned during the
-    // resumed turn must not outlive it — nothing else can see or reach them.
-    this.abortOwnedChildren(id);
+      // Same contract as the spawn settle paths: children spawned during the
+      // resumed turn must not outlive it — nothing else can see or reach them.
+      this.abortOwnedChildren(id);
+      return record.result ?? "";
+    })();
+    record.promise = run;
+    await run;
 
     return record;
   }

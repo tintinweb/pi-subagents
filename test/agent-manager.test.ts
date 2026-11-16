@@ -2289,6 +2289,71 @@ describe("AgentManager — waitForAll", () => {
     await expect(manager.waitForAll()).resolves.toBeUndefined();
     expect(manager.getRecord(id)?.status).toBe("error");
   });
+
+  it("waits for an inline resume without spinning on the settled spawn promise", async () => {
+    // An inline resume marks the record "running" but leaves `record.promise`
+    // pointing at the spawn's, long settled. Awaiting that resolves in a
+    // microtask, so the loop never yields: the resume's own I/O cannot run, the
+    // record never leaves "running", and the process pins a core forever. A
+    // workflow `agent({ resume })` in print mode hits this on exit.
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first", session: mockSession(), aborted: false, steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test", isBackground: true });
+    await manager.getRecord(id)!.promise;
+
+    // Settles on a timer: unreachable while the event loop is starved.
+    vi.mocked(resumeAgent).mockImplementation(() =>
+      new Promise(resolve => setTimeout(() => resolve({ text: "second", aborted: false, steered: false }), 5)),
+    );
+    const resumed = manager.resume(id, "more");
+    expect(manager.getRecord(id)?.status).toBe("running");
+
+    // A spinning loop would hang the test past vitest's own timeout (which a
+    // starved event loop cannot fire), so bound the passes and fail loudly.
+    let passes = 0;
+    const drain = vi.spyOn(manager as unknown as { drainQueue: () => void }, "drainQueue");
+    drain.mockImplementation(() => {
+      if (++passes > 1000) throw new Error("waitForAll spun without yielding");
+    });
+
+    await manager.waitForAll();
+    expect(manager.getRecord(id)?.status).toBe("completed");
+    await resumed;
+    expect(passes).toBeLessThan(10);
+  });
+
+  it("an inline resume's record.promise is the in-flight run, settling only once the record is terminal", async () => {
+    // What `get_subagent_result` with `wait` awaits (index.ts, nested-tools.ts):
+    // on the spawn's settled promise it returned mid-resume with a running record.
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first", session: mockSession(), aborted: false, steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test", isBackground: true });
+    const record = manager.getRecord(id)!;
+    const spawnPromise = record.promise;
+    await spawnPromise;
+
+    let finish!: () => void;
+    vi.mocked(resumeAgent).mockImplementation(() =>
+      new Promise(resolve => { finish = () => resolve({ text: "second", aborted: false, steered: false }); }),
+    );
+    const resumed = manager.resume(id, "more");
+    const waiting = record.promise;
+    expect(waiting).not.toBe(spawnPromise);
+
+    let woke = false;
+    const waiter = waiting!.then(() => { woke = true; expect(record.status).toBe("completed"); });
+    await new Promise(r => setImmediate(r));
+    expect(woke, "the wait returned while the resume was still running").toBe(false);
+
+    finish();
+    await waiter;
+    expect(record.result).toBe("second");
+    await resumed;
+  });
 });
 
 describe("AgentManager — dispose prunes worktree repos", () => {
