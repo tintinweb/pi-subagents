@@ -107,7 +107,7 @@ export const WORKFLOW_DIALOG_CHROME_ROWS = 6;
  * it, less the chrome. Fixed for a given terminal, so the box keeps its size
  * however much the panes hold — moving the selection, expanding the detail or
  * a phase filling up never makes it jump. Never below `MIN_PANE_BODY_ROWS`:
- * in a terminal under 14 rows that floor wins, and the overlay's `maxHeight`
+ * in a very small terminal that floor wins, and the overlay's `maxHeight`
  * cuts the footer off.
  */
 export function workflowDialogBodyRows(rows: number): number {
@@ -1323,7 +1323,7 @@ export class WorkflowDialog implements Component {
       width,
       spinnerFrame: this.spinnerFrame,
       // Sized to the overlay's share of the terminal, so the whole dialog fits
-      // its `maxHeight` (bar a terminal under 14 rows) and keeps one height
+      // its `maxHeight` (bar a very small terminal) and keeps one height
       // while it is open.
       bodyRows: workflowDialogBodyRows(this.tui.terminal.rows),
     });
