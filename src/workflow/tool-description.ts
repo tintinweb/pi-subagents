@@ -59,6 +59,12 @@ const WORKFLOW_SKILL_POINTER =
   + "the workflow authoring reference: script API and gotchas, resume, quality patterns, worked examples.";
 
 /**
+ * Heads the inline body. pi lists the same skill in the system prompt, and
+ * without this line a model read SKILL.md on top of the identical body.
+ */
+const WORKFLOW_SKILL_INLINE_LEAD = "Do not load the `workflow-authoring` skill: its full text follows.";
+
+/**
  * Rendered with `{{typeList}}` substituted. Keep the prose, here and in the
  * skill, accurate to what the runtime implements — documenting a global we do
  * not ship is worse than documenting nothing, because the script only fails
@@ -102,7 +108,8 @@ Agent types for agent(prompt, {agentType}):
 
 /**
  * The description for the `workflowToolExposure` setting. `inline` (the default)
- * puts the skill's body where the pointer was, so the model cannot skip it;
+ * puts the skill's body where the pointer was, so the model cannot skip it,
+ * headed by a line saying not to load the listed skill as well;
  * `skill` keeps the pointer, about 4k tokens lighter, for a model that follows it.
  * `deferred` gets the inline body: exposure, not this text, is what it saves.
  * Read from the shipped file, so the reference still has one source. A missing
@@ -117,5 +124,5 @@ export function workflowToolDescription(mode: WorkflowToolExposureMode): string 
     console.warn(`[pi-subagents] workflowToolExposure is "inline" but ${WORKFLOW_SKILL_PATH} could not be read — using "skill": ${String(error)}`);
     return fullWorkflowToolDescription;
   }
-  return fullWorkflowToolDescription.replace(WORKFLOW_SKILL_POINTER, () => body);
+  return fullWorkflowToolDescription.replace(WORKFLOW_SKILL_POINTER, () => `${WORKFLOW_SKILL_INLINE_LEAD}\n\n${body}`);
 }

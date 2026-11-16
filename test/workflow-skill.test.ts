@@ -105,7 +105,7 @@ describe("the inline reference", () => {
   const inline = workflowToolDescription("inline");
 
   it("is the description with the skill body in place of the pointer", () => {
-    expect(inline).not.toMatch(/load the `workflow-authoring` skill/);
+    expect(inline).not.toMatch(/Before writing a script, load the `workflow-authoring` skill/);
     for (const marker of REFERENCE_MARKERS) expect(inline, marker).toContain(marker);
     expect(inline).toContain("The canonical multi-stage pattern");
     expect(inline).toContain("{{typeList}}");
