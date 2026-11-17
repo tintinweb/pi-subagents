@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setDefaultsDisabled } from "../src/agent-types.js";
+import { setDefaultsDisabled, setToolDescriptionMode } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -85,6 +85,7 @@ describe("toolDescriptionMode", () => {
     // so the "default" assertions below really test the default.
     setWorktreeIsolationEnabled(true);
     setDefaultsDisabled(false);
+    setToolDescriptionMode("full");
     process.chdir(prevCwd);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;

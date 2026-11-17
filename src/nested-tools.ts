@@ -10,8 +10,10 @@ import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import {
   buildAgentRegistry,
+  formatAgentTypeList,
   getAgentConfigIn,
   getAvailableTypesIn,
+  getToolDescriptionMode,
   resolveEnabledTypeIn,
   resolveTypeIn,
 } from "./agent-types.js";
@@ -157,19 +159,28 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     return getAvailableTypesIn(registry).filter(name => allowed === undefined || allowed.has(name));
   };
 
+  const registry = loadRegistry();
+  const available = availableIn(registry);
+  // Same list as the main session's Agent tool (#457); a "custom" description
+  // is written for the main session, so it counts as full here.
+  const typeList = available.length > 0
+    ? formatAgentTypeList(available, name => getAgentConfigIn(registry, name), getToolDescriptionMode() === "compact")
+    : "none";
+
   const agentTool = defineTool({
     name: NESTED_TOOL_NAMES[0],
     label: "Agent",
     description:
       "Launch a child-safe nested subagent for bounded delegated work. " +
-      "Only use agent types allowed by this parent agent; nesting is depth-limited. " +
+      "Only use agent types allowed by this parent agent; nesting is depth-limited.\n\n" +
+      `Available agent types and the tools they have access to:\n${typeList}\n\n` +
       // Overrides the main session's inherited Agent guideline ("you will be
       // notified on completion"), which does not hold for nested children.
       "A background nested agent does NOT notify you when it finishes: collect each one with get_subagent_result (wait: true) before you end your turn, or it is stopped and its work is lost.",
     parameters: Type.Object({
       prompt: Type.String({ description: "Self-contained task for the nested agent." }),
       description: Type.String({ description: "Short 3-5 word task description." }),
-      subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${availableIn(loadRegistry()).join(", ") || "none"}.` }),
+      subagent_type: Type.String({ description: `Allowed nested agent type. Available: ${available.join(", ") || "none"}.` }),
       model: Type.Optional(Type.String({ description: "Optional provider/model override." })),
       thinking: Type.Optional(Type.String({ description: "Optional thinking level." })),
       max_turns: Type.Optional(Type.Number({ minimum: 1 })),
