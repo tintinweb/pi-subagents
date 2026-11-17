@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Behavior change: resuming an evicted agent no longer applies the agent file's `model:` or `thinking:`** ([#462](https://github.com/tintinweb/pi-subagents/issues/462)). An evicted agent is one whose live record is gone after the ten-minute cleanup, a reload or a restart. It now keeps the model and thinking level it ran with, as a resume before eviction does, even if its file was edited since. Prompt and tools still come from the current file. If the saved model can no longer be used, pi falls back to its default model and shows a warning; it no longer falls back to the parent's model.
+
+### Fixed
+- **Resuming an evicted agent no longer switches it to the parent's model and thinking level** ([#462](https://github.com/tintinweb/pi-subagents/issues/462) — thanks [@hazydream](https://github.com/hazydream) for the report and [@zane668](https://github.com/zane668) for the confirmation). After the record's ten-minute cleanup, a reload or a restart, `Agent({ resume })`, `@handle` and a workflow's `resume` reopened the saved session on the parent's current model and level. The switch was silent, and could run on a costlier model than the one the agent was started on. A reopen now runs on the model and thinking level its own session recorded, as a resume before eviction always did.
+
 ## [0.26.0] - 2026-11-16
 
 > **⚠️ Behavior change — a workflow starts only when you ask for one** ([#451](https://github.com/tintinweb/pi-subagents/pull/451)). A request for a number of agents, like "use 10 agents to …", now runs parallel `Agent` calls instead of a `SubagentWorkflow`. To run a workflow, say so ("use a workflow") or name a saved workflow.

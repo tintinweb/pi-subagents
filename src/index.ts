@@ -1968,8 +1968,9 @@ Terse command-style prompts produce shallow, generic work.
       // and picks up the widget, fleet row, transcript, join batching and
       // completion notification unchanged. Only the prompt, the turn budget and
       // run_in_background carry over from the call: like a live resume, it
-      // ignores `subagent_type`, model and the rest, and runs under the agent
-      // type's current definition.
+      // ignores `subagent_type`, model, thinking and the rest. It runs under the
+      // agent type's current prompt and tools, on the model and thinking level
+      // its own session recorded (#462) — see the model resolution below.
       // `schedule` is left to its own branch, which refuses the combination.
       const saved = callParams.resume !== undefined && !callParams.schedule
         && manager.getRecord(callParams.resume) === undefined
@@ -2031,8 +2032,11 @@ Terse command-style prompts produce shallow, generic work.
       });
 
       // Resolve model from agent config first; tool-call params only fill gaps.
-      let model = ctx.model;
-      if (resolvedConfig.modelInput) {
+      // A reopen resolves none: runAgent leaves the model and thinking level to
+      // the reopened session, which restores the ones the agent ran with. The
+      // agent file and the parent would both override them (#462).
+      let model = reopenOptions ? undefined : ctx.model;
+      if (resolvedConfig.modelInput && !reopenOptions) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           if (resolvedConfig.modelFromParams) return textResult(resolved);
@@ -2056,7 +2060,7 @@ Terse command-style prompts produce shallow, generic work.
       if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
       if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
 
-      const thinking = resolvedConfig.thinking;
+      const thinking = reopenOptions ? undefined : resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
