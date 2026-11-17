@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.1] - 2026-11-17
+
 > **⚠️ Note — a resumed agent keeps the model and thinking level it ran with** ([#462](https://github.com/tintinweb/pi-subagents/issues/462)). Editing `model:` or `thinking:` in its file no longer changes them on resume.
 
 ### Fixed
