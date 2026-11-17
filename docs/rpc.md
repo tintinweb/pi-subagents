@@ -1,6 +1,6 @@
 # Driving subagents from another extension
 
-Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer and stop the run — all over the `pi.events` bus, without importing this package directly. Seven request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`), the lifecycle events in README's [event table](../README.md#events), one per-message usage event (`subagents:usage`), one terminal `subagents:disposed`, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
+Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer and stop the run — all over the `pi.events` bus, without importing this package directly. Nine request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`), the lifecycle events in README's [event table](../README.md#events), two workflow-run events (`subagents:workflow_started`, `subagents:workflow_settled`), one per-message usage event (`subagents:usage`), one terminal `subagents:disposed`, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
 
 The thing worth understanding up front is that **the bus is in-process.** Every "RPC" call here is a synchronous `pi.events.emit` into the same event loop, and every reply comes back the same way. That single fact explains most of what follows: why `signal` and the `on*` callbacks work on a spawn payload at all, why a `consume` fired inside a `subagents:completed` handler lands *before* the notification decision has been made, and why none of this survives a real process boundary.
 
@@ -8,7 +8,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 ## The surface at a glance
 
-Everything goes through `pi.events`. The lifecycle events push one agent shape, `SubagentInfo` (`toSubagentInfo` in `src/subagent-info.ts`). `get` and `list` return the same shape on request. `spawn`, `steer`, `consume` and `stop` act on an agent. Every request gets its answer on its own `:reply:<requestId>` channel.
+Everything goes through `pi.events`. The lifecycle events push one agent shape, `SubagentInfo` (`toSubagentInfo` in `src/subagent-info.ts`). `get` and `list` return the same shape on request. `spawn`, `steer`, `consume` and `stop` act on an agent. A `SubagentWorkflow` run gets two lifecycle events of its own, carrying `WorkflowInfo` (`toWorkflowInfo` in `src/workflow-info.ts`); its live per-agent detail is pulled through `workflow_get`/`workflow_list`, never pushed. Every request gets its answer on its own `:reply:<requestId>` channel.
 
 ```mermaid
 flowchart LR
@@ -21,12 +21,13 @@ flowchart LR
     M["AgentManager<br/>top-level, nested, workflow records"]
     I["toSubagentInfo()"]
   end
-  C -- "subagents:rpc:ping / spawn / steer / consume / stop / get / list" --> R
+  C -- "subagents:rpc:ping / spawn / steer / consume / stop / get / list /<br/>workflow_get / workflow_list" --> R
   R -- "subagents:rpc:CHANNEL:reply:REQUESTID<br/>{ success, data? } or { success: false, error }<br/>ping: { version: 2, features }" --> C
   R --> M
   M --> I
   I -- "subagents:created / started / completed /<br/>failed / steered / compacted" --> L
   M -- "subagents:usage (per message)" --> L
+  M -- "subagents:workflow_started / workflow_settled" --> L
 ```
 
 ## Spawn options
@@ -293,6 +294,28 @@ const active = agents.some((a) =>
   (a.status === "running" || a.status === "queued" || a.settling || a.notificationPending));
 ```
 
+## Observing workflow runs
+
+A `SubagentWorkflow` run is not an agent, so it has its own two events and two channels, carrying `WorkflowInfo` (`toWorkflowInfo`, `src/workflow-info.ts`), not `SubagentInfo`.
+
+`subagents:workflow_started` fires once, before the first agent; `subagents:workflow_settled` fires once, when the run completes, fails or is stopped (`status` is `completed`, `failed` or `killed`, with `error`/`failures` on failure). Both carry the run summary — `id` (`wf_…`), `name`, `status`, `startedAt`/`completedAt`, `durationMs`, `agentCount`, `doneCount`, `failedCount`, `totalTokens`, `totalToolCalls`, `phaseLabel`, and `description`/`toolCallId` when present. The run's child agents are separate: they ride the ordinary agent-lifecycle events with `workflowId` set.
+
+There is deliberately **no** `workflow_progress` push. A run's `onProgress` fires on every finished tool call and every assistant message for every running agent — far too hot for the bus. Pull the live detail instead, at whatever cadence you render:
+
+```typescript
+pi.events.emit("subagents:rpc:workflow_get", { requestId, workflowId: "wf_..." });
+// reply data: { workflow: WorkflowDetail }  — the summary, plus:
+//   version: number            bumped once per applied progress batch; dedupe on it
+//   agents: WorkflowAgentInfo[] per-agent snapshot, collapsed to latest-by-index:
+//     index, label, state, phaseIndex?, phaseTitle?, agentType?, model?, thinking?,
+//     tokens?, toolCalls?, durationMs?, error?, skipped?, resultPreview?, recordId?
+
+pi.events.emit("subagents:rpc:workflow_list", { requestId });
+// reply data: { workflows: WorkflowInfo[] }  — summaries only, no agents[]
+```
+
+`workflow_get` on an unknown id replies `{ success: false, error: "Workflow not found" }`. Both are reads with no ownership check — a run is top-level. `WorkflowAgentInfo` is a fixed public subset of the internal entry: the churn-prone fields the dialog uses (`lastProgressAt`, `promptPreview`, `attempt`, …) and the runtime's internal `wf-agent-N` handle are not exposed, and `model` is the effective model once the child's session reports one. Its `recordId` is the join back to that child's own agent-lifecycle events (their `id`), so an observer can pair the per-agent snapshot with the live `subagents:usage` / `completed` stream. Detect the surface with `features.includes("workflow-events")` / `"workflow-get"` / `"workflow-list"` on the `ping` reply. A settled run stays in `list` and `get` for the rest of the session — runs are evicted only at session shutdown, unlike agent records, which are swept about ten minutes after they finish.
+
 ## The manager registry
 
 `globalThis[Symbol.for("pi-subagents:manager")]` (`MANAGER_KEY` and `registryEntry`, `src/index.ts`) is a second integration surface — the standard Node cross-package singleton pattern, no bus involved:
@@ -323,6 +346,8 @@ Everything added since kept version `2`, because each addition left existing cal
 | `stop-settles` | The stop reply waits for the work to stop, returns `{ settled }`, and accepts `settleTimeoutMs` |
 | `settling` | `get` / `list` set `settling`, and sending stop again while something still runs waits again |
 | `notification-pending` | `get` / `list` set `notificationPending` |
+| `workflow-events` | `subagents:workflow_started` / `subagents:workflow_settled` fire for `SubagentWorkflow` runs |
+| `workflow-get`, `workflow-list` | `subagents:rpc:workflow_get` and `subagents:rpc:workflow_list` exist |
 
 Check with `features.includes(...)`. Entries are only ever added, so a feature present today stays present. A reply without `features` comes from an older build. Model scope and stop's ownership check are older than `features` and have no entry.
 
@@ -342,7 +367,8 @@ This document has no test of its own, so it is worth knowing which claims are ac
 
 | Test | Level | Pins |
 |---|---|---|
-| `test/cross-extension-rpc.test.ts` | Mocked `SpawnCapable` | Envelope shape, per-channel error strings (including steer's), model resolution and scope enforcement |
+| `test/cross-extension-rpc.test.ts` | Mocked `SpawnCapable` / `WorkflowReader` | Envelope shape, per-channel error strings (including steer's and `workflow_get`'s), the `features` list, `workflow_get`/`workflow_list` replies, model resolution and scope enforcement |
+| `test/workflow-info.test.ts` | Pure builder | The `WorkflowInfo` / `WorkflowDetail` field sets, omit-not-`undefined`, the `WorkflowAgentInfo` whitelist |
 | `test/rpc-lifecycle-gating.test.ts` | Real extension factory | Nothing wired at factory time, everything once at `session_start`, and live widget activity for RPC spawns ([#142](https://github.com/tintinweb/pi-subagents/issues/142)/[#181](https://github.com/tintinweb/pi-subagents/pull/181)) |
 | `test/rpc-result-consumption.test.ts` | Real delivery path | The notification firing, and not firing, around `consume` |
 
@@ -354,4 +380,4 @@ Not pinned anywhere, so treat them as descriptions rather than contracts: the `S
 
 Read it for the shape of the whole loop: waiting on `subagents:ready`, keeping an id-keyed map of outstanding spawns, resolving each from the `subagents:completed` / `subagents:failed` handler, and consuming the result in the same synchronous handler that reports it.
 
-If what you want is many coordinated agents rather than one, hand a script to [`SubagentWorkflow`](workflows.md) instead of fanning out over `subagents:rpc:spawn` — and note that a workflow's agents are not yours: you can watch them on the lifecycle events (they carry `workflowId`), but `subagents:rpc:stop` refuses them.
+If what you want is many coordinated agents rather than one, hand a script to [`SubagentWorkflow`](workflows.md) instead of fanning out over `subagents:rpc:spawn` — and note that a workflow's agents are not yours: you can watch them on the lifecycle events (they carry `workflowId`), but `subagents:rpc:stop` refuses them. The run itself announces `subagents:workflow_started` and `subagents:workflow_settled`, enough to know it is going; pull its live detail with `subagents:rpc:workflow_get` (see [Observing workflow runs](#observing-workflow-runs)).

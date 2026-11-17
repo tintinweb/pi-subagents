@@ -482,7 +482,7 @@ Concurrency is capped at `max(1, min(16, cpus - 2))`. Queued agents start as slo
 - **No UI that lists or launches saved workflows.** The inspector shows this session's runs.
 - **No scheduled workflows.** The scheduler runs agents, not workflows.
 - **Results are not persisted** beyond the journal and the transcript card.
-- **No driving one from another extension.** A workflow cannot be started or steered over the `pi.events` bus, and its agents can only be watched: they emit the lifecycle events with a `workflowId`, and `subagents:rpc:stop` refuses them. See [`rpc.md`](rpc.md).
+- **No driving one from another extension.** A workflow cannot be started or steered over the `pi.events` bus. It can be *observed*: the run emits `subagents:workflow_started` / `subagents:workflow_settled`, another extension pulls its live detail with `subagents:rpc:workflow_get` / `workflow_list`, and its agents ride the lifecycle events with a `workflowId` — but `subagents:rpc:stop` refuses them. See [`rpc.md`](rpc.md).
 
 The sandbox is a determinism and accident boundary, not a defence against a deliberately hostile script: the injected globals are host closures, and disabled code generation is what actually stops one being used to compile anything.
 

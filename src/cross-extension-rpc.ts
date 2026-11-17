@@ -1,8 +1,9 @@
 /**
  * Cross-extension RPC handlers for the subagents extension.
  *
- * Exposes ping, spawn, stop, consume, steer, get, and list RPCs over the pi.events event bus,
- * using per-request scoped reply channels.
+ * Exposes ping, spawn, stop, consume, steer, get, list, workflow_get, and
+ * workflow_list RPCs over the pi.events event bus, using per-request scoped
+ * reply channels.
  *
  * Reply envelope follows pi-mono convention:
  *   success → { success: true, data?: T }
@@ -18,6 +19,7 @@ import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import { toSubagentInfo } from "./subagent-info.js";
 import type { AgentRecord } from "./types.js";
+import type { WorkflowDetail, WorkflowInfo } from "./workflow-info.js";
 
 /** Minimal event bus interface needed by the RPC handlers. */
 export interface EventBus {
@@ -58,6 +60,9 @@ export const FEATURES = [
   "stop-settles",
   "settling",
   "notification-pending",
+  "workflow-events",
+  "workflow-get",
+  "workflow-list",
 ] as const;
 
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
@@ -103,11 +108,20 @@ export interface SpawnCapable {
   steer(id: string, message: string): boolean;
 }
 
+/** Read-only snapshots of workflow runs, for `workflow_get` / `workflow_list`. */
+export interface WorkflowReader {
+  /** One run's live detail (summary + per-agent snapshot), or undefined. */
+  get(id: string): WorkflowDetail | undefined;
+  /** Every current run, summary only. */
+  list(): WorkflowInfo[];
+}
+
 export interface RpcDeps {
   events: EventBus;
   pi: unknown;                    // passed through to manager.spawn
   getCtx: () => unknown | undefined;  // returns current ExtensionContext
   manager: SpawnCapable;
+  workflows: WorkflowReader;
 }
 
 export interface RpcHandle {
@@ -118,6 +132,8 @@ export interface RpcHandle {
   unsubSteer: () => void;
   unsubGet: () => void;
   unsubList: () => void;
+  unsubWorkflowGet: () => void;
+  unsubWorkflowList: () => void;
 }
 
 /**
@@ -149,7 +165,7 @@ function handleRpc<P extends { requestId: string }>(
  * Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
-  const { events, pi, getCtx, manager } = deps;
+  const { events, pi, getCtx, manager, workflows } = deps;
 
   const unsubPing = handleRpc(events, "subagents:rpc:ping", () => {
     return { version: PROTOCOL_VERSION, features: [...FEATURES] };
@@ -314,5 +330,24 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     return { agents: manager.listAgents().map(record => snapshot(record, now)) };
   });
 
-  return { unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubGet, unsubList };
+  // Workflow-run snapshots, for a consumer that missed `workflow_started` or
+  // wants the live per-agent detail — pulled rather than pushed, at whatever
+  // cadence the consumer wants. A run is top-level, so no ownership guard.
+  // `get` carries the per-agent `agents` snapshot; `list` is summaries only.
+  const unsubWorkflowGet = handleRpc<{ requestId: string; workflowId: string }>(
+    events, "subagents:rpc:workflow_get", ({ workflowId }) => {
+      const workflow = workflows.get(workflowId);
+      if (!workflow) throw new Error("Workflow not found");
+      return { workflow };
+    },
+  );
+
+  const unsubWorkflowList = handleRpc(events, "subagents:rpc:workflow_list", () => {
+    return { workflows: workflows.list() };
+  });
+
+  return {
+    unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubGet, unsubList,
+    unsubWorkflowGet, unsubWorkflowList,
+  };
 }

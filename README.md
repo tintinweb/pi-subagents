@@ -75,8 +75,8 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Skill preloading** — inject named skills into agent system prompts, discovered from `.pi/skills/`, `.agents/skills/`, and global locations (Pi-standard `<name>/SKILL.md` directory layout supported)
 - **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
-- **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`) and a per-message spend ledger (`subagents:usage`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
-- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, and join subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`). Standardized reply envelopes with protocol versioning and feature detection. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
+- **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`), workflow-run events (`subagents:workflow_started`, `subagents:workflow_settled`), and a per-message spend ledger (`subagents:usage`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
+- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, and inspect subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`). Standardized reply envelopes with protocol versioning and feature detection. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results arrive as the same completion notification as a manual background agent; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
 
@@ -912,6 +912,8 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:steered` | Steering message accepted from any path (`steer_subagent`, `@handle`, the viewers, `subagents:rpc:steer`) — fires for a *queued* steer as well as a delivered one | [agent fields](#agent-fields), `message` |
 | `subagents:usage` | Every assistant message any agent spends on — top-level, nested and workflow children alike, live while it runs | Always: `id`, `type`, `description`, `depth`, `usage` (that one message's spend as a pi `Usage`; never emitted for a message that spent nothing). Omitted when unknown, never `undefined`: `model` (`provider/id`) and `thinking` (the effective level) until the session has reported them; `requestedThinking`, only when the agent did not get the level it asked for; `parentAgentId`, nested agents only; `workflowId`, a workflow's agents only |
 | `subagents:compacted` | Agent's session successfully compacted | [agent fields](#agent-fields), `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
+| `subagents:workflow_started` | A `SubagentWorkflow` run (tool call or `--subagents-workflow-file`) starts, before its first agent — once per run | [workflow fields](#workflow-fields) (status `running`) |
+| `subagents:workflow_settled` | That run completes, fails or is stopped — once per run. Its agents are workflow children, reachable on the agent-lifecycle events with `workflowId` set | [workflow fields](#workflow-fields) (status `completed` / `failed` / `killed`; `error` / `failures` on failure). Live per-agent progress is **pulled** via `subagents:rpc:workflow_get`, not pushed |
 | `subagents:disposed` | End of `session_shutdown`, after every agent is stopped and every child session has shut down — no `subagents:usage` can follow it. A ledger flushing in its own `session_shutdown` may run before the agents are aborted; flush again here, **synchronously** (`writeFileSync`, not `fs.promises`): `emit` does not await listeners and pi calls `process.exit` once the shutdown handlers return, so nothing after a listener's first `await` is guaranteed to run | `{}` |
 | `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
@@ -943,6 +945,20 @@ An agent's `tokens` and `usage` include the spend of every agent below it, so ad
 `tokens.total` = `input + output + cacheWrite`. `cacheRead` is excluded — each turn's `cacheRead` is the cumulative cached prefix re-read on that one API call, so summing per-message would over-count it as a measure of work done. Use `contextUsage.percent` (surfaced as `(NN%)` in the widget) for current context size.
 
 `usage` answers the other question — what was billed — and so does include `cacheRead`, because the prefix really is re-read and re-charged on every call. It is a pi `Usage`, the same shape pi puts on `ToolResultEvent` and `AssistantMessage`, so `usage.cost.total` is where a listener already expects the money and anything pi adds to `Usage` arrives without a change here. Neither field derives from the other; `tokens` is a view model, `usage` is the data.
+
+### Workflow fields
+
+`subagents:workflow_started` and `subagents:workflow_settled` carry a run summary (distinct from the agent fields — a run is not an agent). A field with no value is left out, not sent as `undefined`.
+
+| Field | When present |
+|---|---|
+| `id` (`wf_…`), `name`, `status` (`running` / `completed` / `failed` / `killed`), `startedAt`, `durationMs` (excludes paused time), `agentCount`, `doneCount`, `failedCount`, `totalTokens`, `totalToolCalls`, `phaseLabel` (`""` until a phase is active) | Always |
+| `description` | From the script's `meta` |
+| `toolCallId` | Tool-started runs only; absent on `--subagents-workflow-file` |
+| `completedAt` | Once the run settles |
+| `error`, `failures` | When the run failed |
+
+Live per-agent detail (phases, previews, per-agent state) is **pulled** on demand via `subagents:rpc:workflow_get`, not pushed on an event: a run's `onProgress` fires per finished tool call and message per agent, too hot for the bus. `workflow_get` returns the summary above plus `version` and an `agents` array; `subagents:rpc:workflow_list` returns the summaries of every run this session, running and settled. See [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md).
 
 ## Cross-Extension RPC
 
@@ -1079,6 +1095,18 @@ const active = agents.some(a =>
 ```
 
 `notificationPending` never appears on nested or workflow agents, which get no completion message, or on an agent whose result was read with `subagents:rpc:consume` or `get_subagent_result`. Neither field is on the lifecycle events: `subagents:completed` fires before either can become true.
+
+### Inspect workflow runs: `workflow_get` and `workflow_list`
+
+```typescript
+pi.events.emit("subagents:rpc:workflow_get", { requestId: crypto.randomUUID(), workflowId: "wf_..." });
+// reply data: { workflow: WorkflowDetail }   — summary + version + agents[]
+
+pi.events.emit("subagents:rpc:workflow_list", { requestId: crypto.randomUUID() });
+// reply data: { workflows: WorkflowInfo[] }   — summaries only
+```
+
+A `SubagentWorkflow` run emits only `subagents:workflow_started` / `subagents:workflow_settled` on the bus (see [workflow fields](#workflow-fields)). To follow a run between those, **pull** its state: `workflow_get` returns the summary plus `version` (bumped per progress batch) and an `agents` array of per-agent state (label, phase, model, tokens, previews); `workflow_list` returns the summaries of every run this session (running and settled), no `agents`. Poll at whatever cadence you render — the run does not push progress, which would fire per tool call and message per agent. `workflow_get` on an unknown id returns `Workflow not found`.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 

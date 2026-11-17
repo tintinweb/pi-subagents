@@ -751,6 +751,26 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     expect(existsSync(scriptLine!.slice("Script: ".length))).toBe(true);
   });
 
+  it("announces the run on pi.events — started once, then settled, no progress push", async () => {
+    const result = await tools.get("SubagentWorkflow").execute("tc-ev", { script: inlineScript }, undefined, undefined, workflowCtx());
+    const runId = /Task ID: (\S+)/.exec(textOf(result))![1];
+    const wf = () => booted.pi.events.emit.mock.calls.filter(([e]: [string]) => e.startsWith("subagents:workflow_"));
+
+    // started fires synchronously, before the first agent, carrying the summary.
+    expect(wf()[0][0]).toBe("subagents:workflow_started");
+    expect(wf()[0][1]).toMatchObject({
+      id: runId, name: "from-inline", description: "inline source",
+      status: "running", toolCallId: "tc-ev", agentCount: 0,
+    });
+
+    // settled fires once the detached run completes.
+    await vi.waitFor(() => expect(wf().map(([e]: [string]) => e)).toContain("subagents:workflow_settled"));
+    expect(wf().at(-1)![1]).toMatchObject({ id: runId, name: "from-inline", status: "completed", agentCount: 0 });
+
+    // Only the two lifecycle events — progress is pulled via workflow_get, never pushed.
+    expect(wf().map(([e]: [string]) => e)).toEqual(["subagents:workflow_started", "subagents:workflow_settled"]);
+  });
+
   it("prefers scriptPath over script when both are given", async () => {
     const path = join(hermetic.dir, "wf.js");
     writeFileSync(path, fileScript);
