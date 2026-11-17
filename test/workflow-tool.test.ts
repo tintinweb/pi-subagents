@@ -769,6 +769,41 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 
     // Only the two lifecycle events — progress is pulled via workflow_get, never pushed.
     expect(wf().map(([e]: [string]) => e)).toEqual(["subagents:workflow_started", "subagents:workflow_settled"]);
+    // The script returned nothing, so settled carries no result.
+    expect(wf().at(-1)![1]).not.toHaveProperty("result");
+  });
+
+  it("carries the script's return value on workflow_settled, and omits it when the run fails", async () => {
+    const settled = () => booted.pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:workflow_settled");
+    const context = workflowCtx();
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    // Longer than the notification's 4000-char cap: the bus must not truncate.
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-res", { script: `${inlineScript}return { findings: [{ file: "a.ts" }], body: "x".repeat(5000) };\n` },
+      undefined, undefined, context,
+    );
+    const runId = /Task ID: (\S+)/.exec(textOf(result))![1];
+    await vi.waitFor(() => expect(settled()).toHaveLength(1));
+    const payload = settled()[0][1];
+    expect(payload).toMatchObject({ status: "completed", result: { findings: [{ file: "a.ts" }] } });
+    expect(payload.result.body).toHaveLength(5000);
+
+    // A listener mutating its payload must not reach the run: workflow_get still
+    // returns what the script returned.
+    payload.result.findings[0].file = "mutated";
+    const [, workflowGet] = booted.pi.events.on.mock.calls.find(([c]: [string]) => c === "subagents:rpc:workflow_get")!;
+    await workflowGet({ requestId: "wg-1", workflowId: runId });
+    const [, reply] = booted.pi.events.emit.mock.calls.find(([c]: [string]) => c === "subagents:rpc:workflow_get:reply:wg-1")!;
+    expect(reply.data.workflow.result.findings[0].file).toBe("a.ts");
+
+    await tools.get("SubagentWorkflow").execute(
+      "tc-res-fail", { script: `${inlineScript}throw new Error("script blew up");\n` },
+      undefined, undefined, workflowCtx(),
+    );
+    await vi.waitFor(() => expect(settled()).toHaveLength(2));
+    expect(settled()[1][1]).toMatchObject({ status: "failed" });
+    expect(settled()[1][1]).not.toHaveProperty("result");
   });
 
   it("prefers scriptPath over script when both are given", async () => {

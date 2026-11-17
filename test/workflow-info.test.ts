@@ -99,5 +99,28 @@ describe("toWorkflowDetail", () => {
     // The runtime's internal wf-agent-N handle is not part of the public shape.
     expect(detail.agents[0]).not.toHaveProperty("agentId");
     expect(detail.agents[1]).toMatchObject({ index: 1, label: "a1", state: "error", error: "nope" });
+    // No return value yet: omitted, not carried as undefined.
+    expect(detail).not.toHaveProperty("result");
+  });
+
+  it("carries the script's return value as a fresh copy", () => {
+    const value = { findings: [{ file: "a.ts", severity: "high" }] };
+    const t = task({ status: "completed", value });
+    const detail = toWorkflowDetail(t);
+
+    expect(detail.result).toEqual(value);
+    expect(detail.result).not.toBe(value);
+    (detail.result as typeof value).findings[0].severity = "low";
+    expect(value.findings[0].severity).toBe("high");
+    expect(toWorkflowDetail(t).result).toEqual({ findings: [{ file: "a.ts", severity: "high" }] });
+  });
+
+  it("passes a returned primitive through as that primitive", () => {
+    expect(toWorkflowDetail(task({ value: "done" })).result).toBe("done");
+    expect(toWorkflowDetail(task({ value: null })).result).toBeNull();
+  });
+
+  it("keeps the result off the summary that workflow_list returns", () => {
+    expect(toWorkflowInfo(task({ status: "completed", value: { big: true } }))).not.toHaveProperty("result");
   });
 });

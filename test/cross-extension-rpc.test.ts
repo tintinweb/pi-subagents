@@ -68,7 +68,7 @@ describe("cross-extension RPC", () => {
     it("pins the feature list", () => {
       expect([...FEATURES]).toEqual([
         "consume", "steer", "get", "list", "owned-lifecycle", "stop-settles", "settling", "notification-pending",
-        "workflow-events", "workflow-get", "workflow-list",
+        "workflow-events", "workflow-get", "workflow-list", "workflow-result",
       ]);
     });
 

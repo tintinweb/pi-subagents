@@ -63,6 +63,7 @@ export const FEATURES = [
   "workflow-events",
   "workflow-get",
   "workflow-list",
+  "workflow-result",
 ] as const;
 
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */

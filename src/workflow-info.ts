@@ -1,9 +1,10 @@
 /**
  * workflow-info.ts — The one workflow-run shape other extensions read off the bus.
  *
- * `subagents:workflow_started` / `subagents:workflow_settled` carry `WorkflowInfo`;
- * `subagents:rpc:workflow_get` returns `WorkflowDetail` (the summary plus the live
- * per-agent snapshot) and `subagents:rpc:workflow_list` returns `WorkflowInfo[]`.
+ * `subagents:workflow_started` / `subagents:workflow_settled` carry `WorkflowInfo`,
+ * settled with the run's `result` spread beside it; `subagents:rpc:workflow_get`
+ * returns `WorkflowDetail` (the summary plus the live per-agent snapshot and the
+ * result) and `subagents:rpc:workflow_list` returns `WorkflowInfo[]`.
  * It is a public contract, so it is built from a whitelist: a field reaches a
  * listener only by being named here, never because it was added to `WorkflowTask`
  * or `WorkflowAgentEntry`. The agent entries are explicitly unstable internally
@@ -81,6 +82,21 @@ export interface WorkflowDetail extends WorkflowInfo {
   /** `task.progressVersion`: bumped once per applied progress batch. */
   version: number;
   agents: WorkflowAgentInfo[];
+  /** See {@link workflowResult}. */
+  result?: unknown;
+}
+
+/**
+ * The script's return value, as returned — object, array or primitive, never
+ * truncated. Present only once the run completed and returned something.
+ * Carried by `subagents:workflow_settled` and `workflow_get`, not by
+ * `workflow_started` or the `workflow_list` summaries. A fresh copy per
+ * payload: mutating it never touches the run or the parent's notification.
+ * Listeners of one event share that payload. The worker has already passed the
+ * value through JSON, so it always clones.
+ */
+export function workflowResult(task: WorkflowTask): { result?: unknown } {
+  return task.value !== undefined ? { result: structuredClone(task.value) } : {};
 }
 
 /** The run summary — carried by the lifecycle events and `workflow_list`. */
@@ -109,7 +125,7 @@ export function toWorkflowInfo(task: WorkflowTask, now = Date.now()): WorkflowIn
 /** The summary plus the current collapsed per-agent snapshot (fresh objects). */
 export function toWorkflowDetail(task: WorkflowTask, now = Date.now()): WorkflowDetail {
   const agents = collapse(task.workflowProgress).agents.map(toWorkflowAgentInfo);
-  return { ...toWorkflowInfo(task, now), version: task.progressVersion, agents };
+  return { ...toWorkflowInfo(task, now), version: task.progressVersion, agents, ...workflowResult(task) };
 }
 
 function toWorkflowAgentInfo(e: WorkflowAgentEntry): WorkflowAgentInfo {

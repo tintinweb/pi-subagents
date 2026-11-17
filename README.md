@@ -913,7 +913,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:usage` | Every assistant message any agent spends on — top-level, nested and workflow children alike, live while it runs | Always: `id`, `type`, `description`, `depth`, `usage` (that one message's spend as a pi `Usage`; never emitted for a message that spent nothing). Omitted when unknown, never `undefined`: `model` (`provider/id`) and `thinking` (the effective level) until the session has reported them; `requestedThinking`, only when the agent did not get the level it asked for; `parentAgentId`, nested agents only; `workflowId`, a workflow's agents only |
 | `subagents:compacted` | Agent's session successfully compacted | [agent fields](#agent-fields), `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
 | `subagents:workflow_started` | A `SubagentWorkflow` run (tool call or `--subagents-workflow-file`) starts, before its first agent — once per run | [workflow fields](#workflow-fields) (status `running`) |
-| `subagents:workflow_settled` | That run completes, fails or is stopped — once per run. Its agents are workflow children, reachable on the agent-lifecycle events with `workflowId` set | [workflow fields](#workflow-fields) (status `completed` / `failed` / `killed`; `error` / `failures` on failure). Live per-agent progress is **pulled** via `subagents:rpc:workflow_get`, not pushed |
+| `subagents:workflow_settled` | That run completes, fails or is stopped — once per run. Its agents are workflow children, reachable on the agent-lifecycle events with `workflowId` set | [workflow fields](#workflow-fields) (status `completed` / `failed` / `killed`; `error` / `failures` on failure; `result` when the script returned a value). Live per-agent progress is **pulled** via `subagents:rpc:workflow_get`, not pushed |
 | `subagents:disposed` | End of `session_shutdown`, after every agent is stopped and every child session has shut down — no `subagents:usage` can follow it. A ledger flushing in its own `session_shutdown` may run before the agents are aborted; flush again here, **synchronously** (`writeFileSync`, not `fs.promises`): `emit` does not await listeners and pi calls `process.exit` once the shutdown handlers return, so nothing after a listener's first `await` is guaranteed to run | `{}` |
 | `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
 | `subagents:scheduler_ready` | Scheduler bound to session, enabled jobs armed | `sessionId`, `jobCount` |
@@ -957,6 +957,9 @@ An agent's `tokens` and `usage` include the spend of every agent below it, so ad
 | `toolCallId` | Tool-started runs only; absent on `--subagents-workflow-file` |
 | `completedAt` | Once the run settles |
 | `error`, `failures` | When the run failed |
+| `result` | `subagents:workflow_settled` only, when the run completed and the script returned a value |
+
+`result` is the script's return value as returned (object, array or primitive), untruncated, so no `JSON.parse` is needed. The model's completion notification cuts it at 4000 characters; the bus does not. It is a copy: mutating it never affects the run, but listeners of one event share it. A listener that bound late reads it from `workflow_get`; `workflow_list` summaries leave it out.
 
 Live per-agent detail (phases, previews, per-agent state) is **pulled** on demand via `subagents:rpc:workflow_get`, not pushed on an event: a run's `onProgress` fires per finished tool call and message per agent, too hot for the bus. `workflow_get` returns the summary above plus `version` and an `agents` array; `subagents:rpc:workflow_list` returns the summaries of every run this session, running and settled. See [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md).
 
@@ -1100,7 +1103,7 @@ const active = agents.some(a =>
 
 ```typescript
 pi.events.emit("subagents:rpc:workflow_get", { requestId: crypto.randomUUID(), workflowId: "wf_..." });
-// reply data: { workflow: WorkflowDetail }   — summary + version + agents[]
+// reply data: { workflow: WorkflowDetail }   — summary + version + agents[] + result?
 
 pi.events.emit("subagents:rpc:workflow_list", { requestId: crypto.randomUUID() });
 // reply data: { workflows: WorkflowInfo[] }   — summaries only

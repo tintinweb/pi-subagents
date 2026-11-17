@@ -95,7 +95,7 @@ import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { workflowToolDescription } from "./workflow/tool-description.js";
-import { toWorkflowDetail, toWorkflowInfo } from "./workflow-info.js";
+import { toWorkflowDetail, toWorkflowInfo, workflowResult } from "./workflow-info.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
 
@@ -2604,7 +2604,7 @@ Terse command-style prompts produce shallow, generic work.
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
     }
-    announce("subagents:workflow_settled", () => toWorkflowInfo(task));
+    announce("subagents:workflow_settled", () => ({ ...toWorkflowInfo(task), ...workflowResult(task) }));
   }
 
   /**
