@@ -1,11 +1,12 @@
 /**
- * progress.ts — the workflow progress model, ported from Claude Code.
+ * progress.ts — the workflow progress model, aiming for compatibility with Claude Code's.
  *
- * Progress is an **append-only event log**, not a tree. Agent entries are keyed
- * by `index` and last-write-wins, so a running agent is updated by appending a
- * fresh entry with the same index rather than mutating anything. Every view —
- * the inline card, the workflows dialog, the fleet widget — derives its shape
- * by collapsing that log. Keeping the log authoritative is what lets a batched
+ * Progress is an **event log**, not a tree. Agent entries are keyed by `index`
+ * and last-write-wins, so a running agent is updated by emitting a fresh entry
+ * with the same index rather than mutating anything. The task's copy keeps only
+ * each agent's latest entry, in place (`updateWorkflowProgressBatch`). Every
+ * view — the inline card, the workflows dialog, the fleet widget — derives its
+ * shape by collapsing that log. Keeping the log authoritative is what lets a batched
  * update carry several agents' changes in one message from the worker.
  *
  * Two vocabularies, deliberately distinct:
@@ -299,7 +300,14 @@ export function buildPhaseGroups(
   progress: readonly WorkflowEntry[],
   declared?: readonly WorkflowPhaseMeta[],
 ): PhaseGroup[] {
-  const { agents, phaseTitles } = collapse(progress);
+  return phaseGroupsOf(collapse(progress), declared);
+}
+
+/** {@link buildPhaseGroups} over a log the caller has already collapsed. */
+export function phaseGroupsOf(
+  { agents, phaseTitles }: CollapsedProgress,
+  declared?: readonly WorkflowPhaseMeta[],
+): PhaseGroup[] {
   const observed = groupByPhase(agents, phaseTitles) ?? [];
   const merged = mergePhases(declared, observed);
   if (merged.length === 0 && agents.length > 0) {
@@ -328,8 +336,8 @@ export function stats(progress: readonly WorkflowEntry[], agentCount = 0): Workf
   let started = 0;
   let anyLive = false;
 
-  // The log holds an entry per transition (queued, started, progress, settled);
-  // only each agent's latest one describes it.
+  // The log can hold several entries per agent (one per transition, in the
+  // runtime's copy); only each agent's latest one describes it.
   for (const entry of collapse(progress).agents) {
     seen++;
     if (entry.state === "done") {
@@ -496,7 +504,7 @@ const GERUND_CANDIDATE = /^[A-Za-z]{3,12}$/;
 /**
  * Render a phase title as an activity: `Scan` → `Scanning`.
  *
- * Only applied in the footer, where the line reads as "what is happening now".
+ * Only applied to the active-phase label, which reads as "what is happening now".
  * Anything that is not a plain short word is left untouched.
  */
 export function gerund(word: string): string {
@@ -532,7 +540,7 @@ const truncate = (text: string, width: number) =>
   text.length <= width ? text : `${text.slice(0, Math.max(1, width - 1))}…`;
 
 /**
- * The footer's "what is this run doing" label.
+ * The "what is this run doing" label, shown on a run's FleetView row.
  *
  * One active phase shows its position; two concurrent phases are joined, since
  * a barrier-free pipeline routinely has work in more than one at a time.
@@ -548,4 +556,21 @@ export function footerPhaseLabel(input: {
     return `${truncate(titles[0], FOOTER_TITLE_WIDTH)} (${input.positionStart}/${input.totalPhases})`;
   }
   return titles.map(t => truncate(t, FOOTER_TITLE_WIDTH)).join(" & ");
+}
+
+/**
+ * {@link footerPhaseLabel} for the phases that still have work outstanding:
+ * `Reviewing (2/3)`. Empty when the run has no phases — the single "Agents"
+ * group a phase-less run collapses into is not one.
+ */
+export function activePhaseLabel(collapsed: CollapsedProgress, declared?: readonly WorkflowPhaseMeta[]): string {
+  if (!collapsed.agents.some(agent => agent.phaseIndex != null)) return "";
+  const groups = phaseGroupsOf(collapsed, declared);
+  const active = groups.flatMap((group, i) => (group.status === "running" ? [i] : []));
+  if (active.length === 0) return "";
+  return footerPhaseLabel({
+    titles: active.map(i => groups[i].title),
+    positionStart: active[0] + 1,
+    totalPhases: groups.length,
+  });
 }

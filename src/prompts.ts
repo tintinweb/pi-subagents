@@ -168,12 +168,34 @@ ${envBlock}`;
  * @param cwd  The cwd the parent's prompt was rendered with.
  */
 export function inheritableParentPrompt(rendered: string, cwd: string): string {
-  const cwdAt = rendered.lastIndexOf(`\n\n<cwd>\n${cwd.replace(/\\/g, "/")}\n</cwd>`);
+  const cwdAt = rendered.lastIndexOf(cwdSection(cwd));
   if (cwdAt < 0) return rendered;
   const head = rendered.slice(0, cwdAt);
   if (!head.endsWith("\n</skills>")) return head;
   const skillsAt = head.lastIndexOf("\n\n<skills>\n");
   return skillsAt < 0 ? head : head.slice(0, skillsAt);
+}
+
+/**
+ * The parent's rendered system prompt without its `cwd` section, for a session that
+ * renders its own `cwd` after the prompt it is given and adds nothing else.
+ *
+ * Everything else is kept, including sections after `cwd` (extension sections present
+ * while the parent's turn runs). A prompt without the section (for example, a forced
+ * prompt) is returned unchanged.
+ *
+ * @param rendered  The parent's `ctx.getSystemPrompt()`.
+ * @param cwd  The cwd the parent's prompt was rendered with.
+ */
+export function withoutCwdSection(rendered: string, cwd: string): string {
+  const section = cwdSection(cwd);
+  const at = rendered.lastIndexOf(section);
+  return at < 0 ? rendered : rendered.slice(0, at) + rendered.slice(at + section.length);
+}
+
+/** The `cwd` section as pi renders it after the preceding section. */
+function cwdSection(cwd: string): string {
+  return `\n\n<cwd>\n${cwd.replace(/\\/g, "/")}\n</cwd>`;
 }
 
 /** Fallback base prompt when parent system prompt is unavailable in append mode. */

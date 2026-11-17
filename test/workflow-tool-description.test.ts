@@ -15,7 +15,7 @@
  * the prose fails here, which is the point.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -25,7 +25,16 @@ import {
 } from "../src/workflow/runtime.js";
 import { fullWorkflowToolDescription } from "../src/workflow/tool-description.js";
 
-const description = fullWorkflowToolDescription;
+const SKILL_FILE = fileURLToPath(new URL("../skills/workflow-authoring/SKILL.md", import.meta.url));
+
+/**
+ * What the model ends up reading: the tool description plus the authoring
+ * skill it points at. The contract holds for the pair, wherever a sentence
+ * lives.
+ */
+const description = existsSync(SKILL_FILE)
+  ? `${fullWorkflowToolDescription}\n\n${readFileSync(SKILL_FILE, "utf8")}`
+  : fullWorkflowToolDescription;
 const workerSource = readFileSync(
   fileURLToPath(new URL("../src/workflow/worker-source.ts", import.meta.url)),
   "utf8",
@@ -137,22 +146,55 @@ describe("the limits it quotes", () => {
   });
 
   it("describes the concurrency formula the runtime actually applies", () => {
-    expect(description).toContain("min(16, available CPUs - 2)");
+    expect(description).toContain("max(1, min(16, available CPUs - 2))");
+    // The worked figure is derived, not typed: it has to agree with the formula.
+    expect(description).toContain(`(${workflowConcurrency(8)} on an 8-core machine)`);
     expect(workflowConcurrency(8)).toBe(6);
     expect(workflowConcurrency(64)).toBe(16);
+    expect(workflowConcurrency(1)).toBe(1);
+    // Claude Code's "~10" contradicts the formula on every common machine.
+    expect(description).not.toContain("~10 run");
+  });
+});
+
+describe("claims about pi's own surfaces", () => {
+  it("does not advertise a workflow list, or a phase model nothing displays", () => {
+    // Neither exists: `/agents → Workflows` lists runs, not saved workflows,
+    // and `meta.phases[].model` is accepted but rendered nowhere.
+    expect(description).not.toContain("workflow list");
+    expect(description).not.toContain("to a phase entry");
+  });
+
+  it("places log() lines where the card draws them — below the tree", () => {
+    expect(description).toContain("narrator line below the progress tree");
+    expect(readFileSync(fileURLToPath(new URL("../src/ui/workflow-card.ts", import.meta.url)), "utf8"))
+      .toContain("log() output, below the tree");
+  });
+
+  it("names the run id by the label the tool result prints", () => {
+    expect(description).toContain("The tool result's `Task ID` is the runId.");
+    expect(readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8"))
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the source text of the template is the subject under test
+      .toContain("`Task ID: ${runId}\\n`");
+  });
+
+  it("says pipeline() propagates a fatal error, as parallel() does", () => {
+    const line = description.split("\n").find(l => l.startsWith("- pipeline("));
+    expect(line).toContain("only a fatal run error");
   });
 });
 
 describe("rendering", () => {
+  // The tool description alone: it is the only part that is templated.
   it("keeps the placeholder the live agent roster is substituted into", () => {
-    expect(description).toContain("{{typeList}}");
+    expect(fullWorkflowToolDescription).toContain("{{typeList}}");
   });
 
   it("leaves no unescaped template interpolation from the source literal", () => {
     // A bare `${...}` in the .ts literal would interpolate at module load and
     // reach the model as a value (or throw), not as the example text.
-    expect(description).not.toContain("[object Object]");
+    expect(fullWorkflowToolDescription).not.toContain("[object Object]");
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal placeholder is the subject under test
-    expect(description).toContain("${f.title}");
+    expect(fullWorkflowToolDescription).toContain("${f.title}");
   });
 });

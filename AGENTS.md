@@ -84,6 +84,16 @@ Cite code by symbol or quoted string (`spawnTopLevel` in `src/index.ts`), never 
 
 See `CONTRIBUTING.md` for the contributor guidelines and quality bar.
 
+### Triaging
+
+Triage writes a snapshot of all open issues and PRs to `.scratch/TRIAGE.md` (gitignored), following the structure of the previous one. Before overwriting it, rename the old one to `.scratch/triage-<date>.md`.
+
+- Put a **Sponsors** section first: open items by current sponsors, which may be prioritized. Logins:
+  `gh api graphql -f query='{ viewer { sponsorshipsAsMaintainer(first: 100, activeOnly: true) { nodes { sponsorEntity { ... on User { login } ... on Organization { login } } } } } }' --jq '.data.viewer.sponsorshipsAsMaintainer.nodes[].sponsorEntity.login'`
+- Mark each item "confirmed" (checked against master) or "reported". It is a bug only once a failing test reproduces it; check `CHANGELOG.md`, `git log -S` and upstream pi's CHANGELOG before calling it one.
+- Closable means the fix is on master with a test that goes red without it. A release is not needed.
+- Draft replies for the user; post or close only when told to.
+
 ### Filing PRs
 
 Write the body to a temp file and pass `--body-file` (`gh pr create`, `gh pr edit`); never multi-line markdown via `--body`. Create or edit a PR only when the user asks.
@@ -128,8 +138,8 @@ Location: `CHANGELOG.md` (single file, [Keep a Changelog](https://keepachangelog
 
 - All new entries go under `## [Unreleased]`, in the right subsection (`### Added`, `### Changed`, `### Fixed`, `### Removed`, `### Security`, `### Refactored`). Read the section first and append to existing subsections; never duplicate them.
 - One bullet per issue/PR. Never combine separate issues or pull requests into a single entry, even when they touch the same or similar components. (A PR together with the issue it closes or that diagnosed it is one change — one bullet citing both.)
-- Breaking changes are not a separate subsection. Call them out with a `> **⚠️ Breaking: …**` blockquote at the top of the version section, and/or a bold `**BREAKING:**` bullet under `### Changed`, with a migration note.
-- Entries are concise — a bold lead-in stating what changed, then a sentence or two on why it changed and anything a user must do about it. Aim for 2–4 sentences; a genuinely intricate change may run longer, but length is never the goal. Do not match the density of older entries, several of which are far too long.
+- Breaking changes are not a separate subsection. Call them out with a `> **⚠️ Breaking: …**` blockquote at the top of the version section, and/or a bold `**BREAKING:**` bullet under `### Changed`, with a migration note. A fix users may notice gets a `> **⚠️ Note — …**` blockquote instead.
+- Entries are concise — a bold lead-in stating in plain words what the user now sees, then a sentence or two on why it changed and anything a user must do about it. Aim for 2–4 sentences; a genuinely intricate change may run longer, but length is never the goal. Do not match the density of older entries, several of which are far too long.
 - Cut what the reader doesn't need: narration of the investigation, alternatives considered and rejected, restatements of the diff, and detail recoverable from the code or the linked issue. Name a file or symbol only when it helps someone find the change.
 - Released version sections (e.g. `## [0.12.0]`) are immutable; never modify them.
 - Attribute external contributions: `... ([#456](https://github.com/tintinweb/pi-subagents/pull/456) — thanks [@username](https://github.com/username))`.

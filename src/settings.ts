@@ -133,6 +133,18 @@ export interface SubagentsSettings {
    */
   toolDescriptionMode?: ToolDescriptionMode;
   /**
+   * Where the SubagentWorkflow script reference reaches the model. "inline"
+   * (default) puts it in the tool description, where the model cannot skip it.
+   * "skill" saves about 4k tokens every session: one line points at the
+   * bundled `workflow-authoring` skill file by path instead, and the model has
+   * to choose to read it before writing a script — a model that does not
+   * writes the script without the reference. "deferred" keeps the tool out of
+   * the tool spec until pi's `tool_search` loads it, then carries the inline
+   * reference; it needs `tool_search` active. Read once at tool registration;
+   * applies on the next pi session.
+   */
+  workflowToolExposure?: WorkflowToolExposureMode;
+  /**
    * Whether the Claude Code-style FleetView (the navigable main+subagents list
    * rendered below the editor) is shown. Defaults to `true`. Pure-UI: when off,
    * the list never registers and the global key handler never captures input.
@@ -355,6 +367,7 @@ export interface SubagentsSettings {
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
+export type WorkflowToolExposureMode = "skill" | "inline" | "deferred";
 
 /** Setter hooks used by applySettings to wire persisted values into in-memory state. */
 export interface SettingsAppliers {
@@ -370,6 +383,7 @@ export interface SettingsAppliers {
   setStrictAgentFiles: (b: boolean) => void;
   setDisableDefaultAgents: (b: boolean) => void;
   setToolDescriptionMode: (mode: ToolDescriptionMode) => void;
+  setWorkflowToolExposure: (mode: WorkflowToolExposureMode) => void;
   setFleetView: (b: boolean) => void;
   setAgentMentions: (mode: AgentMentionMode) => void;
   setRememberAgents: (b: boolean) => void;
@@ -392,6 +406,7 @@ export type SettingsEmit = (event: string, payload: unknown) => void;
 
 const VALID_JOIN_MODES: ReadonlySet<string> = new Set<JoinMode>(["async", "group", "smart"]);
 const VALID_TOOL_DESCRIPTION_MODES: ReadonlySet<string> = new Set<ToolDescriptionMode>(["full", "compact", "custom"]);
+const VALID_WORKFLOW_TOOL_EXPOSURE_MODES: ReadonlySet<string> = new Set<WorkflowToolExposureMode>(["skill", "inline", "deferred"]);
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 const VALID_VIEWER_MARKDOWN_MODES: ReadonlySet<string> = new Set<ViewerMarkdownMode>(["off", "assistant", "all"]);
 const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
@@ -450,6 +465,7 @@ export const SETTING_DEFAULTS: { readonly [K in keyof Required<SubagentsSettings
   strictAgentFiles: false,
   disableDefaultAgents: false,
   toolDescriptionMode: "full",
+  workflowToolExposure: "inline",
   fleetView: true,
   agentMentions: "model",
   rememberAgents: true,
@@ -515,6 +531,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.toolDescriptionMode === "string" && VALID_TOOL_DESCRIPTION_MODES.has(r.toolDescriptionMode)) {
     out.toolDescriptionMode = r.toolDescriptionMode as ToolDescriptionMode;
+  }
+  if (typeof r.workflowToolExposure === "string" && VALID_WORKFLOW_TOOL_EXPOSURE_MODES.has(r.workflowToolExposure)) {
+    out.workflowToolExposure = r.workflowToolExposure as WorkflowToolExposureMode;
   }
   if (typeof r.fleetView === "boolean") {
     out.fleetView = r.fleetView;
@@ -697,6 +716,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.strictAgentFiles === "boolean") appliers.setStrictAgentFiles(s.strictAgentFiles);
   if (typeof s.disableDefaultAgents === "boolean") appliers.setDisableDefaultAgents(s.disableDefaultAgents);
   if (s.toolDescriptionMode) appliers.setToolDescriptionMode(s.toolDescriptionMode);
+  if (s.workflowToolExposure) appliers.setWorkflowToolExposure(s.workflowToolExposure);
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.agentMentions) appliers.setAgentMentions(s.agentMentions);
   if (typeof s.rememberAgents === "boolean") appliers.setRememberAgents(s.rememberAgents);

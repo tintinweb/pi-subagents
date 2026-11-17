@@ -21,8 +21,7 @@
 
 /**
  * Suggestion trigger: `@` at a token boundary plus the partial handle typed so
- * far. Ported from Claude Code, including the CJK sentence-ending punctuation
- * it accepts as a boundary.
+ * far, including CJK sentence-ending punctuation as a boundary.
  */
 export const MENTION_TRIGGER = /(^|[\s。、？！])@([\w-]*)$/;
 
@@ -30,7 +29,7 @@ export const MENTION_TRIGGER = /(^|[\s。、？！])@([\w-]*)$/;
 const MENTION_SEND = /^@([\w-]+)\s+([\s\S]+)$/;
 
 /**
- * Upper bound on a handle, matching Claude Code's `dSS`. Nothing here generates
+ * Upper bound on a handle. Nothing here generates
  * a name this long, but an agent type or a model-supplied name can be arbitrary
  * text, and an unbounded handle would wrap the suggestion popup.
  */
@@ -38,8 +37,7 @@ const MAX_HANDLE_LENGTH = 64;
 
 /**
  * Handles that address something other than a subagent, and so can never be
- * allocated to one. Claude Code reserves exactly this name (`Vq = "main"`),
- * refusing it at spawn and routing it to the main conversation instead.
+ * allocated to one. This name is refused at spawn and routed to the main conversation instead.
  */
 const RESERVED_HANDLES: ReadonlySet<string> = new Set(["main"]);
 
@@ -119,8 +117,8 @@ export function describeMention(message: string): string {
  * allowed-tools narrowing, and the Task tool is not even named. The model reads
  * this and calls the tool itself.
  *
- * Ported verbatim from the 2.1.233 bundle's attachment renderer, trailing space
- * before the closing newline included, so the wording the model was trained
+ * Fixed wording, trailing space before the closing newline
+ * included, so the wording the model was trained
  * against is the wording it gets. The one substitution is ours: pi's equivalent
  * of Task is the `Agent` tool, and the agent listing that teaches valid
  * `subagent_type` values is the tool spec rather than a separate attachment.

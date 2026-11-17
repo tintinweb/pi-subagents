@@ -24,6 +24,7 @@ import {
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
+import { deniedToolNames } from "./custom-agents.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
@@ -587,6 +588,11 @@ export interface RunOptions {
    * fails at the call that wrote it rather than inside the child.
    */
   structuredOutput?: CompiledSchema;
+  /**
+   * Tools to deny this one spawn, on top of the agent definition's own
+   * `disallowedTools`. Set by the workflow host, for `agent({ disallowedTools })`.
+   */
+  disallowedTools?: string[];
   /** Runtime bridge for opt-in child-safe nested delegation. */
   nestedRuntime?: {
     manager: NestedAgentManager;
@@ -843,12 +849,16 @@ export async function runAgent(
 
   let toolNames = getToolNamesForType(type);
 
+  // The definition's deny list plus this spawn's. Built once: the memory check
+  // below and the tool scoping after it must agree on what is denied.
+  const deniedNames = [...(agentConfig?.disallowedTools ?? []), ...(deniedToolNames(options.disallowedTools) ?? [])];
+  const disallowedSet = deniedNames.length > 0 ? new Set(deniedNames) : undefined;
+
   // Persistent memory: detect write capability and branch accordingly.
   // Account for disallowedTools — a tool in the base set but on the denylist is not truly available.
   if (agentConfig?.memory) {
     const existingNames = new Set(toolNames);
-    const denied = agentConfig.disallowedTools ? new Set(agentConfig.disallowedTools) : undefined;
-    const effectivelyHas = (name: string) => existingNames.has(name) && !denied?.has(name);
+    const effectivelyHas = (name: string) => existingNames.has(name) && !disallowedSet?.has(name);
     const hasWriteTools = effectivelyHas("write") || effectivelyHas("edit");
 
     if (hasWriteTools) {
@@ -863,10 +873,6 @@ export async function runAgent(
       extras.memoryBlock = buildReadOnlyMemoryBlock(agentConfig.name, agentConfig.memory, configCwd);
     }
   }
-
-  const disallowedSet = agentConfig?.disallowedTools
-    ? new Set(agentConfig.disallowedTools)
-    : undefined;
 
   // Nested delegation tools (opt-in, ownership-scoped). Empty unless the agent
   // set `allowed_subagents` and a nestedRuntime was provided — and never when
@@ -1109,16 +1115,22 @@ export async function runAgent(
     }
   }
 
-  // Resolve model: explicit option > config.model > parent model
-  const model = options.model ?? resolveDefaultModel(
-    ctx.model, ctx.modelRegistry, agentConfig?.model,
-  );
+  // A reopened conversation carries the model and thinking level it ran with,
+  // and createAgentSession restores both when none is passed — so a reopen keeps
+  // them, as a live resume keeps its session's (#462). Only an explicit option
+  // outranks them; the agent file and the parent do not.
+  const reopening = options.resumeSessionFile !== undefined;
 
-  // Resolve thinking level: explicit option > agent config > parent session level.
+  // Resolve model: explicit option > (reopen: the session's own) > config.model > parent model
+  const model = options.model ?? (reopening ? undefined : resolveDefaultModel(
+    ctx.model, ctx.modelRegistry, agentConfig?.model,
+  ));
+
+  // Resolve thinking level: explicit option > (reopen: the session's own) > agent config > parent session level.
   // Without the parent step, an unset level falls through to pi's
   // defaultThinkingLevel (e.g. "max") instead of matching the spawning session.
   // Same idiom as mention-clone.ts.
-  const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
+  const thinkingLevel = options.thinkingLevel ?? (reopening ? undefined : agentConfig?.thinking ?? ctx.thinkingLevel);
 
   // The `agent({ schema })` contract: this child reports its answer by calling
   // StructuredOutput, and `structuredJson` below is what the caller reads. The
@@ -1294,7 +1306,11 @@ export async function runAgent(
     sessionOpts.thinkingLevel = thinkingLevel;
   }
 
-  const { session } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  const { session, modelFallbackMessage } = await runInChildSessionContext(() => createAgentSession(sessionOpts));
+  // Pi could not use the model the reopened conversation recorded and fell back
+  // to its default. Warned the way pi warns at its own session start, and the
+  // way an out-of-scope model is warned: to the user, not the model.
+  if (modelFallbackMessage) ctx.ui.notify(modelFallbackMessage, "warning");
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(

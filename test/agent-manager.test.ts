@@ -794,6 +794,35 @@ describe("AgentManager — lifetime usage + compaction count are eagerly initial
     });
   });
 
+  // The workflow host reads the record inside these hooks to report a running
+  // row's counters (#298), so the record must already include the event.
+  it("updates the record before forwarding a spawn's activity and usage hooks", async () => {
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, opts: any) => {
+      // A real child does work first; by then spawn() has returned the id.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      opts.onToolActivity?.({ type: "end", toolName: "read" });
+      opts.onAssistantUsage?.({ input: 100, output: 20, cacheWrite: 0, cost: 0 });
+      return { responseText: "done", session: mockSession(), aborted: false, steered: false };
+    });
+    const seen: { toolUses?: number; output?: number }[] = [];
+    let id = "";
+    const read = () => {
+      const record = manager.getRecord(id);
+      seen.push({ toolUses: record?.toolUses, output: record?.lifetimeUsage.output });
+    };
+
+    id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", {
+      description: "test",
+      isBackground: true,
+      onToolActivity: read,
+      onAssistantUsage: read,
+    });
+    await manager.getRecord(id)!.promise;
+
+    expect(seen).toEqual([{ toolUses: 1, output: 0 }, { toolUses: 1, output: 20 }]);
+  });
+
   it("onCompaction from runAgent increments record.compactionCount", async () => {
     manager = new AgentManager();
     const compactSeen: any[] = [];
@@ -2260,6 +2289,71 @@ describe("AgentManager — waitForAll", () => {
     await expect(manager.waitForAll()).resolves.toBeUndefined();
     expect(manager.getRecord(id)?.status).toBe("error");
   });
+
+  it("waits for an inline resume without spinning on the settled spawn promise", async () => {
+    // An inline resume marks the record "running" but leaves `record.promise`
+    // pointing at the spawn's, long settled. Awaiting that resolves in a
+    // microtask, so the loop never yields: the resume's own I/O cannot run, the
+    // record never leaves "running", and the process pins a core forever. A
+    // workflow `agent({ resume })` in print mode hits this on exit.
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first", session: mockSession(), aborted: false, steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test", isBackground: true });
+    await manager.getRecord(id)!.promise;
+
+    // Settles on a timer: unreachable while the event loop is starved.
+    vi.mocked(resumeAgent).mockImplementation(() =>
+      new Promise(resolve => setTimeout(() => resolve({ text: "second", aborted: false, steered: false }), 5)),
+    );
+    const resumed = manager.resume(id, "more");
+    expect(manager.getRecord(id)?.status).toBe("running");
+
+    // A spinning loop would hang the test past vitest's own timeout (which a
+    // starved event loop cannot fire), so bound the passes and fail loudly.
+    let passes = 0;
+    const drain = vi.spyOn(manager as unknown as { drainQueue: () => void }, "drainQueue");
+    drain.mockImplementation(() => {
+      if (++passes > 1000) throw new Error("waitForAll spun without yielding");
+    });
+
+    await manager.waitForAll();
+    expect(manager.getRecord(id)?.status).toBe("completed");
+    await resumed;
+    expect(passes).toBeLessThan(10);
+  });
+
+  it("an inline resume's record.promise is the in-flight run, settling only once the record is terminal", async () => {
+    // What `get_subagent_result` with `wait` awaits (index.ts, nested-tools.ts):
+    // on the spawn's settled promise it returned mid-resume with a running record.
+    manager = new AgentManager();
+    vi.mocked(runAgent).mockResolvedValue({
+      responseText: "first", session: mockSession(), aborted: false, steered: false,
+    });
+    const id = manager.spawn(mockPi, mockCtx, "general-purpose", "test", { description: "test", isBackground: true });
+    const record = manager.getRecord(id)!;
+    const spawnPromise = record.promise;
+    await spawnPromise;
+
+    let finish!: () => void;
+    vi.mocked(resumeAgent).mockImplementation(() =>
+      new Promise(resolve => { finish = () => resolve({ text: "second", aborted: false, steered: false }); }),
+    );
+    const resumed = manager.resume(id, "more");
+    const waiting = record.promise;
+    expect(waiting).not.toBe(spawnPromise);
+
+    let woke = false;
+    const waiter = waiting!.then(() => { woke = true; expect(record.status).toBe("completed"); });
+    await new Promise(r => setImmediate(r));
+    expect(woke, "the wait returned while the resume was still running").toBe(false);
+
+    finish();
+    await waiter;
+    expect(record.result).toBe("second");
+    await resumed;
+  });
 });
 
 describe("AgentManager — dispose prunes worktree repos", () => {
@@ -2384,6 +2478,30 @@ describe("AgentManager — background resume", () => {
     expect(manager.getRecord(id)!.toolUses).toBe(1);
     expect(manager.getRecord(id)!.lifetimeUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
     expect(manager.getRecord(id)!.ownUsage).toEqual({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+  });
+
+  // As on spawn: a resumed workflow row is reported from inside these hooks.
+  it.each([
+    ["foreground", false],
+    ["background", true],
+  ])("updates the record before forwarding a %s resume's activity and usage hooks", async (_mode, isBackground) => {
+    manager = new AgentManager();
+    const id = await spawnSettled(manager);
+    vi.mocked(resumeAgent).mockImplementation(async (_session, _prompt, opts: any) => {
+      opts.onToolActivity?.({ type: "end", toolName: "grep" });
+      opts.onAssistantUsage?.({ input: 5, output: 3, cacheWrite: 0, cost: 0 });
+      return { text: "ok" };
+    });
+    const seen: { toolUses: number; output: number }[] = [];
+    const read = () => {
+      const record = manager.getRecord(id)!;
+      seen.push({ toolUses: record.toolUses, output: record.lifetimeUsage.output });
+    };
+
+    const record = await manager.resume(id, "go", undefined, { isBackground, onToolActivity: read, onAssistantUsage: read });
+    await record?.promise;
+
+    expect(seen).toEqual([{ toolUses: 1, output: 0 }, { toolUses: 1, output: 3 }]);
   });
 
   it("queues a background resume when the concurrency pool is full", async () => {

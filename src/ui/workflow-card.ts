@@ -126,10 +126,10 @@ export const ASCII_GLYPHS: WorkflowGlyphs = {
  * ------------------------------------------------------------------------- */
 
 /**
- * pi theme keys. Claude Code's palette maps as success→success, error→error,
+ * pi theme keys. The palette maps as success→success, error→error,
  * subtle→dim, permission→warning for a blocked row and accent for selection;
  * an undefined colour means "leave it at the terminal default", which is what
- * the recovered inline mapping asks for on a running row.
+ * a running row shows.
  *
  * `accent` is unused by the card and exists for the workflows dialog, which
  * shares these segment types.
@@ -239,7 +239,7 @@ export function formatThinking(entry: WorkflowAgentEntry): string | undefined {
 export const REPLAYED_ANNOTATION = "from resume journal";
 
 /**
- * The `·`-separated tail of an agent row, in the recovered order: agentType,
+ * The `·`-separated tail of an agent row, in this order: agentType,
  * model, tokens, toolCalls, durationMs. Absent values drop out entirely rather
  * than rendering a placeholder.
  */
@@ -255,7 +255,7 @@ export function agentStatSegments(entry: WorkflowAgentEntry): string[] {
 }
 
 /**
- * The recovered inline mapping — keyed on the raw entry state. `skipped` and
+ * The inline view's glyphs and colours — keyed on the raw entry state. `skipped` and
  * `blocked` are not distinguished here; that is the dialog's job.
  */
 function rowGlyph(entry: WorkflowAgentEntry, glyphs: WorkflowGlyphs): WorkflowCardSegment {
@@ -372,7 +372,7 @@ export function layoutWorkflowCard(input: WorkflowCardInput): WorkflowCardLine[]
       ];
 
       // Prepended rather than folded into `agentStatSegments`, which is the
-      // ported stat tail in its recovered order. A replayed agent otherwise
+      // stat tail in its fixed order. A replayed agent otherwise
       // renders as a tick with no tokens and no duration — indistinguishable
       // from one that somehow did the work for free.
       const statParts = entry.cached

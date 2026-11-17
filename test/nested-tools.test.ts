@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { getAvailableTypes, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { getAvailableTypes, registerAgents, setFallbackSubagent, setToolDescriptionMode } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
 import { setScopeModelsEnabled } from "../src/model-scope.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager, setMaxSubagentDepth } from "../src/nested-tools.js";
@@ -14,10 +14,10 @@ let records: Map<string, any>;
 let spawn: ReturnType<typeof vi.fn>;
 let spawnAndWait: ReturnType<typeof vi.fn>;
 
-function writeAgent(name: string, extra = "") {
+function writeAgent(name: string, extra = "", description = name) {
   const dir = join(cwd, ".pi", "agents");
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, `${name}.md`), `---\ndescription: ${name}\ntools: read\n${extra}---\n${name}\n`);
+  writeFileSync(join(dir, `${name}.md`), `---\ndescription: ${description}\ntools: read\n${extra}---\n${name}\n`);
 }
 
 const MODELS = [
@@ -86,6 +86,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setScopeModelsEnabled(false);
+  setToolDescriptionMode("full");
   rmSync(cwd, { recursive: true, force: true });
 });
 
@@ -97,6 +98,24 @@ describe("child-safe nested Agent tools", () => {
     const [agent] = tools();
     expect(agent.description).toContain("does NOT notify you");
     expect(agent.description).toContain("get_subagent_result");
+  });
+
+  // #457: the child must see what each allowed agent is for, as the main
+  // session does — and nothing about agents outside its allowlist.
+  it("lists each allowed agent type with its description and tools", () => {
+    writeAgent("tracer", "", "Traces call sites. Use it for callers.");
+    const [agent] = tools(["tracer"]);
+    expect(agent.description).toContain("- tracer: Traces call sites. Use it for callers. (Tools: read)");
+    expect(agent.description).not.toContain("scout");
+    expect(agent.description).not.toContain("reviewer");
+  });
+
+  it("lists first sentences only under toolDescriptionMode compact", () => {
+    writeAgent("tracer", "", "Traces call sites. Use it for callers.");
+    setToolDescriptionMode("compact");
+    const [agent] = tools(["tracer"]);
+    expect(agent.description).toContain("- tracer: Traces call sites. (Tools: read)");
+    expect(agent.description).not.toContain("Use it for callers");
   });
 
   it("allows any enabled agent when allowed_subagents is omitted", async () => {

@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { setDefaultsDisabled } from "../src/agent-types.js";
+import { setDefaultsDisabled, setToolDescriptionMode } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import { setWorktreeIsolationEnabled } from "../src/worktree.js";
 
@@ -85,6 +85,7 @@ describe("toolDescriptionMode", () => {
     // so the "default" assertions below really test the default.
     setWorktreeIsolationEnabled(true);
     setDefaultsDisabled(false);
+    setToolDescriptionMode("full");
     process.chdir(prevCwd);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;
@@ -440,6 +441,52 @@ describe("toolDescriptionMode", () => {
       const tools = withAgent("narrow", "tools: read, grep");
       const desc: string = tools.get("Agent").description;
       expect(desc).toContain("- narrow: narrow agent. (Tools: read, grep)");
+    });
+  });
+
+  describe("workflowToolExposure picks where the SubagentWorkflow reference lives", () => {
+    it("skill points at the skill instead of carrying the reference", () => {
+      const desc: string = setup({ workflowToolExposure: "skill" }).get("SubagentWorkflow").description;
+      expect(desc).toContain("load the `workflow-authoring` skill (read `");
+      expect(desc).not.toContain("Script body hooks:");
+    });
+
+    it("defaults to inline: the reference in place of the pointer, roster still rendered", () => {
+      // A model can skip the pointer — one did in a manual run — so by default
+      // the reference is in the description it cannot avoid reading.
+      const desc: string = setup().get("SubagentWorkflow").description;
+      expect(desc).not.toContain("Before writing a script, load the `workflow-authoring` skill");
+      expect(desc).toContain("# Workflow authoring reference");
+      expect(desc).toContain("Script body hooks:");
+      expect(desc).toContain("## Resume");
+      // The skill's frontmatter is for pi's loader, not the model.
+      expect(desc).not.toContain("name: workflow-authoring");
+      expect(desc).not.toContain("{{typeList}}");
+      expect(desc).toContain("- general-purpose:");
+    });
+
+    it("deferred carries the inline reference: a pointer would cost a second round trip after the search", () => {
+      const desc: string = setup({ workflowToolExposure: "deferred" }).get("SubagentWorkflow").description;
+      expect(desc).toContain("Script body hooks:");
+      expect(desc).not.toContain("Before writing a script, load the `workflow-authoring` skill");
+    });
+
+    it("inline and deferred tell the model not to load the listed skill they already carry", () => {
+      // pi lists the skill in the system prompt too; without this line a model
+      // read SKILL.md on top of the identical inline body.
+      const lead = "Do not load the `workflow-authoring` skill: its full text follows.";
+      const inline: string = setup().get("SubagentWorkflow").description;
+      const deferred: string = setup({ workflowToolExposure: "deferred" }).get("SubagentWorkflow").description;
+      const skill: string = setup({ workflowToolExposure: "skill" }).get("SubagentWorkflow").description;
+      expect(inline).toContain(`${lead}\n\n# Workflow authoring reference`);
+      expect(deferred).toContain(lead);
+      expect(skill).not.toContain(lead);
+    });
+
+    it("an invalid value is dropped — the inline default", () => {
+      const desc: string = setup({ workflowToolExposure: "both" }).get("SubagentWorkflow").description;
+      expect(desc).toContain("Script body hooks:");
+      expect(desc).not.toContain("Before writing a script, load the `workflow-authoring` skill");
     });
   });
 });

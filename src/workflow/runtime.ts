@@ -67,6 +67,10 @@ export interface WorkflowSpawnRequest {
    */
   effort?: string;
   isolation?: "worktree";
+  /** Tools denied to this child, on top of its agent type's own deny list. */
+  disallowedTools?: string[];
+  /** Absolute counters for this spawn/resume invocation, not per-event deltas. */
+  onProgress?(info: Pick<WorkflowSpawnResult, "tokens" | "toolCalls">): void;
   /**
    * Called by the host once the child's EFFECTIVE configuration is known —
    * which is when its session exists, not when the spawn resolves.
@@ -128,11 +132,12 @@ export interface WorkflowSpawnResult {
   error?: string;
   /** The user dismissed it rather than it failing; renders as skipped. */
   skipped?: boolean;
+  /** Display total for this spawn/resume invocation, excluding earlier turns. */
   tokens?: number;
   /**
    * Output tokens only, for the script's `budget.spent()`.
    *
-   * Separate from {@link tokens}, which is the lifetime total. Claude Code's
+   * Separate from {@link tokens}, which includes input. Claude Code's
    * budget counts output, and a fan-out's re-sent input would swamp it.
    */
   outputTokens?: number;
@@ -205,6 +210,7 @@ export interface WorkflowHost {
      * the row above it shows the one that ran.
      */
     onResolved?: WorkflowSpawnRequest["onResolved"],
+    onProgress?: WorkflowSpawnRequest["onProgress"],
   ): Promise<WorkflowSpawnResult>;
   /**
    * Run a `gate` command and report whether it passed.
@@ -316,13 +322,27 @@ export interface WorkflowRunResult {
   /** The script's return value, JSON-checked at the boundary. */
   value?: unknown;
   error?: string;
-  /** The append-only log, in emission order. */
+  /**
+   * Every transition, in emission order: one entry each time an agent is
+   * queued, started, resolved or settled. Live counter reports go to
+   * `onProgress` only; the settled entry carries the final counters.
+   */
   progress: WorkflowEntry[];
   /** Agents scheduled, including those that failed. */
   agentCount: number;
   /** How many of those came back from the journal instead of being spawned. */
   replayedCount: number;
+  /**
+   * One line per failure, in settle order: `[label] failed: reason` for an
+   * agent, `parallel[i] failed: …` / `pipeline[i] failed: …` for a slot that
+   * dropped to null. Skips are not failures. Reported in the completion
+   * notification's `<failures>`, as Claude Code's is.
+   */
+  failures: string[];
 }
+
+/** Cap on a failure reason, the same in the journal and in `agentError()`. */
+const FAILURE_REASON_CAP = 500;
 
 /* ------------------------------------------------------------------------- *
  * JSON boundary — host side
@@ -444,11 +464,14 @@ interface AgentCallPayload {
   effort?: string;
   /** Raw JSON Schema from `agent({ schema })`, compiled before anything spawns. */
   schema?: unknown;
+  /** Deduped and sorted worker-side; absent when the script passed none or `[]`. */
+  disallowedTools?: string[];
 }
 
 type WorkerMessage =
   | { type: "call"; callId: number; method: string; payload: AgentCallPayload }
   | { type: "progress"; entries: WorkflowEntry[] }
+  | { type: "failure"; message: string }
   | { type: "complete"; resultJson?: string }
   | { type: "error"; message: string; stack?: string };
 
@@ -606,6 +629,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
    * realm, which §2.4 rules out, and reading stack traces, which is brittle.
    */
   const openLaunches = new Map<number, string>();
+  const failures: string[] = [];
   let agentCount = 0;
   let aborted = false;
   let settled = false;
@@ -735,16 +759,22 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
     };
 
     const respond = (callId: number, ok: boolean, value?: unknown, error?: string, fatal?: boolean) => {
+      // An agent call's label rides along so the worker can keep
+      // `agentError(label)` current: set by a null with a reason, cleared by
+      // anything else.
+      const agentLabel = openLaunches.get(callId);
       // Cleared before the settled check: a launch answered by a run that is
       // already finishing is not an unawaited launch either.
       openLaunches.delete(callId);
       if (settled) return;
       // `spent` rides on every response, so the worker's `budget.spent()` is a
       // mirror of this number rather than a second tally of its own.
-      worker.postMessage({ type: "response", callId, ok, value, error, fatal, spent: spentOutputTokens });
+      worker.postMessage({ type: "response", callId, ok, value, error, fatal, agentLabel, spent: spentOutputTokens });
     };
 
-    const finish = (result: Omit<WorkflowRunResult, "meta" | "progress" | "agentCount" | "replayedCount">) => {
+    const finish = (
+      result: Omit<WorkflowRunResult, "meta" | "progress" | "agentCount" | "replayedCount" | "failures">,
+    ) => {
       if (settled) return;
       settled = true;
       options.signal?.removeEventListener("abort", onAbort);
@@ -758,7 +788,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       semaphore.drain();
       // Resolve only once the thread is actually down, so a caller that awaits
       // runWorkflow() is guaranteed not to be leaking one.
-      const settle = () => resolve({ ...result, meta, progress, agentCount, replayedCount });
+      const settle = () => resolve({ ...result, meta, progress, agentCount, replayedCount, failures });
       void worker.terminate().then(settle, settle);
     };
 
@@ -912,7 +942,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             resultPreview: preview(replayedText),
           },
         ]);
-        openLaunches.delete(callId);
         // Re-recorded so this run's journal is complete on its own terms: a
         // resume of a resume must not have to walk back through a chain of
         // earlier files to find the prefix.
@@ -926,11 +955,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
       /** A skip the user asked for, before the child ever started. */
       const settleSkipped = (extra: Partial<WorkflowAgentEntry>) => {
-        recordJournal?.({ index, key, ok: false, ...resumeMark });
-        emit([{ ...base, queuedAt, ...extra, state: "error", skipped: true, error: "Skipped by user." }]);
+        const error = "Skipped by user.";
+        recordJournal?.({ index, key, ok: false, error, ...resumeMark });
+        emit([{ ...base, queuedAt, ...extra, state: "error", skipped: true, error }]);
         // `null`, exactly as a terminal failure gives — a skipped agent is one
-        // the script's `.filter(Boolean)` was already written to survive.
-        respond(callId, true, null);
+        // the script's `.filter(Boolean)` was already written to survive. Not a
+        // `failures` line: the user chose it.
+        respond(callId, true, null, error);
       };
 
       // Registered for exactly as long as the call is unanswered, which is the
@@ -981,6 +1012,25 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
           const startedAt = Date.now();
           emit([{ ...base, queuedAt, startedAt, ...attemptMark }]);
+          // One row covers every attempt. Reconcile snapshots against the previous
+          // attempts, not the last live snapshot, so completion cannot count twice.
+          const previousTokens = base.tokens ?? 0;
+          const previousToolCalls = base.toolCalls ?? 0;
+          const updateCounters: NonNullable<WorkflowSpawnRequest["onProgress"]> = info => {
+            if (info.tokens !== undefined) base.tokens = previousTokens + info.tokens;
+            if (info.toolCalls !== undefined) base.toolCalls = previousToolCalls + info.toolCalls;
+          };
+          let acceptingProgress = true;
+          const onProgress: WorkflowSpawnRequest["onProgress"] = info => {
+            // agentId is reused by retries and resumes; an inflight id alone would
+            // let an older callback overwrite the current attempt or revive a row.
+            if (!acceptingProgress || settled) return;
+            updateCounters(info);
+            // To the listener only, not `emit`: a report arrives on every
+            // finished tool and message, and logging each would grow `progress`
+            // by one entry. The settled entry carries the final counters.
+            options.onProgress?.([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
+          };
 
           // Mutates `base` rather than emitting a standalone patch: every later
           // emit spreads it, so the settle path carries the effective values
@@ -995,18 +1045,13 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             requestedThinking?: string;
             requestedModel?: string;
           }) => {
+            if (!acceptingProgress || settled) return;
             if (info.recordId !== undefined) base.recordId = info.recordId;
             if (info.modelName !== undefined) base.model = info.modelName;
             if (info.modelId !== undefined) base.modelId = info.modelId;
             if (info.thinking !== undefined) base.thinking = info.thinking;
             if (info.requestedThinking !== undefined) base.requestedThinking = info.requestedThinking;
             if (info.requestedModel !== undefined) base.requestedModel = info.requestedModel;
-            // `base.state` is still "start", so emitting after the row reached a
-            // terminal state would revert it to running under last-write-wins.
-            // Not reachable from this repo's host, which reports during startup
-            // — but this is the host boundary, and every other promise it makes
-            // is checked rather than trusted.
-            if (!inflight.has(agentId)) return;
             emit([{ ...base, queuedAt, startedAt, ...attemptMark, lastProgressAt: Date.now() }]);
           };
           live.started = true;
@@ -1016,7 +1061,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           try {
             result =
               resumed !== undefined && resumeAgent !== undefined
-                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved)
+                ? await resumeAgent(resumed.agentId, payload.prompt, onResolved, onProgress)
                 : await host.spawnAgent({
                     agentId,
                     index,
@@ -1025,6 +1070,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     agentType,
                     ...(model !== undefined ? { model } : {}),
                     ...(payload.effort !== undefined ? { effort: payload.effort } : {}),
+                    ...(payload.disallowedTools !== undefined ? { disallowedTools: payload.disallowedTools } : {}),
                     ...(compiledSchema !== undefined ? { schema: compiledSchema } : {}),
                     ...(isolation !== undefined ? { isolation } : {}),
                     ...(payload.phaseIndex !== undefined ? { phaseIndex: payload.phaseIndex } : {}),
@@ -1033,7 +1079,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
                     // child's worktree does, and hands back `result.gate`.
                     ...(payload.gate !== undefined ? { gate: payload.gate } : {}),
                     onResolved,
+                    onProgress,
                   });
+            updateCounters(result);
             if (result.ok) {
               // Recorded before the gate runs: the child itself finished, so it is
               // resumable even when its gate rejects the work — "here is what the
@@ -1062,12 +1110,17 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           } catch (error) {
             result = { ok: false, error: error instanceof Error ? error.message : String(error) };
           } finally {
+            acceptingProgress = false;
             inflight.delete(agentId);
             live.started = false;
             semaphore.release();
           }
 
           if (settled) return;
+
+          // Budget stays output-only and settlement-based, including stopped
+          // attempts: a retry cannot refund tokens the previous child spent.
+          spentOutputTokens += result.outputTokens ?? 0;
 
           // The stop that produced this result was ours, so run the same call
           // again rather than reporting it. The script is still awaiting this
@@ -1079,11 +1132,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             continue;
           }
 
-          // Counted before the response is sent, so the very call that spent
-          // them already sees them in `budget.spent()`. Failed and skipped
-          // agents count too — they burned the tokens either way.
-          spentOutputTokens += result.outputTokens ?? 0;
-
           const finishedAt = Date.now();
           const common = {
             ...base,
@@ -1092,8 +1140,6 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
             ...attemptMark,
             lastProgressAt: finishedAt,
             durationMs: finishedAt - startedAt,
-            ...(result.tokens !== undefined ? { tokens: result.tokens } : {}),
-            ...(result.toolCalls !== undefined ? { toolCalls: result.toolCalls } : {}),
           };
 
           if (result.ok) {
@@ -1106,7 +1152,11 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
           // Recorded as a failure rather than left out: a gap would be read as an
           // unchanged prefix on the next resume, silently skipping the retry this
           // whole mechanism exists to make cheap.
-          recordJournal?.({ index, key, ok: false, ...resumeMark });
+          // The reason is capped: provider and gate text can be large, and the
+          // same string goes to disk, to the script and to the notification.
+          const error = (result.error ?? "Agent failed.").slice(0, FAILURE_REASON_CAP);
+          recordJournal?.({ index, key, ok: false, error, ...resumeMark });
+          if (!result.skipped) failures.push(`[${label}] failed: ${error}`);
           // A dead agent is a null in the script, not a thrown error: Claude Code
           // scripts .filter(Boolean) rather than try/catch around every call.
           emit([
@@ -1121,7 +1171,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
               ...(result.skipped ? { skipped: true } : {}),
             },
           ]);
-          respond(callId, true, null);
+          respond(callId, true, null, error);
           return;
         }
       } finally {
@@ -1172,6 +1222,9 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       switch (message.type) {
         case "progress":
           emit(message.entries);
+          break;
+        case "failure":
+          failures.push(message.message);
           break;
         case "call":
           if (message.method === "workflow") {

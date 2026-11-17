@@ -21,7 +21,7 @@ import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
 import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
-import { BUILTIN_TOOL_NAMES, getAgentConfig, getAvailableTypes, getConfig, getFallbackSubagent, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent } from "./agent-types.js";
+import { formatAgentTypeList, getAgentConfig, getAvailableTypes, getConfig, getFallbackSubagent, getModelLabelFromConfig, getToolDescriptionMode, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent, setToolDescriptionMode } from "./agent-types.js";
 import { inChildSessionContext } from "./child-context.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -52,10 +52,11 @@ import {
   settingSources,
   settingsFilePath,
   type ToolDescriptionMode,
+  type WorkflowToolExposureMode,
 } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { toSubagentInfo } from "./subagent-info.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -81,6 +82,7 @@ import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroun
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
 import { createSettingsPage, type SettingsPageDeps } from "./ui/settings-menu.js";
 import { renderWorkflowCard, renderWorkflowEntryCard } from "./ui/workflow-card.js";
+import { WorkflowCardRedraws } from "./ui/workflow-card-redraw.js";
 import { openWorkflowFromFleet, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
@@ -92,7 +94,7 @@ import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
-import { fullWorkflowToolDescription } from "./workflow/tool-description.js";
+import { workflowToolDescription } from "./workflow/tool-description.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
 
@@ -264,43 +266,6 @@ function buildNotificationDetails(record: AgentRecord, resultMaxLen: number, act
         : record.result
       : "No output.",
   };
-}
-
-/**
- * Format an agent's tool scope for the Agent tool description.
- *
- * This suffix describes BUILT-IN scope only — extension tools are resolved when
- * the agent runs (extensions can register asynchronously), so they cannot be
- * enumerated while the description is being built. That is why an agent with
- * `tools: "*, ext:mcp/search"` renders "*" and always has.
- *
- * Two distinctions matter, both of them capability claims the orchestrator acts on:
- *
- * - absent vs empty. `builtinToolNames: undefined` means the agent never narrowed
- *   its tools (the shipped defaults); `[]` is what `tools: none` and an `ext:`-only
- *   `tools:` parse to, and the runtime really does hand those agents no built-ins.
- *   Rendering both "*" tells the orchestrator a tool-less agent can run `bash`.
- * - empty-with-extensions vs empty-without. Zero built-ins does NOT imply zero
- *   tools: `tools: none` alongside `extensions:` still surfaces every extension
- *   tool (see test/fixtures/.pi/agents/tools-none.md, which expects three). Calling
- *   that "none" understates the agent instead of overstating it — better, but still
- *   wrong, and it would route work away from the only agent able to do it. "none"
- *   is therefore reserved for agents that genuinely can call nothing: `isolated`
- *   agents and those with `extensions: false`.
- */
-export function formatToolsSuffix(cfg: AgentConfig | undefined): string {
-  const tools = cfg?.builtinToolNames;
-  if (!tools) return "*";
-  if (tools.length === 0) {
-    // `isolated` overrides extensions to false in the runner, so both mean the
-    // agent has no extension tools either — and then it truly has nothing.
-    const noExtensionTools = cfg?.isolated === true || cfg?.extensions === false;
-    return noExtensionTools ? "none" : "no built-ins, extension tools only";
-  }
-  const isFullSet =
-    tools.length === BUILTIN_TOOL_NAMES.length
-    && BUILTIN_TOOL_NAMES.every((t) => tools.includes(t));
-  return isFullSet ? "*" : tools.join(", ");
 }
 
 /** CLI flag that runs a workflow script at session start. */
@@ -1342,13 +1307,8 @@ export default function (pi: ExtensionAPI) {
     reloadCustomAgents(); // re-register with new setting
   }
 
-  // ---- Agent tool description mode ----
-  // "full" (default) keeps the rich Claude Code-style description; "compact"
-  // swaps in a ~75% smaller one for small/local models (#91). Read once at
-  // tool registration — flipping it applies on the next pi session.
-  let toolDescriptionMode: ToolDescriptionMode = "full";
-  function getToolDescriptionMode(): ToolDescriptionMode { return toolDescriptionMode; }
-  function setToolDescriptionMode(mode: ToolDescriptionMode): void { toolDescriptionMode = mode; }
+  let workflowToolExposure: WorkflowToolExposureMode = "inline";
+  function getWorkflowToolExposure(): WorkflowToolExposureMode { return workflowToolExposure; }
 
   // ---- Turn batches for `group` join mode ----
   // Background spawns the parent made in its current turn. The turn's end is
@@ -1504,38 +1464,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", () => outbox.onAgentEnd());
   pi.on("agent_settled", () => outbox.onAgentEnd());
 
-  /** Build the full type list text dynamically from available agents only. */
-  const buildTypeListText = () => {
-    const available = getAvailableTypes();
-
-    return available.map((name) => {
-      const cfg = getAgentConfig(name);
-      const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
-      const toolsSuffix = ` (Tools: ${formatToolsSuffix(cfg)})`;
-      return `- ${name}: ${cfg?.description ?? name}${modelSuffix}${toolsSuffix}`;
-    }).join("\n");
-  };
-
-  /** First sentence of an agent description — for the compact type list. */
-  const firstSentence = (text: string): string => {
-    const match = text.match(/^.*?[.!?](?=\s|$)/s);
-    return (match ? match[0] : text).replace(/\s+/g, " ").trim();
-  };
-
-  /** Compact type list: one line per agent, first sentence only. */
-  const buildCompactTypeListText = () =>
-    getAvailableTypes().map((name) => {
-      const cfg = getAgentConfig(name);
-      return `- ${name}: ${firstSentence(cfg?.description ?? name)} (Tools: ${formatToolsSuffix(cfg)})`;
-    }).join("\n");
-
-  /** Derive a short model label from a model string. */
-  function getModelLabelFromConfig(model: string): string {
-    // Strip provider prefix (e.g. "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6")
-    const name = model.includes("/") ? model.split("/").pop()! : model;
-    // Strip trailing date suffix (e.g. "claude-haiku-4-5-20251001" → "claude-haiku-4-5")
-    return name.replace(/-\d{8}$/, "");
-  }
+  const buildTypeListText = () => formatAgentTypeList(getAvailableTypes(), getAgentConfig, false);
+  const buildCompactTypeListText = () => formatAgentTypeList(getAvailableTypes(), getAgentConfig, true);
 
   // Apply persisted settings on startup and emit `subagents:settings_loaded`.
   // Global + project merged; missing → defaults; corrupt file emits a warning
@@ -1554,6 +1484,7 @@ export default function (pi: ExtensionAPI) {
     setStrictAgentFiles: (b) => { strictAgentFiles = b; },
     setDisableDefaultAgents: setDisableDefaultAgents,
     setToolDescriptionMode: setToolDescriptionMode,
+    setWorkflowToolExposure: (mode) => { workflowToolExposure = mode; },
     setFleetView: setFleetViewEnabled,
     setAgentMentions: setAgentMentionMode,
     setRememberAgents,
@@ -1929,8 +1860,9 @@ Terse command-style prompts produce shallow, generic work.
       // and picks up the widget, fleet row, transcript, join batching and
       // completion notification unchanged. Only the prompt, the turn budget and
       // run_in_background carry over from the call: like a live resume, it
-      // ignores `subagent_type`, model and the rest, and runs under the agent
-      // type's current definition.
+      // ignores `subagent_type`, model, thinking and the rest. It runs under the
+      // agent type's current prompt and tools, on the model and thinking level
+      // its own session recorded (#462) — see the model resolution below.
       // `schedule` is left to its own branch, which refuses the combination.
       const saved = callParams.resume !== undefined && !callParams.schedule
         && manager.getRecord(callParams.resume) === undefined
@@ -1992,8 +1924,11 @@ Terse command-style prompts produce shallow, generic work.
       });
 
       // Resolve model from agent config first; tool-call params only fill gaps.
-      let model = ctx.model;
-      if (resolvedConfig.modelInput) {
+      // A reopen resolves none: runAgent leaves the model and thinking level to
+      // the reopened session, which restores the ones the agent ran with. The
+      // agent file and the parent would both override them (#462).
+      let model = reopenOptions ? undefined : ctx.model;
+      if (resolvedConfig.modelInput && !reopenOptions) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           if (resolvedConfig.modelFromParams) return textResult(resolved);
@@ -2017,7 +1952,7 @@ Terse command-style prompts produce shallow, generic work.
       if (scopeVerdict.kind === "error") return textResult(scopeVerdict.message);
       if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
 
-      const thinking = resolvedConfig.thinking;
+      const thinking = reopenOptions ? undefined : resolvedConfig.thinking;
       const inheritContext = resolvedConfig.inheritContext;
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
@@ -2566,6 +2501,17 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTasks = new Map<string, WorkflowTask>();
 
   /**
+   * pi's renderer mode, as last seen on a TUI the fleet list was drawn into.
+   * Remembered rather than read off the list's live handle, which pi clears on
+   * every theme change and mode switch until the list registers again. Before
+   * any draw, pi's own setting, normalized as its `getTuiMode()` does; that
+   * misses a `--tui-mode` flag, which no extension API exposes.
+   */
+  let seenTuiMode: string | undefined;
+  const tuiMode = () => seenTuiMode ?? (pi.getSettings().tuiMode === "regular" ? "regular" : "fullscreen");
+  const workflowCards = new WorkflowCardRedraws(() => tuiMode() === "fullscreen");
+
+  /**
    * Workflow runs as the fleet list wants them.
    *
    * Mapped here rather than handing `WorkflowTask` over the seam: the list is
@@ -2583,6 +2529,8 @@ Terse command-style prompts produce shallow, generic work.
       status: task.status,
       doneCount: task.doneCount,
       totalCount: task.agentCount,
+      // A settled run has no phase in progress; a paused one is still in its.
+      phase: task.status === "running" || task.status === "paused" ? task.phaseLabel : "",
       startedAt: task.startTime,
       ...(task.endTime !== undefined ? { completedAt: task.endTime } : {}),
       tokens: task.totalTokens,
@@ -2609,7 +2557,11 @@ Terse command-style prompts produce shallow, generic work.
           rootSessionId: ctx.sessionManager.getSessionId(),
           workflowId: task.id,
         }),
-        onProgress: entries => updateWorkflowProgressBatch(task, entries),
+        onProgress: entries => {
+          if (entries.length === 0) return;
+          updateWorkflowProgressBatch(task, entries);
+          workflowCards.request(task.id);
+        },
         // The dialog's pause / skip / retry keys run through this; it is dropped
         // again when the task settles.
         onControl: control => { task.control = control; },
@@ -2634,6 +2586,7 @@ Terse command-style prompts produce shallow, generic work.
   function notifyWorkflowFinished(task: WorkflowTask) {
     widget.update();
     fleet.update();
+    workflowCards.flush(task.id);
     const result = workflowResultText(task);
     const message = {
       content: formatWorkflowNotification(task),
@@ -2659,10 +2612,11 @@ Terse command-style prompts produce shallow, generic work.
   const workflowTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.WORKFLOW,
     label: "SubagentWorkflow",
-    description: renderToolDescriptionTemplate(fullWorkflowToolDescription),
+    // `deferred`: not declared to the model until pi's `tool_search` loads it.
+    ...(getWorkflowToolExposure() === "deferred" ? { exposure: "deferred" as const } : {}),
+    description: renderToolDescriptionTemplate(workflowToolDescription(getWorkflowToolExposure())),
     promptSnippet: "Run a deterministic script that orchestrates many subagents",
     promptGuidelines: [
-      "Use SubagentWorkflow when the number of agents depends on something discovered at runtime, when work flows through stages, or when findings should be independently verified. Use Agent for one delegated task or a handful you can name up front.",
       "Prefer `pipeline` over `parallel` — a barrier costs wall-clock whenever the stages are unevenly sized.",
       "A workflow runs in the background and notifies you when it finishes — do not poll or sleep waiting for it.",
     ],
@@ -2724,6 +2678,14 @@ Terse command-style prompts produce shallow, generic work.
       // No task means the run predates this session (a reloaded transcript) or
       // the call never started one — show what `execute` said instead.
       if (renderContext.isError || !task) return new Text(text, 0, 0);
+      if (task.status === "running" || task.status === "paused") {
+        workflowCards.track(task.id, renderContext.invalidate);
+        // A card that cannot follow the run says where to watch it instead of
+        // showing a launch-time snapshot that reads as live.
+        if (tuiMode() !== "fullscreen") {
+          return new Text(theme.fg("dim", `  ⎿  Running in background (ID: ${task.id}) · /agents → Workflows`), 0, 0);
+        }
+      }
       return renderWorkflowCard(
         {
           progress: task.workflowProgress,
@@ -2875,9 +2837,15 @@ Terse command-style prompts produce shallow, generic work.
         ownDescription: workflowTool.description,
         pinned: isWorkflowsPinned(),
       });
-      if (verdict.kind === "none") return;
-      if (verdict.kind === "report") {
-        warn(verdict.message);
+      if (verdict.kind === "none" || verdict.kind === "report") {
+        if (verdict.kind === "report") warn(verdict.message);
+        // pi's own warning for unreachable deferred tools covers MCP servers only.
+        if (workflowTool.exposure === "deferred" && !pi.getActiveTools().includes("tool_search")) {
+          warn(
+            'workflowToolExposure is "deferred" but tool_search is inactive, so the model cannot load SubagentWorkflow. '
+            + 'Add "+tool_search" to defaultTools in .pi/settings.json, or set workflowToolExposure to "skill".',
+          );
+        }
         return;
       }
 
@@ -2887,6 +2855,9 @@ Terse command-style prompts produce shallow, generic work.
       warn(verdict.message);
 
       if (!verdict.withdraw) return;
+      // An inactive deferred tool stays searchable and callable; only `hidden`
+      // exposure takes it out of reach, and tools cannot be unregistered.
+      if (workflowTool.exposure === "deferred") pi.registerTool({ ...workflowTool, exposure: "hidden" });
       const active = pi.getActiveTools();
       if (active.includes(SUBAGENT_TOOL_NAMES.WORKFLOW)) {
         pi.setActiveTools(active.filter(name => name !== SUBAGENT_TOOL_NAMES.WORKFLOW));
@@ -3215,6 +3186,7 @@ Terse command-style prompts produce shallow, generic work.
       strictAgentFiles,
       disableDefaultAgents: isDefaultsDisabled(),
       toolDescriptionMode: getToolDescriptionMode(),
+      workflowToolExposure: getWorkflowToolExposure(),
       fleetView: isFleetViewEnabled(),
       agentMentions: getAgentMentionMode(),
       rememberAgents: getRememberAgents(),
@@ -3452,6 +3424,17 @@ Terse command-style prompts produce shallow, generic work.
             + "(off keeps the SubagentWorkflow tool out of the tool spec; applies on next pi session)",
           currentValue: isWorkflowsEnabled() ? "on" : "off",
           values: ["on", "off"],
+        },
+        {
+          id: "workflowToolExposure",
+          label: "Workflow tool exposure",
+          description:
+            "Where the SubagentWorkflow script reference reaches the model: inline (default — in the tool description, "
+            + "always read) or skill (~4k fewer tokens per session; the description points at the bundled skill file, "
+            + "which the model must choose to read before writing a script) or deferred (not in the tool spec until "
+            + "pi's tool_search loads it, then inline; requires tool_search). Applies on next pi session",
+          currentValue: getWorkflowToolExposure(),
+          values: ["inline", "skill", "deferred"],
         },
         {
           id: "worktreeIsolation",
@@ -3714,6 +3697,9 @@ Terse command-style prompts produce shallow, generic work.
       } else if (id === "toolDescriptionMode") {
         setToolDescriptionMode(value as ToolDescriptionMode);
         notifyApplied(ctx, target, `Tool description set to ${value}. Takes effect on next pi session.`);
+      } else if (id === "workflowToolExposure") {
+        workflowToolExposure = value as WorkflowToolExposureMode;
+        notifyApplied(ctx, target, `Workflow tool exposure set to ${value}. Takes effect on next pi session.`);
       } else if (id === "reportUsage") {
         const enabled = value === "on";
         setReportUsage(enabled);
@@ -3851,9 +3837,15 @@ Terse command-style prompts produce shallow, generic work.
     // Read lazily: `currentCtx` is rebound on every session_start, and the
     // fleet list may act between sessions, when there is none.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
+    onTaskChange: task => workflowCards.request(task.id),
   };
 
   fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));
+  fleet.setTuiModeObserver(mode => {
+    const was = tuiMode();
+    seenTuiMode = mode;
+    if (mode !== was) workflowCards.redrawAll();
+  });
 
   const { showAgentsMenu } = createAgentsMenu({
     pi,

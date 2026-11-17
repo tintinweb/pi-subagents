@@ -8,7 +8,8 @@
  * Claude Code's `local_workflow` task so the fields line up with what the
  * renderers already expect.
  *
- * The progress log is append-only and collapses by index (see `progress.ts`),
+ * The progress log holds each agent's latest entry, replaced in place, plus
+ * logs and phases in order, and collapses by index (see `progress.ts`),
  * so every derived counter here is recomputed from the log rather than
  * incremented as entries arrive — a re-emitted agent entry replaces its
  * predecessor, and adding its tokens on top would double-count them.
@@ -18,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import { escapeXml } from "../xml.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
-import { collapse, elapsedMs, stats, type WorkflowEntry, type WorkflowRunStatus } from "./progress.js";
+import { activePhaseLabel, collapse, elapsedMs, stats, type WorkflowEntry, type WorkflowRunStatus } from "./progress.js";
 import type { WorkflowControl, WorkflowRunResult } from "./runtime.js";
 
 /** `wf_` + hex, matching Claude Code's `^wf_[a-z0-9-]{6,}$` run ids. */
@@ -60,8 +61,13 @@ export interface WorkflowTask {
   /** How many agents came back from {@link replay} instead of being spawned. */
   replayedCount: number;
 
-  /** The append-only event log, in emission order. */
+  /**
+   * The event log, in first-emission order, holding each agent's latest entry
+   * only — see {@link updateWorkflowProgressBatch}. Logs and phases append.
+   */
   workflowProgress: WorkflowEntry[];
+  /** Agent index → its entry's position in {@link workflowProgress}. */
+  agentSlots: Map<number, number>;
   /** Bumped once per applied batch, so a renderer can tell nothing changed. */
   progressVersion: number;
   agentCount: number;
@@ -69,10 +75,12 @@ export interface WorkflowTask {
    * Agents that have settled successfully, recomputed with the other counters.
    *
    * Cached rather than derived on read because the fleet list asks five times a
-   * second: deriving it there would walk the whole append-only log on every
+   * second: deriving it there would walk the whole progress log on every
    * tick, which for a thousand-agent run is real work in the render loop.
    */
   doneCount: number;
+  /** `Reviewing (2/3)` — the phases with work outstanding, or "". Cached like {@link doneCount}. */
+  phaseLabel: string;
   totalTokens: number;
   totalToolCalls: number;
   logs: string[];
@@ -86,6 +94,8 @@ export interface WorkflowTask {
   /** The script's return value, once the run produced one. */
   value?: unknown;
   error?: string;
+  /** The run's failure lines, for the notification's `<failures>`. */
+  failures?: string[];
 }
 
 export function createWorkflowTask(init: {
@@ -115,9 +125,11 @@ export function createWorkflowTask(init: {
     resumedFrom: init.resumedFrom,
     replayedCount: 0,
     workflowProgress: [],
+    agentSlots: new Map(),
     progressVersion: 0,
     agentCount: 0,
     doneCount: 0,
+    phaseLabel: "",
     totalTokens: 0,
     totalToolCalls: 0,
     logs: [],
@@ -140,11 +152,26 @@ export function updateWorkflowProgressBatch(
   entries: readonly WorkflowEntry[],
 ): void {
   if (entries.length === 0) return;
-  task.workflowProgress.push(...entries);
+  for (const entry of entries) {
+    // An agent's newer entry replaces its older one in place. Every reader goes
+    // through `collapse`, which keeps only the latest entry per index, so this
+    // loses nothing — and a running child's live counters, re-emitted on every
+    // tool and message, would otherwise grow the log (and the session entry it
+    // is persisted into) by one entry each.
+    const slot = entry.type === "workflow_agent" ? task.agentSlots.get(entry.index) : undefined;
+    if (slot !== undefined) {
+      task.workflowProgress[slot] = entry;
+      continue;
+    }
+    if (entry.type === "workflow_agent") task.agentSlots.set(entry.index, task.workflowProgress.length);
+    task.workflowProgress.push(entry);
+  }
   task.progressVersion++;
 
-  const { agents, logs } = collapse(task.workflowProgress);
+  const collapsed = collapse(task.workflowProgress);
+  const { agents, logs } = collapsed;
   task.logs = logs;
+  task.phaseLabel = activePhaseLabel(collapsed, task.meta?.phases);
   // `agentCount` is what the runtime has scheduled, which can lead what the log
   // has seen — never let a recompute walk it backwards.
   task.agentCount = Math.max(task.agentCount, agents.length);
@@ -205,6 +232,7 @@ export function completeWorkflowTask(task: WorkflowTask, result: WorkflowRunResu
   task.replayedCount = result.replayedCount;
   task.value = result.value;
   task.error = result.error;
+  task.failures = result.failures;
   task.endTime = Date.now();
 }
 
@@ -296,6 +324,9 @@ export function formatWorkflowNotification(task: WorkflowTask, now = Date.now())
       task.replayedCount > 0 ? `, ${task.replayedCount} replayed from ${escapeXml(task.resumedFrom ?? "an earlier run")}` : ""
     }</summary>`,
     `<result>${escapeXml(result.length > 4000 ? `${result.slice(0, 4000)}\n...(truncated)` : result)}</result>`,
+    // Compatible with Claude Code's: every failure line, capped, and absent
+    // when nothing failed.
+    task.failures?.length ? `<failures>${escapeXml(task.failures.join("\n").slice(0, 40_000))}</failures>` : null,
     `<usage><total_tokens>${task.totalTokens}</total_tokens><tool_uses>${task.totalToolCalls}</tool_uses><duration_ms>${elapsedMs(task, now)}</duration_ms></usage>`,
     `</task-notification>`,
   ].filter(Boolean).join("\n");

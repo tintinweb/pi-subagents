@@ -410,7 +410,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     // Package agents is on by default because no gate is set at all.
     writeJson(globalFile(), { packageAgents: false });
     const agents = boot();
-    const { ctx, page } = drivePage([...toRow(17), DEL]);
+    const { ctx, page } = drivePage([...toRow(18), DEL]);
 
     await agents(ctx);
 
@@ -643,6 +643,24 @@ describe("/agents → Settings filter and height", () => {
     expect(twice.page.closedItself).toBe(true);
   });
 
+  it("Enter on the Workflow tool exposure row saves skill", async () => {
+    const agents = boot();
+    const { ctx } = drivePage([..."workflow tool exp", DOWN, ENTER]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ workflowToolExposure: "skill" });
+  });
+
+  it("Enter twice on the Workflow tool exposure row saves deferred", async () => {
+    const agents = boot();
+    const { ctx } = drivePage([..."workflow tool exp", DOWN, ENTER, ENTER]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ workflowToolExposure: "deferred" });
+  });
+
   it("Enter on a filtered number row opens the editor for that row", async () => {
     const agents = boot();
     const { ctx } = drivePage([..."grace", DOWN, ...typeValue("9")]);
@@ -662,6 +680,6 @@ describe("/agents → Settings filter and height", () => {
     expect(page.lines.length).toBeLessThanOrEqual(24);
     expect(page.lines[0]).toContain("Subagent Settings");
     expect(page.screen).toMatch(/^> Report usage to session +off\b/m);
-    expect(page.screen).toContain("(27/27)");
+    expect(page.screen).toContain("(28/28)");
   });
 });

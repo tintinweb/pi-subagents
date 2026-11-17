@@ -65,6 +65,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { runInChildSessionContext } from "./child-context.js";
 import { agentMentionReminder } from "./mention.js";
+import { withoutCwdSection } from "./prompts.js";
 import type { SubagentType } from "./types.js";
 
 export interface MentionCloneOptions {
@@ -138,8 +139,11 @@ export async function runMentionClone(opts: MentionCloneOptions): Promise<Mentio
     // The live system prompt, not the one the clone would build from cwd and
     // agentDir — extensions contribute to it per turn. Everything the loader
     // would add on top (AGENTS.md, skills, APPEND_SYSTEM.md) is already in the
-    // rendered prompt, so it is suppressed, as agent-runner does.
-    const systemPrompt = ctx.getSystemPrompt();
+    // rendered prompt, so it is suppressed, as agent-runner does. The `cwd`
+    // section cannot be suppressed — pi renders it after any prompt — so the
+    // parent's copy is removed instead. Extension sections stay: the clone
+    // loads no extensions to render them again.
+    const systemPrompt = withoutCwdSection(ctx.getSystemPrompt(), ctx.cwd);
     const loader = new DefaultResourceLoader({
       cwd: ctx.cwd,
       agentDir: getAgentDir(),

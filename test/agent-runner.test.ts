@@ -1105,6 +1105,60 @@ describe("agent-runner session persistence", () => {
     expect(sessionManagerForkFrom).not.toHaveBeenCalled();
   });
 
+  describe("the model and thinking level of a reopened session (#462)", () => {
+    const parentModel = { provider: "pA", id: "model-a", name: "Model A" };
+    const fileModel = { provider: "pF", id: "model-f", name: "Model F" };
+    /** The parent on model A / medium, with an agent file pinning model F / minimal. */
+    const parentCtx = {
+      ...ctx,
+      model: parentModel,
+      thinkingLevel: "medium",
+      modelRegistry: { find: vi.fn(() => fileModel), getAvailable: vi.fn(() => [fileModel]) },
+      ui: { notify: vi.fn() },
+    };
+    const pinned = () => makeAgentConfig({ model: "pF/model-f", thinking: "minimal" });
+
+    beforeEach(() => parentCtx.ui.notify.mockClear());
+
+    it("passes neither, so pi restores the ones the session recorded — not the agent file's or the parent's", async () => {
+      vi.mocked(getAgentConfig).mockReturnValueOnce(pinned());
+      createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+
+      await runAgent(parentCtx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+
+      const opts = createAgentSession.mock.lastCall![0];
+      expect(opts.model).toBeUndefined();
+      expect(opts.thinkingLevel).toBeUndefined();
+    });
+
+    it("still passes a model and level set explicitly for the run", async () => {
+      vi.mocked(getAgentConfig).mockReturnValueOnce(pinned());
+      createAgentSession.mockResolvedValue({ session: createSession("OK").session });
+      const explicit = { provider: "pB", id: "model-b", name: "Model B" };
+
+      await runAgent(parentCtx, "Explore", "carry on", {
+        pi, resumeSessionFile: "/sessions/explore.jsonl", model: explicit as any, thinkingLevel: "low",
+      });
+
+      const opts = createAgentSession.mock.lastCall![0];
+      expect(opts.model).toBe(explicit);
+      expect(opts.thinkingLevel).toBe("low");
+    });
+
+    it("warns the user when pi could not use the recorded model", async () => {
+      vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig()).mockReturnValueOnce(makeAgentConfig());
+      const message = "Could not restore model pB/model-b. Using pA/model-a";
+      createAgentSession.mockResolvedValueOnce({ session: createSession("OK").session, modelFallbackMessage: message });
+      await runAgent(parentCtx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+      expect(parentCtx.ui.notify).toHaveBeenCalledWith(message, "warning");
+
+      parentCtx.ui.notify.mockClear();
+      createAgentSession.mockResolvedValueOnce({ session: createSession("OK").session });
+      await runAgent(parentCtx, "Explore", "carry on", { pi, resumeSessionFile: "/sessions/explore.jsonl" });
+      expect(parentCtx.ui.notify).not.toHaveBeenCalled();
+    });
+  });
+
   it("uses pi's normal persistent session location and links to the parent session", async () => {
     vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig({ persistSession: true }));
     settingsManagerGetSessionDir.mockReturnValue("/normal/pi/sessions");
@@ -1735,6 +1789,22 @@ describe("agent-runner master tool allowlist", () => {
     const tools = lastToolsPassed();
     expect(tools).not.toContain("bash");
     expect(tools).toEqual(BUILTINS_7.filter((t) => t !== "bash"));
+  });
+
+  it("a spawn's disallowedTools adds to the definition's, in either tool spelling", async () => {
+    // `agent({ disallowedTools })` from a workflow: `Bash` must
+    // deny pi's `bash`, and the agent file's own list must still apply.
+    vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: false }));
+    vi.mocked(getAgentConfig).mockReturnValueOnce(
+      makeAgentConfig({ extensions: false, disallowedTools: ["write"] }),
+    );
+    vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi, disallowedTools: ["Bash"] });
+
+    expect(lastToolsPassed()).toEqual(BUILTINS_7.filter((t) => t !== "bash" && t !== "write"));
   });
 
   it("dynamic mode: leaves the allowlist unset, denies via excludeTools, activates post-bind", async () => {

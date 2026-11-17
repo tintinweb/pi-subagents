@@ -39,6 +39,18 @@ describe("the StructuredOutput tool", () => {
     expect(build().tool.name).toBe("StructuredOutput");
   });
 
+  it("carries its fixed description", () => {
+    expect(build().tool.description).toBe(
+      "Use this tool to return your final response in the requested structured format. You MUST call this "
+        + "tool exactly once at the end of your response to provide the structured output.",
+    );
+  });
+
+  it("tells the model to call again after a rejection, since the call is not forced", () => {
+    // The rejection text alone does not ask for a retry.
+    expect(build().tool.promptGuidelines?.join("\n")).toMatch(/rejected.*call it again/);
+  });
+
   it("uses the caller's schema as its own parameters, verbatim", () => {
     // This is what makes the provider fill the fields; a copy or a conversion
     // would be a second place for the shape to drift.
@@ -56,6 +68,7 @@ describe("the StructuredOutput tool", () => {
     const result = await call(tool, { file: "a.ts", line: 3 });
 
     expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toBe("Structured output provided successfully");
     expect(capture.called).toBe(true);
     expect(JSON.parse(capture.json as string)).toEqual({ file: "a.ts", line: 3 });
     expect(capture.lastError).toBeUndefined();
@@ -66,7 +79,8 @@ describe("the StructuredOutput tool", () => {
     const result = await call(tool, { line: 0 });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/did not match the required schema/);
+    // The errors under one fixed prefix, with nothing else around them.
+    expect(result.content[0].text).toBe(`Output does not match required schema: ${capture.lastError}`);
     // The reason has to reach the model, or the retry is a guess.
     expect(result.content[0].text).toContain("file");
     expect(capture.json).toBeUndefined();

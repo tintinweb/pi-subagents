@@ -7,7 +7,7 @@
  * `subagents:record` entry, under the same id; a workflow's `resume` reopens a
  * child from what its host kept for the run (#331, #385).
  */
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -253,6 +253,129 @@ describe("Agent({ resume }) once the live record is gone", () => {
   });
 });
 
+describe("Agent({ resume }) of an evicted agent keeps its own model and thinking (#462)", () => {
+  const modelA = { provider: "pA", id: "model-a", name: "Model A" };
+  const modelB = { provider: "pB", id: "model-b", name: "Model B" };
+  const registry = {
+    find: (provider: string, id: string) => [modelA, modelB].find(m => m.provider === provider && m.id === id),
+    getAll: () => [modelA, modelB],
+    getAvailable: () => [modelA, modelB],
+  };
+
+  /** A finished run reporting an effective model and thinking level on its session. */
+  function settleWithSession(text: string, file: string, model: unknown, thinkingLevel: string) {
+    vi.mocked(runAgent).mockImplementation(async (_ctx, _type, _prompt, options: any) => {
+      const session = {
+        dispose: vi.fn(),
+        messages: [],
+        subscribe: vi.fn(() => () => {}),
+        sessionManager: { getSessionFile: () => file },
+        model,
+        thinkingLevel,
+      } as any;
+      options.onSessionCreated?.(session);
+      return { responseText: text, session, aborted: false, steered: false };
+    });
+  }
+
+  /** Boot the extension with the parent session on `parentModel` / `parentThinking`. */
+  function bootWith(branch: any[], parentModel: unknown, parentThinking: string) {
+    const { pi, tools, lifecycle } = makePi();
+    pi.appendEntry = vi.fn((customType: string, data: unknown) => branch.push({ type: "custom", customType, data }));
+    subagentsExtension(pi);
+    booted = lifecycle;
+    const context = ctx({
+      model: parentModel,
+      modelRegistry: registry,
+      thinkingLevel: parentThinking,
+      sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => branch) },
+    });
+    const agent = (params: Record<string, unknown>) =>
+      tools.get("Agent").execute("tc", { description: "Review the change", subagent_type: "Explore", ...params }, undefined, undefined, context);
+    return { agent, lifecycle };
+  }
+
+  /**
+   * Run an agent on model B / high while the parent is on A / medium, then shut
+   * down so the next activation finds only its saved record. Returns its id.
+   */
+  async function ranOnB(branch: any[], params: Record<string, unknown> = { model: "pB/model-b", thinking: "high" }): Promise<string> {
+    settleWithSession("FIRST-RUN", sessionFile, modelB, "high");
+    const first = bootWith(branch, modelA, "medium");
+    const res = await first.agent({ prompt: "Review the change.", run_in_background: false, ...params });
+    await first.lifecycle.get("session_shutdown")?.();
+    delete (globalThis as any)[MANAGER_KEY];
+    booted = undefined;
+    return (res as any).details.agentId;
+  }
+
+  // runAgent is mocked here, so what is asserted is the hand-off: the reopen
+  // passes no model or level, which is what lets runAgent leave both to the
+  // reopened session (see agent-runner.test.ts), where pi restores B / high.
+
+  it("passes neither the parent's model nor its thinking level to the reopen", async () => {
+    const branch: any[] = [];
+    const id = await ranOnB(branch);
+
+    settleWithSession("RESUMED-RUN", sessionFile, modelB, "high");
+    const { agent } = bootWith(branch, modelA, "medium");
+    const res = await agent({ prompt: "Now check the tests.", resume: id, run_in_background: false });
+
+    const options = vi.mocked(runAgent).mock.lastCall![3] as any;
+    expect(options.resumeSessionFile).toBe(sessionFile);
+    expect(options.model).toBeUndefined();
+    expect(options.thinkingLevel).toBeUndefined();
+    // Once the session reports, the result names the model the run used.
+    expect((res as any).details.modelName).toBe("model b");
+  });
+
+  it("passes neither on a background reopen either", async () => {
+    const branch: any[] = [];
+    const id = await ranOnB(branch);
+
+    settleWithSession("RESUMED-RUN", sessionFile, modelB, "high");
+    const { agent } = bootWith(branch, modelA, "medium");
+    await agent({ prompt: "Continue.", resume: id, run_in_background: true });
+
+    const options = vi.mocked(runAgent).mock.lastCall![3] as any;
+    expect(options.resumeSessionFile).toBe(sessionFile);
+    expect(options.model).toBeUndefined();
+    expect(options.thinkingLevel).toBeUndefined();
+  });
+
+  it("does not apply a model or thinking level passed with the resume", async () => {
+    const branch: any[] = [];
+    const id = await ranOnB(branch);
+
+    settleWithSession("RESUMED-RUN", sessionFile, modelB, "high");
+    const { agent } = bootWith(branch, modelA, "medium");
+    await agent({ prompt: "Continue.", resume: id, model: "pA/model-a", thinking: "low", run_in_background: false });
+
+    const options = vi.mocked(runAgent).mock.lastCall![3] as any;
+    expect(options.model).toBeUndefined();
+    expect(options.thinkingLevel).toBeUndefined();
+  });
+
+  it("does not apply the agent file's model or thinking level to the reopen", async () => {
+    // A live resume keeps its session's model whatever the file now says; a
+    // reopen must too, or a file edited since the run would switch it.
+    const agentsDir = join(hermetic!.dir, ".pi", "agents");
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(join(agentsDir, "pinned.md"), "---\ndescription: Pinned\nmodel: pA/model-a\nthinking: low\n---\nYou are pinned.\n");
+    const branch: any[] = [];
+    const id = await ranOnB(branch, { subagent_type: "pinned" });
+
+    settleWithSession("RESUMED-RUN", sessionFile, modelB, "high");
+    const { agent } = bootWith(branch, modelA, "medium");
+    await agent({ prompt: "Continue.", resume: id, run_in_background: false });
+
+    const options = vi.mocked(runAgent).mock.lastCall![3] as any;
+    expect(vi.mocked(runAgent).mock.lastCall![1]).toBe("pinned");
+    expect(options.model).toBeUndefined();
+    expect(options.thinkingLevel).toBeUndefined();
+  });
+});
+
 describe("worktreeLost", () => {
   const wt = { path: "/wt/a", branch: "pi-agent-a", baseSha: "abc", workPath: "/wt/a" };
 
@@ -302,13 +425,25 @@ describe("a workflow's resume once the manager evicted the child", () => {
         sessionFile: file,
         ...overrides,
       }) as AgentRecord;
+    /** Only the reopened record is live: the first run's was evicted. */
+    let live: AgentRecord | undefined;
+    /** What the reopened child does mid-run, before it settles. */
+    let duringReopen: ((record: AgentRecord, options: any) => void) | undefined;
     const spawnAndWait = vi.fn(async (_pi: any, _ctx: any, _type: string, _prompt: string, options: any, onSpawned?: (id: string) => void) => {
       const record = settled(options.reclaim ? { result: "fixed" } : firstRun);
+      if (options.reclaim) live = record;
       onSpawned?.(record.id);
+      if (options.reclaim) duringReopen?.(record, options);
       return { id: record.id, record };
     });
     const resume = vi.fn(async () => undefined);
-    return { manager: { spawnAndWait, resume, abort: vi.fn() } as unknown as AgentManager, spawnAndWait, resume };
+    const getRecord = (id: string) => (live?.id === id ? live : undefined);
+    return {
+      manager: { spawnAndWait, resume, getRecord, abort: vi.fn() } as unknown as AgentManager,
+      spawnAndWait,
+      resume,
+      onReopenRun(fn: (record: AgentRecord, options: any) => void) { duringReopen = fn; },
+    };
   }
 
   const request = { agentId: "wf-agent-0", index: 0, prompt: "build it", label: "worker", agentType: "general-purpose" };
@@ -327,7 +462,27 @@ describe("a workflow's resume once the manager evicted the child", () => {
     expect(resumed).toMatchObject({ ok: true, text: "fixed" });
   });
 
-  const wt = { path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };
+  it("reports the reopened child's counters while it runs (#298)", async () => {
+    // The reopen goes through spawnAndWait, not manager.resume, so it needs the
+    // live forwarding wired on its own. The reclaimed record starts from zero:
+    // its lifetime totals are this continuation's, with no baseline to subtract.
+    const stub = evictingManager(sessionFile, { toolUses: 9, lifetimeUsage: { input: 900, output: 90, cacheWrite: 0 } });
+    const snapshots: unknown[] = [];
+    stub.onReopenRun((record, options) => {
+      record.toolUses = 1;
+      options.onToolActivity?.({ type: "end", toolName: "read" });
+      record.lifetimeUsage = { input: 30, output: 12, cacheWrite: 0 };
+      options.onAssistantUsage?.({ input: 30, output: 12, cacheWrite: 0 });
+    });
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request);
+    await host.resumeAgent?.("wf-agent-0", "fix it", undefined, info => snapshots.push(info));
+
+    expect(snapshots.at(-1)).toEqual({ tokens: 42, outputTokens: 12, toolCalls: 1 });
+  });
+
+  const wt ={ path: "/wt/c", branch: "pi-agent-c", baseSha: "abc", workPath: "/wt/c" };
 
   it("refuses, starting nothing, when the child's worktree held its work", async () => {
     const stub = evictingManager(sessionFile, { worktree: wt, worktreeResult: { hasChanges: true, branch: "pi-agent-c" } });

@@ -57,7 +57,7 @@ function commandCtx() {
         return selectPick;
       }),
       custom: vi.fn(async (factory: (...args: unknown[]) => unknown, options?: unknown) => {
-        const tui = { requestRender: () => {} };
+        const tui = { requestRender: () => {}, terminal: { rows: 40 } };
         const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
         const instance = factory(tui, theme, {}, () => {}) as { dispose?: () => void };
         built.push(instance);

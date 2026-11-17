@@ -11,6 +11,7 @@
  * prove that everything from there on is spawned for real.
  */
 
+import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,6 +70,17 @@ describe("journalKey", () => {
     expect(keys.size).toBe(7);
   });
 
+  it("keys disallowedTools only when present, so older journals still replay", () => {
+    // The slot is conditional like the schema one: an unconditional slot
+    // would re-key every entry already on disk.
+    const legacy = createHash("sha256").update(JSON.stringify(["a", null, null, null, null, null, null, null])).digest("hex");
+    expect(journalKey({ prompt: "a" })).toBe(legacy.slice(0, 32));
+    expect(journalKey({ prompt: "a", disallowedTools: ["Bash"] })).not.toBe(journalKey({ prompt: "a" }));
+    expect(journalKey({ prompt: "a", disallowedTools: ["Bash"] })).not.toBe(
+      journalKey({ prompt: "a", disallowedTools: ["Write"] }),
+    );
+  });
+
   it("ignores which phase the row is filed under", () => {
     // Re-grouping the progress tree changes no token the agent sees, and must
     // not throw away an hour of recorded results.
@@ -110,6 +122,17 @@ describe("journal files", () => {
     const path = join(dir, "junk.jsonl");
     writeFileSync(path, '{"index":"one","key":"k","ok":true}\n[]\nnull\n', "utf-8");
     expect(readJournal(path)).toEqual([]);
+  });
+
+  it("reads a failure reason, accepts entries without one, and drops a non-string one", () => {
+    const path = join(dir, "failures.jsonl");
+    const entries: WorkflowJournalEntry[] = [
+      { index: 0, key: "old", ok: false },
+      { index: 1, key: "new", ok: false, error: "rate_limit_error" },
+    ];
+    for (const entry of entries) appendJournal(path, entry);
+    writeFileSync(path, `${readFileSync(path, "utf-8")}{"index":2,"key":"bad","ok":false,"error":42}\n`, "utf-8");
+    expect(readJournal(path)).toEqual(entries);
   });
 });
 
@@ -179,7 +202,7 @@ describe("replay", () => {
     const failing = stubHost(() => (attempt++ === 1 ? { ok: false, error: "boom" } : { ok: true, text: "fine" }));
     await run(twoAgents, { host: failing.host, journal: first });
 
-    expect(first.entries[1]).toEqual({ index: 1, key: first.entries[1].key, ok: false });
+    expect(first.entries[1]).toEqual({ index: 1, key: first.entries[1].key, ok: false, error: "boom" });
 
     const second = stubHost(() => ({ ok: true, text: "retried" }));
     const result = await run(twoAgents, { host: second.host, journal: { entries: first.entries } });

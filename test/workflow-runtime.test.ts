@@ -371,8 +371,11 @@ describe("semaphore", () => {
   });
 });
 
-describe("determinism prelude", () => {
-  it("makes Date.now, new Date() and Math.random throw with guidance", async () => {
+describe("determinism shim", () => {
+  const NOW = "Date.now() / new Date() are unavailable in workflow scripts (breaks resume). Stamp results after the workflow returns, or pass timestamps via args.";
+  const RANDOM = "Math.random() is unavailable in workflow scripts (breaks resume). For N independent samples, include the index in the agent label or prompt.";
+
+  it("blocks every clock and random read with a fixed message", async () => {
     const { host } = stubHost();
     const result = await run(
       [
@@ -380,26 +383,29 @@ describe("determinism prelude", () => {
         "const capture = (fn) => { try { fn(); messages.push(null); } catch (error) { messages.push(error.message); } };",
         "capture(() => Date.now());",
         "capture(() => new Date());",
+        "capture(() => Date());",
+        // Called as a function the real Date returns the current time even
+        // with an argument, so the guard is on how it was called.
+        "capture(() => Date(0));",
+        // The holes a lexical shadow left: the global, and the real
+        // constructor reached through an instance.
+        "capture(() => new globalThis.Date());",
+        "capture(() => globalThis.Date.now());",
+        "capture(() => new (new Date(0).constructor)());",
         "capture(() => Math.random());",
-        "return { messages, stamped: new Date(0).getTime() };",
+        "const epoch = new Date(0);",
+        "return { messages, stamped: epoch.getTime(), isDate: epoch instanceof Date, utc: Date.UTC(1970, 0, 2) };",
       ].join("\n"),
       { host },
     );
 
     expect(result.status).toBe("completed");
-    const value = result.value as { messages: string[]; stamped: number };
-    expect(value.messages).toHaveLength(3);
-    for (const message of value.messages) {
-      expect(message).toContain("unavailable in workflow scripts (breaks resume)");
-      expect(message).toContain(
-        "Stamp results after the workflow returns, or pass timestamps via `args`.",
-      );
-    }
-    expect(value.messages[0]).toContain("Date.now()");
-    expect(value.messages[1]).toContain("new Date()");
-    expect(value.messages[2]).toContain("Math.random()");
+    const value = result.value as { messages: string[]; stamped: number; isDate: boolean; utc: number };
+    expect(value.messages).toEqual([NOW, NOW, NOW, NOW, NOW, NOW, NOW, RANDOM]);
     // An explicit timestamp still works — only the clock reads are blocked.
     expect(value.stamped).toBe(0);
+    expect(value.isDate).toBe(true);
+    expect(value.utc).toBe(86_400_000);
   });
 
   it("blocks code generation from strings", async () => {
@@ -419,24 +425,67 @@ describe("determinism prelude", () => {
 });
 
 describe("the JSON boundary", () => {
-  const cases: [string, string, string][] = [
-    ["a cycle", "const a = {}; a.self = a; return a;", "a circular structure"],
-    ["a BigInt", "return { n: 1n };", "a BigInt"],
-    ["a function", "return () => 1;", "a function"],
-    ["a Map", "return new Map();", "a non-plain object"],
-    ["a sparse array", "const a = []; a[2] = 1; return a;", "a sparse array"],
-    ["NaN", "return { n: 0 / 0 };", "a non-finite number"],
+  it("copies the return value rather than failing the run", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      [
+        "class Point { constructor() { this.x = 1; } toJSON() { return 'called'; } }",
+        "const sparse = []; sparse[2] = 1;",
+        "return {",
+        "  gone: undefined, nan: 0 / 0, inf: 1 / 0,",
+        "  date: new Date(0), map: new Map([[1, 2]]), set: new Set([1]),",
+        "  point: new Point(), sparse, fn: () => 1, inArray: [() => 1, undefined],",
+        "  own: Object.assign(new Date(0), { tag: 'kept' }),",
+        "};",
+      ].join("\n"),
+      { host },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual({
+      nan: null,
+      inf: null,
+      // Own enumerable keys only: toJSON is never called, so a Date is not
+      // an ISO string and a class keeps its fields.
+      date: {},
+      map: {},
+      set: {},
+      point: { x: 1 },
+      sparse: [null, null, 1],
+      inArray: [null, null],
+      own: { tag: "kept" },
+    });
+  });
+
+  it("drops a getter that throws instead of failing on it", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      "return { a: 1, get b() { throw new Error('no'); } };",
+      { host },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual({ a: 1 });
+  });
+
+  const failures: [string, string, string][] = [
+    ["a cycle", "const a = {}; a.self = a; return a;", "the workflow result cannot be serialized: Converting circular structure"],
+    ["a BigInt", "return { n: 1n };", "the workflow result cannot be serialized: Do not know how to serialize a BigInt"],
+    ["a top-level function", "return () => 1;", "workflow result cannot be a function"],
   ];
 
-  for (const [name, body, expected] of cases) {
-    it(`rejects ${name} on the way out`, async () => {
+  for (const [name, body, expected] of failures) {
+    it(`fails on ${name}, which no copy can carry`, async () => {
       const { host } = stubHost();
       const result = await run(body, { host });
       expect(result.status).toBe("failed");
       expect(result.error).toContain(expected);
-      expect(result.error).toContain("across the workflow VM boundary");
     });
   }
+
+  it("keeps a shared reference that is not a cycle", async () => {
+    const { host } = stubHost();
+    const result = await run("const shared = { n: 1 }; return [shared, shared];", { host });
+    expect(result.value).toEqual([{ n: 1 }, { n: 1 }]);
+  });
 
   it("rejects args that cannot cross, before the worker starts", async () => {
     const { host } = stubHost();
@@ -927,6 +976,120 @@ describe("pause and the concurrency limit", () => {
  * Scripts written for Claude Code
  * ------------------------------------------------------------------------- */
 
+describe("Claude Code script semantics", () => {
+  const logs = (result: WorkflowRunResult) =>
+    result.progress.filter(e => e.type === "workflow_log").map(e => e.message);
+
+  it("ends an item's pipeline at a null, from a stage or from the item itself", async () => {
+    const { host, calls } = stubHost();
+    const result = await run(
+      [
+        'return await pipeline(["skip", "keep", null],',
+        '  async (value) => (value === "skip" ? null : value),',
+        '  async (value) => agent("verify " + value),',
+        ");",
+      ].join("\n"),
+      { host },
+    );
+    expect(result.value).toEqual([null, "ok:verify keep", null]);
+    // Neither null reached stage two, so no agent was spent on "verify null".
+    expect(calls.map(c => c.prompt)).toEqual(["verify keep"]);
+  });
+
+  it("awaits a promise item before the first stage", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      "return await pipeline([Promise.resolve('p')], async (value, item) => [value, item instanceof Promise]);",
+      { host },
+    );
+    expect(result.value).toEqual([["p", true]]);
+  });
+
+  it("logs the failure a parallel thunk or a pipeline stage folds into null", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      [
+        'const a = await parallel([async () => 1, async () => { throw new Error("boom"); }]);',
+        'const b = await pipeline(["x"], async () => { throw new Error("bust"); });',
+        "return [a, b];",
+      ].join("\n"),
+      { host },
+    );
+    expect(result.value).toEqual([[1, null], [null]]);
+    expect(logs(result)).toEqual(["parallel[1] failed: boom", "pipeline[0] failed: bust"]);
+  });
+
+  it("provides setTimeout and clearTimeout", async () => {
+    const { host } = stubHost();
+    const result = await run(
+      [
+        "const seen = [];",
+        "const cancelled = setTimeout(() => seen.push('cancelled'), 1);",
+        "clearTimeout(cancelled);",
+        "setTimeout(() => { throw new Error('ignored'); }, 1);",
+        // An async callback rejects rather than throws; that must not fail the run either.
+        "setTimeout(async () => { throw new Error('ignored too'); }, 1);",
+        "await new Promise(resolve => setTimeout(() => { seen.push('fired'); resolve(); }, '5'));",
+        "return { seen, id: typeof cancelled };",
+      ].join("\n"),
+      { host },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual({ seen: ["fired"], id: "number" });
+  });
+
+  it("runs the script in strict mode", async () => {
+    const { host } = stubHost();
+    const result = await run("undeclared = 1;\nreturn undeclared;", { host });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("undeclared is not defined");
+  });
+
+  it("reads effort case-insensitively, with med for medium and empty as unset", async () => {
+    const { host, calls } = stubHost();
+    const result = await run(
+      'await agent("a", { effort: "High" });\nawait agent("b", { effort: "med" });\nawait agent("c", { effort: "" });\nreturn null;',
+      { host },
+    );
+    expect(result.status).toBe("completed");
+    expect(calls.map(c => c.effort)).toEqual(["high", "medium", undefined]);
+  });
+
+  it("carries disallowedTools to the spawn, deduped and sorted, and [] as unset", async () => {
+    const { host, calls } = stubHost();
+    const result = await run(
+      'await agent("a", { disallowedTools: ["Write", "Bash", "Write"] });\nawait agent("b", { disallowedTools: [] });\nreturn null;',
+      { host },
+    );
+    expect(result.status).toBe("completed");
+    expect(calls[0].disallowedTools).toEqual(["Bash", "Write"]);
+    expect(calls[1].disallowedTools).toBeUndefined();
+  });
+
+  for (const [name, value, got] of [
+    ["a string", "'Bash'", "string"],
+    ["a padded entry", "[' Bash']", "an array with non-string, empty, or whitespace-padded entries"],
+    ["an empty entry", "['']", "an array with non-string, empty, or whitespace-padded entries"],
+  ]) {
+    it(`refuses disallowedTools given ${name}`, async () => {
+      const { host, calls } = stubHost();
+      const result = await run(`return await agent("a", { disallowedTools: ${value} });`, { host });
+      expect(result.status).toBe("failed");
+      expect(result.error).toBe(
+        `agent() opts.disallowedTools must be an array of non-empty tool-name strings (e.g. ['Bash', 'Write']); got ${got}. Refusing the spawn rather than running it un-narrowed.`,
+      );
+      expect(calls).toHaveLength(0);
+    });
+  }
+
+  it("refuses disallowedTools together with resume", async () => {
+    const { host } = stubHost();
+    const result = await run('return await agent("a", { resume: "x", disallowedTools: ["Bash"] });', { host });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("opts.resume and opts.disallowedTools are mutually exclusive");
+  });
+});
+
 describe("Claude Code option compatibility", () => {
   it("names a misspelt option rather than ignoring it", async () => {
     const stub = stubHost();
@@ -1085,6 +1248,20 @@ describe("structured output", () => {
     }
   });
 
+  it("fails the run on a schema no output can satisfy, even inside parallel, spawning nothing", async () => {
+    // Fatal rather than folded to null: the schema is usually shared by every
+    // item, and a run of nulls would read as "found nothing".
+    const stub = stubHost();
+    const schema = "{ type: 'object', properties: {}, required: ['ok'], additionalProperties: false }";
+    const result = await run(`return await parallel([() => agent('a', { schema: ${schema} }), () => agent('b')]);`, {
+      host: stub.host,
+    });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain('lists "ok" in required but does not declare it in properties');
+    expect(result.error).toContain("The subagent was not started");
+    expect(stub.calls.map(call => call.prompt)).not.toContain("a");
+  });
+
   it("refuses schema together with resume", async () => {
     // A resumed child re-prompts a session whose tool set was fixed when it
     // started, so it has no StructuredOutput tool to answer through.
@@ -1170,6 +1347,85 @@ describe("nested workflow()", () => {
 
   const child = (name: string, body: string) =>
     `export const meta = { name: "${name}", description: "d" };\n${body}\n`;
+
+  it("logs a child's parallel and pipeline failures under the child's prefix", async () => {
+    const { host } = nestingHost({
+      c: child(
+        "c",
+        'await parallel([async () => { throw new Error("boom"); }]);\nawait pipeline(["x"], async () => { throw new Error("bust"); });\nreturn 1;',
+      ),
+    });
+    const result = await run('return await workflow("c");', { host });
+    const logs = result.progress.filter(e => e.type === "workflow_log").map(e => e.message);
+    expect(logs).toEqual(["▸ c: parallel[0] failed: boom", "▸ c: pipeline[0] failed: bust"]);
+  });
+
+  it("lets a child redeclare the names it is handed, as a root script can", async () => {
+    // Claude Code makes these globals of the child's context, so a child
+    // declaring its own `pipeline` or `log` compiles there.
+    const { host } = nestingHost({ c: child("c", "const pipeline = 1;\nconst log = 2;\nreturn pipeline + log;") });
+    const result = await run('return await workflow("c");', { host });
+    expect(result.status).toBe("completed");
+    expect(result.value).toBe(3);
+  });
+
+  it("reports a child's line numbers against the file the author wrote", async () => {
+    // `child()` puts meta on line 1, so the Error is constructed on line 2.
+    const { host } = nestingHost({ c: child("c", 'return new Error("x").stack;') });
+    const result = await run('return await workflow("c");', { host });
+    expect(result.value).toContain("workflow:c.js:2:");
+  });
+
+  it("holds the determinism shim inside the child, which shares the context", async () => {
+    const { host } = nestingHost({ c: child("c", "try { new Date(); return 'leaked'; } catch (error) { return error.message; }") });
+    const result = await run('return await workflow("c");', { host });
+    expect(result.value).toContain("Date.now() / new Date() are unavailable");
+  });
+
+  it("hands the child a copy of its args, and the parent a copy of its result", async () => {
+    // Child input is copied; passing the parent's own
+    // object let a child mutate state the parent still held.
+    const { host } = nestingHost({
+      c: child("c", "args.list.push('child'); args.when = new Date(0); return { got: args, fn: () => 1 };"),
+    });
+    const result = await run(
+      // `fn` is read inside the parent: its own return is copied again, which
+      // would hide a child result that crossed uncopied.
+      'const mine = { list: ["parent"] };\nconst out = await workflow("c", mine);\nreturn { mine, out, fn: typeof out.fn };',
+      { host },
+    );
+    expect(result.status).toBe("completed");
+    expect(result.value).toEqual({
+      mine: { list: ["parent"] },
+      out: { got: { list: ["parent", "child"], when: {} } },
+      fn: "undefined",
+    });
+  });
+
+  it("refuses a child that returns a function, as a script's own result is refused", async () => {
+    // Copied, a function becomes undefined, and the parent would read a value
+    // the child never meant to return.
+    const { host } = nestingHost({ c: child("c", "return () => 1;") });
+    const result = await run(
+      'try { await workflow("c"); return "copied"; } catch (error) { return error.message; }',
+      { host },
+    );
+    expect(result.value).toBe('workflow("c") result cannot be a function');
+  });
+
+  it("runs the child in strict mode too", async () => {
+    const { host } = nestingHost({ c: child("c", "undeclared = 1;\nreturn undeclared;") });
+    const result = await run('return await workflow("c");', { host });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain("undeclared is not defined");
+  });
+
+  it("fails the call when the child's args cannot be copied", async () => {
+    const { host } = nestingHost({ c: child("c", "return 1;") });
+    const result = await run('const a = {}; a.self = a;\nreturn await workflow("c", a);', { host });
+    expect(result.status).toBe("failed");
+    expect(result.error).toContain('workflow("c") args cannot be serialized');
+  });
 
   it("runs the child and returns its value", async () => {
     const stub = nestingHost({ audit: child("audit", "return 'from the child';") });
@@ -1342,5 +1598,154 @@ describe("nested workflow()", () => {
     const replayed = await run(script, { host: replayHost.host, journal: { entries } });
     expect(replayed.replayedCount).toBe(2);
     expect(replayHost.calls).toHaveLength(0);
+  });
+});
+
+/* ------------------------------------------------------------------------- *
+ * Live counters (#298)
+ * ------------------------------------------------------------------------- */
+
+describe("live tool and token counters", () => {
+  const rows = (seen: readonly WorkflowEntry[][], index = 0) =>
+    seen.flat().filter((e): e is WorkflowAgentEntry => e.type === "workflow_agent" && e.index === index);
+
+  async function until(predicate: () => boolean, what: string): Promise<void> {
+    for (let i = 0; i < 400; i++) {
+      if (predicate()) return;
+      await sleep(5);
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  }
+
+  it("updates a running row from the host's reports, then settles to the final totals once", async () => {
+    const seen: WorkflowEntry[][] = [];
+    let report: WorkflowSpawnRequest["onProgress"];
+    let finish: ((r: WorkflowSpawnResult) => void) | undefined;
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        report = request.onProgress;
+        return new Promise(resolve => { finish = resolve; });
+      },
+      abortAgent() {},
+    };
+    const done = run("return await agent('go');", { host, onProgress(e) { seen.push([...e]); } });
+
+    await until(() => finish !== undefined, "the agent to start");
+    report?.({ tokens: 120, toolCalls: 1 });
+    const running = rows(seen).at(-1);
+    expect(running).toMatchObject({ state: "start", tokens: 120, toolCalls: 1 });
+
+    // The settled result is the same absolute snapshot, not a delta to add.
+    finish?.({ ok: true, text: "ok", tokens: 150, toolCalls: 2, outputTokens: 30 });
+    await done;
+    expect(rows(seen).at(-1)).toMatchObject({ state: "done", tokens: 150, toolCalls: 2 });
+  });
+
+  it("keeps live reports out of the run's transition log", async () => {
+    // A host that reports `reports` live updates, then settles.
+    const runWith = async (reports: number) => {
+      const seen: WorkflowEntry[][] = [];
+      const host: WorkflowHost = {
+        async spawnAgent(request) {
+          for (let i = 1; i <= reports; i++) request.onProgress?.({ tokens: i * 10, toolCalls: i });
+          return { ok: true, text: "ok", tokens: 1000, toolCalls: 50 };
+        },
+        abortAgent() {},
+      };
+      const result = await run("return await agent('go');", { host, onProgress(e) { seen.push([...e]); } });
+      return { seen, logged: agentEntries(result.progress) };
+    };
+
+    const quiet = await runWith(0);
+    const live = await runWith(50);
+
+    // Every report reached the listener, which is what the task log reads.
+    expect(rows(live.seen).length - rows(quiet.seen).length).toBe(50);
+    // The returned log holds the same transitions either way, ending on the final totals.
+    expect(live.logged).toHaveLength(quiet.logged.length);
+    expect(live.logged.at(-1)).toMatchObject({ state: "done", tokens: 1000, toolCalls: 50 });
+  });
+
+  it("updates a resumed row from the host's reports before it settles", async () => {
+    const seen: WorkflowEntry[][] = [];
+    let report: WorkflowSpawnRequest["onProgress"];
+    let finish: ((r: WorkflowSpawnResult) => void) | undefined;
+    const host: WorkflowHost = {
+      async spawnAgent() {
+        return { ok: true, text: "first", tokens: 500, toolCalls: 5 };
+      },
+      resumeAgent(_id, _prompt, _onResolved, onProgress) {
+        report = onProgress;
+        return new Promise(resolve => { finish = resolve; });
+      },
+      abortAgent() {},
+    };
+    const done = run("await agent('go', { label: 'w' }); return await agent('more', { resume: 'w' });", {
+      host,
+      onProgress(e) { seen.push([...e]); },
+    });
+
+    await until(() => finish !== undefined, "the resume to start");
+    report?.({ tokens: 30, toolCalls: 1 });
+    expect(rows(seen, 1).at(-1)).toMatchObject({ state: "start", tokens: 30, toolCalls: 1 });
+
+    finish?.({ ok: true, text: "second", tokens: 35, toolCalls: 1 });
+    await done;
+    expect(rows(seen, 1).at(-1)).toMatchObject({ state: "done", tokens: 35, toolCalls: 1 });
+  });
+
+  it("ignores a report that arrives after the agent settled", async () => {
+    const seen: WorkflowEntry[][] = [];
+    let report: WorkflowSpawnRequest["onProgress"];
+    const host: WorkflowHost = {
+      async spawnAgent(request) {
+        report = request.onProgress;
+        return { ok: true, text: "ok", tokens: 10, toolCalls: 1 };
+      },
+      abortAgent() {},
+    };
+
+    await run("return await agent('go');", { host, onProgress(e) { seen.push([...e]); } });
+    const before = seen.length;
+    report?.({ tokens: 999, toolCalls: 9 });
+
+    expect(seen.length).toBe(before);
+    expect(rows(seen).at(-1)).toMatchObject({ state: "done", tokens: 10, toolCalls: 1 });
+  });
+
+  it("keeps a retried row's earlier attempt, counted once, in the row and the budget", async () => {
+    const seen: WorkflowEntry[][] = [];
+    const attempts: Array<{ report?: WorkflowSpawnRequest["onProgress"]; finish: (r: WorkflowSpawnResult) => void }> = [];
+    let control: WorkflowControl | undefined;
+    const host: WorkflowHost = {
+      spawnAgent(request) {
+        return new Promise(resolve => { attempts.push({ report: request.onProgress, finish: resolve }); });
+      },
+      // A stopped child reports what it spent before it was stopped.
+      abortAgent() {
+        attempts.at(-1)?.finish({ ok: false, skipped: true, error: "Stopped.", tokens: 100, toolCalls: 2, outputTokens: 10 });
+      },
+    };
+    const done = run("await agent('go'); return budget.spent();", {
+      host,
+      onControl: c => { control = c; },
+      onProgress(e) { seen.push([...e]); },
+    });
+
+    await until(() => attempts.length === 1, "the first attempt");
+    attempts[0]?.report?.({ tokens: 100, toolCalls: 2 });
+    control?.retry(0);
+    await until(() => attempts.length === 2, "the second attempt");
+
+    // The first attempt's late report must not touch the second's row.
+    attempts[0]?.report?.({ tokens: 5000, toolCalls: 50 });
+    attempts[1]?.report?.({ tokens: 40, toolCalls: 1 });
+    expect(rows(seen).at(-1)).toMatchObject({ attempt: 2, tokens: 140, toolCalls: 3 });
+
+    attempts[1]?.finish({ ok: true, text: "ok", tokens: 50, toolCalls: 1, outputTokens: 5 });
+    const result = await done;
+    expect(rows(seen).at(-1)).toMatchObject({ state: "done", attempt: 2, tokens: 150, toolCalls: 3 });
+    // Both attempts burned output tokens; a retry does not refund the first.
+    expect(result.value).toBe(15);
   });
 });

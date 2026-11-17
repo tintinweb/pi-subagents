@@ -62,15 +62,18 @@ function stubManager(
   settle: (type: string, prompt: string, options: any) => Promise<AgentRecord> | AgentRecord = () => record(),
 ): StubManager {
   const abort = vi.fn();
+  const records = new Map<string, AgentRecord>();
   const resume = vi.fn(async () => record({ id: "agent-1", result: "resumed" }));
   const spawnAndWait = vi.fn(
     async (_pi: any, _ctx: any, type: string, prompt: string, options: any, onSpawned?: (id: string) => void) => {
       const settled = await settle(type, prompt, options);
+      records.set(settled.id, settled);
       onSpawned?.(settled.id);
       return { id: settled.id, record: settled };
     },
   );
-  return { manager: { spawnAndWait, abort, resume } as unknown as AgentManager, spawnAndWait, abort, resume };
+  const getRecord = (id: string) => records.get(id);
+  return { manager: { spawnAndWait, abort, resume, getRecord } as unknown as AgentManager, spawnAndWait, abort, resume };
 }
 
 const request = (overrides: Partial<WorkflowSpawnRequest> = {}): WorkflowSpawnRequest => ({
@@ -230,6 +233,17 @@ describe("createWorkflowHost — spawn mapping", () => {
 
     expect(stub.spawnAndWait.mock.calls[0][4].structuredOutput).toBe(compilation.compiled);
     expect(result).toMatchObject({ ok: true, text: '{"a":"x"}' });
+  });
+
+  it("forwards disallowedTools to the spawn, and leaves it off when unset", async () => {
+    const stub = stubManager(() => record({ result: "ok" }));
+    const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager: stub.manager });
+
+    await host.spawnAgent(request({ disallowedTools: ["Bash"] }));
+    await host.spawnAgent(request({}));
+
+    expect(stub.spawnAndWait.mock.calls[0][4].disallowedTools).toEqual(["Bash"]);
+    expect(stub.spawnAndWait.mock.calls[1][4]).not.toHaveProperty("disallowedTools");
   });
 
   it("falls back to the prose when no schema was asked for", async () => {
@@ -538,8 +552,78 @@ describe("createWorkflowHost — abort, resume and gate", () => {
     await host.spawnAgent(request({ agentId: "wf-agent-0" }));
     const resumed = await host.resumeAgent?.("wf-agent-0", "and now this");
 
-    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined);
+    expect(stub.resume).toHaveBeenCalledWith("manager-id-7", "and now this", undefined, {
+      onToolActivity: expect.any(Function),
+      onAssistantUsage: expect.any(Function),
+    });
     expect(resumed).toMatchObject({ ok: true, text: "resumed" });
+  });
+
+  describe("live counters (#298)", () => {
+    /**
+     * A manager whose one child keeps a live record while it runs: `during`
+     * mutates it and fires the manager's hooks, as `runAgent` would, before the
+     * spawn settles. `resume` does the same for the continuation.
+     */
+    function liveManager(during: (child: AgentRecord, options: any) => void) {
+      const child = record({ id: "child-1" });
+      const spawnAndWait = vi.fn(async (_pi: any, _ctx: any, _t: string, _p: string, options: any, onSpawned?: (id: string) => void) => {
+        onSpawned?.(child.id);
+        during(child, options);
+        return { id: child.id, record: child };
+      });
+      const resume = vi.fn(async (_id: string, _prompt: string, _signal: unknown, options: any) => {
+        during(child, options);
+        return child;
+      });
+      const getRecord = (id: string) => (id === child.id ? child : undefined);
+      return { spawnAndWait, resume, getRecord, abort: vi.fn() } as unknown as AgentManager;
+    }
+
+    it("reports a running child's completed tools and finalized usage before it settles", async () => {
+      const snapshots: unknown[] = [];
+      const manager = liveManager((child, options) => {
+        options.onToolActivity({ type: "start", toolName: "read" });
+        child.toolUses = 1;
+        options.onToolActivity({ type: "end", toolName: "read" });
+        child.lifetimeUsage = { input: 100, output: 20, cacheWrite: 0 };
+        options.onAssistantUsage({ input: 100, output: 20, cacheWrite: 0 });
+      });
+      const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager });
+
+      const result = await host.spawnAgent(request({ onProgress: info => snapshots.push(info) }));
+
+      // A tool start is not a completed tool call, so it reports nothing.
+      expect(snapshots).toEqual([
+        { tokens: 0, outputTokens: 0, toolCalls: 0 },
+        { tokens: 0, outputTokens: 0, toolCalls: 1 },
+        { tokens: 120, outputTokens: 20, toolCalls: 1 },
+      ]);
+      expect(result).toMatchObject({ tokens: 120, outputTokens: 20, toolCalls: 1 });
+    });
+
+    it("counts only the continuation on a resumed row, live and settled", async () => {
+      const snapshots: unknown[] = [];
+      let resuming = false;
+      const manager = liveManager((child, options) => {
+        if (!resuming) {
+          child.toolUses = 4;
+          child.lifetimeUsage = { input: 400, output: 40, cacheWrite: 0 };
+          return;
+        }
+        child.toolUses = 5;
+        child.lifetimeUsage = { input: 430, output: 45, cacheWrite: 0 };
+        options.onAssistantUsage({ input: 30, output: 5, cacheWrite: 0 });
+      });
+      const host = createWorkflowHost({ pi: {} as any, ctx: ctx(), manager });
+
+      await host.spawnAgent(request({ agentId: "wf-agent-0" }));
+      resuming = true;
+      const resumed = await host.resumeAgent?.("wf-agent-0", "more", undefined, info => snapshots.push(info));
+
+      expect(snapshots).toEqual([{ tokens: 35, outputTokens: 5, toolCalls: 1 }]);
+      expect(resumed).toMatchObject({ tokens: 35, outputTokens: 5, toolCalls: 1 });
+    });
   });
 
   it("refuses to resume an agent the run never spawned", async () => {
@@ -1027,6 +1111,127 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 });
 
 /* ------------------------------------------------------------------------- *
+ * The inline card following a background run (#284)
+ * ------------------------------------------------------------------------- */
+
+describe("SubagentWorkflow card — redraws while the run goes", () => {
+  let hermetic: Hermetic;
+  let booted: ReturnType<typeof makePi>;
+
+  beforeEach(() => {
+    hermetic = hermeticDir({ settings: { schedulingEnabled: false, workflowsEnabled: true } });
+    booted = makePi();
+    subagentsExtension(booted.pi);
+  });
+
+  afterEach(async () => {
+    await flush();
+    hermetic.restore();
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A UI whose widgets are drawn into a TUI of the given mode. The fleet list
+   * learns pi's renderer mode from the TUI its widget factory receives, which
+   * is the only place an extension can read it.
+   */
+  function uiCtx(mode: "fullscreen" | "regular") {
+    const tui = { mode, requestRender: vi.fn(), terminal: { columns: 80, rows: 24 } };
+    /** The components the factories returned, by widget key. */
+    const widgets = new Map<string, { invalidate(): void }>();
+    const context = ctx({
+      cwd: hermetic.dir,
+      hasUI: true,
+      ui: {
+        setStatus: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn(),
+        onTerminalInput: vi.fn(() => vi.fn()),
+        setWidget: vi.fn((key: string, factory: unknown) => {
+          if (typeof factory === "function") widgets.set(key, factory(tui, plainTheme));
+        }),
+      },
+    });
+    return { context, tui, widgets };
+  }
+
+  /** Launch `body` as a workflow in `mode`, and draw its card once. */
+  async function launch(mode: "fullscreen" | "regular", body: string) {
+    const { context, tui, widgets } = uiCtx(mode);
+    await booted.lifecycle.get("tool_execution_start")?.({}, context);
+    const tool = booted.tools.get("SubagentWorkflow");
+    const result = await tool.execute("tc-card", { script: `${inlineScript}${body}` }, undefined, undefined, context);
+    const invalidate = vi.fn();
+    const render = () =>
+      String(tool.renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false, invalidate }).text ?? "");
+    const first = render();
+    const taskId = /Task ID: (\S+)/.exec(textOf(result))![1];
+    const settled = () =>
+      vi.waitFor(
+        () => expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => String(c[0]?.content).includes(taskId))).toBe(true),
+        { timeout: 10_000 },
+      );
+    return { context, tui, widgets, invalidate, render, first, settled };
+  }
+
+  const sleep = (ms: number) => `await new Promise(r => setTimeout(r, ${ms}));\n`;
+
+  it("redraws the card when the run reports progress", async () => {
+    const { context, invalidate } = await launch("fullscreen", `${sleep(50)}log("scanning");\nawait new Promise(() => {});\n`);
+
+    await vi.waitFor(() => expect(invalidate).toHaveBeenCalled(), { timeout: 5_000 });
+
+    await booted.lifecycle.get("session_shutdown")?.({}, context);
+  });
+
+  it("re-renders every live card when pi switches renderer mid-run", async () => {
+    const { context, tui, widgets, invalidate, render } = await launch(
+      "fullscreen",
+      `${sleep(50)}log("scanning");\nawait new Promise(() => {});\n`,
+    );
+    await vi.waitFor(() => expect(invalidate).toHaveBeenCalled(), { timeout: 5_000 });
+    const before = invalidate.mock.calls.length;
+
+    // What pi does on a switch: a new TUI, and an invalidate that drops the
+    // list's widget until it registers again on its next tick.
+    tui.mode = "regular";
+    widgets.get("fleet")!.invalidate();
+    await vi.waitFor(() => expect(invalidate.mock.calls.length).toBeGreaterThan(before), { timeout: 2_000 });
+    expect(render()).toContain("Running in background");
+
+    await booted.lifecycle.get("session_shutdown")?.({}, context);
+  });
+
+  it("before any widget has drawn, follows pi's tuiMode setting", async () => {
+    booted.pi.getSettings.mockReturnValue({ tuiMode: "regular" });
+    const tool = booted.tools.get("SubagentWorkflow");
+    const context = ctx({ cwd: hermetic.dir });
+    const result = await tool.execute("tc-card", { script: `${inlineScript}await new Promise(() => {});\n` }, undefined, undefined, context);
+
+    const card = String(tool.renderResult(result, { expanded: false, isPartial: false }, plainTheme, { isError: false, invalidate: vi.fn() }).text ?? "");
+    expect(card).toContain("Running in background");
+
+    await booted.lifecycle.get("session_shutdown")?.({}, context);
+  });
+
+  it("in pi's regular renderer, shows a launch line and redraws only once the run settles", async () => {
+    const { invalidate, render, first, settled } = await launch(
+      "regular",
+      `${sleep(50)}log("one");\n${sleep(50)}log("two");\nreturn "done";\n`,
+    );
+
+    // An off-screen redraw there clears the terminal's scrollback, so a running
+    // card must not claim to be live.
+    expect(first).toContain("Running in background");
+    expect(first).not.toMatch(/\d+\/\d+ agents/);
+
+    await settled();
+    expect(invalidate, "progress does not redraw; settle does, once").toHaveBeenCalledTimes(1);
+    const card = render();
+    expect(card).toContain("from-inline");
+    expect(card).toContain("two");
+  });
+});
+
+/* ------------------------------------------------------------------------- *
  * The CLI flag
  * ------------------------------------------------------------------------- */
 
@@ -1231,6 +1436,16 @@ describe("workflowsEnabled — the master switch", () => {
     subagentsExtension(booted.pi);
     return booted;
   };
+
+  // Claude Code's Workflow tool carries no guideline choosing it over Agent;
+  // its description's explicit opt-in rule decides. A pi-only line ("Use Agent
+  // for ... a handful you can name up front") routed "use 10 agents to explore
+  // this folder" to SubagentWorkflow instead of 10 parallel Agent calls.
+  it("adds no guideline that picks SubagentWorkflow over Agent", () => {
+    const guidelines: string[] = boot({}).tools.get("SubagentWorkflow").promptGuidelines;
+
+    expect(guidelines.filter((g) => /\bAgent\b|handful|number of agents/i.test(g))).toEqual([]);
+  });
 
   it("is on with no setting at all", () => {
     const booted = boot({});
@@ -1472,6 +1687,68 @@ describe("collisions with another extension", () => {
     expect(booted.pi.setActiveTools).not.toHaveBeenCalled();
     expect(booted.pi.getActiveTools()).toContain("SubagentWorkflow");
     expect(warnings(context).filter(m => /disabled for this session/.test(m))).toEqual([]);
+  });
+
+  /* ----------------------------------------------------------------------- *
+   * workflowToolExposure: "deferred"
+   * ----------------------------------------------------------------------- */
+
+  const workflowRegistrations = (booted: ReturnType<typeof boot>) =>
+    booted.pi.registerTool.mock.calls.map((c: any[]) => c[0]).filter((t: any) => t.name === "SubagentWorkflow");
+
+  it("registers the tool deferred only when workflowToolExposure is deferred", () => {
+    expect(workflowRegistrations(boot({ workflowToolExposure: "deferred" })).map((t: any) => t.exposure)).toEqual(["deferred"]);
+    hermetic.restore();
+    expect(workflowRegistrations(boot({})).map((t: any) => t.exposure)).toEqual([undefined]);
+  });
+
+  it("re-registers a deferred tool as hidden when it stands down", async () => {
+    // An inactive deferred tool stays searchable and callable, so taking it
+    // out of the active set alone would leave tool_search a way back in.
+    const booted = boot({ workflowToolExposure: "deferred" });
+    booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
+
+    await booted.lifecycle.get("session_start")?.({}, uiContext());
+
+    expect(workflowRegistrations(booted).map((t: any) => t.exposure)).toEqual(["deferred", "hidden"]);
+  });
+
+  it("does not re-register a direct tool when it stands down", async () => {
+    const booted = bootAuto();
+    booted.pi.getAllTools.mockReturnValue([foreign("Workflow")]);
+
+    await booted.lifecycle.get("session_start")?.({}, uiContext());
+
+    expect(workflowRegistrations(booted)).toHaveLength(1);
+  });
+
+  it("warns when deferred but tool_search is inactive", async () => {
+    // pi only warns about unreachable deferred MCP tools, not extension tools.
+    const booted = boot({ workflowToolExposure: "deferred" });
+    const context = uiContext();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    expect(warnings(context).some(m => /tool_search is inactive/.test(m) && /\+tool_search/.test(m))).toBe(true);
+  });
+
+  it("stays quiet when deferred and tool_search is active", async () => {
+    const booted = boot({ workflowToolExposure: "deferred" });
+    booted.pi.setActiveTools([...booted.pi.getActiveTools(), "tool_search"]);
+    const context = uiContext();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    expect(warnings(context).filter(m => /tool_search/.test(m))).toEqual([]);
+  });
+
+  it("does not mention tool_search unless deferred", async () => {
+    const booted = boot();
+    const context = uiContext();
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    expect(warnings(context).filter(m => /tool_search/.test(m))).toEqual([]);
   });
 
   /**
