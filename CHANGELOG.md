@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Resuming an evicted agent no longer switches it to the parent's model and thinking level** ([#462](https://github.com/tintinweb/pi-subagents/issues/462) — thanks [@hazydream](https://github.com/hazydream) for the report and [@zane668](https://github.com/zane668) for the confirmation). After the record's ten-minute cleanup, a reload or a restart, `Agent({ resume })`, `@handle` and a workflow's `resume` reopened the saved session on the parent's current model and level. The switch was silent, and could run on a costlier model than the one the agent was started on. A reopen now runs on the model and thinking level its own session recorded, as a resume before eviction always did.
+- **A mention clone's system prompt no longer lists the working directory twice** ([#459](https://github.com/tintinweb/pi-subagents/issues/459) — thanks [@sjdhome](https://github.com/sjdhome)). The off-screen clone that starts an `@handle` agent took the parent's full rendered prompt, then pi added the clone's own `<cwd>` section after it. The parent's copy is now removed, so every section of the parent's prompt reaches the clone exactly once.
 
 ## [0.26.0] - 2026-11-16
 
