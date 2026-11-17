@@ -324,6 +324,34 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(payload.tokens).toBeUndefined();
     });
 
+    it("carries the validated report and the persisted session file (#415)", async () => {
+      // A bus-only caller reads both here instead of through the
+      // `Symbol.for("pi-subagents:manager")` registry.
+      const { pi, tools } = boot({});
+      vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, opts: any) => {
+        const session = { dispose: vi.fn(), messages: [], sessionManager: { getSessionFile: () => "/sessions/child.jsonl" } } as any;
+        opts.onSessionCreated?.(session);
+        return { responseText: "verdict: FAIL", session, aborted: false, steered: false, structuredJson: '{"verdict":"FAIL"}' };
+      });
+
+      await spawn(tools, "tc-1");
+
+      const payload = await completedPayload(pi);
+      expect(payload.structuredJson).toBe('{"verdict":"FAIL"}');
+      expect(payload.sessionFile).toBe("/sessions/child.jsonl");
+    });
+
+    it("omits both when the spawn asked for no schema and kept no session", async () => {
+      const { pi, tools } = boot({});
+      runSpendingNothing();
+
+      await spawn(tools, "tc-1");
+
+      const payload = await completedPayload(pi);
+      expect(payload).not.toHaveProperty("structuredJson");
+      expect(payload).not.toHaveProperty("sessionFile");
+    });
+
     it("reports an unpriced model's tokens with a zero cost", async () => {
       const { pi, tools } = boot({});
       runSpending({ input: 100, output: 50, cacheWrite: 0, cost: 0 });

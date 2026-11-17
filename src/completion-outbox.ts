@@ -64,6 +64,11 @@ export class CompletionOutbox {
     if (stopReason !== "aborted" && stopReason !== "error") this.flush();
   }
 
+  /** Whether a notification naming `id` is waiting to be sent. */
+  has(id: string): boolean {
+    return this.items.some(item => item.ids.includes(id));
+  }
+
   /** The agent's result was read: it must not also be notified. */
   cancel(id: string): void {
     for (const item of this.items) item.ids = item.ids.filter(i => i !== id);

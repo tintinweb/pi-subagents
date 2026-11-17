@@ -143,6 +143,19 @@ describe("CompletionOutbox", () => {
     expect(() => vi.advanceTimersByTime(NOTIFICATION_HOLD_MS)).not.toThrow();
   });
 
+  it("has() names an agent from the add until its send or cancel", () => {
+    outbox.add(item("a"));
+    outbox.add(item("b"));
+    expect(outbox.has("a")).toBe(true);
+
+    outbox.cancel("a");
+    expect(outbox.has("a")).toBe(false);
+    expect(outbox.has("b")).toBe(true);
+
+    vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
+    expect(outbox.has("b")).toBe(false);
+  });
+
   it("dispose drops pending completions and their timer", () => {
     outbox.add(item("a"));
     outbox.dispose();
