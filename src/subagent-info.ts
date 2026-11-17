@@ -5,6 +5,12 @@
  * adds of its own. It is a public contract, so it is built from a whitelist:
  * a field reaches listeners only by being named here, never because it was
  * added to `AgentRecord`. Documented in docs/rpc.md.
+ *
+ * Two rules keep the events one shape. A payload is flat: these fields, with
+ * the event's own spread beside them, because existing listeners read
+ * `payload.id`. And an event's own field never reuses a name from here, or a
+ * listener reading it off any `subagents:*` event gets two meanings.
+ * (`subagents:usage`'s per-message `usage` predates this rule.)
  */
 import type { AgentRecord } from "./types.js";
 import { getLifetimeTotal, type ReportedUsage, toReportedUsage } from "./usage.js";

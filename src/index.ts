@@ -619,10 +619,9 @@ export default function (pi: ExtensionAPI) {
     // The same message, live, for anyone keeping their own ledger — a footer
     // that breaks spend down by agent type and thinking level, say. This is the
     // one place every agent's spend passes through, which is why it is emitted
-    // here and not from the lifecycle events: those fire for top-level agents
-    // only, once, at the end, so a workflow's children and nested agents would
-    // never be counted, and a running agent would read as free until it
-    // stopped. Deliberately ungated by `reportUsage` — that decides whether the
+    // here and not from the lifecycle events: those carry spend once, at the
+    // end, so a running agent would read as free until it stopped.
+    // Deliberately ungated by `reportUsage` — that decides whether the
     // parent session's own totals include this spend, not whether it happened.
     //
     // `model` and `thinking` are read off the record per message, not captured

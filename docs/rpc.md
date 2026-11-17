@@ -302,7 +302,7 @@ const active = agents.some((a) =>
 | `waitForAll()` | `() => Promise<void>` | Resolves when nothing is running. **All** agents, including ones you did not spawn — a shutdown barrier, not a join |
 | `hasRunning()` | `() => boolean` | |
 | `spawn(pi, ctx, type, prompt, options)` | `=> string` | **Is** `spawnTopLevel`, so the strip list above applies identically |
-| `getRecord(id)` | `=> AgentRecord \| undefined` | Filtered through `isTopLevelAgent`, so someone else's child comes back `undefined` rather than leaking |
+| `getRecord(id)` | `=> AgentRecord \| undefined` | Filtered through `isTopLevelAgent`: someone else's child comes back `undefined`. The record is live and mutable (abort controller, session), so handing out an owned one would bypass the ownership guard `subagents:rpc:stop` enforces. `subagents:rpc:get` returns owned agents because it returns a copy |
 
 The slot is claimed by the first activation only; subagent sessions re-activate this extension in the same process, and unconditionally overwriting would point the registry at a short-lived child manager whose shutdown would then delete the root session's entry ([#128](https://github.com/tintinweb/pi-subagents/pull/128)). Child activations leave it alone, and shutdown releases it only if this activation claimed it (`ownsManagerRegistry`, checked in the `session_shutdown` handler).
 
