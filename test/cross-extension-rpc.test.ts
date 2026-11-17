@@ -2,8 +2,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type EventBus, FEATURES, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable, STOP_SETTLE_TIMEOUT_MAX_MS, STOP_SETTLE_TIMEOUT_MS } from "../src/cross-extension-rpc.js";
+import { type EventBus, FEATURES, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable, STOP_SETTLE_TIMEOUT_MAX_MS, STOP_SETTLE_TIMEOUT_MS, type WorkflowReader } from "../src/cross-extension-rpc.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
+import type { WorkflowDetail, WorkflowInfo } from "../src/workflow-info.js";
 
 /** Simple in-process event bus for testing. */
 function createEventBus(): EventBus {
@@ -23,6 +24,7 @@ function createEventBus(): EventBus {
 describe("cross-extension RPC", () => {
   let events: EventBus;
   let manager: SpawnCapable;
+  let workflows: WorkflowReader;
   let ctx: object | undefined;
   let deps: RpcDeps;
 
@@ -40,8 +42,12 @@ describe("cross-extension RPC", () => {
       consumeResult: vi.fn().mockReturnValue(true),
       steer: vi.fn().mockReturnValue(true),
     };
+    workflows = {
+      get: vi.fn().mockReturnValue(undefined),
+      list: vi.fn().mockReturnValue([]),
+    };
     ctx = { session: true };
-    deps = { events, pi: { events }, getCtx: () => ctx, manager };
+    deps = { events, pi: { events }, getCtx: () => ctx, manager, workflows };
   });
 
   // --- ping ---
@@ -62,6 +68,7 @@ describe("cross-extension RPC", () => {
     it("pins the feature list", () => {
       expect([...FEATURES]).toEqual([
         "consume", "steer", "get", "list", "owned-lifecycle", "stop-settles", "settling", "notification-pending",
+        "workflow-events", "workflow-get", "workflow-list",
       ]);
     });
 
@@ -82,6 +89,65 @@ describe("cross-extension RPC", () => {
       const reply = vi.fn();
       events.on("subagents:rpc:ping:reply:req-1", reply);
       events.emit("subagents:rpc:ping", { requestId: "req-1" });
+
+      await new Promise((r) => setTimeout(r, 20));
+      expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- workflow_get / workflow_list ---
+
+  describe("workflow RPC", () => {
+    const info: WorkflowInfo = {
+      id: "wf_1", name: "demo", status: "running", startedAt: 1000,
+      durationMs: 50, agentCount: 2, doneCount: 1, failedCount: 0,
+      totalTokens: 10, totalToolCalls: 3, phaseLabel: "Scan (1/2)",
+    };
+    const detail: WorkflowDetail = {
+      ...info, version: 4,
+      agents: [{ index: 0, label: "a0", state: "done" }, { index: 1, label: "a1", state: "start" }],
+    };
+
+    it("workflow_get returns the run's detail, agents and version included", async () => {
+      (workflows.get as any).mockImplementation((id: string) => (id === "wf_1" ? detail : undefined));
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:workflow_get:reply:req-wg", reply);
+      events.emit("subagents:rpc:workflow_get", { requestId: "req-wg", workflowId: "wf_1" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { workflow: detail } });
+      expect(workflows.get).toHaveBeenCalledWith("wf_1");
+    });
+
+    it("workflow_get reports 'Workflow not found' for an unknown id", async () => {
+      registerRpcHandlers(deps); // workflows.get returns undefined by default
+      const reply = vi.fn();
+      events.on("subagents:rpc:workflow_get:reply:req-wg2", reply);
+      events.emit("subagents:rpc:workflow_get", { requestId: "req-wg2", workflowId: "nope" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: false, error: "Workflow not found" });
+    });
+
+    it("workflow_list returns summaries, without the per-agent snapshot", async () => {
+      (workflows.list as any).mockReturnValue([info]);
+      registerRpcHandlers(deps);
+      const reply = vi.fn();
+      events.on("subagents:rpc:workflow_list:reply:req-wl", reply);
+      events.emit("subagents:rpc:workflow_list", { requestId: "req-wl" });
+
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      expect(reply).toHaveBeenCalledWith({ success: true, data: { workflows: [info] } });
+      expect((reply.mock.calls[0][0] as any).data.workflows[0]).not.toHaveProperty("agents");
+    });
+
+    it("unsub stops responding to workflow_get", async () => {
+      const { unsubWorkflowGet } = registerRpcHandlers(deps);
+      unsubWorkflowGet();
+      const reply = vi.fn();
+      events.on("subagents:rpc:workflow_get:reply:req-wg3", reply);
+      events.emit("subagents:rpc:workflow_get", { requestId: "req-wg3", workflowId: "wf_1" });
 
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();

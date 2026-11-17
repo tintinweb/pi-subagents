@@ -95,6 +95,7 @@ import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { workflowToolDescription } from "./workflow/tool-description.js";
+import { toWorkflowDetail, toWorkflowInfo } from "./workflow-info.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
 
@@ -828,6 +829,16 @@ export default function (pi: ExtensionAPI) {
           },
           steer: (id, message) => manager.steer(id, message),
         },
+        // Read-only snapshots of workflow runs, for `workflow_get` / `workflow_list`.
+        // A run is top-level, so there is no ownership to guard. `get` carries the
+        // live per-agent detail; `list` is summaries only.
+        workflows: {
+          get: (id) => {
+            const task = workflowTasks.get(id);
+            return task ? toWorkflowDetail(task) : undefined;
+          },
+          list: () => [...workflowTasks.values()].map(task => toWorkflowInfo(task)),
+        },
       });
       // Broadcast readiness so extensions loaded alongside us can discover us.
       // Emitting after all factories have run (rather than at factory time)
@@ -1098,6 +1109,8 @@ export default function (pi: ExtensionAPI) {
     rpcHandle?.unsubSteer();
     rpcHandle?.unsubGet();
     rpcHandle?.unsubList();
+    rpcHandle?.unsubWorkflowGet();
+    rpcHandle?.unsubWorkflowList();
     rpcHandle = undefined;
     currentCtx = undefined;
     // Only release the global slot if this activation claimed it — a child
@@ -2544,6 +2557,21 @@ Terse command-style prompts produce shallow, generic work.
    * detached — a rejection would surface as an unhandled one.
    */
   async function runWorkflowTask(ctx: ExtensionContext, task: WorkflowTask): Promise<void> {
+    // This function must never reject (both callers are detached). The payload
+    // is built inside the guard as well as emitted there: a stale `pi` throws
+    // on emit after a session replacement, and either throw would otherwise
+    // surface as an unhandled rejection.
+    const announce = (event: string, build: () => unknown) => {
+      try {
+        pi.events.emit(event, build());
+      } catch {
+        /* stale `pi`, or a payload that could not be built */
+      }
+    };
+    // Bracket the run on the bus. The per-agent detail between these is pulled
+    // on demand via `subagents:rpc:workflow_get`, not pushed — `onProgress`
+    // fires per tool call and message per agent, too hot for the bus.
+    announce("subagents:workflow_started", () => toWorkflowInfo(task));
     try {
       const result = await runWorkflow({
         script: task.script,
@@ -2576,6 +2604,7 @@ Terse command-style prompts produce shallow, generic work.
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
     }
+    announce("subagents:workflow_settled", () => toWorkflowInfo(task));
   }
 
   /**
