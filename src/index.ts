@@ -95,7 +95,7 @@ import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { workflowToolDescription } from "./workflow/tool-description.js";
-import { toWorkflowDetail, toWorkflowInfo, workflowResult } from "./workflow-info.js";
+import { toWorkflowDetail, toWorkflowInfo, workflowArgs, workflowResult } from "./workflow-info.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
 
@@ -2571,7 +2571,7 @@ Terse command-style prompts produce shallow, generic work.
     // Bracket the run on the bus. The per-agent detail between these is pulled
     // on demand via `subagents:rpc:workflow_get`, not pushed — `onProgress`
     // fires per tool call and message per agent, too hot for the bus.
-    announce("subagents:workflow_started", () => toWorkflowInfo(task));
+    announce("subagents:workflow_started", () => ({ ...toWorkflowInfo(task), ...workflowArgs(task) }));
     try {
       const result = await runWorkflow({
         script: task.script,

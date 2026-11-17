@@ -912,7 +912,7 @@ Agent lifecycle events are emitted via `pi.events.emit()` so other extensions ca
 | `subagents:steered` | Steering message accepted from any path (`steer_subagent`, `@handle`, the viewers, `subagents:rpc:steer`) — fires for a *queued* steer as well as a delivered one | [agent fields](#agent-fields), `message` |
 | `subagents:usage` | Every assistant message any agent spends on — top-level, nested and workflow children alike, live while it runs | Always: `id`, `type`, `description`, `depth`, `usage` (that one message's spend as a pi `Usage`; never emitted for a message that spent nothing). Omitted when unknown, never `undefined`: `model` (`provider/id`) and `thinking` (the effective level) until the session has reported them; `requestedThinking`, only when the agent did not get the level it asked for; `parentAgentId`, nested agents only; `workflowId`, a workflow's agents only |
 | `subagents:compacted` | Agent's session successfully compacted | [agent fields](#agent-fields), `reason` (`"manual"` / `"threshold"` / `"overflow"`), `tokensBefore`, `compactionCount` |
-| `subagents:workflow_started` | A `SubagentWorkflow` run (tool call or `--subagents-workflow-file`) starts, before its first agent — once per run | [workflow fields](#workflow-fields) (status `running`) |
+| `subagents:workflow_started` | A `SubagentWorkflow` run (tool call or `--subagents-workflow-file`) starts, before its first agent — once per run | [workflow fields](#workflow-fields) (status `running`; `args` when the call passed them) |
 | `subagents:workflow_settled` | That run completes, fails or is stopped — once per run. Its agents are workflow children, reachable on the agent-lifecycle events with `workflowId` set | [workflow fields](#workflow-fields) (status `completed` / `failed` / `killed`; `error` / `failures` on failure; `result` when the script returned a value). Live per-agent progress is **pulled** via `subagents:rpc:workflow_get`, not pushed |
 | `subagents:disposed` | End of `session_shutdown`, after every agent is stopped and every child session has shut down — no `subagents:usage` can follow it. A ledger flushing in its own `session_shutdown` may run before the agents are aborted; flush again here, **synchronously** (`writeFileSync`, not `fs.promises`): `emit` does not await listeners and pi calls `process.exit` once the shutdown handlers return, so nothing after a listener's first `await` is guaranteed to run | `{}` |
 | `subagents:scheduled` | Schedule lifecycle change | `{ type: "added" \| "removed" \| "updated" \| "fired" \| "error", … }` (job/agentId/error fields per type) |
@@ -957,7 +957,10 @@ An agent's `tokens` and `usage` include the spend of every agent below it, so ad
 | `toolCallId` | Tool-started runs only; absent on `--subagents-workflow-file` |
 | `completedAt` | Once the run settles |
 | `error`, `failures` | When the run failed |
+| `args` | `subagents:workflow_started` only, when the call passed `args` |
 | `result` | `subagents:workflow_settled` only, when the run completed and the script returned a value |
+
+`args` is what the run was called with (the script's global `args`), so a host can tell two runs of the same saved workflow apart. Like `result`, it is a copy, and a listener that bound late reads it from `workflow_get`.
 
 `result` is the script's return value as returned (object, array or primitive), untruncated, so no `JSON.parse` is needed. The model's completion notification cuts it at 4000 characters; the bus does not. It is a copy: mutating it never affects the run, but listeners of one event share it. A listener that bound late reads it from `workflow_get`; `workflow_list` summaries leave it out.
 
@@ -1103,13 +1106,13 @@ const active = agents.some(a =>
 
 ```typescript
 pi.events.emit("subagents:rpc:workflow_get", { requestId: crypto.randomUUID(), workflowId: "wf_..." });
-// reply data: { workflow: WorkflowDetail }   — summary + version + agents[] + result?
+// reply data: { workflow: WorkflowDetail }   — summary + version + agents[] + logs[] + args? + result?
 
 pi.events.emit("subagents:rpc:workflow_list", { requestId: crypto.randomUUID() });
 // reply data: { workflows: WorkflowInfo[] }   — summaries only
 ```
 
-A `SubagentWorkflow` run emits only `subagents:workflow_started` / `subagents:workflow_settled` on the bus (see [workflow fields](#workflow-fields)). To follow a run between those, **pull** its state: `workflow_get` returns the summary plus `version` (bumped per progress batch) and an `agents` array of per-agent state (label, phase, model, tokens, previews); `workflow_list` returns the summaries of every run this session (running and settled), no `agents`. Poll at whatever cadence you render — the run does not push progress, which would fire per tool call and message per agent. `workflow_get` on an unknown id returns `Workflow not found`.
+A `SubagentWorkflow` run emits only `subagents:workflow_started` / `subagents:workflow_settled` on the bus (see [workflow fields](#workflow-fields)). To follow a run between those, **pull** its state: `workflow_get` returns the summary plus `version` (bumped per progress batch) and an `agents` array of per-agent state (label, phase, model, tokens, previews), plus `logs` (the script's `log()` lines in order) and `args`/`result` when present; `workflow_list` returns the summaries of every run this session (running and settled), no `agents`. Poll at whatever cadence you render — the run does not push progress, which would fire per tool call and message per agent. `workflow_get` on an unknown id returns `Workflow not found`.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 

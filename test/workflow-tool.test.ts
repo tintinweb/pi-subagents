@@ -769,8 +769,31 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 
     // Only the two lifecycle events — progress is pulled via workflow_get, never pushed.
     expect(wf().map(([e]: [string]) => e)).toEqual(["subagents:workflow_started", "subagents:workflow_settled"]);
-    // The script returned nothing, so settled carries no result.
+    // The script returned nothing and the call passed no args.
     expect(wf().at(-1)![1]).not.toHaveProperty("result");
+    expect(wf()[0][1]).not.toHaveProperty("args");
+  });
+
+  it("carries the call's args on workflow_started, and args and log lines on workflow_get", async () => {
+    const wf = () => booted.pi.events.emit.mock.calls.filter(([e]: [string]) => e.startsWith("subagents:workflow_"));
+    const context = workflowCtx();
+    await booted.lifecycle.get("session_start")?.({}, context);
+
+    const result = await tools.get("SubagentWorkflow").execute(
+      "tc-args", { script: `${inlineScript}log("reviewing " + args.pr);\n`, args: { pr: 123 } },
+      undefined, undefined, context,
+    );
+    const runId = /Task ID: (\S+)/.exec(textOf(result))![1];
+
+    expect(wf()[0]).toEqual(["subagents:workflow_started", expect.objectContaining({ id: runId, args: { pr: 123 } })]);
+    await vi.waitFor(() => expect(wf().map(([e]: [string]) => e)).toContain("subagents:workflow_settled"));
+    expect(wf().at(-1)![1]).not.toHaveProperty("args");
+
+    const [, workflowGet] = booted.pi.events.on.mock.calls.find(([c]: [string]) => c === "subagents:rpc:workflow_get")!;
+    await workflowGet({ requestId: "wg-args", workflowId: runId });
+    const [, reply] = booted.pi.events.emit.mock.calls.find(([c]: [string]) => c === "subagents:rpc:workflow_get:reply:wg-args")!;
+    expect(reply.data.workflow.args).toEqual({ pr: 123 });
+    expect(reply.data.workflow.logs).toEqual([expect.stringContaining("reviewing 123")]);
   });
 
   it("carries the script's return value on workflow_settled, and omits it when the run fails", async () => {

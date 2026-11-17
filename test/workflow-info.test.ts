@@ -99,8 +99,30 @@ describe("toWorkflowDetail", () => {
     // The runtime's internal wf-agent-N handle is not part of the public shape.
     expect(detail.agents[0]).not.toHaveProperty("agentId");
     expect(detail.agents[1]).toMatchObject({ index: 1, label: "a1", state: "error", error: "nope" });
-    // No return value yet: omitted, not carried as undefined.
+    // No return value yet and no args: omitted, not carried as undefined.
     expect(detail).not.toHaveProperty("result");
+    expect(detail).not.toHaveProperty("args");
+    // The script's log() lines, in order.
+    expect(detail.logs).toEqual(["hello"]);
+  });
+
+  it("returns the logs as a fresh array, and [] when the script logged nothing", () => {
+    // `logs` mirrors what updateWorkflowProgressBatch stores, so only the copy differs.
+    const t = task({ workflowProgress: progress, logs: ["hello"] });
+    toWorkflowDetail(t).logs.push("injected");
+    expect(t.logs).toEqual(["hello"]);
+    expect(toWorkflowDetail(t).logs).toEqual(["hello"]);
+    expect(toWorkflowDetail(task()).logs).toEqual([]);
+  });
+
+  it("carries the run's args as a fresh copy", () => {
+    const args = { pr: 123, files: ["a.ts"] };
+    const t = task({ args });
+    const detail = toWorkflowDetail(t);
+
+    expect(detail.args).toEqual(args);
+    (detail.args as typeof args).files.push("b.ts");
+    expect(args.files).toEqual(["a.ts"]);
   });
 
   it("carries the script's return value as a fresh copy", () => {
@@ -120,7 +142,10 @@ describe("toWorkflowDetail", () => {
     expect(toWorkflowDetail(task({ value: null })).result).toBeNull();
   });
 
-  it("keeps the result off the summary that workflow_list returns", () => {
-    expect(toWorkflowInfo(task({ status: "completed", value: { big: true } }))).not.toHaveProperty("result");
+  it("keeps the result, args and logs off the summary that workflow_list returns", () => {
+    const info = toWorkflowInfo(task({ status: "completed", value: { big: true }, args: { pr: 1 }, workflowProgress: progress }));
+    expect(info).not.toHaveProperty("result");
+    expect(info).not.toHaveProperty("args");
+    expect(info).not.toHaveProperty("logs");
   });
 });

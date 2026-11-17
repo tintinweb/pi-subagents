@@ -2,9 +2,10 @@
  * workflow-info.ts — The one workflow-run shape other extensions read off the bus.
  *
  * `subagents:workflow_started` / `subagents:workflow_settled` carry `WorkflowInfo`,
- * settled with the run's `result` spread beside it; `subagents:rpc:workflow_get`
- * returns `WorkflowDetail` (the summary plus the live per-agent snapshot and the
- * result) and `subagents:rpc:workflow_list` returns `WorkflowInfo[]`.
+ * started with the run's `args` and settled with its `result` spread beside it;
+ * `subagents:rpc:workflow_get` returns `WorkflowDetail` (the summary plus the
+ * live per-agent snapshot, the logs, the args and the result) and
+ * `subagents:rpc:workflow_list` returns `WorkflowInfo[]`.
  * It is a public contract, so it is built from a whitelist: a field reaches a
  * listener only by being named here, never because it was added to `WorkflowTask`
  * or `WorkflowAgentEntry`. The agent entries are explicitly unstable internally
@@ -82,8 +83,24 @@ export interface WorkflowDetail extends WorkflowInfo {
   /** `task.progressVersion`: bumped once per applied progress batch. */
   version: number;
   agents: WorkflowAgentInfo[];
+  /** The script's `log()` lines in order, as the TUI shows them; `[]` when none. */
+  logs: string[];
+  /** See {@link workflowArgs}. */
+  args?: unknown;
   /** See {@link workflowResult}. */
   result?: unknown;
+}
+
+/**
+ * The `args` the run was called with, the script's global `args`. Present only
+ * when the call passed them; a `--subagents-workflow-file` run has none.
+ * Carried by `subagents:workflow_started` and `workflow_get`, not by
+ * `workflow_settled` or the `workflow_list` summaries. A fresh copy per
+ * payload, as {@link workflowResult}. The tool takes JSON-shaped `args` only,
+ * so it always clones.
+ */
+export function workflowArgs(task: WorkflowTask): { args?: unknown } {
+  return task.args !== undefined ? { args: structuredClone(task.args) } : {};
 }
 
 /**
@@ -122,10 +139,18 @@ export function toWorkflowInfo(task: WorkflowTask, now = Date.now()): WorkflowIn
   };
 }
 
-/** The summary plus the current collapsed per-agent snapshot (fresh objects). */
+/** The summary plus the current collapsed per-agent snapshot and logs (fresh objects). */
 export function toWorkflowDetail(task: WorkflowTask, now = Date.now()): WorkflowDetail {
-  const agents = collapse(task.workflowProgress).agents.map(toWorkflowAgentInfo);
-  return { ...toWorkflowInfo(task, now), version: task.progressVersion, agents, ...workflowResult(task) };
+  // `collapse` builds a fresh `logs` array on every call, so it is the copy.
+  const { agents, logs } = collapse(task.workflowProgress);
+  return {
+    ...toWorkflowInfo(task, now),
+    version: task.progressVersion,
+    agents: agents.map(toWorkflowAgentInfo),
+    logs,
+    ...workflowArgs(task),
+    ...workflowResult(task),
+  };
 }
 
 function toWorkflowAgentInfo(e: WorkflowAgentEntry): WorkflowAgentInfo {

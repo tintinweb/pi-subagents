@@ -302,6 +302,8 @@ A `SubagentWorkflow` run is not an agent, so it has its own two events and two c
 
 `subagents:workflow_settled` also carries `result`: the script's return value as returned (object, array or primitive), with no truncation and no `JSON.parse` needed. It is left out when the run failed, was stopped, or returned nothing. It is a copy, so mutating it never affects the run or its notification; listeners of one event share the same payload. `workflow_get` returns it too, for a listener that bound late; `workflow_started` and the `workflow_list` summaries never carry it.
 
+`subagents:workflow_started` carries `args` the same way, at the other end of the run: what the call passed as the script's global `args`, so two runs of one saved workflow can be told apart. It is left out when the call passed none (always, for `--subagents-workflow-file`). It is a copy, `workflow_get` returns it too, and `workflow_settled` and `workflow_list` never carry it.
+
 ```typescript
 pi.events.on("subagents:workflow_settled", (run) => {
   if (run.status === "completed" && run.result !== undefined) render(run.result);
@@ -317,13 +319,15 @@ pi.events.emit("subagents:rpc:workflow_get", { requestId, workflowId: "wf_..." }
 //   agents: WorkflowAgentInfo[] per-agent snapshot, collapsed to latest-by-index:
 //     index, label, state, phaseIndex?, phaseTitle?, agentType?, model?, thinking?,
 //     tokens?, toolCalls?, durationMs?, error?, skipped?, resultPreview?, recordId?
+//   logs: string[]             the script's log() lines in order, as the TUI shows them; [] when none
+//   args?: unknown             the call's args, when it passed any
 //   result?: unknown           the script's return value, once the run completed with one
 
 pi.events.emit("subagents:rpc:workflow_list", { requestId });
 // reply data: { workflows: WorkflowInfo[] }  — summaries only, no agents[] or result
 ```
 
-`workflow_get` on an unknown id replies `{ success: false, error: "Workflow not found" }`. Both are reads with no ownership check — a run is top-level. `WorkflowAgentInfo` is a fixed public subset of the internal entry: the churn-prone fields the dialog uses (`lastProgressAt`, `promptPreview`, `attempt`, …) and the runtime's internal `wf-agent-N` handle are not exposed, and `model` is the effective model once the child's session reports one. Its `recordId` is the join back to that child's own agent-lifecycle events (their `id`), so an observer can pair the per-agent snapshot with the live `subagents:usage` / `completed` stream. Detect the surface with `features.includes("workflow-events")` / `"workflow-get"` / `"workflow-list"` / `"workflow-result"` on the `ping` reply. A settled run stays in `list` and `get` for the rest of the session — runs are evicted only at session shutdown, unlike agent records, which are swept about ten minutes after they finish.
+`workflow_get` on an unknown id replies `{ success: false, error: "Workflow not found" }`. Both are reads with no ownership check — a run is top-level. `WorkflowAgentInfo` is a fixed public subset of the internal entry: the churn-prone fields the dialog uses (`lastProgressAt`, `promptPreview`, `attempt`, …) and the runtime's internal `wf-agent-N` handle are not exposed, and `model` is the effective model once the child's session reports one. Its `recordId` is the join back to that child's own agent-lifecycle events (their `id`), so an observer can pair the per-agent snapshot with the live `subagents:usage` / `completed` stream. Detect the surface with `features.includes("workflow-events")` / `"workflow-get"` / `"workflow-list"` / `"workflow-result"` / `"workflow-args"` / `"workflow-logs"` on the `ping` reply. A new log line bumps `version`, so a poller can skip a reply whose `version` it has already rendered. A settled run stays in `list` and `get` for the rest of the session — runs are evicted only at session shutdown, unlike agent records, which are swept about ten minutes after they finish.
 
 ## The manager registry
 
@@ -358,6 +362,8 @@ Everything added since kept version `2`, because each addition left existing cal
 | `workflow-events` | `subagents:workflow_started` / `subagents:workflow_settled` fire for `SubagentWorkflow` runs |
 | `workflow-get`, `workflow-list` | `subagents:rpc:workflow_get` and `subagents:rpc:workflow_list` exist |
 | `workflow-result` | `subagents:workflow_settled` and `workflow_get` carry the script's return value as `result` |
+| `workflow-args` | `subagents:workflow_started` and `workflow_get` carry the call's `args` |
+| `workflow-logs` | `workflow_get` returns the script's `log()` lines as `logs` |
 
 Check with `features.includes(...)`. Entries are only ever added, so a feature present today stays present. A reply without `features` comes from an older build. Model scope and stop's ownership check are older than `features` and have no entry.
 
