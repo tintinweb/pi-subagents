@@ -7,10 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.26.1] - 2026-11-17
-
-> **⚠️ Note — a resumed agent keeps the model and thinking level it ran with** ([#462](https://github.com/tintinweb/pi-subagents/issues/462)). Editing `model:` or `thinking:` in its file no longer changes them on resume.
-
 > **⚠️ Behavior change — lifecycle events now fire for nested and workflow agents** ([#442](https://github.com/tintinweb/pi-subagents/issues/442)). `subagents:created`, `started`, `completed`, `failed`, `steered` and `compacted` used to cover only the session's own agents. Nested and workflow agents now send them too, with `parentAgentId` or `workflowId` set. To keep the old behavior, ignore events where either field is set.
 
 > **⚠️ Behavior change — the `subagents:rpc:stop` reply can arrive up to 5 s later** ([#443](https://github.com/tintinweb/pi-subagents/issues/443)). It now waits until the stopped agent and every agent below it have finished. A caller whose stop timeout is under 5 s should raise it, or pass a smaller `settleTimeoutMs`.
@@ -24,10 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Lifecycle events cover nested and workflow agents** ([#442](https://github.com/tintinweb/pi-subagents/issues/442) — thanks [@sergio-agosti](https://github.com/sergio-agosti)). An extension following every agent had to scrape session files to see nested ones start or finish. They now send the lifecycle events with their parent or workflow set, and still get no completion message, saved record or widget row. A new `ownUsage` field holds each agent's own spend: `usage` includes the agents below it, so adding `usage` up across a tree counts twice.
 
 ### Fixed
+- **`subagents:rpc:stop` replies only once the stopped agent and every agent below it have finished** ([#443](https://github.com/tintinweb/pi-subagents/issues/443) — thanks [@VolodymyrMachekhin](https://github.com/VolodymyrMachekhin)). A nested agent's tool call that ignored the abort could finish after the reply and overwrite the caller's replacement work. The reply now waits up to 5 s, or `settleTimeoutMs`, and returns `{ settled }`. After `settled: false`, `get` shows the agent as `settling`, and sending stop again waits again.
+
+## [0.26.1] - 2026-11-17
+
+> **⚠️ Note — a resumed agent keeps the model and thinking level it ran with** ([#462](https://github.com/tintinweb/pi-subagents/issues/462)). Editing `model:` or `thinking:` in its file no longer changes them on resume.
+
+### Fixed
 - **Resuming an old agent no longer switches it to your current model** ([#462](https://github.com/tintinweb/pi-subagents/issues/462) — thanks [@hazydream](https://github.com/hazydream) for the report and [@zane668](https://github.com/zane668) for the confirmation). Once an agent had been cleaned up (after ten minutes, a reload or a restart), resuming it silently ran it on the parent's model and thinking level, which could cost more. It now resumes on the model and thinking level it ran with.
 - **`@agent` mentions no longer send the working directory twice** ([#459](https://github.com/tintinweb/pi-subagents/issues/459) — thanks [@sjdhome](https://github.com/sjdhome)). The agent's system prompt repeated the `<cwd>` section; it now appears once.
 - **Subagents that delegate now see what each agent they can spawn does** ([#457](https://github.com/tintinweb/pi-subagents/issues/457) — thanks [@WinPooh32](https://github.com/WinPooh32)). Their `Agent` tool listed agent names only. It now lists each allowed agent's description and tools, like the main session's, and follows `toolDescriptionMode: "compact"`.
-- **`subagents:rpc:stop` replies only once the stopped agent and every agent below it have finished** ([#443](https://github.com/tintinweb/pi-subagents/issues/443) — thanks [@VolodymyrMachekhin](https://github.com/VolodymyrMachekhin)). A nested agent's tool call that ignored the abort could finish after the reply and overwrite the caller's replacement work. The reply now waits up to 5 s, or `settleTimeoutMs`, and returns `{ settled }`. After `settled: false`, `get` shows the agent as `settling`, and sending stop again waits again.
 
 ## [0.26.0] - 2026-11-16
 
