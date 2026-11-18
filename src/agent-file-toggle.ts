@@ -292,6 +292,7 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   // its session, or write it somewhere else.
   if (cfg.persistSession !== undefined) fmFields.push(`persist_session: ${cfg.persistSession}`);
   if (cfg.sessionDir) fmFields.push(`session_dir: ${JSON.stringify(cfg.sessionDir)}`);
+  if (cfg.cacheRetention) fmFields.push(`cache_retention: ${cfg.cacheRetention}`);
 
   return `---\n${fmFields.join("\n")}\n---\n\n${cfg.systemPrompt}\n`;
 }

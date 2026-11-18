@@ -282,6 +282,65 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     expect(process.cwd()).toBe(prevCwd);
     expect((globalThis as Record<symbol, unknown>)[Symbol.for("pi-subagents:manager")]).toBeUndefined();
   });
+
+  // The unit tests stub `session.agent.streamFunction`; these read the retention
+  // where pi hands the request to the provider. They fail if pi stops routing a
+  // turn through `agent.streamFunction`, or captures it before the wrapper lands.
+  describe("prompt cache retention reaches the provider", () => {
+    /** Run one foreground spawn of `type`; return the retention each request carried, by session. */
+    async function retentions(cwd: string, type: string) {
+      const seen = { parent: [] as unknown[], child: [] as unknown[] };
+      const route = routeBySession({
+        parentInitial: agentCall({ subagent_type: type, description: "cache", prompt: "Reply.", run_in_background: false }),
+        parentFinal: "Done.",
+        subagent: "ok",
+      });
+      run = await runPrintMode({
+        prompt: "Delegate.",
+        cwd,
+        respond: (context, state, options) => {
+          seen[isSubagentContext(context) ? "child" : "parent"].push(options?.cacheRetention);
+          return route(context, state);
+        },
+        live: false,
+      });
+      return seen;
+    }
+
+    function projectDir(prefix: string) {
+      const cwd = mkdtempSync(join(tmpdir(), prefix));
+      tmpDirs.push(cwd);
+      mkdirSync(join(cwd, ".pi", "agents"), { recursive: true });
+      return cwd;
+    }
+
+    it("an agent's cache_retention frontmatter reaches its requests, not the parent's", async () => {
+      const cwd = projectDir("subagents-cache-fm-");
+      writeFileSync(
+        join(cwd, ".pi", "agents", "cache-spy.md"),
+        "---\ndescription: Replies.\ncache_retention: short\n---\nReply ok.\n",
+      );
+
+      const seen = await retentions(cwd, "cache-spy");
+
+      expect(seen.child.length).toBeGreaterThan(0);
+      expect(seen.child.every((r) => r === "short")).toBe(true);
+      expect(seen.parent.length).toBeGreaterThan(0);
+      expect(seen.parent.every((r) => r === undefined)).toBe(true);
+    });
+
+    it("the cacheRetention setting reaches a built-in agent's requests, not the parent's", async () => {
+      const cwd = projectDir("subagents-cache-setting-");
+      writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ cacheRetention: "long" }));
+
+      const seen = await retentions(cwd, "general-purpose");
+
+      expect(seen.child.length).toBeGreaterThan(0);
+      expect(seen.child.every((r) => r === "long")).toBe(true);
+      expect(seen.parent.length).toBeGreaterThan(0);
+      expect(seen.parent.every((r) => r === undefined)).toBe(true);
+    });
+  });
 });
 
 // Opt-in real-LLM smoke tests — exercise the SAME runner against a live model

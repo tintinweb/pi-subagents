@@ -22,6 +22,7 @@ import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
 import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { formatAgentTypeList, getAgentConfig, getAvailableTypes, getConfig, getFallbackSubagent, getModelLabelFromConfig, getToolDescriptionMode, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent, setToolDescriptionMode } from "./agent-types.js";
+import { getCacheRetention, setCacheRetention } from "./cache-retention.js";
 import { inChildSessionContext } from "./child-context.js";
 import { CompletionOutbox, NOTIFICATION_HOLD_MS } from "./completion-outbox.js";
 import { type RpcHandle, registerRpcHandlers } from "./cross-extension-rpc.js";
@@ -56,7 +57,7 @@ import {
 } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
 import { toSubagentInfo } from "./subagent-info.js";
-import { type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentInvocation, type AgentMentionMode, type AgentRecord, type CacheRetentionSetting, type JoinMode, type NotificationDetails, type SubagentType, THINKING_LEVELS, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
 import {
   type AgentActivity,
@@ -1501,6 +1502,7 @@ export default function (pi: ExtensionAPI) {
     setFleetView: setFleetViewEnabled,
     setAgentMentions: setAgentMentionMode,
     setRememberAgents,
+    setCacheRetention,
     setWidgetMode: setWidgetMode,
     setOutputTranscript: setOutputTranscriptDefault,
     setWorktreeIsolation: setWorktreeIsolationEnabled,
@@ -3219,6 +3221,7 @@ Terse command-style prompts produce shallow, generic work.
       fleetView: isFleetViewEnabled(),
       agentMentions: getAgentMentionMode(),
       rememberAgents: getRememberAgents(),
+      cacheRetention: getCacheRetention(),
       widgetMode: getWidgetMode(),
       outputTranscript: getOutputTranscriptDefault(),
       worktreeIsolation: isWorktreeIsolationEnabled(),
@@ -3486,6 +3489,16 @@ Terse command-style prompts produce shallow, generic work.
           description: "Persist subagent sessions so `@handle` can resume one long after it finished (they also appear in /resume)",
           currentValue: getRememberAgents() ? "on" : "off",
           values: ["on", "off"],
+        },
+        {
+          id: "cacheRetention",
+          label: "Prompt cache retention",
+          description:
+            "Prompt cache lifetime for subagent model calls: short (5 min on Anthropic), long (1 hour), none, "
+            + "or inherit (pi's default, incl. PI_CACHE_RETENTION). An agent's cache_retention frontmatter overrides it; "
+            + "the main session is unaffected. Applies to agents started after the change",
+          currentValue: getCacheRetention(),
+          values: ["inherit", "short", "long", "none"],
         },
         {
           id: "packageAgents",
@@ -3770,6 +3783,9 @@ Terse command-style prompts produce shallow, generic work.
         const enabled = value === "on";
         setRememberAgents(enabled);
         notifyApplied(ctx, target, `Remember agents ${enabled ? "enabled" : "disabled"}`);
+      } else if (id === "cacheRetention") {
+        setCacheRetention(value as CacheRetentionSetting);
+        notifyApplied(ctx, target, `Prompt cache retention set to ${value}`);
       } else if (id === "widgetMode") {
         setWidgetMode(value as WidgetMode);
         notifyApplied(ctx, target, `Widget set to ${value}`);

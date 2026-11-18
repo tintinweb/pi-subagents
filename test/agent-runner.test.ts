@@ -157,6 +157,7 @@ import {
   setGraceTurns,
   setRememberAgents,
 } from "../src/agent-runner.js";
+import { setCacheRetention } from "../src/cache-retention.js";
 import { compileJsonSchema } from "../src/workflow/json-schema.js";
 
 /** The most recent session built by `createSession` — read by `lastToolsPassed()`. */
@@ -1193,6 +1194,46 @@ describe("agent-runner session persistence", () => {
       "/repo/.seams/pi-sessions/seam-plan-reviewer",
       { parentSession: "/sessions/parent.jsonl" },
     );
+  });
+});
+
+describe("agent-runner prompt cache retention", () => {
+  afterEach(() => setCacheRetention("inherit"));
+
+  /**
+   * Run an agent whose session has a recording stream function, then make one
+   * model call through whatever stream function the session ends up with.
+   * Returns the retention that call carried and whether the wrapper was already
+   * in place when extensions were bound.
+   */
+  async function retentionOf(config: Record<string, unknown>) {
+    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig(config));
+    const { session } = createSession("OK");
+    const inner = vi.fn((_m: unknown, _c: unknown, _o?: { cacheRetention?: string }) => undefined);
+    const agent = session.agent as { streamFunction?: unknown };
+    agent.streamFunction = inner;
+    let wrappedAtBind = false;
+    session.bindExtensions = vi.fn(async () => { wrappedAtBind = agent.streamFunction !== inner; });
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    (agent.streamFunction as typeof inner)("model", "context", {});
+    return { retention: inner.mock.calls[0]?.[2]?.cacheRetention, wrappedAtBind };
+  }
+
+  it("leaves model calls alone by default (inherit)", async () => {
+    expect(await retentionOf({})).toEqual({ retention: undefined, wrappedAtBind: false });
+  });
+
+  it("applies the setting when the agent sets nothing, before extensions are bound", async () => {
+    setCacheRetention("short");
+    expect(await retentionOf({})).toEqual({ retention: "short", wrappedAtBind: true });
+  });
+
+  it("lets frontmatter override the setting", async () => {
+    setCacheRetention("long");
+    expect((await retentionOf({ cacheRetention: "short" })).retention).toBe("short");
   });
 });
 

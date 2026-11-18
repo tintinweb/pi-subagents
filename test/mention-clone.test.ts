@@ -39,6 +39,7 @@ vi.mock("@earendil-works/pi-coding-agent", async () => {
   };
 });
 
+import { setCacheRetention } from "../src/cache-retention.js";
 import { agentMentionReminder } from "../src/mention.js";
 import { runMentionClone } from "../src/mention-clone.js";
 
@@ -231,6 +232,21 @@ describe("cloning the conversation", () => {
     expect(built.model).toEqual({ id: "main-model" });
     expect(built.thinkingLevel).toBe("high");
     expect(built.modelRuntime).toEqual({ kind: "runtime" });
+  });
+
+  it("applies the prompt cache retention setting to the clone's model calls", async () => {
+    const session = cloneSession(callsAgent());
+    const inner = vi.fn((_m: unknown, _c: unknown, _o?: { cacheRetention?: string }) => undefined);
+    session.agent = { streamFunction: inner };
+    setCacheRetention("short");
+    try {
+      await runMentionClone(opts());
+    } finally {
+      setCacheRetention("inherit");
+    }
+
+    session.agent.streamFunction("model", "context", {});
+    expect(inner.mock.calls[0]?.[2]).toEqual({ cacheRetention: "short" });
   });
 
   it("gives the clone the Agent tool and nothing else", async () => {

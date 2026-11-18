@@ -148,6 +148,16 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
+  it("round-trips cacheRetention; keeps the four values, drops others", () => {
+    for (const v of ["inherit", "none", "short", "long"] as const) {
+      saveSettings({ cacheRetention: v }, projectDir);
+      expect(loadSettings(projectDir)).toEqual({ cacheRetention: v });
+    }
+    writeProject({});
+    writeGlobal({ cacheRetention: "1h" });
+    expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
+  });
+
   it("round-trips widgetMode; keeps valid values, drops invalid", () => {
     saveSettings({ widgetMode: "off" }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ widgetMode: "off" });
@@ -716,6 +726,7 @@ describe("settings persistence", () => {
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
       setRememberAgents: vi.fn(),
+      setCacheRetention: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
@@ -892,6 +903,13 @@ describe("settings persistence", () => {
       expect(appliers.setRememberAgents).toHaveBeenCalledTimes(1); // absence is "use default"
     });
 
+    it("applies cacheRetention; skips it when absent", () => {
+      applySettings({ cacheRetention: "short" }, appliers);
+      expect(appliers.setCacheRetention).toHaveBeenCalledWith("short");
+      applySettings({}, appliers);
+      expect(appliers.setCacheRetention).toHaveBeenCalledTimes(1); // absence is "use default"
+    });
+
     it("applies scopeModels: false", () => {
       applySettings({ scopeModels: false }, appliers);
       expect(appliers.setScopeModels).toHaveBeenCalledWith(false);
@@ -1002,6 +1020,7 @@ describe("settings persistence", () => {
         setFleetView: vi.fn(),
         setAgentMentions: vi.fn(),
       setRememberAgents: vi.fn(),
+      setCacheRetention: vi.fn(),
         setWidgetMode: vi.fn(),
         setViewerMarkdown: vi.fn(),
         setOutputTranscript: vi.fn(),
