@@ -28,7 +28,7 @@ import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
 import { describeModel } from "./model-resolver.js";
 import type { AgentInvocation, AgentRecord, AgentTombstone, IsolationMode, MentionResolution, Pool, SubagentType, ThinkingLevel } from "./types.js";
-import { addUsage, type LifetimeUsage } from "./usage.js";
+import { addUsage, type LifetimeUsage, type ResponseInfo } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 import { cleanupWorktree, createWorktree, isWorktreeIsolationEnabled, pruneWorktrees, } from "./worktree.js";
 
@@ -49,9 +49,10 @@ export type OnAgentCompact = (record: AgentRecord, info: CompactionInfo) => void
  * shows up on the record a human can see, which makes those records useless as
  * a basis for anything that must not count a message twice — parent-session
  * accounting above all. (`AgentRecord.ownUsage` is the per-record figure that
- * is not double-booked.)
+ * is not double-booked.) `response` is what that message says about its
+ * request: the model and effort the provider reported, and its timing.
  */
-export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage) => void;
+export type OnAgentUsage = (record: AgentRecord, usage: LifetimeUsage, response: ResponseInfo) => void;
 export type CompactionInfo = { reason: "manual" | "threshold" | "overflow"; tokensBefore: number };
 
 /**
@@ -919,10 +920,10 @@ export class AgentManager {
       },
       onTurnEnd: options.onTurnEnd,
       onTextDelta: options.onTextDelta,
-      onAssistantUsage: (usage) => {
+      onAssistantUsage: (usage, response) => {
         addUsage(record.lifetimeUsage, usage);
         addUsage(record.ownUsage, usage);
-        this.onUsage?.(record, usage);
+        this.onUsage?.(record, usage, response);
         options.onAssistantUsage?.(usage);
       },
       onCompaction: (info) => {
@@ -1359,10 +1360,10 @@ export class AgentManager {
             if (activity.type === "end") record.toolUses++;
             options?.onToolActivity?.(activity);
           },
-          onAssistantUsage: (usage) => {
+          onAssistantUsage: (usage, response) => {
             addUsage(record.lifetimeUsage, usage);
             addUsage(record.ownUsage, usage);
-            this.onUsage?.(record, usage);
+            this.onUsage?.(record, usage, response);
             options?.onAssistantUsage?.(usage);
           },
           onCompaction: (info) => {
@@ -1486,10 +1487,10 @@ export class AgentManager {
         if (activity.type === "end") record.toolUses++;
         options.onToolActivity?.(activity);
       },
-      onAssistantUsage: (usage) => {
+      onAssistantUsage: (usage, response) => {
         addUsage(record.lifetimeUsage, usage);
         addUsage(record.ownUsage, usage);
-        this.onUsage?.(record, usage);
+        this.onUsage?.(record, usage, response);
         options.onAssistantUsage?.(usage);
       },
       onCompaction: (info) => {

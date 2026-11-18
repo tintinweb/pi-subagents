@@ -577,7 +577,7 @@ export default function (pi: ExtensionAPI) {
       tokensBefore: info.tokensBefore,
       compactionCount: record.compactionCount,
     });
-  }, (record, usage) => {
+  }, (record, usage, response) => {
     // Every assistant message from every agent — nested included, exactly once.
     // Parked here until a tool result can carry it back to the parent session;
     // see `PendingUsagePool`. Skipped entirely when the feature is off, so no
@@ -614,6 +614,10 @@ export default function (pi: ExtensionAPI) {
       ...(record.parentAgentId !== undefined ? { parentAgentId: record.parentAgentId } : {}),
       ...(record.workflowId !== undefined ? { workflowId: record.workflowId } : {}),
       usage: reported,
+      // What the message itself reports, next to the configured `model` and
+      // `thinking` above: a router can serve a request with another model or
+      // effort, and only the response says which (#441).
+      ...response,
     });
   }, (record, message) => {
     pi.events.emit("subagents:steered", { ...toSubagentInfo(record), message });
