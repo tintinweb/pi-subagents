@@ -22,6 +22,25 @@
 export type LifetimeUsage = { input: number; output: number; cacheWrite: number; cacheRead?: number; cost?: number };
 
 /**
+ * What one assistant message says about the request that produced it, read
+ * off pi's `AssistantMessage` at `message_end`. `startedAt` and `stopReason`
+ * are always set; the rest only when the provider or stream supplied them.
+ * `responseModel` and `providerThinkingLevel` are what the provider reported,
+ * which a router can make differ from the agent's configured model and level.
+ */
+export type ResponseInfo = {
+  responseModel?: string;
+  providerThinkingLevel?: string;
+  /** Wall-clock ms when the request was sent (the message's `timestamp`). */
+  startedAt: number;
+  /** Ms from `startedAt` until the response ended, per pi's monotonic clock. */
+  durationMs?: number;
+  /** Ms from `startedAt` until the first streamed text, thinking or tool-call delta. */
+  firstTokenMs?: number;
+  stopReason: string;
+};
+
+/**
  * Sum of lifetime *token* components for DISPLAY, or 0 if undefined.
  * Deliberately excludes `cacheRead` (see above) and `cost` — that is money, not
  * tokens, and lives on the same object only because it accumulates on the same
