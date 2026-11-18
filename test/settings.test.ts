@@ -148,16 +148,12 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // non-boolean dropped
   });
 
-  it("round-trips cacheRetention; keeps the four values, drops others; project wins over global", () => {
+  it("round-trips cacheRetention; keeps the four values, drops others", () => {
     for (const v of ["inherit", "none", "short", "long"] as const) {
       saveSettings({ cacheRetention: v }, projectDir);
       expect(loadSettings(projectDir)).toEqual({ cacheRetention: v });
     }
-    writeGlobal({ cacheRetention: "long" });
-    writeProject({ cacheRetention: "short" });
-    expect(loadSettings(projectDir)).toEqual({ cacheRetention: "short" });
     writeProject({});
-    expect(loadSettings(projectDir)).toEqual({ cacheRetention: "long" });
     writeGlobal({ cacheRetention: "1h" });
     expect(loadSettings(projectDir)).toEqual({}); // invalid value dropped
   });

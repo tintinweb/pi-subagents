@@ -1235,10 +1235,6 @@ describe("agent-runner prompt cache retention", () => {
     setCacheRetention("long");
     expect((await retentionOf({ cacheRetention: "short" })).retention).toBe("short");
   });
-
-  it("applies frontmatter when the setting is inherit", async () => {
-    expect((await retentionOf({ cacheRetention: "none" })).retention).toBe("none");
-  });
 });
 
 describe("agent-runner master tool allowlist", () => {

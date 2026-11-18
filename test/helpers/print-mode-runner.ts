@@ -55,6 +55,7 @@ import {
   fauxToolCall,
   getCurrentSystemPrompt,
   type Model,
+  type SimpleStreamOptions,
   type ToolCall,
 } from "@earendil-works/pi-ai";
 import {
@@ -88,11 +89,13 @@ export type FauxReply = string | FauxContentBlock | FauxContentBlock[] | Assista
 /**
  * A context-branching responder. Invoked once per model call (parent OR child)
  * with that call's own `Context`, so it can decide what to emit from the prompt
- * it sees — order-independent, unlike a flat FIFO `steps` list.
+ * it sees — order-independent, unlike a flat FIFO `steps` list. `options` are
+ * the request options as they reached the provider (e.g. `cacheRetention`).
  */
 export type FauxResponder = (
   context: Context,
   state: { callCount: number },
+  options?: SimpleStreamOptions,
 ) => FauxReply | Promise<FauxReply>;
 
 export interface RunPrintModeOptions {
@@ -347,8 +350,8 @@ export async function runPrintMode(options: RunPrintModeOptions): Promise<PrintM
         throw new Error("runPrintMode (faux mode): provide `respond` or `steps`");
       }
       const max = options.maxModelCalls ?? 16;
-      const factory: FauxResponseStep = async (context, _opts, state) =>
-        toAssistantMessage(await respond(context, state));
+      const factory: FauxResponseStep = async (context, opts, state) =>
+        toAssistantMessage(await respond(context, state, opts));
       faux.setResponses(Array.from({ length: max }, () => factory));
     }
   }

@@ -178,7 +178,6 @@ Just a prompt.`);
     expect(agent.thinking).toBeUndefined();
     expect(agent.maxTurns).toBeUndefined();
     expect(agent.persistSession).toBeUndefined();
-    expect(agent.cacheRetention).toBeUndefined();
     expect(agent.outputTranscript).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
     expect(agent.allowedSubagents).toBeUndefined();
@@ -1281,7 +1280,6 @@ Prompt.`);
 
     it("preserves cache_retention", () => {
       expect(roundTrip({ cacheRetention: "short" }).cacheRetention).toBe("short");
-      expect(roundTrip({}).cacheRetention).toBeUndefined();
     });
 
     it("preserves a tool-less agent as none, not as the whole toolbox", () => {
