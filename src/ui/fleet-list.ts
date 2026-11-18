@@ -202,11 +202,6 @@ export class FleetList {
      * conversation viewer and the `Agent` tool result.
      */
     private showModel: () => boolean = () => false,
-    /**
-     * Read live at render time. Whether rows show other extensions'
-     * `subagents:rpc:annotate` text. Defaults to on, as the setting does.
-     */
-    private showAnnotations: () => boolean = () => true,
   ) {}
 
   // ---- Lifecycle ----
@@ -730,9 +725,7 @@ export class FleetList {
     // Other extensions' text, after the model and still on the left, so a
     // narrow row cuts it before the name (#441). Each segment keeps its tone,
     // selected or not: the tone is the caller's meaning, e.g. unconfirmed.
-    if (this.showAnnotations()) {
-      for (const { text, tone } of annotationSegments(record)) left += `${theme.fg("dim", " · ")}${theme.fg(tone, text)}`;
-    }
+    for (const { text, tone } of annotationSegments(record)) left += `${theme.fg("dim", " · ")}${theme.fg(tone, text)}`;
     // The record, not the activity tracker: only the record outlives the agent.
     // Its OWN usage, not `lifetimeUsage` — that one folds in every descendant,
     // and the descendants have rows of their own here.

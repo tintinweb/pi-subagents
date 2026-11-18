@@ -282,10 +282,10 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
-  it("round-trips showAnnotations; drops non-boolean", () => {
-    saveSettings({ showAnnotations: false }, projectDir);
-    expect(loadSettings(projectDir)).toEqual({ showAnnotations: false });
-    writeGlobal({ showAnnotations: "off" } as any);
+  it("round-trips allowExtensionAnnotations; drops non-boolean", () => {
+    saveSettings({ allowExtensionAnnotations: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ allowExtensionAnnotations: false });
+    writeGlobal({ allowExtensionAnnotations: "off" } as any);
     expect(loadSettings(projectDir)).toEqual({});
   });
 
@@ -743,7 +743,7 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
-        setShowAnnotations: vi.fn(),
+        setAllowExtensionAnnotations: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };
@@ -808,9 +808,9 @@ describe("settings persistence", () => {
       expect(appliers.setShowModel).toHaveBeenCalledWith(false);
     });
 
-    it("applies showAnnotations", () => {
-      applySettings({ showAnnotations: false }, appliers);
-      expect(appliers.setShowAnnotations).toHaveBeenCalledWith(false);
+    it("applies allowExtensionAnnotations", () => {
+      applySettings({ allowExtensionAnnotations: false }, appliers);
+      expect(appliers.setAllowExtensionAnnotations).toHaveBeenCalledWith(false);
     });
 
     it("is a no-op on an empty settings object", () => {
@@ -1043,7 +1043,7 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
-        setShowAnnotations: vi.fn(),
+        setAllowExtensionAnnotations: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };

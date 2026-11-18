@@ -776,7 +776,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, workflow tool exposure skill/inline/deferred, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, annotations on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, workflow tool exposure skill/inline/deferred, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, extension annotations on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides.
@@ -865,13 +865,13 @@ Both places report what the run *actually* used, read back from the child sessio
 
 Toggle via `/agents → Settings → Show model`; applied live.
 
-**Show annotations** (`showAnnotations`, default `true`): whether rows show the text other extensions attach to an agent over [`subagents:rpc:annotate`](#annotate-rows-annotate), such as the model a router actually served or a task id. The segments follow the model on the widget's running rows, the fleet view rows and the workflow inspector's agent rows, each in the color the extension chose:
+**Allow extension annotations** (`allowExtensionAnnotations`, default `true`): whether other extensions may attach text to agent rows over [`subagents:rpc:annotate`](#annotate-rows-annotate), such as the model a router actually served or a task id. The segments follow the model on the widget's running rows, the fleet view rows and the workflow inspector's agent rows, each in the color the extension chose:
 
 ```text
   ○ Explore  inspect code · sonnet 4.6 · high · GLM-5 · medium · 96 tok/s · #42      4s · ↓ 8.2k tokens
 ```
 
-Nothing appears until an installed extension writes an annotation. Turning it off hides them without uninstalling that extension; they are still stored, so turning it back on shows the current text. Toggle via `/agents → Settings → Show annotations`; applied live.
+Nothing appears until an installed extension writes an annotation. Turning it off clears every annotation already shown and rejects further calls with an error naming this setting, so the extension can tell you where to look; it doesn't need uninstalling. After turning it back on, rows fill again as extensions resend. Toggle via `/agents → Settings → Allow extension annotations`; applied live.
 
 **Viewer markdown** (`viewerMarkdown`, default `"assistant"`): how much of the [conversation viewer](#ui)'s transcript is rendered as Markdown rather than shown verbatim.
 
@@ -1153,7 +1153,7 @@ pi.events.emit("subagents:rpc:annotate", {
   text: "GLM-5 · medium · 96 tok/s",               // "" removes your key
   tone: "muted",                                   // dim (default) | muted | accent | success | warning | error
 });
-// reply data: { shown: boolean }   — false while the user hides annotations
+// reply: { success: true }, or an error — e.g. while the user disallows annotations
 ```
 
 Display-only text on an agent's row, for facts only your extension knows. It works for any agent, nested and workflow agents included, and is never sent to the model, a notification, a saved record or an event. Each key keeps its own segment, so two extensions never overwrite each other. See [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md#annotating-rows) for the limits.

@@ -121,13 +121,16 @@ export interface WorkflowReader {
   list(): WorkflowInfo[];
 }
 
-/** What `annotate` needs from the UI: the user's setting and a repaint. */
+/** What `annotate` needs from the UI: the user's permission and a repaint. */
 export interface AnnotationDisplay {
-  /** Whether the user shows annotations (`showAnnotations`). */
-  shown(): boolean;
+  /** Whether the user lets extensions annotate (`allowExtensionAnnotations`). */
+  allowed(): boolean;
   /** Repaint the rows; a finished row's timer may have stopped. */
   changed(): void;
 }
+
+/** The error a caller gets while the user disallows annotations; it names the switch. */
+export const ANNOTATIONS_DISALLOWED = "Annotations are disabled: /agents → Settings → Allow extension annotations";
 
 export interface RpcDeps {
   events: EventBus;
@@ -364,15 +367,15 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
   // Display-only text on an agent's row, for facts only the caller knows — the
   // model a router actually served, a task id, a verdict (#441). No ownership
   // guard: it changes nothing about the run, and nested and workflow agents
-  // have rows too. Stored even while the user hides annotations, so turning
-  // the setting on shows current values; `shown` tells the caller which.
+  // have rows too. While the user disallows annotations the call fails with an
+  // error naming the setting, so the caller can tell the user where to look.
   const unsubAnnotate = handleRpc<{ requestId: string; agentId: string; key: unknown; text: unknown; tone?: unknown }>(
     events, "subagents:rpc:annotate", ({ agentId, key, text, tone }) => {
+      if (!annotations.allowed()) throw new Error(ANNOTATIONS_DISALLOWED);
       const record = manager.getRecord(agentId);
       if (!record) throw new Error("Agent not found");
       setAnnotation(record, key, text, tone ?? "dim");
       annotations.changed();
-      return { shown: annotations.shown() };
     },
   );
 

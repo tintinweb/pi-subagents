@@ -303,11 +303,6 @@ export class AgentWidget {
      * conversation viewer unconditionally.
      */
     private showModel: () => boolean = () => false,
-    /**
-     * Read live at render time. Whether rows show other extensions'
-     * `subagents:rpc:annotate` text. Defaults to on, as the setting does.
-     */
-    private showAnnotations: () => boolean = () => true,
   ) {}
 
   /**
@@ -490,9 +485,7 @@ export class AgentWidget {
       }
       // Other extensions' text, after the model it usually qualifies (#441).
       // Colored in its own tone; the dim around it is restored after each.
-      if (this.showAnnotations()) {
-        for (const { text, tone } of annotationSegments(a)) parts.push(theme.fg(tone, text));
-      }
+      for (const { text, tone } of annotationSegments(a)) parts.push(theme.fg(tone, text));
       if (bg) parts.push(formatTurns(bg.turnCount, bg.maxTurns));
       if (toolUses > 0) parts.push(`${toolUses} tool use${toolUses === 1 ? "" : "s"}`);
       if (tokenText) parts.push(tokenText);

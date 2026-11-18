@@ -1140,8 +1140,8 @@ describe("FleetList annotations (#441)", () => {
     return record;
   }
 
-  function mount(record: AgentRecord, shown: { on: boolean }, theme: object) {
-    const fleet = new FleetList(fakeManager([record]), new Map(), () => false, undefined, undefined, undefined, undefined, () => true, () => shown.on);
+  function mount(record: AgentRecord, theme: object) {
+    const fleet = new FleetList(fakeManager([record]), new Map(), () => false, undefined, undefined, undefined, undefined, () => true);
     let factory: any;
     fleet.setUICtx({
       setWidget: (_k: string, c: any) => { factory = c; },
@@ -1158,20 +1158,17 @@ describe("FleetList annotations (#441)", () => {
 
   it("renders each key's segment after the model, in order, in its own tone", () => {
     // Wide: the tags count toward the width the row is cut to.
-    const out = mount(annotated(), { on: true }, tagged)(400);
+    const out = mount(annotated(), tagged)(400);
     expect(out).toContain("· sonnet 4.6 · high</dim><dim> · </dim><muted>DeepSeek V4.1 Flash · high · 118 tok/s</muted><dim> · </dim><accent>#42</accent>");
   });
 
-  it("hides the segments while showAnnotations is off, and shows them again when it is on", () => {
-    const shown = { on: false };
-    const render = mount(annotated(), shown, plainTheme);
-    expect(render()).not.toContain("DeepSeek");
-    shown.on = true;
-    expect(render()).toContain("high · DeepSeek V4.1 Flash · high · 118 tok/s · #42");
+  it("renders nothing extra for an agent without annotations", () => {
+    const record = makeRecord({ invocation: { modelName: "sonnet 4.6", thinking: "high" } });
+    expect(mount(record, plainTheme)()).toContain("Sleep then report 1 · sonnet 4.6 · high  ");
   });
 
   it("cuts the annotations, not the agent name or stats, on a narrow terminal", () => {
-    const out = mount(annotated(), { on: true }, plainTheme)(70);
+    const out = mount(annotated(), plainTheme)(70);
     expect(out).toContain("Agent  Sleep then report 1");
     expect(out).toContain("13.1k tokens");
     expect(out).not.toContain("#42");

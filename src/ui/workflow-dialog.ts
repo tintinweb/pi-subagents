@@ -369,7 +369,7 @@ export interface WorkflowDialogSource {
   detail?(recordId: string): AgentDetail | undefined;
   /**
    * Other extensions' text for the child's row, by the entry's `recordId`
-   * (#441). Empty once the record has been swept or annotations are hidden.
+   * (#441). Empty once the record has been swept.
    */
   annotations?(recordId: string): readonly Annotation[];
 }

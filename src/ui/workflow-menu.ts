@@ -42,8 +42,6 @@ export interface WorkflowMenuDeps {
   getCtx(): ExtensionCommandContext | undefined;
   /** A run's status changed from here (pause, resume), so its inline card is stale. */
   onTaskChange(task: WorkflowTask): void;
-  /** Whether rows show other extensions' annotations (`showAnnotations`). */
-  showAnnotations(): boolean;
 }
 
 /**
@@ -117,7 +115,7 @@ export async function showWorkflowDialog(
    */
   let overlay: { setHidden(hidden: boolean): void } | undefined;
   const detail = createAgentDetailSource(deps.getRecord);
-  const annotations = (id: string) => deps.showAnnotations() ? annotationSegments(deps.getRecord(id)) : [];
+  const annotations = (id: string) => annotationSegments(deps.getRecord(id));
   await ctx.ui.custom<undefined>(
     (tui, theme, keybindings, done) =>
       new WorkflowDialog(

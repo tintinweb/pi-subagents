@@ -28,7 +28,7 @@ describe("cross-extension RPC", () => {
   let ctx: object | undefined;
   let deps: RpcDeps;
   let annotations: AnnotationDisplay;
-  let shown: boolean;
+  let allowed: boolean;
 
   beforeEach(() => {
     events = createEventBus();
@@ -49,8 +49,8 @@ describe("cross-extension RPC", () => {
       list: vi.fn().mockReturnValue([]),
     };
     ctx = { session: true };
-    shown = true;
-    annotations = { shown: () => shown, changed: vi.fn() };
+    allowed = true;
+    annotations = { allowed: () => allowed, changed: vi.fn() };
     deps = { events, pi: { events }, getCtx: () => ctx, manager, workflows, annotations };
   });
 
@@ -685,7 +685,7 @@ describe("cross-extension RPC", () => {
 
     it("stores one segment per key, in first-set order, and repaints", async () => {
       expect(await annotate("a1", { key: "router", text: "DeepSeek V4.1 Flash · high", tone: "muted" }))
-        .toEqual({ success: true, data: { shown: true } });
+        .toEqual({ success: true });
       await annotate("a2", { key: "tasks", text: "#42" });
       await annotate("a3", { key: "router", text: "GLM-5 · medium", tone: "warning" });
 
@@ -730,10 +730,12 @@ describe("cross-extension RPC", () => {
       expect(await annotate("u1", { key: "k", text: "x" })).toEqual({ success: false, error: "Agent not found" });
     });
 
-    it("stores while the user hides annotations, and says so", async () => {
-      shown = false;
-      expect(await annotate("h1", { key: "k", text: "x" })).toEqual({ success: true, data: { shown: false } });
-      expect(stored()).toEqual([["k", { text: "x", tone: "dim" }]]);
+    it("rejects every call while the user disallows annotations, naming the setting", async () => {
+      allowed = false;
+      expect(await annotate("h1", { key: "k", text: "x" }))
+        .toEqual({ success: false, error: "Annotations are disabled: /agents → Settings → Allow extension annotations" });
+      expect(record.annotations).toBeUndefined();
+      expect(annotations.changed).not.toHaveBeenCalled();
     });
   });
 

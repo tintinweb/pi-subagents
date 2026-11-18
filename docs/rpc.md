@@ -239,7 +239,9 @@ It takes an id only, enforces the same top-level ownership guard as stop, and an
 
 ## Annotating rows
 
-`subagents:rpc:annotate` `{ requestId, agentId, key, text, tone? }` attaches display-only text to an agent's row, for facts only the caller knows: the model a router actually served, a task id, a verdict. The text follows the model tag on the widget's running row, the fleet view row and the workflow inspector's agent row. It replies `{ shown }`, which is `false` while the user has turned annotations off (`showAnnotations`). The text is stored either way, so turning the setting back on shows it.
+`subagents:rpc:annotate` `{ requestId, agentId, key, text, tone? }` attaches display-only text to an agent's row, for facts only the caller knows: the model a router actually served, a task id, a verdict. The text follows the model tag on the widget's running row, the fleet view row and the workflow inspector's agent row. A successful call replies `{ success: true }` with no data.
+
+The user can disallow annotations with `/agents → Settings → Allow extension annotations` (`allowExtensionAnnotations`, on by default). While it is off, every call fails with `Annotations are disabled: /agents → Settings → Allow extension annotations` and nothing is stored, so you can show that message to the user as it is. Turning it off also clears every annotation already set. Turning it back on restores nothing: resend what you want shown. `subagents:settings_changed` carries the new `settings`, so listen there for `allowExtensionAnnotations` becoming `true`.
 
 - **`key`** is your namespace, a non-empty string of at most 32 characters. Each key owns one segment, in the order the keys were first set, so two extensions never overwrite each other. Re-sending a key replaces its text and keeps its place.
 - **`text`** is plain text. Escape sequences are stripped, control characters and runs of whitespace collapse to one space, and the result is cut to 48 columns with `…`. Empty text removes your key and nobody else's.
@@ -387,7 +389,7 @@ Everything added since kept version `2`, because each addition left existing cal
 | `workflow-result` | `subagents:workflow_settled` and `workflow_get` carry the script's return value as `result` |
 | `workflow-args` | `subagents:workflow_started` and `workflow_get` carry the call's `args` |
 | `workflow-logs` | `workflow_get` returns the script's `log()` lines as `logs` |
-| `annotate` | `subagents:rpc:annotate` exists, and `/agents → Settings` has `showAnnotations` |
+| `annotate` | `subagents:rpc:annotate` exists, and `/agents → Settings` has `allowExtensionAnnotations` |
 
 Check with `features.includes(...)`. Entries are only ever added, so a feature present today stays present. A reply without `features` comes from an older build. Model scope and stop's ownership check are older than `features` and have no entry.
 

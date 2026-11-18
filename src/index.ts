@@ -416,10 +416,18 @@ export default function (pi: ExtensionAPI) {
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
   function setShowModel(b: boolean): void { showModel = b; widget.update(); fleet.update(); }
-  /** Show other extensions' `subagents:rpc:annotate` text on the rows (#441). */
-  let showAnnotations = true;
-  function isShowAnnotationsEnabled(): boolean { return showAnnotations; }
-  function setShowAnnotations(b: boolean): void { showAnnotations = b; widget.update(); fleet.update(); }
+  /** Whether other extensions may annotate rows over `subagents:rpc:annotate` (#441). */
+  let allowExtensionAnnotations = true;
+  function isExtensionAnnotationsAllowed(): boolean { return allowExtensionAnnotations; }
+  function setAllowExtensionAnnotations(b: boolean): void {
+    allowExtensionAnnotations = b;
+    if (b) return;
+    // Disallowing also withdraws what was granted: nothing an extension wrote
+    // earlier stays on a row the user has closed to annotations.
+    for (const record of manager.listAgents()) delete record.annotations;
+    widget.update();
+    fleet.update();
+  }
   /**
    * How much of the conversation viewer renders as Markdown. Read through a
    * getter by the viewer rather than captured like `showCost`, because the
@@ -845,7 +853,7 @@ export default function (pi: ExtensionAPI) {
           list: () => [...workflowTasks.values()].map(task => toWorkflowInfo(task)),
         },
         annotations: {
-          shown: isShowAnnotationsEnabled,
+          allowed: isExtensionAnnotationsAllowed,
           changed: () => { widget.update(); fleet.update(); },
         },
       });
@@ -1168,7 +1176,7 @@ export default function (pi: ExtensionAPI) {
   // everything else; "off" = hide the widget entirely. Read live at render time.
   let widgetMode: WidgetMode = "background";
   function getWidgetMode(): WidgetMode { return widgetMode; }
-  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled, isShowAnnotationsEnabled);
+  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   /**
@@ -1254,7 +1262,7 @@ export default function (pi: ExtensionAPI) {
   // one opened from `/agents`: same settings on the way in, same persist out.
   const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
     (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    getFullscreenScrollbar, backgroundActionFor, isShowModelEnabled, isShowAnnotationsEnabled);
+    getFullscreenScrollbar, backgroundActionFor, isShowModelEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -1521,7 +1529,7 @@ export default function (pi: ExtensionAPI) {
     setReportUsage,
     setShowCost,
     setShowModel,
-    setShowAnnotations,
+    setAllowExtensionAnnotations,
     setViewerMarkdown,
     setPackageAgents: setPackageAgentsGate,
     setPackageWorkflows: setPackageWorkflowsGate,
@@ -3252,7 +3260,7 @@ Terse command-style prompts produce shallow, generic work.
       reportUsage: isReportUsageEnabled(),
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
-      showAnnotations: isShowAnnotationsEnabled(),
+      allowExtensionAnnotations: isExtensionAnnotationsAllowed(),
       viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
@@ -3570,11 +3578,11 @@ Terse command-style prompts produce shallow, generic work.
           values: ["on", "off"],
         },
         {
-          id: "showAnnotations",
-          label: "Show annotations",
+          id: "allowExtensionAnnotations",
+          label: "Allow extension annotations",
           description:
-            "Show the text other extensions attach to agent rows (a served model, a task id, a verdict) on the widget, fleet view and workflow inspector. Nothing appears unless an installed extension writes some.",
-          currentValue: isShowAnnotationsEnabled() ? "on" : "off",
+            "Let other extensions add text to agent rows over subagents:rpc:annotate (a served model, a task id, a verdict) on the widget, fleet view and workflow inspector. Off rejects their calls with an error naming this setting and clears what they already added.",
+          currentValue: isExtensionAnnotationsAllowed() ? "on" : "off",
           values: ["on", "off"],
         },
         {
@@ -3779,10 +3787,10 @@ Terse command-style prompts produce shallow, generic work.
         const enabled = value === "on";
         setShowModel(enabled);
         notifyApplied(ctx, target, `Model display ${enabled ? "enabled" : "disabled"}`);
-      } else if (id === "showAnnotations") {
+      } else if (id === "allowExtensionAnnotations") {
         const enabled = value === "on";
-        setShowAnnotations(enabled);
-        notifyApplied(ctx, target, `Annotations ${enabled ? "shown" : "hidden"}`);
+        setAllowExtensionAnnotations(enabled);
+        notifyApplied(ctx, target, `Extension annotations ${enabled ? "allowed" : "disallowed and cleared"}`);
       } else if (id === "viewerMarkdown") {
         setViewerMarkdown(value as ViewerMarkdownMode);
         notifyApplied(ctx, target, `Viewer markdown set to ${value}`);
@@ -3906,7 +3914,6 @@ Terse command-style prompts produce shallow, generic work.
     // fleet list may act between sessions, when there is none.
     getCtx: () => currentCtx as unknown as ExtensionCommandContext | undefined,
     onTaskChange: task => workflowCards.request(task.id),
-    showAnnotations: isShowAnnotationsEnabled,
   };
 
   fleet.setWorkflowSource(fleetWorkflows, id => openWorkflowFromFleet(id, workflowMenuDeps));

@@ -26,6 +26,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
   }),
 }));
 
+import { setAnnotation } from "../src/annotations.js";
 import { getCacheRetention, setCacheRetention } from "../src/cache-retention.js";
 import subagentsExtension from "../src/index.js";
 import { loadSettings } from "../src/settings.js";
@@ -540,6 +541,22 @@ describe("/agents → Settings filter and height", () => {
     rmSync(cwd, { recursive: true, force: true });
     // Module state, set by the Prompt cache retention row test below.
     setCacheRetention("inherit");
+  });
+
+  it("turning extension annotations off clears what extensions already added (#441)", async () => {
+    const agents = boot();
+    // A top-level agent through the registry; its run fails without a model,
+    // which leaves the record in the manager, where the setting must reach it.
+    const registry = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+    const id = registry.spawn({}, drivePage([]).ctx, "general-purpose", "go", { description: "annotated", isBackground: true });
+    const record = registry.getRecord(id);
+    setAnnotation(record, "router", "GLM-5 · 96 tok/s");
+
+    const { ctx, page } = drivePage([..."annotations", DOWN, ENTER]);
+    await agents(ctx);
+
+    expect(page.screen).toMatch(/^> Allow extension annotations +global +off\b/m);
+    expect(record.annotations).toBeUndefined();
   });
 
   it("typing filters rows by label, not by the file tag", async () => {
