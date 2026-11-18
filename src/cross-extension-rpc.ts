@@ -1,8 +1,8 @@
 /**
  * Cross-extension RPC handlers for the subagents extension.
  *
- * Exposes ping, spawn, stop, consume, steer, get, list, workflow_get, and
- * workflow_list RPCs over the pi.events event bus, using per-request scoped
+ * Exposes ping, spawn, stop, consume, steer, get, list, workflow_get,
+ * workflow_list, and annotate RPCs over the pi.events event bus, using per-request scoped
  * reply channels.
  *
  * Reply envelope follows pi-mono convention:
@@ -15,6 +15,7 @@
  */
 
 import { isTopLevelAgent } from "./agent-manager.js";
+import { setAnnotation } from "./annotations.js";
 import { type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope } from "./model-scope.js";
 import { toSubagentInfo } from "./subagent-info.js";
@@ -66,6 +67,7 @@ export const FEATURES = [
   "workflow-result",
   "workflow-args",
   "workflow-logs",
+  "annotate",
 ] as const;
 
 /** Minimal AgentManager interface needed by the spawn/stop/consume RPCs. */
@@ -119,12 +121,24 @@ export interface WorkflowReader {
   list(): WorkflowInfo[];
 }
 
+/** What `annotate` needs from the UI: the user's permission and a repaint. */
+export interface AnnotationDisplay {
+  /** Whether the user lets extensions annotate (`allowExtensionAnnotations`). */
+  allowed(): boolean;
+  /** Repaint the rows; a finished row's timer may have stopped. */
+  changed(): void;
+}
+
+/** The error a caller gets while the user disallows annotations; it names the switch. */
+export const ANNOTATIONS_DISALLOWED = "Annotations are disabled: /agents → Settings → Allow extension annotations";
+
 export interface RpcDeps {
   events: EventBus;
   pi: unknown;                    // passed through to manager.spawn
   getCtx: () => unknown | undefined;  // returns current ExtensionContext
   manager: SpawnCapable;
   workflows: WorkflowReader;
+  annotations: AnnotationDisplay;
 }
 
 export interface RpcHandle {
@@ -137,6 +151,7 @@ export interface RpcHandle {
   unsubList: () => void;
   unsubWorkflowGet: () => void;
   unsubWorkflowList: () => void;
+  unsubAnnotate: () => void;
 }
 
 /**
@@ -168,7 +183,7 @@ function handleRpc<P extends { requestId: string }>(
  * Returns unsub functions for cleanup.
  */
 export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
-  const { events, pi, getCtx, manager, workflows } = deps;
+  const { events, pi, getCtx, manager, workflows, annotations } = deps;
 
   const unsubPing = handleRpc(events, "subagents:rpc:ping", () => {
     return { version: PROTOCOL_VERSION, features: [...FEATURES] };
@@ -349,8 +364,23 @@ export function registerRpcHandlers(deps: RpcDeps): RpcHandle {
     return { workflows: workflows.list() };
   });
 
+  // Display-only text on an agent's row, for facts only the caller knows — the
+  // model a router actually served, a task id, a verdict (#441). No ownership
+  // guard: it changes nothing about the run, and nested and workflow agents
+  // have rows too. While the user disallows annotations the call fails with an
+  // error naming the setting, so the caller can tell the user where to look.
+  const unsubAnnotate = handleRpc<{ requestId: string; agentId: string; key: unknown; text: unknown; tone?: unknown }>(
+    events, "subagents:rpc:annotate", ({ agentId, key, text, tone }) => {
+      if (!annotations.allowed()) throw new Error(ANNOTATIONS_DISALLOWED);
+      const record = manager.getRecord(agentId);
+      if (!record) throw new Error("Agent not found");
+      setAnnotation(record, key, text, tone ?? "dim");
+      annotations.changed();
+    },
+  );
+
   return {
     unsubPing, unsubSpawn, unsubStop, unsubConsume, unsubSteer, unsubGet, unsubList,
-    unsubWorkflowGet, unsubWorkflowList,
+    unsubWorkflowGet, unsubWorkflowList, unsubAnnotate,
   };
 }

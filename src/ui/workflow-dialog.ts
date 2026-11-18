@@ -52,6 +52,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import type { Annotation } from "../annotations.js";
 import type { AgentDetail, AgentDetailItem } from "../workflow/agent-detail.js";
 import type { WorkflowMeta } from "../workflow/meta.js";
 import {
@@ -366,6 +367,11 @@ export interface WorkflowDialogSource {
    * record has been swept, which falls back to the progress log's previews.
    */
   detail?(recordId: string): AgentDetail | undefined;
+  /**
+   * Other extensions' text for the child's row, by the entry's `recordId`
+   * (#441). Empty once the record has been swept.
+   */
+  annotations?(recordId: string): readonly Annotation[];
 }
 
 export interface WorkflowDialogInput extends WorkflowDialogSource {
@@ -840,6 +846,7 @@ function agentRow(options: {
   workflowActive: boolean;
   spinnerFrame: number;
   now: number;
+  annotations: readonly Annotation[];
 }): WorkflowCardLine {
   const { entry, selected, glyphs, width } = options;
   const display = displayState(entry, options.workflowActive);
@@ -857,6 +864,8 @@ function agentRow(options: {
 
   const model = formatModel(entry);
   if (model) head.push({ text: ` ${model}`, color: "dim" });
+  // Other extensions' text, after the model as on the fleet row (#441).
+  for (const { text, tone } of options.annotations) head.push({ text: " · ", color: "dim" }, { text, color: tone });
   for (const part of [...subStatusAnnotations(entry, display, options.now), ...rowStatSegments(entry)]) {
     head.push({ text: " · ", color: "dim" }, { text: part, color: "dim" });
   }
@@ -970,6 +979,7 @@ export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: Workfl
   } else {
     const agents = windowRange(view.clampedAgent, view.visibleAgents.length, capacity);
     for (let i = agents.start; i < Math.min(agents.end, view.visibleAgents.length); i++) {
+      const recordId = view.visibleAgents[i].recordId;
       agentRows.push(
         agentRow({
           entry: view.visibleAgents[i],
@@ -980,6 +990,7 @@ export function buildWorkflowDialog(input: WorkflowDialogInput): { lines: Workfl
           workflowActive: view.workflowActive,
           spinnerFrame,
           now,
+          annotations: recordId === undefined ? [] : input.annotations?.(recordId) ?? [],
         }),
       );
     }

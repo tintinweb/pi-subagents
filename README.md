@@ -76,7 +76,7 @@ https://github.com/user-attachments/assets/8685261b-9338-4fea-8dfe-1c590d5df543
 - **Tool denylist** — block specific tools via `disallowed_tools` frontmatter
 - **Styled completion notifications** — background agent results render as themed, compact notification boxes (icon, stats, result preview) instead of raw XML. Expandable to show full output. Group completions render each agent individually
 - **Event bus** — lifecycle events (`subagents:created`, `started`, `completed`, `failed`, `steered`, `compacted`), workflow-run events (`subagents:workflow_started`, `subagents:workflow_settled`), and a per-message spend ledger (`subagents:usage`) emitted via `pi.events`, enabling other extensions to react to sub-agent activity
-- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, and inspect subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`). Standardized reply envelopes with protocol versioning and feature detection. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
+- **Cross-extension RPC** — other pi extensions can spawn, stop, steer, and inspect subagents via the `pi.events` event bus (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`), and annotate agent rows with display-only text (`subagents:rpc:annotate`). Standardized reply envelopes with protocol versioning and feature detection. Emits `subagents:ready` on session start. **[Full reference](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md)**
 - **Schedule subagents** — pass `schedule` to the `Agent` tool to fire on cron / interval / one-shot. Session-scoped jobs with PID-locked persistence; results arrive as the same completion notification as a manual background agent; manage via `/agents → Scheduled jobs`
 - **Model scope enforcement** — opt-in validation that subagent model choices stay within your pi `enabledModels` allowlist (sourced from `/scoped-models`, with both global and project-local pi settings honored). Caller-supplied out-of-scope → hard error to orchestrator; frontmatter-pinned out-of-scope → warning + runs anyway (frontmatter authoritative). Toggle via `/agents → Settings → Scope models`
 
@@ -776,7 +776,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 
 ## Persistent Settings
 
-Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, workflow tool exposure skill/inline/deferred, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
+Runtime tuning values set via `/agents` → Settings (max background concurrency, max foreground concurrency, max nested concurrency, nested depth, default max turns, grace turns, fallback agent, default join mode, scheduling on/off, scope models on/off, disable defaults on/off, strict agent files on/off, package agents on/off, package workflows on/off, agent mentions on/off, output transcript on/off, tool description full/compact/custom, workflow tool exposure skill/inline/deferred, widget all/background/off, usage reporting on/off, cost display on/off, model display on/off, extension annotations on/off, viewer markdown off/assistant/all) persist across pi restarts. Two files, merged on load:
 
 - **Global:** `~/.pi/agent/subagents.json` — your machine-wide defaults.
 - **Project:** `<cwd>/.pi/subagents.json` — per-project overrides.
@@ -864,6 +864,14 @@ Both places report what the run *actually* used, read back from the child sessio
 ```
 
 Toggle via `/agents → Settings → Show model`; applied live.
+
+**Allow extension annotations** (`allowExtensionAnnotations`, default `true`): whether other extensions may attach text to agent rows over [`subagents:rpc:annotate`](#annotate-rows-annotate), such as the model a router actually served or a task id. The segments follow the model on the widget's running rows, the fleet view rows and the workflow inspector's agent rows, each in the color the extension chose:
+
+```text
+  ○ Explore  inspect code · sonnet 4.6 · high · GLM-5 · medium · 96 tok/s · #42      4s · ↓ 8.2k tokens
+```
+
+Nothing appears until an installed extension writes an annotation. Turning it off clears every annotation already shown and rejects further calls with an error naming this setting, so the extension can tell you where to look; it doesn't need uninstalling. After turning it back on, rows fill again as extensions resend. Toggle via `/agents → Settings → Allow extension annotations`; applied live.
 
 **Viewer markdown** (`viewerMarkdown`, default `"assistant"`): how much of the [conversation viewer](#ui)'s transcript is rendered as Markdown rather than shown verbatim.
 
@@ -1134,6 +1142,21 @@ pi.events.emit("subagents:rpc:workflow_list", { requestId: crypto.randomUUID() }
 ```
 
 A `SubagentWorkflow` run emits only `subagents:workflow_started` / `subagents:workflow_settled` on the bus (see [workflow fields](#workflow-fields)). To follow a run between those, **pull** its state: `workflow_get` returns the summary plus `version` (bumped per progress batch) and an `agents` array of per-agent state (label, phase, model, tokens, previews), plus `logs` (the script's `log()` lines in order) and `args`/`result` when present; `workflow_list` returns the summaries of every run this session (running and settled), no `agents`. Poll at whatever cadence you render — the run does not push progress, which would fire per tool call and message per agent. `workflow_get` on an unknown id returns `Workflow not found`.
+
+### Annotate rows: `annotate`
+
+```typescript
+pi.events.emit("subagents:rpc:annotate", {
+  requestId: crypto.randomUUID(),
+  agentId,
+  key: "router",                                   // your namespace: one segment per key
+  text: "GLM-5 · medium · 96 tok/s",               // "" removes your key
+  tone: "muted",                                   // dim (default) | muted | accent | success | warning | error
+});
+// reply: { success: true }, or an error — e.g. while the user disallows annotations
+```
+
+Display-only text on an agent's row, for facts only your extension knows. It works for any agent, nested and workflow agents included, and is never sent to the model, a notification, a saved record or an event. Each key keeps its own segment, so two extensions never overwrite each other; use one key per extension. See [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md#annotating-rows) for the limits.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 

@@ -326,6 +326,13 @@ export interface SubagentsSettings {
    */
   showModel?: boolean;
   /**
+   * Whether other extensions may annotate agent rows over
+   * `subagents:rpc:annotate` (#441). On by default: nothing appears until an
+   * extension the user installed writes one. Off rejects every annotate call
+   * with an error naming this setting, and clears what was already stored.
+   */
+  allowExtensionAnnotations?: boolean;
+  /**
    * Whether agents declared by installed pi packages load, and from which
    * packages. Defaults to `true`.
    *
@@ -406,6 +413,7 @@ export interface SettingsAppliers {
   setReportUsage: (b: boolean) => void;
   setShowCost: (b: boolean) => void;
   setShowModel: (b: boolean) => void;
+  setAllowExtensionAnnotations: (b: boolean) => void;
   setViewerMarkdown: (mode: ViewerMarkdownMode) => void;
   setPackageAgents: (gate: boolean | string[]) => void;
   setPackageWorkflows: (gate: boolean | string[]) => void;
@@ -490,6 +498,7 @@ export const SETTING_DEFAULTS: { readonly [K in keyof Required<SubagentsSettings
   reportUsage: false,
   showCost: false,
   showModel: false,
+  allowExtensionAnnotations: true,
   viewerMarkdown: "assistant",
   packageAgents: undefined,
   packageWorkflows: undefined,
@@ -580,6 +589,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.showModel === "boolean") {
     out.showModel = r.showModel;
+  }
+  if (typeof r.allowExtensionAnnotations === "boolean") {
+    out.allowExtensionAnnotations = r.allowExtensionAnnotations;
   }
   if (typeof r.viewerMarkdown === "string" && VALID_VIEWER_MARKDOWN_MODES.has(r.viewerMarkdown)) {
     out.viewerMarkdown = r.viewerMarkdown as ViewerMarkdownMode;
@@ -742,6 +754,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.reportUsage === "boolean") appliers.setReportUsage(s.reportUsage);
   if (typeof s.showCost === "boolean") appliers.setShowCost(s.showCost);
   if (typeof s.showModel === "boolean") appliers.setShowModel(s.showModel);
+  if (typeof s.allowExtensionAnnotations === "boolean") appliers.setAllowExtensionAnnotations(s.allowExtensionAnnotations);
   if (s.viewerMarkdown) appliers.setViewerMarkdown(s.viewerMarkdown);
   if (typeof s.workflowsEnabled === "boolean") appliers.setWorkflowsEnabled(s.workflowsEnabled);
   if (s.packageAgents !== undefined) appliers.setPackageAgents(s.packageAgents);

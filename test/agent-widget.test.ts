@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { setAnnotation } from "../src/annotations.js";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
@@ -189,6 +190,19 @@ describe("AgentWidget", () => {
     // Label stripped, but the "(asked max)" annotation survives the strip.
     expect(renderLines(manager, "bg", () => "background", true))
       .toContain("haiku 4.5 · high (asked max)");
+  });
+
+  // Other extensions' row text (#441): after the model, before the turn count.
+  it("puts each annotation after the model on a running row", () => {
+    const record = makeRecord("bg", { isBackground: true });
+    setAnnotation(record, "router", "DeepSeek V4.1 Flash · 118 tok/s", "muted");
+    setAnnotation(record, "tasks", "#42");
+    const manager = { listAgents: () => [record] };
+
+    expect(renderLines(manager, "bg", () => "background", true))
+      .toContain("sonnet 4.6 · high · DeepSeek V4.1 Flash · 118 tok/s · #42 · ");
+    // Independent of showModel.
+    expect(renderLines(manager, "bg", () => "background", false)).toContain("DeepSeek V4.1 Flash · 118 tok/s · #42");
   });
 
   // Queued agents stay a one-line count. A fan-out of ten would otherwise eat
