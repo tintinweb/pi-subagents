@@ -390,7 +390,7 @@ All fields are optional — sensible defaults for everything.
 | `max_turns` | unlimited | Max agentic turns before graceful shutdown. `0` or omit for unlimited |
 | `persist_session` | `subagents.json` `rememberAgents` (default `true`) | Persist this subagent as a normal pi session instead of keeping the session in memory only; overrides the `rememberAgents` project default in both directions. It records its spawning session as parent, so it nests under it in `/resume`. The subagent's `.output` transcript is still written either way unless `output_transcript: false` |
 | `output_transcript` | `true` (or `subagents.json` `outputTranscript`) | Write this subagent's `.output` transcript; when set, overrides the `subagents.json` `outputTranscript` default. Set `false` to write no transcript file or path. Governs only the transcript — independent of `persist_session`, `isolation: worktree`, and `memory:` |
-| `cache_retention` | `subagents.json` `cacheRetention` (default `inherit`) | Prompt cache lifetime for this agent's model calls: `short`, `long`, or `none`; overrides the [`cacheRetention`](#persistent-settings) setting |
+| `cache_retention` | `subagents.json` `cacheRetention` (default `inherit`) | Prompt cache tier for this agent's model calls: `short`, `long` (on Anthropic 5 min and 1 hour), or `none` (no caching); overrides the [`cacheRetention`](#persistent-settings) setting |
 | `session_dir` | pi default | Optional session directory when `persist_session: true`; omitted uses pi's normal session location, and relative paths resolve from the agent cwd. A session outside the parent's session directory (this override, or `isolation: worktree`) is listed separately, so it shows as a root instead of nesting |
 | `allowed_subagents` | none | Opt in to scoped nested `Agent`, `get_subagent_result`, and `steer_subagent` tools. Omitted / empty / `none` / `false` = no nesting; `all` (or `"*"` / `true`) = any enabled agent; comma-separated list = only those agent types |
 | `prompt_mode` | `replace` | `replace`: body is the full system prompt (no AGENTS.md / CLAUDE.md inheritance). `append`: body appended to parent's prompt (agent acts as a "parent twin" — inherits parent's AGENTS.md / CLAUDE.md) |
@@ -807,7 +807,25 @@ A row whose value comes from a settings file is tagged with that file (`project`
 
 **Remember agents** (`rememberAgents`, default `true`): whether subagents persist their pi session, which is what lets [`@handle`](#agent-mentions), `Agent({ resume })` and a workflow's `resume` reopen an agent's conversation after its in-memory record has been evicted. Two visible consequences of the default: top-level subagents write a session file, and they nest under the session that spawned them in pi's `/resume`. Agents spawned by another agent are excluded — they get no handle, so nothing could reopen their transcript. A custom agent's `persist_session` frontmatter overrides this per agent, in both directions. Toggle via `/agents → Settings → Remember agents`; with it off, handles expire with their record (roughly ten minutes past completion) and `@explore` then starts a fresh agent rather than resuming — the behaviour before this setting existed — and a later `resume` is refused because nothing was saved. When pi's `/fork` or `/clone` copies a session, resuming one of its agents from the copy forks that agent's session too, so the two parents never write into one file. That agent's `.output` transcript in the copy starts at the resume.
 
-**Prompt cache retention** (`cacheRetention`, default `inherit`): how long subagent model calls ask the provider to keep their prompt cache: `short` (5 minutes on Anthropic), `long` (1 hour), or `none`. `inherit` leaves pi's default in charge, including `PI_CACHE_RETENTION`. Use `short` to stop short-lived subagents paying the 1-hour cache-write rate when the main session runs with `PI_CACHE_RETENTION=long`; the main session is unaffected. A custom agent's `cache_retention` frontmatter overrides it per agent, and a request that sets its own retention keeps it (pi sends compaction uncached). Toggle via `/agents → Settings → Prompt cache retention`; applies to agents started after the change.
+**Prompt cache retention** (`cacheRetention`, default `inherit`): the prompt cache tier subagent model calls request. `short` and `long` are pi's tiers: on Anthropic 5 minutes and 1 hour, on direct OpenAI in-memory and 24 hours; other providers map or ignore them. `none` turns prompt caching off for the subagent's calls. `inherit` leaves pi's default in charge, including `PI_CACHE_RETENTION`. Use `short` to stop short-lived subagents paying Anthropic's 1-hour cache-write rate when the main session runs with `PI_CACHE_RETENTION=long`; the main session is unaffected. A custom agent's `cache_retention` frontmatter overrides it per agent, and a request that sets its own retention keeps it (pi sends compaction uncached). Toggle via `/agents → Settings → Prompt cache retention`; applies to agents started after the change.
+
+`.pi/subagents.json`:
+
+```json
+{ "cacheRetention": "short" }
+```
+
+`.pi/agents/architect.md`:
+
+```markdown
+---
+description: Long-running design agent, resumed across the session
+cache_retention: long
+---
+You are the project's architect. ...
+```
+
+With both files, `architect` uses `long` and every other subagent uses `short`.
 
 **Output transcript** (`outputTranscript`, default `true`): the project/global default for writing each subagent's `.output` transcript. Toggle via `/agents → Settings → Output transcript`, or set `false` in `subagents.json` to make transcripts opt-in project-wide — useful when run transcripts shouldn't sit on disk for backup or DLP tooling to pick up. A custom agent's `output_transcript` frontmatter overrides this per agent. Applied live at spawn time. Governs only the transcript, not `persist_session`, worktree commits, or memory files.
 
