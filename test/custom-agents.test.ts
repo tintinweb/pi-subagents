@@ -142,6 +142,22 @@ You are a security auditor.`);
     expect(agent.systemPrompt).toBe("You are a security auditor.");
   });
 
+  it("parses cache_retention: none, short and long; drops inherit and anything else", () => {
+    for (const v of ["none", "short", "long"]) {
+      writeAgent(`cache-${v}`, `---\ncache_retention: ${v}\n---\n\nPrompt.`);
+    }
+    writeAgent("cache-inherit", "---\ncache_retention: inherit\n---\n\nPrompt.");
+    writeAgent("cache-bogus", "---\ncache_retention: 1h\n---\n\nPrompt.");
+
+    const result = loadCustomAgents(tmpDir);
+
+    expect(result.get("cache-none")!.cacheRetention).toBe("none");
+    expect(result.get("cache-short")!.cacheRetention).toBe("short");
+    expect(result.get("cache-long")!.cacheRetention).toBe("long");
+    expect(result.get("cache-inherit")!.cacheRetention).toBeUndefined();
+    expect(result.get("cache-bogus")!.cacheRetention).toBeUndefined();
+  });
+
   it("uses sensible defaults when frontmatter is empty", () => {
     writeAgent("minimal", `---
 ---
@@ -162,6 +178,7 @@ Just a prompt.`);
     expect(agent.thinking).toBeUndefined();
     expect(agent.maxTurns).toBeUndefined();
     expect(agent.persistSession).toBeUndefined();
+    expect(agent.cacheRetention).toBeUndefined();
     expect(agent.outputTranscript).toBeUndefined();
     expect(agent.sessionDir).toBeUndefined();
     expect(agent.allowedSubagents).toBeUndefined();
@@ -1260,6 +1277,11 @@ Prompt.`);
       expect(roundTrip({ persistSession: true, sessionDir: "/tmp/sessions" }))
         .toMatchObject({ persistSession: true, sessionDir: "/tmp/sessions" });
       expect(roundTrip({ persistSession: false }).persistSession).toBe(false);
+    });
+
+    it("preserves cache_retention", () => {
+      expect(roundTrip({ cacheRetention: "short" }).cacheRetention).toBe("short");
+      expect(roundTrip({}).cacheRetention).toBeUndefined();
     });
 
     it("preserves a tool-less agent as none, not as the whole toolbox", () => {

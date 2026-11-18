@@ -22,6 +22,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
+import { getCacheRetention, installCacheRetention } from "./cache-retention.js";
 import { runInChildSessionContext } from "./child-context.js";
 import { buildParentContext, extractText } from "./context.js";
 import { deniedToolNames } from "./custom-agents.js";
@@ -1311,6 +1312,8 @@ export async function runAgent(
   // to its default. Warned the way pi warns at its own session start, and the
   // way an out-of-scope model is warned: to the user, not the model.
   if (modelFallbackMessage) ctx.ui.notify(modelFallbackMessage, "warning");
+  // Before bindExtensions, so session_start handlers already see the wrapper.
+  installCacheRetention(session, agentConfig?.cacheRetention ?? getCacheRetention());
 
   const baseSessionName = agentConfig?.name ?? type;
   session.setSessionName(

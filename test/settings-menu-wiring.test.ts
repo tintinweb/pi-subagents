@@ -26,6 +26,7 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => ({
   }),
 }));
 
+import { getCacheRetention, setCacheRetention } from "../src/cache-retention.js";
 import subagentsExtension from "../src/index.js";
 import { loadSettings } from "../src/settings.js";
 
@@ -410,7 +411,7 @@ describe("/agents → Settings writes only the changed setting", () => {
     // Package agents is on by default because no gate is set at all.
     writeJson(globalFile(), { packageAgents: false });
     const agents = boot();
-    const { ctx, page } = drivePage([...toRow(18), DEL]);
+    const { ctx, page } = drivePage([...toRow(19), DEL]);
 
     await agents(ctx);
 
@@ -537,6 +538,8 @@ describe("/agents → Settings filter and height", () => {
     if (originalHome == null) delete process.env.HOME;
     else process.env.HOME = originalHome;
     rmSync(cwd, { recursive: true, force: true });
+    // Module state, set by the Prompt cache retention row test below.
+    setCacheRetention("inherit");
   });
 
   it("typing filters rows by label, not by the file tag", async () => {
@@ -661,6 +664,17 @@ describe("/agents → Settings filter and height", () => {
     expect(readJson(globalFile())).toEqual({ workflowToolExposure: "deferred" });
   });
 
+  it("Enter on the Prompt cache retention row saves short and applies it to the next spawn", async () => {
+    const agents = boot();
+    const { ctx, notify } = drivePage([..."prompt cache", DOWN, ENTER]);
+
+    await agents(ctx);
+
+    expect(readJson(globalFile())).toEqual({ cacheRetention: "short" });
+    expect(getCacheRetention()).toBe("short");
+    expect(notify).toHaveBeenCalledWith(expect.stringContaining("Prompt cache retention set to short"), "info");
+  });
+
   it("Enter on a filtered number row opens the editor for that row", async () => {
     const agents = boot();
     const { ctx } = drivePage([..."grace", DOWN, ...typeValue("9")]);
@@ -680,6 +694,6 @@ describe("/agents → Settings filter and height", () => {
     expect(page.lines.length).toBeLessThanOrEqual(24);
     expect(page.lines[0]).toContain("Subagent Settings");
     expect(page.screen).toMatch(/^> Report usage to session +off\b/m);
-    expect(page.screen).toContain("(28/28)");
+    expect(page.screen).toContain("(29/29)");
   });
 });

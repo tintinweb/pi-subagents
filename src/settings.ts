@@ -13,7 +13,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { NO_FALLBACK } from "./agent-types.js";
-import type { AgentMentionMode, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
+import type { AgentMentionMode, CacheRetentionSetting, JoinMode, ViewerMarkdownMode, WidgetMode } from "./types.js";
 
 export interface SubagentsSettings {
   maxConcurrent?: number;
@@ -179,6 +179,15 @@ export interface SubagentsSettings {
    * nested under the spawning session in pi's `/resume`.
    */
   rememberAgents?: boolean;
+  /**
+   * Prompt-cache retention for subagent model calls: `none`, `short` (5 min on
+   * Anthropic) or `long` (1 hour). Defaults to `inherit`, which leaves pi's
+   * default — and its `PI_CACHE_RETENTION` environment variable — in charge.
+   * Per-agent `cache_retention:` frontmatter overrides it, and a request that
+   * sets its own retention (compaction passes `none`) keeps it. The parent
+   * session is never affected. Read at spawn.
+   */
+  cacheRetention?: CacheRetentionSetting;
   /**
    * Display mode for the persistent above-editor agent widget:
    *   - `all`: show every agent (foreground + background).
@@ -387,6 +396,7 @@ export interface SettingsAppliers {
   setFleetView: (b: boolean) => void;
   setAgentMentions: (mode: AgentMentionMode) => void;
   setRememberAgents: (b: boolean) => void;
+  setCacheRetention: (v: CacheRetentionSetting) => void;
   setWidgetMode: (mode: WidgetMode) => void;
   setOutputTranscript: (b: boolean) => void;
   setWorktreeIsolation: (b: boolean) => void;
@@ -410,6 +420,7 @@ const VALID_WORKFLOW_TOOL_EXPOSURE_MODES: ReadonlySet<string> = new Set<Workflow
 const VALID_WIDGET_MODES: ReadonlySet<string> = new Set<WidgetMode>(["all", "background", "off"]);
 const VALID_VIEWER_MARKDOWN_MODES: ReadonlySet<string> = new Set<ViewerMarkdownMode>(["off", "assistant", "all"]);
 const VALID_AGENT_MENTION_MODES: ReadonlySet<string> = new Set<AgentMentionMode>(["model", "direct", "off"]);
+const VALID_CACHE_RETENTIONS: ReadonlySet<string> = new Set<CacheRetentionSetting>(["inherit", "none", "short", "long"]);
 
 // Sanity ceilings — prevent hand-edited configs from asking for values that
 // make no operational sense (e.g. 1e6 concurrent subagents). Permissive enough
@@ -469,6 +480,7 @@ export const SETTING_DEFAULTS: { readonly [K in keyof Required<SubagentsSettings
   fleetView: true,
   agentMentions: "model",
   rememberAgents: true,
+  cacheRetention: "inherit",
   widgetMode: "background",
   outputTranscript: true,
   worktreeIsolation: true,
@@ -547,6 +559,9 @@ function sanitize(raw: unknown): SubagentsSettings {
   }
   if (typeof r.rememberAgents === "boolean") {
     out.rememberAgents = r.rememberAgents;
+  }
+  if (typeof r.cacheRetention === "string" && VALID_CACHE_RETENTIONS.has(r.cacheRetention)) {
+    out.cacheRetention = r.cacheRetention as CacheRetentionSetting;
   }
   if (typeof r.widgetMode === "string" && VALID_WIDGET_MODES.has(r.widgetMode)) {
     out.widgetMode = r.widgetMode as WidgetMode;
@@ -720,6 +735,7 @@ export function applySettings(s: SubagentsSettings, appliers: SettingsAppliers):
   if (typeof s.fleetView === "boolean") appliers.setFleetView(s.fleetView);
   if (s.agentMentions) appliers.setAgentMentions(s.agentMentions);
   if (typeof s.rememberAgents === "boolean") appliers.setRememberAgents(s.rememberAgents);
+  if (s.cacheRetention) appliers.setCacheRetention(s.cacheRetention);
   if (s.widgetMode) appliers.setWidgetMode(s.widgetMode);
   if (typeof s.outputTranscript === "boolean") appliers.setOutputTranscript(s.outputTranscript);
   if (typeof s.worktreeIsolation === "boolean") appliers.setWorktreeIsolation(s.worktreeIsolation);
