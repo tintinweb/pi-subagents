@@ -1156,7 +1156,7 @@ pi.events.emit("subagents:rpc:annotate", {
 // reply: { success: true }, or an error — e.g. while the user disallows annotations
 ```
 
-Display-only text on an agent's row, for facts only your extension knows. It works for any agent, nested and workflow agents included, and is never sent to the model, a notification, a saved record or an event. Each key keeps its own segment, so two extensions never overwrite each other. See [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md#annotating-rows) for the limits.
+Display-only text on an agent's row, for facts only your extension knows. It works for any agent, nested and workflow agents included, and is never sent to the model, a notification, a saved record or an event. Each key keeps its own segment, so two extensions never overwrite each other; use one key per extension. See [`docs/rpc.md`](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md#annotating-rows) for the limits.
 
 Reply channels are scoped per `requestId`, so concurrent requests don't interfere.
 

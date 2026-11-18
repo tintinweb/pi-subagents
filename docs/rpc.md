@@ -243,7 +243,7 @@ It takes an id only, enforces the same top-level ownership guard as stop, and an
 
 The user can disallow annotations with `/agents → Settings → Allow extension annotations` (`allowExtensionAnnotations`, on by default). While it is off, every call fails with `Annotations are disabled: /agents → Settings → Allow extension annotations` and nothing is stored, so you can show that message to the user as it is. Turning it off also clears every annotation already set. Turning it back on restores nothing: resend what you want shown. `subagents:settings_changed` carries the new `settings`, so listen there for `allowExtensionAnnotations` becoming `true`.
 
-- **`key`** is your namespace, a non-empty string of at most 32 characters. Each key owns one segment, in the order the keys were first set, so two extensions never overwrite each other. Re-sending a key replaces its text and keeps its place.
+- **`key`** is your namespace, a non-empty string of at most 32 characters. Each key owns one segment, in the order the keys were first set, so two extensions never overwrite each other. Re-sending a key replaces its text and keeps its place. Use one key per extension and put everything you show into its text: one call sets or clears one key, and there is no batch form.
 - **`text`** is plain text. Escape sequences are stripped, control characters and runs of whitespace collapse to one space, and the result is cut to 48 columns with `…`. Empty text removes your key and nobody else's.
 - **`tone`** is a theme color: `dim` (the default), `muted`, `accent`, `success`, `warning` or `error`. Use it for meaning the text alone can't carry, such as `warning` for a route that was attempted but not confirmed.
 
