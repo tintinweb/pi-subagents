@@ -694,6 +694,6 @@ describe("/agents → Settings filter and height", () => {
     expect(page.lines.length).toBeLessThanOrEqual(24);
     expect(page.lines[0]).toContain("Subagent Settings");
     expect(page.screen).toMatch(/^> Report usage to session +off\b/m);
-    expect(page.screen).toContain("(29/29)");
+    expect(page.screen).toContain("(30/30)");
   });
 });

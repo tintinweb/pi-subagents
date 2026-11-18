@@ -4,6 +4,7 @@
 
 import type { CacheRetention, ThinkingLevel } from "@earendil-works/pi-ai";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
+import type { Annotation } from "./annotations.js";
 import type { LifetimeUsage } from "./usage.js";
 
 export type { ThinkingLevel };
@@ -281,6 +282,12 @@ export interface AgentRecord {
   ownUsage: LifetimeUsage;
   /** Number of times this agent's session has compacted. Initialized to 0 at spawn. */
   compactionCount: number;
+  /**
+   * Display-only row text set by other extensions over `subagents:rpc:annotate`,
+   * one entry per caller-chosen key. Written only through `setAnnotation`
+   * (`src/annotations.ts`); read only by the row renderers.
+   */
+  annotations?: Map<string, Annotation>;
   /**
    * Whether this agent runs in the background. Tri-state, initialized at spawn
    * from `SpawnOptions.isBackground` and flipped `false` → `true` (once, never

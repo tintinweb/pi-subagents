@@ -282,6 +282,13 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({});
   });
 
+  it("round-trips showAnnotations; drops non-boolean", () => {
+    saveSettings({ showAnnotations: false }, projectDir);
+    expect(loadSettings(projectDir)).toEqual({ showAnnotations: false });
+    writeGlobal({ showAnnotations: "off" } as any);
+    expect(loadSettings(projectDir)).toEqual({});
+  });
+
   it("round-trips workflowsEnabled; drops non-boolean", () => {
     saveSettings({ workflowsEnabled: true }, projectDir);
     expect(loadSettings(projectDir)).toEqual({ workflowsEnabled: true });
@@ -736,6 +743,7 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
+        setShowAnnotations: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };
@@ -798,6 +806,11 @@ describe("settings persistence", () => {
 
       applySettings({ showModel: false }, appliers);
       expect(appliers.setShowModel).toHaveBeenCalledWith(false);
+    });
+
+    it("applies showAnnotations", () => {
+      applySettings({ showAnnotations: false }, appliers);
+      expect(appliers.setShowAnnotations).toHaveBeenCalledWith(false);
     });
 
     it("is a no-op on an empty settings object", () => {
@@ -1030,6 +1043,7 @@ describe("settings persistence", () => {
         setReportUsage: vi.fn(),
         setShowCost: vi.fn(),
         setShowModel: vi.fn(),
+        setShowAnnotations: vi.fn(),
         setPackageAgents: vi.fn(),
         setPackageWorkflows: vi.fn(),
       };

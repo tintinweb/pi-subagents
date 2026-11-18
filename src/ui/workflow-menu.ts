@@ -15,6 +15,7 @@
  */
 
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { annotationSegments } from "../annotations.js";
 import type { AgentRecord } from "../types.js";
 import { type AgentDetail, agentDetailFromMessages, displayText } from "../workflow/agent-detail.js";
 import { pauseWorkflowTask, resumeWorkflowTask, type WorkflowTask } from "../workflow/task.js";
@@ -41,6 +42,8 @@ export interface WorkflowMenuDeps {
   getCtx(): ExtensionCommandContext | undefined;
   /** A run's status changed from here (pause, resume), so its inline card is stale. */
   onTaskChange(task: WorkflowTask): void;
+  /** Whether rows show other extensions' annotations (`showAnnotations`). */
+  showAnnotations(): boolean;
 }
 
 /**
@@ -114,6 +117,7 @@ export async function showWorkflowDialog(
    */
   let overlay: { setHidden(hidden: boolean): void } | undefined;
   const detail = createAgentDetailSource(deps.getRecord);
+  const annotations = (id: string) => deps.showAnnotations() ? annotationSegments(deps.getRecord(id)) : [];
   await ctx.ui.custom<undefined>(
     (tui, theme, keybindings, done) =>
       new WorkflowDialog(
@@ -132,6 +136,7 @@ export async function showWorkflowDialog(
           meta: task.meta,
           agentCount: task.agentCount,
           detail,
+          annotations,
         }),
         theme,
         done,

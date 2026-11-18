@@ -1,6 +1,6 @@
 # Driving subagents from another extension
 
-Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer and stop the run — all over the `pi.events` bus, without importing this package directly. Nine request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`), the lifecycle events in README's [event table](../README.md#events), two workflow-run events (`subagents:workflow_started`, `subagents:workflow_settled`), one per-message usage event (`subagents:usage`), one terminal `subagents:disposed`, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
+Another pi extension can spawn a subagent, listen for subagent completion, read the result, steer and stop the run, and annotate its row — all over the `pi.events` bus, without importing this package directly. Ten request/reply channels (`subagents:rpc:ping`, `subagents:rpc:spawn`, `subagents:rpc:stop`, `subagents:rpc:consume`, `subagents:rpc:steer`, `subagents:rpc:get`, `subagents:rpc:list`, `subagents:rpc:workflow_get`, `subagents:rpc:workflow_list`, `subagents:rpc:annotate`), the lifecycle events in README's [event table](../README.md#events), two workflow-run events (`subagents:workflow_started`, `subagents:workflow_settled`), one per-message usage event (`subagents:usage`), one terminal `subagents:disposed`, and one in-process registry at `Symbol.for("pi-subagents:manager")`.
 
 The thing worth understanding up front is that **the bus is in-process.** Every "RPC" call here is a synchronous `pi.events.emit` into the same event loop, and every reply comes back the same way. That single fact explains most of what follows: why `signal` and the `on*` callbacks work on a spawn payload at all, why a `consume` fired inside a `subagents:completed` handler lands *before* the notification decision has been made, and why none of this survives a real process boundary.
 
@@ -8,7 +8,7 @@ For the channel list, the reply envelope, the per-channel snippets and the event
 
 ## The surface at a glance
 
-Everything goes through `pi.events`. The lifecycle events push one agent shape, `SubagentInfo` (`toSubagentInfo` in `src/subagent-info.ts`). `get` and `list` return the same shape on request. `spawn`, `steer`, `consume` and `stop` act on an agent. A `SubagentWorkflow` run gets two lifecycle events of its own, carrying `WorkflowInfo` (`toWorkflowInfo` in `src/workflow-info.ts`); its live per-agent detail is pulled through `workflow_get`/`workflow_list`, never pushed. Every request gets its answer on its own `:reply:<requestId>` channel.
+Everything goes through `pi.events`. The lifecycle events push one agent shape, `SubagentInfo` (`toSubagentInfo` in `src/subagent-info.ts`). `get` and `list` return the same shape on request. `spawn`, `steer`, `consume` and `stop` act on an agent. `annotate` only changes how its row looks. A `SubagentWorkflow` run gets two lifecycle events of its own, carrying `WorkflowInfo` (`toWorkflowInfo` in `src/workflow-info.ts`); its live per-agent detail is pulled through `workflow_get`/`workflow_list`, never pushed. Every request gets its answer on its own `:reply:<requestId>` channel.
 
 ```mermaid
 flowchart LR
@@ -21,7 +21,7 @@ flowchart LR
     M["AgentManager<br/>top-level, nested, workflow records"]
     I["toSubagentInfo()"]
   end
-  C -- "subagents:rpc:ping / spawn / steer / consume / stop / get / list /<br/>workflow_get / workflow_list" --> R
+  C -- "subagents:rpc:ping / spawn / steer / consume / stop / get / list /<br/>workflow_get / workflow_list / annotate" --> R
   R -- "subagents:rpc:CHANNEL:reply:REQUESTID<br/>{ success, data? } or { success: false, error }<br/>ping: { version: 2, features }" --> C
   R --> M
   M --> I
@@ -237,6 +237,29 @@ One related thing that lives nowhere else: on every top-level settle, pi-subagen
 
 It takes an id only, enforces the same top-level ownership guard as stop, and answers `Agent is not running` for a record that has settled. A message queued before the agent's session exists is flushed when the session is created, exactly as the tool's steer is. A successful steer emits `subagents:steered` with the agent fields plus `message`, as every steer path does. An older build has no handler and the request times out on your side: check `features.includes("steer")` on the `ping` reply first, or give it a timeout and treat expiry as "not available here".
 
+## Annotating rows
+
+`subagents:rpc:annotate` `{ requestId, agentId, key, text, tone? }` attaches display-only text to an agent's row, for facts only the caller knows: the model a router actually served, a task id, a verdict. The text follows the model tag on the widget's running row, the fleet view row and the workflow inspector's agent row. It replies `{ shown }`, which is `false` while the user has turned annotations off (`showAnnotations`). The text is stored either way, so turning the setting back on shows it.
+
+- **`key`** is your namespace, a non-empty string of at most 32 characters. Each key owns one segment, in the order the keys were first set, so two extensions never overwrite each other. Re-sending a key replaces its text and keeps its place.
+- **`text`** is plain text. Escape sequences are stripped, control characters and runs of whitespace collapse to one space, and the result is cut to 48 columns with `…`. Empty text removes your key and nobody else's.
+- **`tone`** is a theme color: `dim` (the default), `muted`, `accent`, `success`, `warning` or `error`. Use it for meaning the text alone can't carry, such as `warning` for a route that was attempted but not confirmed.
+
+Annotations never reach the model, a completion notification, the saved `subagents:record` entry, the lifecycle events, or `get` / `list`. They live on the agent's record and are dropped when it is swept, about ten minutes after the agent finishes. On a narrow terminal the fleet row cuts them before the agent's name or stats.
+
+There is no ownership check, because nothing about the run changes: nested and workflow agents have rows too. An unknown id answers `Agent not found`, and an invalid key, text or tone answers with the rule it broke. Pace your updates however you like; each one repaints the rows once. Detect it with `features.includes("annotate")` on the `ping` reply.
+
+```typescript
+// After a spawn replied with `id`: show which task the agent is working on.
+pi.events.emit("subagents:rpc:annotate", {
+  requestId: crypto.randomUUID(),
+  agentId: id,
+  key: "tasks",
+  text: `#${task.id} ${task.title}`,
+  tone: "accent",
+});
+```
+
 ## Reading agent state
 
 `subagents:rpc:get` `{ requestId, agentId }` replies `{ agent }`. `subagents:rpc:list` `{ requestId }` replies `{ agents }`. Both return the [agent fields](../README.md#agent-fields) the lifecycle events carry, built by the same `toSubagentInfo` (`src/subagent-info.ts`). Use them when your extension loaded after the events it needed had already fired. Detect them with `features.includes("get")` / `"list"` on the `ping` reply.
@@ -364,6 +387,7 @@ Everything added since kept version `2`, because each addition left existing cal
 | `workflow-result` | `subagents:workflow_settled` and `workflow_get` carry the script's return value as `result` |
 | `workflow-args` | `subagents:workflow_started` and `workflow_get` carry the call's `args` |
 | `workflow-logs` | `workflow_get` returns the script's `log()` lines as `logs` |
+| `annotate` | `subagents:rpc:annotate` exists, and `/agents → Settings` has `showAnnotations` |
 
 Check with `features.includes(...)`. Entries are only ever added, so a feature present today stays present. A reply without `features` comes from an older build. Model scope and stop's ownership check are older than `features` and have no entry.
 

@@ -2,6 +2,7 @@ import { Editor, type OverlayOptions, type TuiMode, type TuiMouseEvent, type Tui
 import { describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
+import { setAnnotation } from "../src/annotations.js";
 import type { AgentConfig, AgentRecord, ViewerMarkdownMode } from "../src/types.js";
 import { type AgentActivity, getDisplayName } from "../src/ui/agent-widget.js";
 import type { ViewerBackgroundAction } from "../src/ui/conversation-viewer.js";
@@ -1124,6 +1125,56 @@ describe("FleetList model display", () => {
     expect(render()).not.toContain("sonnet 4.6");
     state.on = true;
     expect(render()).toContain("sonnet 4.6 · high");
+  });
+});
+
+describe("FleetList annotations (#441)", () => {
+  /** Tags each colored span, so a test can read the tone a segment got. */
+  const tagged = { fg: (c: string, s: string) => `<${c}>${s}</${c}>`, bold: (s: string) => s };
+  const plainTheme = { fg: (_c: string, s: string) => s, bold: (s: string) => s };
+
+  function annotated(): AgentRecord {
+    const record = makeRecord({ invocation: { modelName: "sonnet 4.6", thinking: "high" } });
+    setAnnotation(record, "router", "DeepSeek V4.1 Flash · high · 118 tok/s", "muted");
+    setAnnotation(record, "tasks", "#42", "accent");
+    return record;
+  }
+
+  function mount(record: AgentRecord, shown: { on: boolean }, theme: object) {
+    const fleet = new FleetList(fakeManager([record]), new Map(), () => false, undefined, undefined, undefined, undefined, () => true, () => shown.on);
+    let factory: any;
+    fleet.setUICtx({
+      setWidget: (_k: string, c: any) => { factory = c; },
+      onTerminalInput: () => () => {},
+      getEditorText: () => "",
+      notify: () => {},
+      custom: (() => new Promise(() => {})) as any,
+    } as any);
+    return (width = 160): string => {
+      fleet.update();
+      return factory({ requestRender: () => {}, terminal: { columns: width, rows: 40 } }, theme).render(width).join("\n");
+    };
+  }
+
+  it("renders each key's segment after the model, in order, in its own tone", () => {
+    // Wide: the tags count toward the width the row is cut to.
+    const out = mount(annotated(), { on: true }, tagged)(400);
+    expect(out).toContain("· sonnet 4.6 · high</dim><dim> · </dim><muted>DeepSeek V4.1 Flash · high · 118 tok/s</muted><dim> · </dim><accent>#42</accent>");
+  });
+
+  it("hides the segments while showAnnotations is off, and shows them again when it is on", () => {
+    const shown = { on: false };
+    const render = mount(annotated(), shown, plainTheme);
+    expect(render()).not.toContain("DeepSeek");
+    shown.on = true;
+    expect(render()).toContain("high · DeepSeek V4.1 Flash · high · 118 tok/s · #42");
+  });
+
+  it("cuts the annotations, not the agent name or stats, on a narrow terminal", () => {
+    const out = mount(annotated(), { on: true }, plainTheme)(70);
+    expect(out).toContain("Agent  Sleep then report 1");
+    expect(out).toContain("13.1k tokens");
+    expect(out).not.toContain("#42");
   });
 });
 
