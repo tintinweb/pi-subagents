@@ -55,8 +55,20 @@ export function safeReadFile(filePath: string): string | undefined {
 }
 
 /**
+ * `<cwd>/.pi/<root>/<agentName>`. Refuses a symlinked `.pi` or `<root>`: both
+ * come from the project, so a cloned repo could point them anywhere.
+ */
+function projectMemoryDir(cwd: string, root: string, agentName: string): string {
+  for (const dir of [join(cwd, ".pi"), join(cwd, ".pi", root)]) {
+    if (isSymlink(dir)) throw new Error(`Refusing to use symlinked memory directory: ${dir}`);
+  }
+  return join(cwd, ".pi", root, agentName);
+}
+
+/**
  * Resolve the memory directory path for a given agent + scope + cwd.
- * Throws if agentName contains path traversal characters.
+ * Throws if agentName contains path traversal characters, or if a project or
+ * local path goes through a symlinked `.pi` or memory root.
  */
 export function resolveMemoryDir(agentName: string, scope: MemoryScope, cwd: string): string {
   if (isUnsafeName(agentName)) {
@@ -75,9 +87,9 @@ export function resolveMemoryDir(agentName: string, scope: MemoryScope, cwd: str
       return current;
     }
     case "project":
-      return join(cwd, ".pi", "agent-memory", agentName);
+      return projectMemoryDir(cwd, "agent-memory", agentName);
     case "local":
-      return join(cwd, ".pi", "agent-memory-local", agentName);
+      return projectMemoryDir(cwd, "agent-memory-local", agentName);
   }
 }
 
