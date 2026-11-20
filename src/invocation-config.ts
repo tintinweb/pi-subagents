@@ -1,3 +1,4 @@
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import type { AgentConfig, IsolationMode, JoinMode, ThinkingLevel } from "./types.js";
 
@@ -15,7 +16,7 @@ import type { AgentConfig, IsolationMode, JoinMode, ThinkingLevel } from "./type
  * obvious one to reach for.
  *
  * The wording tracks Claude Code's own `isolation` parameter, whose phrasing
- * models have the most exposure to: one description on the union rather than
+ * models have the most exposure to: one description on the enum rather than
  * per-value ones, opening "Isolation mode.", then a sentence per value in
  * schema order, each with its caveats in a trailing parenthetical. Two clauses
  * are ours, because our shape is not theirs — `"off"` has no counterpart there
@@ -24,10 +25,17 @@ import type { AgentConfig, IsolationMode, JoinMode, ThinkingLevel } from "./type
  * #231 fell into. Deliberately absent is any "only use a worktree when…"
  * restriction: Claude Code's `Agent` tool states the capability and stops, and
  * a second legal value is what lets a model decline one, not being told to.
+ *
+ * Serialized as a plain string enum (pi-ai's `StringEnum`), not a union of
+ * literals. `Type.Union` of `Type.Literal`s becomes an `anyOf` of `const`
+ * branches, which pi's own extension guide flags as not working with Google. In
+ * #467 a relay in front of Gemini rejected it with a 400 once a top-level `type`
+ * sat beside that `anyOf`; since the tool definition goes out with every
+ * request, every turn failed. `{ type: "string", enum }` passed.
  */
 const isolationParamShape = {
   isolation: Type.Optional(
-    Type.Union([Type.Literal("off"), Type.Literal("worktree")], {
+    StringEnum(["off", "worktree"] as const, {
       description:
         'Isolation mode. Default "off". "off" runs the agent in the current checkout, the same as omitting the field. "worktree" creates a temporary git worktree so the agent works on an isolated copy of the repo (a copy cannot see uncommitted or staged changes in the main checkout).',
     }),
