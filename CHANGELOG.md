@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.2] - 2026-11-20
+
 > **⚠️ Behavior change — lifecycle events now fire for nested and workflow agents** ([#442](https://github.com/tintinweb/pi-subagents/issues/442)). `subagents:created`, `started`, `completed`, `failed`, `steered` and `compacted` used to cover only the session's own agents. Nested and workflow agents now send them too, with `parentAgentId` or `workflowId` set. To keep the old behavior, ignore events where either field is set.
 
 > **⚠️ Behavior change — the `subagents:rpc:stop` reply can arrive up to 5 s later** ([#443](https://github.com/tintinweb/pi-subagents/issues/443)). It now waits until the stopped agent and every agent below it have finished. A caller whose stop timeout is under 5 s should raise it, or pass a smaller `settleTimeoutMs`.
