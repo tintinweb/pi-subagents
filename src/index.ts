@@ -107,6 +107,16 @@ function textResult(msg: string, details?: AgentDetails) {
   return { content: [{ type: "text" as const, text: msg }], details: details as any };
 }
 
+/**
+ * The blank line between a `get_subagent_result` reply's header and the agent's
+ * own output. Both builders of that reply — the live record and the saved one —
+ * write it from here, and the tool's renderer splits on it: the header is the
+ * answer the model asked for, while a reader wants the output under it. A reply
+ * with no separator (an error, or "Agent not found") is one block and renders
+ * whole at either setting.
+ */
+const AGENT_REPLY_SEPARATOR = "\n\n";
+
 export function renderRunningAgentStatus(
   frame: string,
   statsText: string,
@@ -718,7 +728,8 @@ export default function (pi: ExtensionAPI) {
     `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
     (saved.completedAt ? `Finished: ${new Date(saved.completedAt).toISOString().slice(0, 16)}Z (${formatAge(saved.completedAt)} ago)\n` : "") +
     `Description: ${saved.description}\n` +
-    `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
+    `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)` +
+    AGENT_REPLY_SEPARATOR +
     (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
 
   const registryEntry = {
@@ -3003,6 +3014,25 @@ Terse command-style prompts produce shallow, generic work.
         }),
       ),
     }),
+
+    renderResult(result, { expanded }, theme, renderContext) {
+      const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      const separator = text.indexOf(AGENT_REPLY_SEPARATOR);
+      const body = separator < 0 ? "" : text.slice(separator + AGENT_REPLY_SEPARATOR.length);
+      // A reply that never reached a record, or an error, is one block, and so is
+      // a reply any reader asked to unfold: show exactly what the model got.
+      if (renderContext.isError || !body || expanded) return new Text(text, 0, 0);
+
+      const lines = body.split("\n");
+      const more = lines.length - 1;
+      let out = theme.fg("dim", `  ⎿  ${lines[0]}`);
+      // The key is named rather than resolved: `ToolRenderContext.keyHint` only
+      // exists past the pi version this package typechecks against, and the
+      // Agent row's ctrl+b hint is written the same way.
+      if (more > 0) out += theme.fg("dim", `\n     ... (${more} more line${more === 1 ? "" : "s"}, ctrl+o to expand)`);
+      return new Text(out, 0, 0);
+    },
+
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
       const record = resolveAgentRef(params.agent_id);
       if (!record) {
@@ -3054,7 +3084,8 @@ Terse command-style prompts produce shallow, generic work.
       let output =
         `Agent: ${record.id}\n` +
         `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-        `Description: ${record.description}\n\n`;
+        `Description: ${record.description}` +
+        AGENT_REPLY_SEPARATOR;
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
