@@ -654,6 +654,48 @@ describe("agent-runner usage callback wiring", () => {
     ]);
   });
 
+  it("runAgent passes what the response reported, timed from the first streamed delta", async () => {
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    const now = vi.spyOn(Date, "now");
+    const emit = (event: any) => { for (const l of listeners) l(event); };
+
+    const seen: any[] = [];
+    session.prompt = vi.fn(async () => {
+      // First request: thinking streams at t=1300, 300ms after it was sent.
+      emit({ type: "message_start", message: { role: "assistant" } });
+      now.mockReturnValue(1_300);
+      emit({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "hm" } });
+      now.mockReturnValue(1_900);
+      emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "x" } });
+      emit({ type: "message_end", message: {
+        role: "assistant", usage: { input: 1, output: 1 },
+        responseModel: "deepseek-v4.1-flash", providerThinkingLevel: "high",
+        timestamp: 1_000, durationMs: 2_000, stopReason: "toolUse",
+      } });
+      // Second request streams nothing: its first-token time must not carry over.
+      emit({ type: "message_start", message: { role: "assistant" } });
+      emit({ type: "message_end", message: { role: "assistant", usage: { input: 1 }, timestamp: 5_000, stopReason: "error" } });
+      session.messages.push({ role: "assistant", content: [{ type: "text", text: "OK" }] });
+    });
+
+    await runAgent(ctx, "Explore", "go", { pi, onAssistantUsage: (_u, r) => seen.push(r) });
+    now.mockRestore();
+
+    expect(seen).toEqual([
+      {
+        responseModel: "deepseek-v4.1-flash",
+        providerThinkingLevel: "high",
+        startedAt: 1_000,
+        durationMs: 2_000,
+        firstTokenMs: 300,
+        stopReason: "toolUse",
+      },
+      // Unknown values are absent keys, not `undefined`.
+      { startedAt: 5_000, stopReason: "error" },
+    ]);
+  });
+
   it("runAgent normalizes partial usage objects to 0 for missing fields", async () => {
     const { session, listeners } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });

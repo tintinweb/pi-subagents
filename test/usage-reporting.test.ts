@@ -402,6 +402,34 @@ describe("reporting subagent usage back to the parent session", () => {
       expect(events[0]).not.toHaveProperty("workflowId");
     });
 
+    it("carries what the response reported next to the configured model", async () => {
+      // A router can serve a request with another model and effort than the
+      // agent was configured with; only the message says which (#441).
+      const { pi, tools } = boot({});
+      vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, opts: any) => {
+        opts.onAssistantUsage?.({ input: 10, output: 5, cacheWrite: 0, cost: 0.001 }, {
+          responseModel: "deepseek-v4.1-flash",
+          providerThinkingLevel: "high",
+          startedAt: 1_000,
+          durationMs: 2_500,
+          firstTokenMs: 1_200,
+          stopReason: "toolUse",
+        });
+        return { responseText: "done", session: { dispose: vi.fn(), messages: [] } as any, aborted: false, steered: false };
+      });
+
+      await spawn(tools, "tc-1");
+
+      expect(usageEvents(pi)[0]).toMatchObject({
+        responseModel: "deepseek-v4.1-flash",
+        providerThinkingLevel: "high",
+        startedAt: 1_000,
+        durationMs: 2_500,
+        firstTokenMs: 1_200,
+        stopReason: "toolUse",
+      });
+    });
+
     it("is emitted regardless of reportUsage", async () => {
       // reportUsage decides whether the parent's own totals include the spend.
       // A listener keeping its own ledger asked for the data itself.

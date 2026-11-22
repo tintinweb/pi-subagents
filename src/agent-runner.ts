@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
-import type { Model } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
   type AgentSession,
@@ -34,7 +34,7 @@ import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
-import type { LifetimeUsage } from "./usage.js";
+import type { LifetimeUsage, ResponseInfo } from "./usage.js";
 import type { CompiledSchema } from "./workflow/json-schema.js";
 
 /**
@@ -574,8 +574,11 @@ export interface RunOptions {
    * model's rates, so it is 0 (not missing) for a model pi has no pricing for.
    * We never price anything ourselves; every dollar figure this extension shows
    * or reports traces back to this field.
+   *
+   * `response` is what the same message says about its request: the model and
+   * effort the provider reported, and the request's timing.
    */
-  onAssistantUsage?: (usage: LifetimeUsage) => void;
+  onAssistantUsage?: (usage: LifetimeUsage, response: ResponseInfo) => void;
   /**
    * Called when the session successfully compacts. `tokensBefore` is upstream's
    * pre-compaction context size estimate. Aborted compactions don't fire.
@@ -700,6 +703,22 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
   return undefined;
 }
 
+/**
+ * The request facts an assistant message carries, keys with no value left out.
+ * `firstTokenAt` is wall-clock, like the message's `timestamp`.
+ */
+function responseInfo(message: AssistantMessage, firstTokenAt: number | undefined): ResponseInfo {
+  const { responseModel, providerThinkingLevel, timestamp, durationMs, stopReason } = message;
+  return {
+    ...(responseModel !== undefined ? { responseModel } : {}),
+    ...(providerThinkingLevel !== undefined ? { providerThinkingLevel } : {}),
+    startedAt: timestamp,
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(firstTokenAt !== undefined ? { firstTokenMs: Math.max(0, firstTokenAt - timestamp) } : {}),
+    stopReason,
+  };
+}
+
 /** The per-run callbacks a spawn and a resume share, plus the resolved turn limit. */
 type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onToolActivity" | "onAssistantUsage" | "onCompaction"> & {
   /** Already resolved: undefined = unlimited. */
@@ -717,6 +736,8 @@ type RunObserverOptions = Pick<RunOptions, "onTurnEnd" | "onTextDelta" | "onTool
 function observeRun(session: AgentSession, options: RunObserverOptions) {
   let turnCount = 0;
   let currentMessageText = "";
+  /** When the current assistant message streamed its first delta. */
+  let firstTokenAt: number | undefined;
   const run = {
     steered: false,
     aborted: false,
@@ -738,6 +759,13 @@ function observeRun(session: AgentSession, options: RunObserverOptions) {
     }
     if (event.type === "message_start") {
       currentMessageText = "";
+      if (event.message.role === "assistant") firstTokenAt = undefined;
+    }
+    if (event.type === "message_update") {
+      const streamed = event.assistantMessageEvent.type;
+      if (firstTokenAt === undefined && (streamed === "text_delta" || streamed === "thinking_delta" || streamed === "toolcall_delta")) {
+        firstTokenAt = Date.now();
+      }
     }
     if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
       currentMessageText += event.assistantMessageEvent.delta;
@@ -750,14 +778,15 @@ function observeRun(session: AgentSession, options: RunObserverOptions) {
       options.onToolActivity?.({ type: "end", toolName: event.toolName });
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
-      const u = (event.message as any).usage;
+      const message = event.message;
+      const u = message.usage;
       if (u) options.onAssistantUsage?.({
         input: u.input ?? 0,
         output: u.output ?? 0,
         cacheWrite: u.cacheWrite ?? 0,
         cacheRead: u.cacheRead ?? 0,
         cost: u.cost?.total ?? 0,
-      });
+      }, responseInfo(message, firstTokenAt));
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });

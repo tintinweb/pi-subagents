@@ -190,6 +190,8 @@ flowchart TB
 
 **`subagents:disposed` is the last event of a session.** It is emitted at the end of this extension's `session_shutdown`, after every agent is stopped and every child session has shut down, so no `subagents:usage` can follow it. A listener gets only its synchronous prefix on quit: `pi.events.emit` does not await listeners, and pi calls `process.exit` once the shutdown handlers return. Flush with `writeFileSync`, not `fs.promises`. Fields, and the other events, are in README's [event table](../README.md#events).
 
+**`subagents:usage` reports both the configured model and the one that answered.** `model` and `thinking` are what the agent was configured with. `responseModel` and `providerThinkingLevel` are what the provider reported for that one message. A router or fallback can make them differ, and they can change from one request to the next. `startedAt` is the wall-clock time the request was sent, `durationMs` runs until the response ended, and `firstTokenMs` runs until the first streamed text, thinking or tool-call delta. `stopReason` is pi's (`stop`, `toolUse`, `length`, `error`, …). A message that spent nothing still emits no event, so a request that failed before spending anything never shows up here. Rates such as tokens per second are left to the listener: divide `usage.output` by whichever interval it means.
+
 **Read a finished agent's report from the final event.** `subagents:completed` and `subagents:failed` carry the shared [agent fields](../README.md#agent-fields). A caller that spawned with `options.structuredOutput` reads the validated report from `structuredJson` and the session file path from `sessionFile`, without the registry. Both are left out when there is no value: `structuredJson` when no schema was passed or no valid report was produced, `sessionFile` when the session was not saved to disk. `structuredJson` is JSON text; `JSON.parse` it.
 
 ## The notification race
@@ -364,6 +366,7 @@ Everything added since kept version `2`, because each addition left existing cal
 | `workflow-result` | `subagents:workflow_settled` and `workflow_get` carry the script's return value as `result` |
 | `workflow-args` | `subagents:workflow_started` and `workflow_get` carry the call's `args` |
 | `workflow-logs` | `workflow_get` returns the script's `log()` lines as `logs` |
+| `usage-response` | `subagents:usage` carries `stopReason` and `startedAt`, plus `responseModel`, `providerThinkingLevel`, `durationMs` and `firstTokenMs` when known |
 
 Check with `features.includes(...)`. Entries are only ever added, so a feature present today stays present. A reply without `features` comes from an older build. Model scope and stop's ownership check are older than `features` and have no entry.
 
