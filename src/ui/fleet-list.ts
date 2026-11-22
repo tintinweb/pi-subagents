@@ -17,6 +17,7 @@
 import { isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type TuiMouseEvent, type TuiMouseEventResult, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import type { AgentManager } from "../agent-manager.js";
+import { annotationSegments } from "../annotations.js";
 import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
 import { agentTree } from "./agent-tree.js";
@@ -721,6 +722,10 @@ export class FleetList {
       const model = [modelName, thinking].filter(Boolean).join(" · ");
       if (model) left += theme.fg(selected ? "text" : "dim", ` · ${model}`);
     }
+    // Other extensions' text, after the model and still on the left, so a
+    // narrow row cuts it before the name (#441). Each segment keeps its tone,
+    // selected or not: the tone is the caller's meaning, e.g. unconfirmed.
+    for (const { text, tone } of annotationSegments(record)) left += `${theme.fg("dim", " · ")}${theme.fg(tone, text)}`;
     // The record, not the activity tracker: only the record outlives the agent.
     // Its OWN usage, not `lifetimeUsage` — that one folds in every descendant,
     // and the descendants have rows of their own here.

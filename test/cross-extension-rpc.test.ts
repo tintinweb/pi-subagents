@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type EventBus, FEATURES, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable, STOP_SETTLE_TIMEOUT_MAX_MS, STOP_SETTLE_TIMEOUT_MS, type WorkflowReader } from "../src/cross-extension-rpc.js";
+import { type AnnotationDisplay, type EventBus, FEATURES, PROTOCOL_VERSION, type RpcDeps, registerRpcHandlers, type SpawnCapable, STOP_SETTLE_TIMEOUT_MAX_MS, STOP_SETTLE_TIMEOUT_MS, type WorkflowReader } from "../src/cross-extension-rpc.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 import type { WorkflowDetail, WorkflowInfo } from "../src/workflow-info.js";
 
@@ -27,6 +27,8 @@ describe("cross-extension RPC", () => {
   let workflows: WorkflowReader;
   let ctx: object | undefined;
   let deps: RpcDeps;
+  let annotations: AnnotationDisplay;
+  let allowed: boolean;
 
   beforeEach(() => {
     events = createEventBus();
@@ -47,7 +49,9 @@ describe("cross-extension RPC", () => {
       list: vi.fn().mockReturnValue([]),
     };
     ctx = { session: true };
-    deps = { events, pi: { events }, getCtx: () => ctx, manager, workflows };
+    allowed = true;
+    annotations = { allowed: () => allowed, changed: vi.fn() };
+    deps = { events, pi: { events }, getCtx: () => ctx, manager, workflows, annotations };
   });
 
   // --- ping ---
@@ -69,6 +73,7 @@ describe("cross-extension RPC", () => {
       expect([...FEATURES]).toEqual([
         "consume", "steer", "get", "list", "owned-lifecycle", "stop-settles", "settling", "notification-pending",
         "workflow-events", "workflow-get", "workflow-list", "workflow-result", "workflow-args", "workflow-logs",
+        "annotate",
       ]);
     });
 
@@ -656,6 +661,81 @@ describe("cross-extension RPC", () => {
 
       await new Promise((r) => setTimeout(r, 20));
       expect(reply).not.toHaveBeenCalled();
+    });
+  });
+
+  // --- annotate ---
+
+  describe("annotate RPC", () => {
+    let record: { annotations?: Map<string, { text: string; tone: string }> };
+    const annotate = async (requestId: string, payload: Record<string, unknown>) => {
+      const reply = vi.fn();
+      events.on(`subagents:rpc:annotate:reply:${requestId}`, reply);
+      events.emit("subagents:rpc:annotate", { requestId, agentId: "agent-42", ...payload });
+      await vi.waitFor(() => expect(reply).toHaveBeenCalled());
+      return reply.mock.calls[0][0];
+    };
+    const stored = () => [...(record.annotations?.entries() ?? [])];
+
+    beforeEach(() => {
+      record = {};
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(record);
+      registerRpcHandlers(deps);
+    });
+
+    it("stores one segment per key, in first-set order, and repaints", async () => {
+      expect(await annotate("a1", { key: "router", text: "DeepSeek V4.1 Flash · high", tone: "muted" }))
+        .toEqual({ success: true });
+      await annotate("a2", { key: "tasks", text: "#42" });
+      await annotate("a3", { key: "router", text: "GLM-5 · medium", tone: "warning" });
+
+      // Updating `router` keeps its place; `tasks` defaults to dim.
+      expect(stored()).toEqual([
+        ["router", { text: "GLM-5 · medium", tone: "warning" }],
+        ["tasks", { text: "#42", tone: "dim" }],
+      ]);
+      expect(annotations.changed).toHaveBeenCalledTimes(3);
+    });
+
+    it("clears only the caller's key on empty text", async () => {
+      await annotate("c1", { key: "router", text: "a" });
+      await annotate("c2", { key: "tasks", text: "b" });
+      await annotate("c3", { key: "router", text: "  " });
+
+      expect(stored()).toEqual([["tasks", { text: "b", tone: "dim" }]]);
+    });
+
+    it("keeps the row one line: strips escapes and control characters, caps the width", async () => {
+      await annotate("s1", { key: "k", text: "\u001b[31mred\u001b[0m\nnext\tline\u0007" });
+      await annotate("s2", { key: "long", text: "x".repeat(100) });
+
+      expect(record.annotations?.get("k")?.text).toBe("red next line");
+      const long = record.annotations?.get("long")?.text ?? "";
+      expect(long).toHaveLength(48);
+      expect(long.endsWith("…")).toBe(true);
+    });
+
+    it("rejects a bad key, tone or text without storing anything", async () => {
+      expect((await annotate("r1", { key: "", text: "x" })).success).toBe(false);
+      expect((await annotate("r2", { key: "k".repeat(33), text: "x" })).success).toBe(false);
+      expect(await annotate("r3", { key: "k", text: "x", tone: "\u001b[31m" }))
+        .toEqual({ success: false, error: "Annotation tone must be one of: dim, muted, accent, success, warning, error" });
+      expect((await annotate("r4", { key: "k", text: 42 })).success).toBe(false);
+      expect(record.annotations).toBeUndefined();
+      expect(annotations.changed).not.toHaveBeenCalled();
+    });
+
+    it("returns error when the agent is unknown", async () => {
+      (manager.getRecord as ReturnType<typeof vi.fn>).mockReturnValue(undefined);
+      expect(await annotate("u1", { key: "k", text: "x" })).toEqual({ success: false, error: "Agent not found" });
+    });
+
+    it("rejects every call while the user disallows annotations, naming the setting", async () => {
+      allowed = false;
+      expect(await annotate("h1", { key: "k", text: "x" }))
+        .toEqual({ success: false, error: "Annotations are disabled: /agents → Settings → Allow extension annotations" });
+      expect(record.annotations).toBeUndefined();
+      expect(annotations.changed).not.toHaveBeenCalled();
     });
   });
 

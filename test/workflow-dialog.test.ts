@@ -1025,6 +1025,27 @@ describe("activity from the transcript", () => {
  * Width
  * ------------------------------------------------------------------------- */
 
+describe("annotations (#441)", () => {
+  const progress: WorkflowEntry[] = [
+    { type: "workflow_phase", index: 0, title: "Review" },
+    agentEntry({ index: 0, state: "done", model: "sonnet 4.6", recordId: "rec-1" }),
+    agentEntry({ index: 1, state: "done", model: "sonnet 4.6" }),
+  ];
+  const annotations = (id: string) =>
+    id === "rec-1" ? [{ text: "GLM-5 · 96 tok/s", tone: "muted" as const }, { text: "#42", tone: "accent" as const }] : [];
+
+  it("puts the child's annotations after its model, each in its own tone", () => {
+    const rows = styled({ progress, annotations, width: 120 }).join("\n");
+    expect(rows).toContain("<dim> sonnet 4.6</dim><dim> · </dim><muted>GLM-5 · 96 tok/s</muted><dim> · </dim><accent>#42</accent>");
+  });
+
+  it("leaves a row with no record, or no annotations source, as it was", () => {
+    const rows = dialog({ progress, annotations, width: 120 });
+    expect(rows.filter(line => line.includes("GLM-5"))).toHaveLength(1);
+    expect(dialog({ progress, width: 120 }).join("\n")).not.toContain("GLM-5");
+  });
+});
+
 describe("width", () => {
   const wide: WorkflowEntry[] = [
     { type: "workflow_phase", index: 0, title: "A phase title that runs on well past any sane terminal width" },
