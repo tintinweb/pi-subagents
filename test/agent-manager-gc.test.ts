@@ -154,6 +154,86 @@ describe("AgentManager — record GC", () => {
   });
 });
 
+// A nested child runs on an in-memory session, so eviction is final: its parent
+// can no longer resume it, collect it, or be handed its unread result (#475).
+// The parent is its only reader, so the child lives as long as the parent's record.
+describe("AgentManager — record GC of nested children (#475)", () => {
+  let manager: AgentManager;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    manager?.dispose();
+    vi.useRealTimers();
+  });
+
+  const STALE = TEN_MINUTES + 30_000;
+
+  function spawnParent(running: boolean) {
+    vi.mocked(runAgent).mockImplementationOnce(() =>
+      running
+        ? new Promise(() => {})
+        : Promise.resolve({ responseText: "done", session: { dispose: vi.fn() }, aborted: false, steered: false } as any),
+    );
+    return manager.spawn(mockPi, mockCtx, "X", "parent", { description: "parent", isBackground: true });
+  }
+
+  async function settledChild(parentAgentId: string) {
+    const dispose = vi.fn();
+    vi.mocked(runAgent).mockResolvedValueOnce({
+      responseText: "child done",
+      session: { dispose } as any,
+      aborted: false,
+      steered: false,
+    } as any);
+    const id = manager.spawn(mockPi, mockCtx, "X", "child", { description: "child", isBackground: true, parentAgentId });
+    await manager.getRecord(id)!.promise;
+    const record = manager.getRecord(id)!;
+    record.completedAt = Date.now() - STALE;
+    return { id, record, dispose };
+  }
+
+  it("keeps a finished nested child while its parent is still running", async () => {
+    manager = new AgentManager();
+    const parentId = spawnParent(true);
+    const { id, dispose } = await settledChild(parentId);
+
+    await vi.advanceTimersByTimeAsync(TICK * 5);
+
+    expect(manager.getRecord(id)?.result).toBe("child done");
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it("keeps a nested child while its finished parent is still inside its own window", async () => {
+    manager = new AgentManager();
+    const parentId = spawnParent(false);
+    await manager.getRecord(parentId)!.promise;
+    manager.getRecord(parentId)!.completedAt = Date.now() - (TEN_MINUTES - 2 * TICK);
+    const { id } = await settledChild(parentId);
+
+    await vi.advanceTimersByTimeAsync(TICK);
+
+    expect(manager.getRecord(parentId)).toBeDefined();
+    expect(manager.getRecord(id)).toBeDefined();
+  });
+
+  it("evicts the nested child in the same sweep that evicts its parent", async () => {
+    manager = new AgentManager();
+    const parentId = spawnParent(false);
+    await manager.getRecord(parentId)!.promise;
+    manager.getRecord(parentId)!.completedAt = Date.now() - STALE;
+    const { id, dispose } = await settledChild(parentId);
+
+    await vi.advanceTimersByTimeAsync(TICK);
+
+    expect(manager.getRecord(parentId)).toBeUndefined();
+    expect(manager.getRecord(id)).toBeUndefined();
+    expect(dispose).toHaveBeenCalled();
+  });
+});
+
 // Eviction is exactly the moment a handle would otherwise stop working. These
 // cover what outlives it: enough to find the agent's session on disk and
 // reopen the conversation, and the name held so nothing else claims it.

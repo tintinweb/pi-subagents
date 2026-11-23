@@ -1748,6 +1748,10 @@ export class AgentManager {
     for (const [id, record] of this.agents) {
       if (record.status === "running" || record.status === "queued") continue;
       if ((record.completedAt ?? 0) >= cutoff) continue;
+      // A nested child runs in memory, so eviction is final, and its parent is
+      // its only reader: keep it while the parent stays. The map is in spawn
+      // order, so the sweep that evicts the parent reaches its children after.
+      if (record.parentAgentId !== undefined && this.agents.has(record.parentAgentId)) continue;
       this.removeRecord(id, record);
     }
   }
@@ -1756,7 +1760,8 @@ export class AgentManager {
    * Remove all completed/stopped/errored records immediately.
    * Called on session start/switch so tasks from a prior session don't persist.
    * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
-   * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
+   * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead
+   * (a nested child, once its parent is gone).
    * An unread nested child is spared only while its parent stays: the parent
    * is its only reader (collecting it, or the runner's drain, marks it read).
    */
