@@ -327,6 +327,98 @@ describe("PR #164 nested agents through the real print-mode boundary", () => {
     ).toBe(true);
   });
 
+  // A delegating child that starts background work of its own and answers at
+  // once used to end its run there: the manager stopped the grandchildren, and
+  // its answer reached the parent as "started", the work lost. Its run now
+  // stays open until they report, and its final answer is its reaction to them.
+  it("keeps a child's run open until its background children report, then lets it answer", async () => {
+    const calls = new Map<string, number>();
+    const seen = (ctx: Context, token: string) => JSON.stringify(ctx.messages).includes(token);
+    ({ run, cwd } = await runWithAgents(
+      {
+        fan_out: "allowed_subagents: worker\n",
+        worker: "",
+      },
+      async (ctx) => {
+        const route = userPrompt(ctx);
+        calls.set(route, (calls.get(route) ?? 0) + 1);
+        if (route === "worker-a" || route === "worker-b") {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return route === "worker-a" ? "NUMBER_A_17" : "NUMBER_B_42";
+        }
+        if (route === "fan-out-child") {
+          if (seen(ctx, "NUMBER_A_17") && seen(ctx, "NUMBER_B_42")) return "FAN_OUT_FINAL NUMBER_A_17 NUMBER_B_42";
+          if (toolResults(ctx, "Agent").length === 0) {
+            return [
+              agentCall({ subagent_type: "worker", description: "worker a", prompt: "worker-a", run_in_background: true }, { id: "spawn-a" }),
+              agentCall({ subagent_type: "worker", description: "worker b", prompt: "worker-b", run_in_background: true }, { id: "spawn-b" }),
+            ];
+          }
+          // The answer the live run gave: the children "running", handed in at once.
+          return "FAN_OUT_STARTED both running";
+        }
+        if (toolResults(ctx, "Agent").length === 0) {
+          return agentCall({ subagent_type: "fan_out", description: "fan out", prompt: "fan-out-child", run_in_background: false });
+        }
+        return lastToolResult(ctx, "Agent");
+      },
+      { prompt: "root-fan-out", maxModelCalls: 24 },
+    ));
+
+    expect(run.responseText).toContain("FAN_OUT_FINAL NUMBER_A_17 NUMBER_B_42");
+    expect(calls.get("worker-a")).toBe(1);
+    expect(calls.get("worker-b")).toBe(1);
+  });
+
+  it("does not hand a child a background result it already read", async () => {
+    let drainTurns: string[] = [];
+    ({ run, cwd } = await runWithAgents(
+      {
+        collector: "allowed_subagents: worker\n",
+        worker: "",
+      },
+      async (ctx) => {
+        const route = userPrompt(ctx);
+        if (route === "worker-read") return "READ_RESULT_5";
+        if (route === "worker-unread") {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return "UNREAD_RESULT_9";
+        }
+        if (route === "collector-child") {
+          const last = ctx.messages[ctx.messages.length - 1];
+          if (last.role === "user" && JSON.stringify(last.content).includes("you started finished")) {
+            drainTurns = [...drainTurns, JSON.stringify(last.content)];
+            return "COLLECTOR_FINAL";
+          }
+          const spawned = toolResults(ctx, "Agent");
+          if (spawned.length === 0) {
+            return [
+              agentCall({ subagent_type: "worker", description: "worker read", prompt: "worker-read", run_in_background: true }, { id: "spawn-read" }),
+              agentCall({ subagent_type: "worker", description: "worker unread", prompt: "worker-unread", run_in_background: true }, { id: "spawn-unread" }),
+            ];
+          }
+          if (toolResults(ctx, "get_subagent_result").length === 0) {
+            const id = spawned[0].match(/Agent ID: (\S+)/)?.[1];
+            if (!id) throw new Error(`No nested agent ID in: ${spawned[0]}`);
+            return toolCall("get_subagent_result", { agent_id: id, wait: true }, "get-read");
+          }
+          return "COLLECTOR_DONE_EARLY";
+        }
+        if (toolResults(ctx, "Agent").length === 0) {
+          return agentCall({ subagent_type: "collector", description: "collect", prompt: "collector-child", run_in_background: false });
+        }
+        return lastToolResult(ctx, "Agent");
+      },
+      { prompt: "root-collector", maxModelCalls: 24 },
+    ));
+
+    expect(run.responseText).toContain("COLLECTOR_FINAL");
+    // One drain turn, carrying only the result the child never read.
+    expect(drainTurns).toHaveLength(1);
+    expect(drainTurns[0]).toContain("UNREAD_RESULT_9");
+    expect(drainTurns[0]).not.toContain("READ_RESULT_5");
+  });
+
   it("keeps nested get and steer ownership-scoped to the calling parent", async () => {
     // #164 aborts nested children when their owner settles, so the owner must
     // stay running while a foreign peer probes the live nested record. Spawn

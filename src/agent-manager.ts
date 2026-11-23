@@ -1109,15 +1109,53 @@ export class AgentManager {
   }
 
   /**
-   * Stop the nested children a settled parent owns. Nested records are hidden
-   * from the UI and only their owner can consume them, so a child outliving its
-   * parent would burn tokens unseen with no way to reach it. Grandchildren are
-   * covered transitively — each abort lands in that child's own settle path.
+   * Stop the nested children a settled parent owns. Only their owner can read
+   * their results, so a child outliving its parent would burn tokens with no
+   * way to reach it. A parent that finishes normally has already waited for its
+   * children (the runner drains them), so this catches the paths that cut the
+   * drain short: a stop, an error, the turn limit. Grandchildren are covered
+   * transitively — each abort lands in that child's own settle path.
    */
   private abortOwnedChildren(parentId: string): void {
     for (const [id, record] of this.agents) {
       if (record.parentAgentId === parentId) this.abort(id);
     }
+  }
+
+  /**
+   * What a child's run is still waiting on: leaving the queue, its worktree
+   * startup, or the run itself. A stopped child stays pending until its run
+   * ends, so its result is final when it is read. Empty once it has settled.
+   */
+  private pendingRun(record: AgentRecord): Promise<unknown>[] {
+    const pending: Promise<unknown>[] = [];
+    if (record.status === "queued" && record.startGate) pending.push(record.startGate);
+    const startup = this.startups.get(record.id);
+    if (startup) pending.push(startup);
+    // A foreground resume's promise is not tracked in `unsettled`; its status is.
+    if (record.promise && (record.status === "running" || this.unsettled.has(record.promise))) {
+      pending.push(record.promise);
+    }
+    return pending;
+  }
+
+  /** The nested children `parentId` owns whose runs have settled. */
+  settledChildren(parentId: string): AgentRecord[] {
+    return [...this.agents.values()].filter(r => r.parentAgentId === parentId && this.pendingRun(r).length === 0);
+  }
+
+  /**
+   * Wait until one of `parentId`'s still-running (or queued) children settles,
+   * or moves on from the queue. False at once when none is pending, so a caller
+   * can loop on it until its children are all done.
+   */
+  async waitForChild(parentId: string): Promise<boolean> {
+    const pending = [...this.agents.values()]
+      .filter(r => r.parentAgentId === parentId)
+      .flatMap(r => this.pendingRun(r));
+    if (pending.length === 0) return false;
+    await Promise.race(pending.map(p => p.then(() => {}, () => {})));
+    return true;
   }
 
   /**
@@ -1353,6 +1391,7 @@ export class AgentManager {
       try {
         this.settleOutcome(record, await resumeAgent(session, prompt, {
           type: record.type,
+          children: { manager: this, parentAgentId: id },
           maxTurns: options?.maxTurns ?? record.invocation?.maxTurns,
           onTurnEnd: options?.onTurnEnd,
           onToolActivity: (activity) => {
@@ -1377,8 +1416,9 @@ export class AgentManager {
       }
       this.detachParentAbort(record);
 
-      // Same contract as the spawn settle paths: children spawned during the
-      // resumed turn must not outlive it — nothing else can see or reach them.
+      // Same contract as the spawn settle paths: the resumed turn waited for
+      // its children unless it was cut short, and none may outlive it —
+      // nothing else can reach them.
       this.abortOwnedChildren(id);
       return record.result ?? "";
     })();
@@ -1471,7 +1511,7 @@ export class AgentManager {
         try { record.outputCleanup(); } catch { /* ignore */ }
         record.outputCleanup = undefined;
       }
-      // Children spawned during the resumed turn must not outlive it.
+      // Children of a resumed turn cut short must not outlive it.
       this.abortOwnedChildren(id);
       if (occupiesPoolSlot(record)) this.runningBackground--;
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
@@ -1480,6 +1520,7 @@ export class AgentManager {
 
     const promise = resumeAgent(record.session, prompt, {
       type: record.type,
+      children: { manager: this, parentAgentId: id },
       maxTurns: options.maxTurns ?? record.invocation?.maxTurns,
       onTurnEnd: options.onTurnEnd,
       onToolActivity: (activity) => {
@@ -1716,8 +1757,8 @@ export class AgentManager {
    * Called on session start/switch so tasks from a prior session don't persist.
    * Pass skipUnconsumed=true to preserve records the LLM hasn't read yet
    * (resultConsumed=false) — they will be evicted by the 10-minute cleanup timer instead.
-   * A nested child is spared only while its parent stays: the parent is its
-   * only reader, and nothing marks it consumed when the parent collects it.
+   * An unread nested child is spared only while its parent stays: the parent
+   * is its only reader (collecting it, or the runner's drain, marks it read).
    */
   clearCompleted(skipUnconsumed = false): void {
     for (const [id, record] of this.agents) {

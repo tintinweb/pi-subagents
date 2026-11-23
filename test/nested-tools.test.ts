@@ -91,13 +91,14 @@ afterEach(() => {
 });
 
 describe("child-safe nested Agent tools", () => {
-  // A child inherits the main session's Agent guideline "you will be notified on
-  // completion", which is false for nested children: they send nothing and are
-  // stopped when the parent finishes. The tool's own description must say so.
-  it("tells the parent that background nested agents must be collected", () => {
+  // The runner keeps a parent's run open until its background children report,
+  // so the parent must not hand in an answer that calls them still running —
+  // the live failure was a child reporting "both are running" just before they
+  // were stopped.
+  it("tells the parent its background children report back before it returns", () => {
     const [agent] = tools();
-    expect(agent.description).toContain("does NOT notify you");
-    expect(agent.description).toContain("get_subagent_result");
+    expect(agent.description).toContain("your run continues with its result before you return");
+    expect(agent.description).toContain("never report it as still running");
   });
 
   // #457: the child must see what each allowed agent is for, as the main

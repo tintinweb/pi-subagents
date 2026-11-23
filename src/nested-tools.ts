@@ -92,6 +92,10 @@ export interface NestedAgentManager {
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
   resume(id: string, prompt: string, signal?: AbortSignal, options?: { maxTurns?: number }): Promise<AgentRecord | undefined>;
+  /** The children `parentId` owns whose runs have settled. */
+  settledChildren(parentId: string): AgentRecord[];
+  /** Wait for one of `parentId`'s pending children to settle; false at once when none is pending. */
+  waitForChild(parentId: string): Promise<boolean>;
 }
 
 export interface NestedToolContext {
@@ -144,6 +148,29 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
   return note ? `Nested agent${note}.\n\n${text}` : text;
 }
 
+/**
+ * `formatRecord` for a result the parent's model is about to read. A settled
+ * one is marked consumed, so the runner does not deliver it again before the
+ * parent's run ends.
+ */
+function readRecord(record: AgentRecord, position: ResultPosition): string {
+  if (record.status !== "queued" && record.status !== "running") record.resultConsumed = true;
+  return formatRecord(record, position);
+}
+
+/**
+ * The turn a parent gets when background children it started have finished
+ * and it never read their results: one message per batch, each child under
+ * its id and description so the parent can tell them apart.
+ */
+export function formatChildCompletions(records: readonly AgentRecord[]): string {
+  const header = records.length === 1
+    ? "A background nested agent you started finished:"
+    : `${records.length} background nested agents you started finished:`;
+  const blocks = records.map(r => `Agent ${r.id} (${r.description}):\n${formatRecord(r, "fetched")}`);
+  return [header, ...blocks].join("\n\n");
+}
+
 /** Build child-safe orchestration tools scoped to one parent agent instance. */
 export function createNestedSubagentTools(context: NestedToolContext): ToolDefinition[] {
   // Agents resolve from a registry built for THIS branch's config root (under
@@ -174,9 +201,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       "Launch a child-safe nested subagent for bounded delegated work. " +
       "Only use agent types allowed by this parent agent; nesting is depth-limited.\n\n" +
       `Available agent types and the tools they have access to:\n${typeList}\n\n` +
-      // Overrides the main session's inherited Agent guideline ("you will be
-      // notified on completion"), which does not hold for nested children.
-      "A background nested agent does NOT notify you when it finishes: collect each one with get_subagent_result (wait: true) before you end your turn, or it is stopped and its work is lost.",
+      // The runner keeps the parent's run open until its background children
+      // report (`drainChildren` in agent-runner.ts), so the parent must not
+      // hand in an answer that calls them still running.
+      "A background nested agent reports back when it finishes: your run continues with its result before you return, so never report it as still running.",
     parameters: Type.Object({
       prompt: Type.String({ description: "Self-contained task for the nested agent." }),
       description: Type.String({ description: "Short 3-5 word task description." }),
@@ -186,7 +214,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       max_turns: Type.Optional(Type.Number({ minimum: 1 })),
       run_in_background: Type.Optional(
         Type.Boolean({
-          description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true only for work you will collect later with get_subagent_result; a detached child is stopped when you finish.",
+          description: "Defaults to false for nested spawns — the call blocks and returns the child's result inline. Set true to run it alongside your own work; you receive its result before your run ends.",
         }),
       ),
       resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
@@ -206,7 +234,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
         });
         return resumed
-          ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
+          ? textResult(readRecord(resumed, "inline"), resumed.status === "error")
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
 
@@ -403,7 +431,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         if (record.promise) await abortable(record.promise, signal);
       }
-      return textResult(formatRecord(record, "fetched"), record.status === "error");
+      return textResult(readRecord(record, "fetched"), record.status === "error");
     },
   });
 
