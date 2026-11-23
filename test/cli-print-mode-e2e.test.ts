@@ -75,9 +75,11 @@ describe("pi CLI, print mode", () => {
 
     expect(code, stderr).toBe(0);
     expect(stdout).toBe("");
-    // Exactly the two lines the user should see: the run started, and why it was
-    // stopped. Anything else is the stopped run reaching into the dead session.
-    expect(stderr.trim().split("\n")).toEqual([
+    // Nothing reached into the dead session. pi's own startup notices (pi 1.6
+    // warns that the empty home has no models) are not ours to pin.
+    expect(stderr).not.toMatch(/Extension error|stale|Unhandled|ERR_/i);
+    // Exactly our two lines: the run started, and why it was stopped.
+    expect(stderr.split("\n").filter((l) => l.startsWith("[pi-subagents]"))).toEqual([
       "[pi-subagents] Running workflow busy…",
       '[pi-subagents] --subagents-workflow-file under -p needs a prompt; workflow stopped. Example: pi -p --subagents-workflow-file=x.js "Report the result."',
     ]);
