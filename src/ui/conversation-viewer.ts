@@ -33,7 +33,7 @@ interface ToolBlock {
    * transcript re-wrapped every block on every keystroke. The rows only change
    * when the inputs above do, so they are kept and reused until one does.
    */
-  rows?: string[];
+  rows?: readonly string[];
   width?: number;
 }
 
@@ -655,7 +655,7 @@ export class ConversationViewer implements Component, Focusable {
   }
 
   /** Render `text` as Markdown, reusing this message's component instance. */
-  private markdownLines(msg: AgentSession["messages"][number], text: string, width: number, dim: boolean): string[] {
+  private markdownLines(msg: AgentSession["messages"][number], text: string, width: number, dim: boolean): readonly string[] {
     let entry = this.markdownCache.get(msg);
     if (!entry) {
       entry = {
@@ -882,7 +882,7 @@ export class ConversationViewer implements Component, Focusable {
    * generic `name key=value` header plus a bounded preview that the expand key
    * unfolds.
    */
-  private toolBlockLines(call: ToolCallPart, result: ToolResultPart | undefined, notRun: string | undefined, width: number): string[] {
+  private toolBlockLines(call: ToolCallPart, result: ToolResultPart | undefined, notRun: string | undefined, width: number): readonly string[] {
     let block = this.toolBlocks.get(call.id);
     let changed = false;
     if (!block) {
