@@ -16,6 +16,9 @@
  *   queues on Esc — and sent once the run has ended, starting a turn. Claude
  *   Code keeps an agent's completion queued through Esc the same way and runs
  *   it as soon as the interrupted turn stops.
+ * - Headless parent (print/JSON mode): nothing comes after the run settles, so
+ *   the parent's `agent_before_settle` waits for background work, `take`s what
+ *   is pending and returns it as an entry that continues the run.
  */
 
 import type { NotificationDetails } from "./types.js";
@@ -41,6 +44,7 @@ export interface OutboxItem {
 export class CompletionOutbox {
   private items: OutboxItem[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
 
   constructor(
     /** Delivers one message as a steer that triggers a turn when the parent is idle. */
@@ -51,6 +55,9 @@ export class CompletionOutbox {
 
   /** A newer completion of the same agent (a resume) replaces its pending one. */
   add(item: OutboxItem): void {
+    // Work stopped at session_shutdown settles after dispose; sending its
+    // notice would start a turn on the session being torn down.
+    if (this.disposed) return;
     for (const id of item.ids) this.cancel(id);
     this.items.push(item);
     if (!this.parentRunning()) this.arm();
@@ -84,6 +91,7 @@ export class CompletionOutbox {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     this.items = [];
@@ -97,16 +105,26 @@ export class CompletionOutbox {
     }, NOTIFICATION_HOLD_MS);
   }
 
-  private flush(): void {
+  /**
+   * Everything pending as one message, removed from the outbox without being
+   * sent — for a caller that delivers it itself, such as a headless parent's
+   * `agent_before_settle` boundary returning it as an entry.
+   */
+  take(): OutboxMessage | undefined {
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     const items = this.items;
     this.items = [];
     const messages = items.map(item => item.build(item.ids));
-    if (messages.length === 0) return;
+    return messages.length > 0 ? combine(messages) : undefined;
+  }
+
+  private flush(): void {
+    const message = this.take();
+    if (!message) return;
     // A send from a timer can outlive the session it was meant for (pi -p
     // tearing down): pi throws on the stale context, and nothing is left to tell.
-    try { this.send(combine(messages)); } catch { /* stale context */ }
+    try { this.send(message); } catch { /* stale context */ }
   }
 }
 

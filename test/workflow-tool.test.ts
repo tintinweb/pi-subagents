@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { NOTIFICATION_HOLD_MS } from "../src/completion-outbox.js";
 import subagentsExtension, { WORKFLOW_ENTRY_TYPE, WORKFLOW_FILE_FLAG } from "../src/index.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 import type { AgentRecord } from "../src/types.js";
@@ -1154,8 +1155,13 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 
     await booted.lifecycle.get("session_shutdown")?.({}, workflowCtx());
 
-    const sent = await awaitNotification(startedTaskId(result));
-    expect(String(sent[0].content)).toContain("<status>Stopped</status>");
+    // The run settles as stopped. Its notice is dropped: the session it would
+    // report into is gone, and sending it would start a turn there.
+    const settled = () => booted.pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:workflow_settled");
+    await vi.waitFor(() => expect(settled()).toHaveLength(1), { timeout: 4_000 });
+    expect(settled()[0][1]).toMatchObject({ id: startedTaskId(result), status: "killed" });
+    await new Promise(resolve => setTimeout(resolve, NOTIFICATION_HOLD_MS + 50));
+    expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => String(c[0]?.content).includes(startedTaskId(result)))).toBe(false);
   });
 
   it("reports a script that threw, rather than a run that quietly ended", async () => {
@@ -1426,29 +1432,76 @@ describe("--subagents-workflow-file", () => {
     expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
   });
 
-  it("renders the finished run as a session entry and hands it to the model as next-turn context", async () => {
+  /** The quiet `workflow-result` message the interactive flag path sent, once it has. */
+  const flagResult = (booted: ReturnType<typeof makePi>) =>
+    booted.pi.sendMessage.mock.calls.find((c: any[]) => c[0]?.customType === "workflow-result");
+
+  it("renders the finished run as a session entry and hands the result to the next turn", async () => {
     const path = join(hermetic.dir, "flow.js");
     writeFileSync(path, `${fileScript}log("scanned");\nreturn "all clear";\n`);
     const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
     subagentsExtension(booted.pi);
 
     await booted.lifecycle.get("session_start")?.({}, uiCtx());
-    await vi.waitFor(
-      () => expect(booted.pi.appendEntry).toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything()),
-      { timeout: 10_000 },
-    );
+    await vi.waitFor(() => expect(flagResult(booted)).toBeTruthy(), { timeout: 10_000 });
 
     const [, data] = booted.pi.appendEntry.mock.calls.find((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)!;
     expect(data).toMatchObject({ name: "from-file", status: "completed" });
     // The card is rebuilt from this log, so the entry has to carry it.
     expect(data.progress).toContainEqual({ type: "workflow_log", message: "scanned" });
 
-    // nextTurn, not followUp: a flag-launched run puts its result in context
-    // without forcing a turn the user never asked for.
-    const sent = booted.pi.sendMessage.mock.calls.find((c: any[]) => c[0]?.customType === "workflow-result");
-    expect(sent, "the run's outcome must reach the model").toBeTruthy();
-    expect(sent![1]).toMatchObject({ deliverAs: "nextTurn" });
-    expect(String(sent![0].content)).toContain("<result>all clear</result>");
+    // Interactive: a user-launched startup workflow is context for the user's
+    // next turn, not an unprompted one — delivered quietly, never through the
+    // outbox that would wake an idle session.
+    const [message, options] = flagResult(booted)!;
+    expect(message.display).toBe(false);
+    expect(options).toMatchObject({ deliverAs: "nextTurn" });
+    expect(String(message.content)).toContain("<result>all clear</result>");
+    expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => c[0]?.customType === "subagent-notification")).toBe(false);
+  });
+
+  it("still hands the result to the model when the session entry can no longer be saved (#309)", async () => {
+    const path = join(hermetic.dir, "flow.js");
+    writeFileSync(path, `${fileScript}return "all clear";\n`);
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    subagentsExtension(booted.pi);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    await booted.lifecycle.get("session_start")?.({}, uiCtx());
+    // A run that settles after /new or /reload holds a stale `pi`, which throws.
+    booted.pi.appendEntry.mockImplementation(() => { throw new Error("ctx is stale after session replacement"); });
+    await vi.waitFor(() => expect(flagResult(booted)).toBeTruthy(), { timeout: 10_000 });
+
+    expect(warn.mock.calls.some((c: any[]) => /result card could not be saved/.test(String(c[0])))).toBe(true);
+  });
+
+  it.each([
+    ["no prompt ever started a run", false, "quit", true],
+    ["a prompt started a run", true, "quit", false],
+    ["the session is reloading", false, "reload", false],
+  ])("under -p, warns that the flag needs a prompt only when %s", async (_label, started, reason, warns) => {
+    const path = join(hermetic.dir, "flow.js");
+    // Slow enough to still be running at shutdown.
+    writeFileSync(path, `${fileScript}let n = 0; for (let i = 0; i < 1e10; i++) n += i;\nreturn "late";\n`);
+    const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
+    subagentsExtension(booted.pi);
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    const context = ctx({ cwd: hermetic.dir, mode: "print" });
+
+    await booted.lifecycle.get("session_start")?.({}, context);
+    if (started) await booted.lifecycle.get("agent_start")?.({}, context);
+    await booted.lifecycle.get("session_shutdown")?.({ reason }, context);
+
+    const warned = stderr.mock.calls.some((c: any[]) => String(c[0]).includes("needs a prompt"));
+    expect(warned).toBe(warns);
+    // Shutdown stops the run either way; the warning only explains why.
+    const settled = () => booted.pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:workflow_settled");
+    await vi.waitFor(() => expect(settled()[0]?.[1]).toMatchObject({ status: "killed" }), { timeout: 4_000 });
+    // The run settles after its session is gone: no card to save (pi would
+    // throw on the stale append) and no notice to start a turn there.
+    await new Promise(resolve => setTimeout(resolve, NOTIFICATION_HOLD_MS + 50));
+    expect(booted.pi.appendEntry.mock.calls.some((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)).toBe(false);
+    expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => c[0]?.customType === "subagent-notification")).toBe(false);
   });
 
   it("renders the persisted entry through the shared workflow card layout", async () => {

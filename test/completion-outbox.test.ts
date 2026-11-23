@@ -50,6 +50,25 @@ describe("CompletionOutbox", () => {
     });
   });
 
+  describe("take — a headless boundary delivers it itself", () => {
+    it("returns everything pending as one message and sends nothing, then or later", () => {
+      outbox.add(item("a"));
+      outbox.add(item("b"));
+
+      expect(outbox.take()?.content).toBe("2 background tasks finished.\n\n<done a>\n\n<done b>");
+      vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
+      expect(send).not.toHaveBeenCalled();
+      expect(outbox.take()).toBeUndefined();
+    });
+
+    it("returns nothing when every pending result was read first", () => {
+      outbox.add(item("a"));
+      outbox.cancel("a");
+
+      expect(outbox.take()).toBeUndefined();
+    });
+  });
+
   describe("busy parent", () => {
     beforeEach(() => { running = true; });
 
@@ -161,5 +180,13 @@ describe("CompletionOutbox", () => {
     outbox.dispose();
     vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it("ignores completions added after dispose, so a stopped run cannot wake a dead session", () => {
+    outbox.dispose();
+    outbox.add(item("a"));
+    vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
+    expect(send).not.toHaveBeenCalled();
+    expect(outbox.has("a")).toBe(false);
   });
 });

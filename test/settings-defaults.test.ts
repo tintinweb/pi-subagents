@@ -66,7 +66,7 @@ it("lists every setting at the value a boot with no settings files runs with", a
   } as any);
 
   // Any change emits the full in-memory snapshot. Tab to Global is a no-op
-  // here; Down×7 (the first leaves the filter) + Enter cycles Join mode, the
+  // here; Down×8 (the first leaves the filter) + Enter cycles Join mode, the
   // one key this test changes.
   const kb = { matches: (data: string, id: string) => ({ "tui.select.down": "\x1b[B", "tui.select.confirm": "\r" })[id] === data, getKeys: () => [] };
   await commands.get("agents").handler("", {
@@ -77,7 +77,7 @@ it("lists every setting at the value a boot with no settings files runs with", a
       select: vi.fn().mockResolvedValueOnce("Settings").mockResolvedValue(undefined),
       custom: vi.fn((factory: (...args: any[]) => any) => {
         const page = factory({ requestRender: vi.fn() }, { fg: (_c: string, t: string) => t }, kb, vi.fn());
-        for (const key of [...Array<string>(7).fill("\x1b[B"), "\r"]) page.handleInput(key);
+        for (const key of [...Array<string>(8).fill("\x1b[B"), "\r"]) page.handleInput(key);
         return Promise.resolve(undefined);
       }),
       setStatus: vi.fn(),
