@@ -1123,13 +1123,13 @@ export class AgentManager {
   }
 
   /**
-   * What a child's run is still waiting on: leaving the queue, its worktree
-   * startup, or the run itself. A stopped child stays pending until its run
-   * ends, so its result is final when it is read. Empty once it has settled.
+   * What a child's run is still waiting on: its worktree startup, or the run
+   * itself. Nested children hold no pool slot, so they never queue. A stopped
+   * child stays pending until its run ends, so its result is final when it is
+   * read. Empty once it has settled.
    */
   private pendingRun(record: AgentRecord): Promise<unknown>[] {
     const pending: Promise<unknown>[] = [];
-    if (record.status === "queued" && record.startGate) pending.push(record.startGate);
     const startup = this.startups.get(record.id);
     if (startup) pending.push(startup);
     // A foreground resume's promise is not tracked in `unsettled`; its status is.
@@ -1145,9 +1145,9 @@ export class AgentManager {
   }
 
   /**
-   * Wait until one of `parentId`'s still-running (or queued) children settles,
-   * or moves on from the queue. False at once when none is pending, so a caller
-   * can loop on it until its children are all done.
+   * Wait until one of `parentId`'s still-running children settles, or finishes
+   * starting up. False at once when none is pending, so a caller can loop on it
+   * until its children are all done.
    */
   async waitForChild(parentId: string): Promise<boolean> {
     const pending = [...this.agents.values()]

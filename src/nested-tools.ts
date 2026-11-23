@@ -149,12 +149,14 @@ function formatRecord(record: AgentRecord, position: ResultPosition): string {
 }
 
 /**
- * `formatRecord` for a result the parent's model is about to read. A settled
- * one is marked consumed, so the runner does not deliver it again before the
- * parent's run ends.
+ * `formatRecord` for a result the parent's model is about to read. Marked
+ * consumed once its run has settled, so the runner does not deliver it again
+ * before the parent's run ends. The run, not the status: a child stopped from
+ * the UI says "stopped" at once but gets its final text only when its run
+ * unwinds, and the drain must still deliver that.
  */
-function readRecord(record: AgentRecord, position: ResultPosition): string {
-  if (record.status !== "queued" && record.status !== "running") record.resultConsumed = true;
+function readRecord(record: AgentRecord, position: ResultPosition, context: NestedToolContext): string {
+  if (context.manager.settledChildren(context.parentAgentId).includes(record)) record.resultConsumed = true;
   return formatRecord(record, position);
 }
 
@@ -234,7 +236,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
           maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
         });
         return resumed
-          ? textResult(readRecord(resumed, "inline"), resumed.status === "error")
+          ? textResult(readRecord(resumed, "inline", context), resumed.status === "error")
           : textResult(`Failed to resume nested agent "${params.resume}".`, true);
       }
 
@@ -431,7 +433,7 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         }
         if (record.promise) await abortable(record.promise, signal);
       }
-      return textResult(readRecord(record, "fetched"), record.status === "error");
+      return textResult(readRecord(record, "fetched", context), record.status === "error");
     },
   });
 

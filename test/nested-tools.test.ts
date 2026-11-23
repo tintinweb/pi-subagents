@@ -81,6 +81,9 @@ beforeEach(() => {
     awaitStartup: vi.fn(async () => {}),
     getRecord: (id: string) => records.get(id),
     resume: vi.fn(),
+    // A record's run counts as settled only when a test flags it.
+    settledChildren: (parentId: string) => [...records.values()].filter(r => r.parentAgentId === parentId && r.settled),
+    waitForChild: vi.fn(async () => false),
   } as any;
 });
 
@@ -367,6 +370,24 @@ describe("child-safe nested Agent tools", () => {
     const result = await execute(getResult, { agent_id: record.id, wait: true });
 
     expect(result.content[0].text).toBe("queued done");
+  });
+
+  // A child stopped from the UI says "stopped" at once but keeps running until
+  // its prompt unwinds, and only then gets its final text. Read in that window,
+  // it must stay unread, so the parent's drain still delivers that text.
+  it("marks a result read only once the child's run has settled", async () => {
+    const [, getResult] = tools();
+    const record: Record<string, unknown> = { id: "stopping-child", status: "stopped", parentAgentId: "parent-1" };
+    records.set("stopping-child", record);
+
+    await execute(getResult, { agent_id: "stopping-child" });
+    expect(record.resultConsumed).toBeUndefined();
+
+    record.settled = true;
+    record.result = "PARTIAL_TEXT";
+    const result = await execute(getResult, { agent_id: "stopping-child" });
+    expect(result.content[0].text).toContain("PARTIAL_TEXT");
+    expect(record.resultConsumed).toBe(true);
   });
 
   it("aborts a nested result wait without aborting the owned child", async () => {
