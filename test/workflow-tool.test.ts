@@ -1495,12 +1495,12 @@ describe("--subagents-workflow-file", () => {
     const warned = stderr.mock.calls.some((c: any[]) => String(c[0]).includes("needs a prompt"));
     expect(warned).toBe(warns);
     // Shutdown stops the run either way; the warning only explains why.
-    await vi.waitFor(() => expect(
-      booted.pi.appendEntry.mock.calls.find((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)?.[1],
-    ).toMatchObject({ status: "killed" }), { timeout: 4_000 });
-    // The stopped run settles after shutdown; its notice must not start a turn
-    // on the session being torn down.
+    const settled = () => booted.pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:workflow_settled");
+    await vi.waitFor(() => expect(settled()[0]?.[1]).toMatchObject({ status: "killed" }), { timeout: 4_000 });
+    // The run settles after its session is gone: no card to save (pi would
+    // throw on the stale append) and no notice to start a turn there.
     await new Promise(resolve => setTimeout(resolve, NOTIFICATION_HOLD_MS + 50));
+    expect(booted.pi.appendEntry.mock.calls.some((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)).toBe(false);
     expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => c[0]?.customType === "subagent-notification")).toBe(false);
   });
 

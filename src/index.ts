@@ -1112,6 +1112,7 @@ export default function (pi: ExtensionAPI) {
           `Example: pi -p --${WORKFLOW_FILE_FLAG}=x.js "Report the result."\n`,
       );
     }
+    sessionEnded = true;
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -1498,6 +1499,8 @@ export default function (pi: ExtensionAPI) {
   let headlessWaitMinutes = 0;
   /** A `-p` with no prompt never starts a run, so nothing can drain into one. */
   let runStarted = false;
+  /** Set by `session_shutdown`, which stops every workflow; one settling afterwards has no session to report to. */
+  let sessionEnded = false;
   const isHeadless = (ctx: ExtensionContext) => ctx.mode === "print" || ctx.mode === "json";
   const hasBackgroundWork = () => manager.hasRunning() || workflowRuns.size > 0;
   const allBackgroundWorkSettled = () => Promise.allSettled([manager.waitForAll(), ...workflowRuns]);
@@ -3080,6 +3083,9 @@ Terse command-style prompts produce shallow, generic work.
     // uses, so the model can react — under `-p` the headless drain keeps the run
     // open until then.
     trackWorkflowRun(runWorkflowTask(ctx, task).then(() => {
+      // Stopped by session_shutdown: the session is gone, so there is no card
+      // to save and no model to tell.
+      if (sessionEnded) return;
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout). A run that settles after /new or /reload holds a
       // stale `pi`, which throws on append (#309); each delivery below is
