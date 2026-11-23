@@ -678,7 +678,7 @@ Skipping is immediate for a running agent and for one held at a pause; an agent 
 |------|-------------|
 | `--subagents-workflow-file=<path>` | Run a workflow script at session start |
 
-Use the `=` form. The bare `--flag value` spelling consumes the next argument, so `pi --subagents-workflow-file review.js "do the thing"` would take the prompt as the flag's value. The run goes alongside the session, like background work the model started: with no tool call to attach to, it renders as a session entry, and when it finishes the model is notified and reacts in a turn of its own. Headless, give it a prompt: `pi -p --subagents-workflow-file=review.js "Report the result."` runs the workflow and the turn together, then the model answers with the result. Without a prompt pi starts no turn to report into, so the run is stopped at exit with a warning, as `claude -p` refuses to run without input.
+Use the `=` form. The bare `--flag value` spelling consumes the next argument, so `pi --subagents-workflow-file review.js "do the thing"` would take the prompt as the flag's value. The run goes alongside the session, like background work the model started: with no tool call to attach to, it renders as a session entry. In an interactive session its result is handed to the model as context for your next prompt; it does not start a turn on its own. Headless, the model is notified and reacts in a turn of its own, so give it a prompt: `pi -p --subagents-workflow-file=review.js "Report the result."` runs the workflow and the turn together, then the model answers with the result. Without a prompt pi starts no turn to report into, so the run is stopped at exit with a warning, as `claude -p` refuses to run without input.
 
 ### Headless mode (`pi -p`)
 

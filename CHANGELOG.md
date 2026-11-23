@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Note — `pi -p` now stays open until background agents and workflows finish** ([#452](https://github.com/tintinweb/pi-subagents/pull/452)). A script may run longer than before: there is no time limit by default, so set `headlessWaitMinutes` to cap it. SDK hosts that bind extensions without a mode are treated as print mode and wait too.
+
+### Fixed
+- **Headless runs wait for background work and answer with its result** ([#452](https://github.com/tintinweb/pi-subagents/pull/452), closes [#341](https://github.com/tintinweb/pi-subagents/issues/341), superseding [#408](https://github.com/tintinweb/pi-subagents/pull/408) — thanks [@ajaynomics](https://github.com/ajaynomics)). In print and JSON mode, background agents, `SubagentWorkflow` runs and `--subagents-workflow-file` runs were stopped when the parent's turn ended, and their results were lost. pi-subagents now waits for them, writes a notice to stderr, and the model answers in a further turn. The new `headlessWaitMinutes` setting (default `0` = no limit) stops the work after that many minutes. Hosts that patched pi's follow-up queue to hold the run can drop the patch.
+
 ## [0.26.2] - 2026-11-20
 
 > **⚠️ Behavior change — lifecycle events now fire for nested and workflow agents** ([#442](https://github.com/tintinweb/pi-subagents/issues/442)). `subagents:created`, `started`, `completed`, `failed`, `steered` and `compacted` used to cover only the session's own agents. Nested and workflow agents now send them too, with `parentAgentId` or `workflowId` set. To keep the old behavior, ignore events where either field is set.
