@@ -95,7 +95,7 @@ import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
 import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
-import { workflowToolDescription } from "./workflow/tool-description.js";
+import { WORKFLOW_SKILL_PATH, workflowToolDescription } from "./workflow/tool-description.js";
 import { toWorkflowDetail, toWorkflowInfo, workflowArgs, workflowResult } from "./workflow-info.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
 import { escapeXml } from "./xml.js";
@@ -2824,6 +2824,12 @@ Terse command-style prompts produce shallow, generic work.
   });
 
   if (isWorkflowsEnabled()) pi.registerTool(workflowTool);
+
+  // The bundled `workflow-authoring` skill documents this tool, so it is offered
+  // only while the tool is. A static `pi.skills` entry in package.json would be
+  // loaded regardless of `workflowsEnabled` (#468). pi fires this after
+  // session_start, so a collision that turned workflows off there drops it too.
+  pi.on("resources_discover", () => (isWorkflowsEnabled() ? { skillPaths: [WORKFLOW_SKILL_PATH] } : {}));
 
   /**
    * Act on {@link decideWorkflowCollision} — the half that needs the host.

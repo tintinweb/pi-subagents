@@ -46,14 +46,16 @@ const REFERENCE_MARKERS = [
 ];
 
 describe("the workflow-authoring skill", () => {
-  it("exists where the package manifest declares it", () => {
-    // Declared so pi lists it: a model asked whether it loaded the skill looks
-    // in the skill list, not in a tool description.
+  it("exists, and is not declared statically in the package manifest", () => {
+    // Listed so a model asked whether it loaded the skill finds it in the skill
+    // list. The extension offers it through `resources_discover` only while
+    // workflows are on; a `pi.skills` entry would list it even when they are
+    // off (#468).
     expect(existsSync(SKILL_FILE)).toBe(true);
     const manifest = JSON.parse(
       readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8"),
     ) as { pi?: { skills?: string[] } };
-    expect(manifest.pi?.skills).toContain("./skills");
+    expect(manifest.pi?.skills ?? []).not.toContain("./skills");
   });
 
   it("is named after its directory, as the skill spec requires", () => {

@@ -1543,6 +1543,30 @@ describe("workflowsEnabled — the master switch", () => {
     expect(boot({ workflowsEnabled: true }).tools.has("SubagentWorkflow")).toBe(true);
   });
 
+  it("offers the workflow-authoring skill only while workflows are on (#468)", async () => {
+    const discover = (booted: ReturnType<typeof makePi>) =>
+      booted.lifecycle.get("resources_discover")?.({ type: "resources_discover", cwd: hermetic.dir, reason: "startup" });
+
+    const on = await discover(boot({}));
+    expect(on.skillPaths).toHaveLength(1);
+    expect(on.skillPaths[0]).toMatch(/skills[\\/]workflow-authoring[\\/]SKILL\.md$/);
+    expect(existsSync(on.skillPaths[0])).toBe(true);
+
+    expect((await discover(boot({ workflowsEnabled: false }))).skillPaths).toBeUndefined();
+  });
+
+  it("drops the skill when a collision turns workflows off at session_start", async () => {
+    const booted = boot({});
+    const discover = () =>
+      booted.lifecycle.get("resources_discover")?.({ type: "resources_discover", cwd: hermetic.dir, reason: "startup" });
+    expect((await discover()).skillPaths).toHaveLength(1);
+
+    booted.pi.getAllTools.mockReturnValue([{ name: "SubagentWorkflow", description: "someone else's" }]);
+    await booted.lifecycle.get("session_start")?.({}, switchCtx());
+
+    expect((await discover()).skillPaths).toBeUndefined();
+  });
+
   it("refuses the startup flag while off, instead of running the script anyway", async () => {
     // The flag is the same machinery by another door, so the switch has to
     // close it too — and say why, rather than appearing to do nothing.
