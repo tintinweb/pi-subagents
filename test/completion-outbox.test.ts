@@ -181,4 +181,12 @@ describe("CompletionOutbox", () => {
     vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("ignores completions added after dispose, so a stopped run cannot wake a dead session", () => {
+    outbox.dispose();
+    outbox.add(item("a"));
+    vi.advanceTimersByTime(NOTIFICATION_HOLD_MS);
+    expect(send).not.toHaveBeenCalled();
+    expect(outbox.has("a")).toBe(false);
+  });
 });

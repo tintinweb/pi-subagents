@@ -44,6 +44,7 @@ export interface OutboxItem {
 export class CompletionOutbox {
   private items: OutboxItem[] = [];
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private disposed = false;
 
   constructor(
     /** Delivers one message as a steer that triggers a turn when the parent is idle. */
@@ -54,6 +55,9 @@ export class CompletionOutbox {
 
   /** A newer completion of the same agent (a resume) replaces its pending one. */
   add(item: OutboxItem): void {
+    // Work stopped at session_shutdown settles after dispose; sending its
+    // notice would start a turn on the session being torn down.
+    if (this.disposed) return;
     for (const id of item.ids) this.cancel(id);
     this.items.push(item);
     if (!this.parentRunning()) this.arm();
@@ -87,6 +91,7 @@ export class CompletionOutbox {
   }
 
   dispose(): void {
+    this.disposed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     this.items = [];

@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
+import { NOTIFICATION_HOLD_MS } from "../src/completion-outbox.js";
 import subagentsExtension, { WORKFLOW_ENTRY_TYPE, WORKFLOW_FILE_FLAG } from "../src/index.js";
 import { isScopeModelsEnabled, setScopeModelsEnabled } from "../src/model-scope.js";
 import type { AgentRecord } from "../src/types.js";
@@ -1154,8 +1155,13 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
 
     await booted.lifecycle.get("session_shutdown")?.({}, workflowCtx());
 
-    const sent = await awaitNotification(startedTaskId(result));
-    expect(String(sent[0].content)).toContain("<status>Stopped</status>");
+    // The run settles as stopped. Its notice is dropped: the session it would
+    // report into is gone, and sending it would start a turn there.
+    const settled = () => booted.pi.events.emit.mock.calls.filter(([e]: [string]) => e === "subagents:workflow_settled");
+    await vi.waitFor(() => expect(settled()).toHaveLength(1), { timeout: 4_000 });
+    expect(settled()[0][1]).toMatchObject({ id: startedTaskId(result), status: "killed" });
+    await new Promise(resolve => setTimeout(resolve, NOTIFICATION_HOLD_MS + 50));
+    expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => String(c[0]?.content).includes(startedTaskId(result)))).toBe(false);
   });
 
   it("reports a script that threw, rather than a run that quietly ended", async () => {
@@ -1492,6 +1498,10 @@ describe("--subagents-workflow-file", () => {
     await vi.waitFor(() => expect(
       booted.pi.appendEntry.mock.calls.find((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)?.[1],
     ).toMatchObject({ status: "killed" }), { timeout: 4_000 });
+    // The stopped run settles after shutdown; its notice must not start a turn
+    // on the session being torn down.
+    await new Promise(resolve => setTimeout(resolve, NOTIFICATION_HOLD_MS + 50));
+    expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => c[0]?.customType === "subagent-notification")).toBe(false);
   });
 
   it("renders the persisted entry through the shared workflow card layout", async () => {
