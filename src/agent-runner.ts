@@ -21,6 +21,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { abortable } from "./abortable.js";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { getCacheRetention, installCacheRetention } from "./cache-retention.js";
 import { runInChildSessionContext } from "./child-context.js";
@@ -29,7 +30,7 @@ import { deniedToolNames } from "./custom-agents.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
 import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
-import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
+import { createNestedSubagentTools, formatChildCompletions, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
 import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
@@ -698,6 +699,68 @@ function finalTurnError(session: AgentSession, startIndex = 0): string | undefin
     return undefined;
   }
   return undefined;
+}
+
+/** The agent whose own nested children a run drains, and the manager that holds them. */
+export interface ChildDrain {
+  manager: NestedAgentManager;
+  parentAgentId: string;
+}
+
+/**
+ * Keep an agent's run open while background children it started are still
+ * running, and hand it each batch of their results as a further turn — the
+ * main session's headless drain, one level down. Without it the run ends
+ * first, the manager stops the children, and their work is lost while the
+ * agent's answer calls them "running".
+ *
+ * Results the agent already read (`get_subagent_result`, an inline resume)
+ * are marked consumed and not sent again; neither are children started before
+ * `since` — a resume's earlier, cut-short run owned those, and the agent can
+ * still fetch them by id. Ends when nothing is pending, the
+ * run is aborted (signal or turn limit), or its last turn failed; the manager's
+ * `abortOwnedChildren` then stops whatever is left, as before.
+ */
+async function drainChildren(
+  session: AgentSession,
+  drain: ChildDrain | undefined,
+  run: { aborted: boolean },
+  signal: AbortSignal | undefined,
+  startIndex: number,
+  since: number,
+): Promise<void> {
+  if (!drain) return;
+  while (!run.aborted && signal?.aborted !== true && finalTurnError(session, startIndex) === undefined) {
+    const unread = drain.manager.settledChildren(drain.parentAgentId)
+      .filter(r => !r.resultConsumed && r.startedAt >= since);
+    if (unread.length > 0) {
+      for (const r of unread) r.resultConsumed = true;
+      await session.prompt(formatChildCompletions(unread));
+      continue;
+    }
+    // No prompt is active while it waits, so pi only queues a steer (the
+    // record still says "running", so steering is accepted). Run it as the next
+    // turn rather than leave it until a child finishes. Already expanded when
+    // it was queued, hence no second expansion.
+    if (session.getSteeringMessages().length > 0) {
+      await session.prompt(session.clearQueue().steering.join("\n\n"), { expandPromptTemplates: false });
+      continue;
+    }
+    let unsubscribe = () => {};
+    const steered = new Promise<void>(resolve => {
+      unsubscribe = session.subscribe(event => {
+        if (event.type === "queue_update" && event.steering.length > 0) resolve();
+      });
+    });
+    try {
+      const childPending = drain.manager.waitForChild(drain.parentAgentId);
+      if (!(await abortable(Promise.race([childPending, steered.then(() => true)]), signal))) return;
+    } catch {
+      return; // stopped while waiting: the settle path stops the children
+    } finally {
+      unsubscribe();
+    }
+  }
 }
 
 /** The per-run callbacks a spawn and a resume share, plus the resolved turn limit. */
@@ -1380,6 +1443,15 @@ export async function runAgent(
     // parent is already gone is not prompted at all.
     if (options.signal?.aborted !== true) await session.prompt(effectivePrompt);
 
+    // Background children this agent started report before it does — and
+    // before the structured retry, so a structured agent still ends on its
+    // capture. Only an agent with nested tools can own any.
+    await drainChildren(
+      session,
+      nestedTools && nestedRuntime ? { manager: nestedRuntime.manager, parentAgentId: nestedRuntime.parentAgentId } : undefined,
+      run, options.signal, startLen, 0, // a fresh agent: every child is this run's
+    );
+
     // One more prompt when a schema was asked for and nothing usable came back
     // — the model answered in prose, or only ever called the tool invalidly.
     // Inside this `try`, so the turn tracking, the text collector and above all
@@ -1428,12 +1500,15 @@ export async function resumeAgent(
   options: Pick<RunOptions, "maxTurns" | "onTurnEnd" | "onToolActivity" | "onAssistantUsage" | "onCompaction" | "signal"> & {
     /** The agent's type, for its own `max_turns`. */
     type: SubagentType;
+    /** Drain the children this resumed turn starts, as `runAgent` does. */
+    children?: ChildDrain;
   },
 ): Promise<{ text: string; failure?: string } & Pick<RunResult, "aborted" | "steered">> {
   // Boundary for the history fallback: the session already holds prior turns,
   // so only assistant text produced by THIS resume prompt counts as its output
   // — a failed resume must not surface the previous turn's answer (#144).
   const startLen = session.messages.length;
+  const startedAt = Date.now();
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
   const run = observeRun(session, { ...options, maxTurns: resolveEffectiveMaxTurns(options.type, options.maxTurns) });
@@ -1441,6 +1516,7 @@ export async function resumeAgent(
   try {
     // Already aborted: not prompted, as in `runAgent`.
     if (options.signal?.aborted !== true) await session.prompt(prompt);
+    await drainChildren(session, options.children, run, options.signal, startLen, startedAt);
   } finally {
     collector.unsubscribe();
     run.unsubscribe();

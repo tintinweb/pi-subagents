@@ -401,6 +401,37 @@ describe("AgentManager — nested runtime propagation", () => {
     expect(manager.getRecord(grandchild)?.status).toBe("stopped");
   });
 
+  // What the runner's child drain reads: one parent's own children, split into
+  // settled and still running.
+  it("waitForChild resolves when one of the parent's children settles, and settledChildren lists it", async () => {
+    let finishChild: ((value: any) => void) | undefined;
+    vi.mocked(runAgent)
+      .mockImplementationOnce(() => new Promise(() => {})) // the parent: still running
+      .mockImplementationOnce(() => new Promise(resolve => { finishChild = resolve; }));
+    manager = new AgentManager();
+
+    const parentId = manager.spawn(mockPi, mockCtx, "general-purpose", "parent", { description: "parent", isBackground: true });
+    expect(await manager.waitForChild(parentId)).toBe(false); // nothing to wait for
+    const childId = manager.spawn(mockPi, mockCtx, "scout", "child", {
+      description: "child", isBackground: true, depth: 2, parentAgentId: parentId,
+    });
+    expect(manager.settledChildren(parentId)).toEqual([]);
+    // Startup ending also wakes a waiter (the drain just loops); wait past it.
+    await manager.awaitStartup(childId);
+
+    let woke = false;
+    const waiting = manager.waitForChild(parentId).then(pending => { woke = true; return pending; });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(woke).toBe(false);
+
+    finishChild?.({ responseText: "CHILD_DONE", session: mockSession(), aborted: false, steered: false });
+    expect(await waiting).toBe(true);
+    expect(manager.settledChildren(parentId).map(r => r.id)).toEqual([childId]);
+    expect(manager.getRecord(childId)?.result).toBe("CHILD_DONE");
+    // Another agent's children are not this parent's.
+    expect(manager.settledChildren(childId)).toEqual([]);
+  });
+
   it("aborts children spawned during a resumed turn", async () => {
     // The spawn settle path already ran, so only resume() can stop what the
     // resumed turn launched — otherwise the child runs on, invisible.

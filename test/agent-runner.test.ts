@@ -131,7 +131,9 @@ vi.mock("../src/skill-loader.js", () => ({
   preloadSkills: vi.fn(() => []),
 }));
 
-vi.mock("../src/nested-tools.js", () => ({
+vi.mock("../src/nested-tools.js", async (importOriginal) => ({
+  // The real formatter: the drain tests read the prompt it builds.
+  formatChildCompletions: (await importOriginal<{ formatChildCompletions: unknown }>()).formatChildCompletions,
   getMaxSubagentDepth: vi.fn(() => 2),
   createNestedSubagentTools: vi.fn(() => [
     { name: "Agent" },
@@ -182,6 +184,9 @@ function createSession(finalText: string) {
     }),
     abort: vi.fn(),
     steer: vi.fn(),
+    // pi's queue of steers that arrived while no prompt was active.
+    getSteeringMessages: vi.fn((): readonly string[] => []),
+    clearQueue: vi.fn(() => ({ steering: [] as string[], followUp: [] as string[] })),
     // Stateful, so the active set reflects what the scope installer actually did
     // and `renarrow`'s no-op guard behaves as it does against real pi.
     getActiveToolNames: vi.fn(() => activeToolNames),
@@ -1237,6 +1242,159 @@ describe("agent-runner prompt cache retention", () => {
   });
 });
 
+/** A nested manager whose agent owns no children, so the child drain ends at once. */
+const childlessManager = () => ({ settledChildren: () => [], waitForChild: async () => false }) as any;
+
+// The drain loop itself, through `resumeAgent` (same helper as `runAgent`). The
+// real-session behaviour — a child's run held open until its background
+// children report — is pinned in subagents-nested-print-mode-e2e.test.ts.
+describe("agent-runner child drain", () => {
+  // `startedAt` far ahead: started during the resumed run unless a test says otherwise.
+  const child = (over: Record<string, unknown> = {}) =>
+    ({ id: "kid-1", description: "count", status: "completed", result: "KID_RESULT_7", startedAt: Number.MAX_SAFE_INTEGER, ...over }) as any;
+
+  it("hands an unread finished child to the agent as one more turn, once", async () => {
+    const { session } = createSession("ANSWER");
+    const kid = child();
+    let pendingRuns = 1;
+    const manager = {
+      settledChildren: () => (pendingRuns > 0 ? [] : [kid]),
+      waitForChild: async () => (pendingRuns-- > 0),
+    };
+
+    await resumeAgent(session as any, "go", { type: "Explore", children: { manager: manager as any, parentAgentId: "p" } });
+
+    expect(session.prompt).toHaveBeenCalledTimes(2);
+    const drainPrompt = String((session.prompt.mock.calls as unknown[][])[1][0]);
+    expect(drainPrompt).toContain("A background nested agent you started finished");
+    expect(drainPrompt).toContain("Agent kid-1 (count)");
+    expect(drainPrompt).toContain("KID_RESULT_7");
+    expect(kid.resultConsumed).toBe(true);
+  });
+
+  it("hands children that finished together over in one turn", async () => {
+    const { session } = createSession("ANSWER");
+    const kids = [child(), child({ id: "kid-2", description: "other", result: "KID_RESULT_9" })];
+    let pendingRuns = 1;
+    const manager = {
+      settledChildren: () => (pendingRuns > 0 ? [] : kids),
+      waitForChild: async () => (pendingRuns-- > 0),
+    };
+
+    await resumeAgent(session as any, "go", { type: "Explore", children: { manager: manager as any, parentAgentId: "p" } });
+
+    expect(session.prompt).toHaveBeenCalledTimes(2);
+    const drainPrompt = String((session.prompt.mock.calls as unknown[][])[1][0]);
+    expect(drainPrompt).toContain("2 background nested agents you started finished");
+    expect(drainPrompt).toContain("KID_RESULT_7");
+    expect(drainPrompt).toContain("KID_RESULT_9");
+  });
+
+  // A child stopped when an earlier run was cut short is that run's, not news
+  // for this one; the agent can still fetch it by id.
+  it("does not hand a resumed agent the children of its earlier run", async () => {
+    const { session } = createSession("ANSWER");
+    const stale = child({ status: "stopped", startedAt: Date.now() - 60_000 });
+    const manager = { settledChildren: () => [stale], waitForChild: async () => false };
+
+    await resumeAgent(session as any, "go", { type: "Explore", children: { manager: manager as any, parentAgentId: "p" } });
+
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(stale.resultConsumed).toBeUndefined();
+  });
+
+  // While it waits no prompt is active, so pi only queues a steer: without a
+  // turn to carry it, it would sit until a child finished.
+  it("runs a steer that arrives while it waits as the next turn", async () => {
+    const { session, listeners } = createSession("ANSWER");
+    let queued: string[] = [];
+    session.getSteeringMessages.mockImplementation(() => queued);
+    session.clearQueue.mockImplementation(() => {
+      const steering = queued;
+      queued = [];
+      return { steering, followUp: [] };
+    });
+    let childDone: (() => void) | undefined;
+    let settled = false;
+    const kid = child();
+    const manager = {
+      settledChildren: () => (settled ? [kid] : []),
+      waitForChild: () => (settled ? Promise.resolve(false) : new Promise<boolean>(resolve => { childDone = () => { settled = true; resolve(true); }; })),
+    };
+
+    const result = resumeAgent(session as any, "go", { type: "Explore", children: { manager: manager as any, parentAgentId: "p" } });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    queued = ["wrap up now"];
+    for (const l of listeners) l({ type: "queue_update", steering: queued, followUp: [] });
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    // Delivered before the child finished, not after.
+    expect((session.prompt.mock.calls as unknown[][]).map(c => c[0])).toEqual(["go", "wrap up now"]);
+    childDone?.();
+    await result;
+    expect(session.prompt).toHaveBeenCalledTimes(3);
+  });
+
+  // Queued between the turn ending and the wait subscribing: no event left to
+  // wake on, so the queue itself is checked first.
+  it("runs a steer queued before the wait began", async () => {
+    const { session } = createSession("ANSWER");
+    let queued = ["early steer"];
+    session.getSteeringMessages.mockImplementation(() => queued);
+    session.clearQueue.mockImplementation(() => {
+      const steering = queued;
+      queued = [];
+      return { steering, followUp: [] };
+    });
+    let pending = true;
+    const manager = {
+      settledChildren: () => [],
+      // One child that never finishes until the steer turn has run.
+      waitForChild: () => (pending ? new Promise<boolean>(() => {}) : Promise.resolve(false)),
+    };
+    session.prompt.mockImplementation(async (text: string) => {
+      if (text === "early steer") pending = false;
+    });
+
+    await resumeAgent(session as any, "go", { type: "Explore", children: { manager: manager as any, parentAgentId: "p" } });
+
+    expect((session.prompt.mock.calls as unknown[][]).map(c => c[0])).toEqual(["go", "early steer"]);
+  });
+
+  it("stops waiting when the agent is stopped", async () => {
+    const { session } = createSession("ANSWER");
+    const controller = new AbortController();
+    const manager = {
+      settledChildren: () => [],
+      // A child that never settles: only the abort ends the wait.
+      waitForChild: () => new Promise<boolean>(() => {}),
+    };
+
+    const result = resumeAgent(session as any, "go", {
+      type: "Explore", signal: controller.signal, children: { manager: manager as any, parentAgentId: "p" },
+    });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    controller.abort();
+
+    await expect(result).resolves.toBeDefined();
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not drain after a final turn that failed", async () => {
+    const { session } = createSession("ANSWER");
+    session.prompt.mockImplementationOnce(async () => {
+      session.messages.push({ role: "assistant", content: [], stopReason: "error", errorMessage: "boom" });
+    });
+    const kid = child();
+    const manager = { settledChildren: () => [kid], waitForChild: async () => false };
+
+    await resumeAgent(session as any, "go", { type: "Explore", children: { manager: manager as any, parentAgentId: "p" } });
+
+    expect(session.prompt).toHaveBeenCalledTimes(1);
+    expect(kid.resultConsumed).toBeUndefined();
+  });
+});
+
 describe("agent-runner master tool allowlist", () => {
   it("extensions: true with extension tools — all 7 built-ins plus extension tools land in the allowlist", async () => {
     vi.mocked(getConfig).mockReturnValueOnce(makeConfig({ extensions: true }));
@@ -1317,7 +1475,7 @@ describe("agent-runner master tool allowlist", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+      nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1 },
     });
 
     expect(createNestedSubagentTools).not.toHaveBeenCalled();
@@ -1333,7 +1491,7 @@ describe("agent-runner master tool allowlist", () => {
     vi.mocked(getToolNamesForType).mockReturnValueOnce(BUILTINS_7);
     const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
-    const manager = {} as any;
+    const manager = childlessManager();
 
     await runAgent(ctx, "Explore", "go", {
       pi,
@@ -1369,7 +1527,7 @@ describe("agent-runner master tool allowlist", () => {
     await runAgent(ctx, "general-purpose", "go", {
       pi,
       workflow: true,
-      nestedRuntime: { manager: {} as any, parentAgentId: "wf-agent-0", depth: 1 },
+      nestedRuntime: { manager: childlessManager(), parentAgentId: "wf-agent-0", depth: 1 },
     });
 
     expect(createNestedSubagentTools).not.toHaveBeenCalled();
@@ -1390,7 +1548,7 @@ describe("agent-runner master tool allowlist", () => {
       createAgentSession.mockResolvedValue({ session });
       await runAgent(ctx, "general-purpose", "go", {
         pi,
-        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+        nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1 },
       });
       const { buildAgentPrompt } = await import("../src/prompts.js");
       return vi.mocked(buildAgentPrompt).mock.lastCall![4] as Record<string, unknown>;
@@ -1425,7 +1583,7 @@ describe("agent-runner master tool allowlist", () => {
     await runAgent(ctx, "lead", "go", {
       pi,
       workflow: true,
-      nestedRuntime: { manager: {} as any, parentAgentId: "wf-agent-0", depth: 1 },
+      nestedRuntime: { manager: childlessManager(), parentAgentId: "wf-agent-0", depth: 1 },
     });
 
     expect(createNestedSubagentTools).toHaveBeenCalled();
@@ -1447,7 +1605,7 @@ describe("agent-runner master tool allowlist", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+      nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1 },
     });
 
     const opts = createAgentSession.mock.calls[0][0];
@@ -1478,7 +1636,7 @@ describe("agent-runner master tool allowlist", () => {
 
       await runAgent(ctx, "Explore", "go", {
         pi,
-        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+        nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1 },
       });
 
       const tools = lastToolsPassed();
@@ -1499,7 +1657,7 @@ describe("agent-runner master tool allowlist", () => {
 
       await runAgent(ctx, "Explore", "go", {
         pi,
-        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+        nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1 },
       });
 
       expect(createAgentSession.mock.calls[0][0].excludeTools ?? []).toContain("Agent");
@@ -1521,7 +1679,7 @@ describe("agent-runner master tool allowlist", () => {
 
       await runAgent(ctx, "Explore", "go", {
         pi,
-        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+        nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1 },
       });
 
       await expect(
@@ -1732,7 +1890,7 @@ describe("agent-runner master tool allowlist", () => {
 
       await runAgent(ctx, "Explore", "go", {
         pi,
-        nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 3 },
+        nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1, maxSubagentDepth: 3 },
       });
 
       const tools = lastToolsPassed();
@@ -1773,7 +1931,7 @@ describe("agent-runner master tool allowlist", () => {
     await runAgent(ctx, "Explore", "go", {
       pi,
       isolated: true,
-      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1 },
+      nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1 },
     });
 
     expect(createNestedSubagentTools).not.toHaveBeenCalled();
@@ -1791,7 +1949,7 @@ describe("agent-runner master tool allowlist", () => {
     );
     await runAgent(ctx, "Explore", "go", {
       pi,
-      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 3 },
+      nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1, maxSubagentDepth: 3 },
     });
     expect(createNestedSubagentTools).toHaveBeenLastCalledWith(expect.objectContaining({ maxSubagentDepth: 3 }));
   });
@@ -1809,7 +1967,7 @@ describe("agent-runner master tool allowlist", () => {
 
     await runAgent(ctx, "Explore", "go", {
       pi,
-      nestedRuntime: { manager: {} as any, parentAgentId: "parent", depth: 1, maxSubagentDepth: 1 },
+      nestedRuntime: { manager: childlessManager(), parentAgentId: "parent", depth: 1, maxSubagentDepth: 1 },
     });
 
     expect(createNestedSubagentTools).not.toHaveBeenCalled();

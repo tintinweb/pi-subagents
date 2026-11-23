@@ -69,9 +69,9 @@ export interface SubagentsSettings {
    * returned its result inline.
    *
    * Top-level only. Nested spawns (a subagent spawning its own) always default
-   * to foreground regardless of this setting — see `nested-tools.ts`, where a
-   * detached child would be killed by `abortOwnedChildren` when its parent
-   * settles, with no notification path to deliver its result.
+   * to foreground regardless of this setting — see `nested-tools.ts`. A
+   * detached nested child reports only to its parent, whose run the runner
+   * holds open until it does (`drainChildren` in `agent-runner.ts`).
    *
    * An explicit `run_in_background` on the call, or in the agent file's
    * frontmatter, overrides this in both directions; the setting only decides

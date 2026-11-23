@@ -85,9 +85,9 @@ interface ResolveOptions {
    *
    * Top-level callers pass the `backgroundByDefault` setting (default `true`,
    * following Claude Code). Nested callers pass `false` unconditionally: a
-   * detached child is killed by `abortOwnedChildren` when its parent settles
-   * and has no notification path of its own, so backgrounding one loses its
-   * work. Both call sites pass it explicitly; the `false` fallback only covers
+   * nested child has no notification path to the main session, only the
+   * runner's drain back into its parent, so an unqualified nested spawn returns
+   * its result inline. Both call sites pass it explicitly; the `false` fallback only covers
    * a caller that supplies no options at all, which in-tree means tests.
    */
   defaultRunInBackground?: boolean;
