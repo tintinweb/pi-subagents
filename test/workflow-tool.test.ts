@@ -1426,32 +1426,35 @@ describe("--subagents-workflow-file", () => {
     expect(booted.pi.appendEntry).not.toHaveBeenCalledWith(WORKFLOW_ENTRY_TYPE, expect.anything());
   });
 
-  /** The completion notification the outbox sent, once it has. */
-  const sentNotification = (booted: ReturnType<typeof makePi>) =>
-    booted.pi.sendMessage.mock.calls.find((c: any[]) => c[0]?.customType === "subagent-notification");
+  /** The quiet `workflow-result` message the interactive flag path sent, once it has. */
+  const flagResult = (booted: ReturnType<typeof makePi>) =>
+    booted.pi.sendMessage.mock.calls.find((c: any[]) => c[0]?.customType === "workflow-result");
 
-  it("renders the finished run as a session entry and notifies the model so it can react", async () => {
+  it("renders the finished run as a session entry and hands the result to the next turn", async () => {
     const path = join(hermetic.dir, "flow.js");
     writeFileSync(path, `${fileScript}log("scanned");\nreturn "all clear";\n`);
     const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
     subagentsExtension(booted.pi);
 
     await booted.lifecycle.get("session_start")?.({}, uiCtx());
-    await vi.waitFor(() => expect(sentNotification(booted)).toBeTruthy(), { timeout: 10_000 });
+    await vi.waitFor(() => expect(flagResult(booted)).toBeTruthy(), { timeout: 10_000 });
 
     const [, data] = booted.pi.appendEntry.mock.calls.find((c: any[]) => c[0] === WORKFLOW_ENTRY_TYPE)!;
     expect(data).toMatchObject({ name: "from-file", status: "completed" });
     // The card is rebuilt from this log, so the entry has to carry it.
     expect(data.progress).toContainEqual({ type: "workflow_log", message: "scanned" });
 
-    // The run is alongside the session like any background work, so its result
-    // starts a turn — the same channel a background SubagentWorkflow reports on.
-    const [message, options] = sentNotification(booted)!;
-    expect(options).toMatchObject({ triggerTurn: true });
+    // Interactive: a user-launched startup workflow is context for the user's
+    // next turn, not an unprompted one — delivered quietly, never through the
+    // outbox that would wake an idle session.
+    const [message, options] = flagResult(booted)!;
+    expect(message.display).toBe(false);
+    expect(options).toMatchObject({ deliverAs: "nextTurn" });
     expect(String(message.content)).toContain("<result>all clear</result>");
+    expect(booted.pi.sendMessage.mock.calls.some((c: any[]) => c[0]?.customType === "subagent-notification")).toBe(false);
   });
 
-  it("still notifies the model when the session entry can no longer be saved (#309)", async () => {
+  it("still hands the result to the model when the session entry can no longer be saved (#309)", async () => {
     const path = join(hermetic.dir, "flow.js");
     writeFileSync(path, `${fileScript}return "all clear";\n`);
     const booted = makePi({ [WORKFLOW_FILE_FLAG]: path });
@@ -1461,7 +1464,7 @@ describe("--subagents-workflow-file", () => {
     await booted.lifecycle.get("session_start")?.({}, uiCtx());
     // A run that settles after /new or /reload holds a stale `pi`, which throws.
     booted.pi.appendEntry.mockImplementation(() => { throw new Error("ctx is stale after session replacement"); });
-    await vi.waitFor(() => expect(sentNotification(booted)).toBeTruthy(), { timeout: 10_000 });
+    await vi.waitFor(() => expect(flagResult(booted)).toBeTruthy(), { timeout: 10_000 });
 
     expect(warn.mock.calls.some((c: any[]) => /result card could not be saved/.test(String(c[0])))).toBe(true);
   });

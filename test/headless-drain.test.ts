@@ -55,7 +55,8 @@ describe("headless drain at agent_before_settle", () => {
     await booted.lifecycle.get("session_start")({}, context);
     await booted.lifecycle.get("agent_start")({}, context);
     shutdown = () => booted.lifecycle.get("session_shutdown")({ reason: "quit" }, context);
-    const settle = () => booted.lifecycle.get("agent_before_settle")(settleEvent, context);
+    const settle = (outcome: string = "completed") =>
+      booted.lifecycle.get("agent_before_settle")({ ...settleEvent, outcome }, context);
     return { booted, settle };
   }
 
@@ -64,6 +65,18 @@ describe("headless drain at agent_before_settle", () => {
 
     // The workflow is still running; an interactive parent must settle anyway.
     await expect(settle()).resolves.toBeUndefined();
+  });
+
+  it.each(["error", "aborted"])("does not drain on a %s final turn, even with work pending", async (outcome) => {
+    const { settle } = await boot("print");
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    // Settles without waiting or forcing a turn: a failed/aborted run is one pi
+    // is tearing down, as CompletionOutbox.onTurnEnd treats the same outcomes.
+    const result = settle(outcome);
+    await flush();
+    expect(stderr.mock.calls.some((c: any[]) => String(c[0]).includes("Waiting for background work"))).toBe(false);
+    await expect(result).resolves.toBeUndefined();
   });
 
   it("returns nothing when no background work is pending", async () => {

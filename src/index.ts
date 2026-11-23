@@ -1514,6 +1514,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("agent_before_settle", async (event, ctx) => {
     if (!isHeadless(ctx) || !hasBackgroundWork()) return;
+    // A failed or aborted final turn ends the run; forcing a continuation into
+    // it would reopen a run pi is tearing down (mirrors CompletionOutbox.onTurnEnd,
+    // which suppresses on "aborted"/"error"). pi already short-circuits the abort
+    // case before this boundary; guarding it too is harmless and symmetric.
+    if (event.outcome !== "completed") return;
     process.stderr.write(
       `[pi-subagents] Waiting for background work to finish (${describeBackgroundWork()}). Press Ctrl+C to exit now.\n`,
     );
@@ -2614,7 +2619,10 @@ Terse command-style prompts produce shallow, generic work.
   const workflowRuns = new Set<Promise<void>>();
   function trackWorkflowRun(run: Promise<void>): void {
     workflowRuns.add(run);
-    void run.finally(() => workflowRuns.delete(run));
+    // `.catch` backstop: runWorkflowTask and notifyWorkflowFinished are both
+    // non-throwing by contract, but this guarantees a detached run can never
+    // surface as an unhandled rejection even if a future throw slips in.
+    void run.finally(() => workflowRuns.delete(run)).catch(() => {});
   }
 
   /**
@@ -2702,14 +2710,25 @@ Terse command-style prompts produce shallow, generic work.
   }
 
   /**
+   * Repaint the widget, fleet list and the run's card after it settles. These
+   * touch the captured pi UI context, which throws once the session that owned
+   * it is replaced (/new, /reload — #309); the caller's delivery still proceeds.
+   */
+  function redrawWorkflowSurfaces(task: WorkflowTask): void {
+    try {
+      widget.update();
+      fleet.update();
+      workflowCards.flush(task.id);
+    } catch { /* stale pi: the session these would redraw is gone */ }
+  }
+
+  /**
    * Hand a finished run back to the model through the SAME channel a background
    * agent uses — the completion outbox, which delivers at the parent's next
    * boundary — rendered by the existing `subagent-notification` renderer.
    */
   function notifyWorkflowFinished(task: WorkflowTask) {
-    widget.update();
-    fleet.update();
-    workflowCards.flush(task.id);
+    redrawWorkflowSurfaces(task);
     const result = workflowResultText(task);
     const message = {
       content: formatWorkflowNotification(task),
@@ -3063,8 +3082,8 @@ Terse command-style prompts produce shallow, generic work.
     trackWorkflowRun(runWorkflowTask(ctx, task).then(() => {
       // No tool call to attach a result card to, so the card becomes a session
       // entry (same layout). A run that settles after /new or /reload holds a
-      // stale `pi`, which throws (#309); the notification is still attempted —
-      // the outbox swallows its own stale send.
+      // stale `pi`, which throws on append (#309); each delivery below is
+      // guarded too, so the whole settle is stale-safe.
       try {
         pi.appendEntry<WorkflowEntryData>(WORKFLOW_ENTRY_TYPE, workflowEntryData(task));
       } catch (err) {
@@ -3073,7 +3092,23 @@ Terse command-style prompts produce shallow, generic work.
             (err instanceof Error ? err.message : String(err)),
         );
       }
-      notifyWorkflowFinished(task);
+      if (isHeadless(ctx)) {
+        // -p / JSON: no user turn follows, so the drain delivers this — route it
+        // through the outbox the drain consumes.
+        notifyWorkflowFinished(task);
+      } else {
+        // Interactive: a user-launched startup workflow is not a reply to
+        // anything. Hand its result to the model as context for the next user
+        // turn rather than waking an idle session (#341 needs the outbox only
+        // under -p; the SubagentWorkflow tool, being model-initiated, still does).
+        redrawWorkflowSurfaces(task);
+        try {
+          pi.sendMessage(
+            { customType: "workflow-result", content: formatWorkflowNotification(task), display: false },
+            { deliverAs: "nextTurn" },
+          );
+        } catch { /* stale pi */ }
+      }
     }));
   }
 
