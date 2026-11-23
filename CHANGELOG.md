@@ -9,11 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **⚠️ Note — `pi -p` now stays open until background agents and workflows finish** ([#452](https://github.com/tintinweb/pi-subagents/pull/452)). A script may run longer than before: there is no time limit by default, so set `headlessWaitMinutes` to cap it. SDK hosts that bind extensions without a mode are treated as print mode and wait too.
 
-> **⚠️ Note — a subagent that starts background nested agents now waits for them before it finishes.** Its run, and a foreground `Agent` call waiting on it, can take longer than before.
+> **⚠️ Note — a subagent that starts background nested agents now waits for them before it finishes** ([#476](https://github.com/tintinweb/pi-subagents/pull/476)). Its run, and a foreground `Agent` call waiting on it, can take longer than before.
 
 ### Fixed
 - **Headless runs wait for background work and answer with its result** ([#452](https://github.com/tintinweb/pi-subagents/pull/452), closes [#341](https://github.com/tintinweb/pi-subagents/issues/341), superseding [#408](https://github.com/tintinweb/pi-subagents/pull/408) — thanks [@ajaynomics](https://github.com/ajaynomics)). In print and JSON mode, background agents, `SubagentWorkflow` runs and `--subagents-workflow-file` runs were stopped when the parent's turn ended, and their results were lost. pi-subagents now waits for them, writes a notice to stderr, and the model answers in a further turn. The new `headlessWaitMinutes` setting (default `0` = no limit) stops the work after that many minutes. Hosts that patched pi's follow-up queue to hold the run can drop the patch.
-- **A subagent's background nested agents report back to it instead of being stopped.** They used to be stopped the moment it answered, their work lost, often while its answer still called them "running". Its run now stays open until they finish, their results arrive as a further turn, and its final answer reflects them. A steer sent while it waits is delivered at once.
+- **A subagent's background nested agents report back to it instead of being stopped** ([#476](https://github.com/tintinweb/pi-subagents/pull/476)). They used to be stopped the moment it answered, their work lost, often while its answer still called them "running". Its run now stays open until they finish, their results arrive as a further turn, and its final answer reflects them. A steer sent while it waits is delivered at once.
 
 ## [0.26.2] - 2026-11-20
 
