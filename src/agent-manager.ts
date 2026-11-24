@@ -395,6 +395,7 @@ async function shutdownChildSession(session: AgentSession | undefined): Promise<
 }
 
 export class AgentManager {
+  onActivityChange?: () => void;
   private agents = new Map<string, AgentRecord>();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
@@ -645,6 +646,7 @@ export class AgentManager {
       sessionFile: options.resumeSessionFile,
     };
     this.agents.set(id, record);
+    this.onActivityChange?.();
     // After the insert, so `takenHandles()` already counts this record's own
     // handle — a spawn named after its own type gets `explore-2`, not a
     // duplicate `explore` that would make resolution ambiguous.
@@ -700,6 +702,7 @@ export class AgentManager {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        this.onActivityChange?.();
       }
       return false;
     }
@@ -747,7 +750,7 @@ export class AgentManager {
    */
   private launch(id: string, record: AgentRecord, args: SpawnArgs, queuedPool: Pool | undefined): Promise<void> {
     const startup = this.startAgent(id, record, args).then(
-      () => { this.startups.delete(id); },
+      () => { this.startups.delete(id); this.onActivityChange?.(); },
       (err) => {
         this.startups.delete(id);
         if (queuedPool !== undefined) {
@@ -762,6 +765,7 @@ export class AgentManager {
         } else {
           this.agents.delete(id);
         }
+        this.onActivityChange?.();
         // The agent never kept its slot (startAgent gives it back on failure),
         // so anything queued behind it can go now.
         this.drainQueue();
@@ -1093,6 +1097,7 @@ export class AgentManager {
     const pool = record.chargedPool;
     this.chargePool(pool, -1);
 
+    this.onActivityChange?.();
     if (guardCallback) {
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
     } else {
@@ -1132,7 +1137,6 @@ export class AgentManager {
     const pending: Promise<unknown>[] = [];
     const startup = this.startups.get(record.id);
     if (startup) pending.push(startup);
-    // A foreground resume's promise is not tracked in `unsettled`; its status is.
     if (record.promise && (record.status === "running" || this.unsettled.has(record.promise))) {
       pending.push(record.promise);
     }
@@ -1335,6 +1339,7 @@ export class AgentManager {
       record.error = undefined;
       record.completedAt = undefined;
       record.status = "queued";
+      this.onActivityChange?.();
 
       const start = () => this.startResume(id, record, prompt, signal, options);
       if (occupiesPoolSlot(record) && !this.poolHasRoom("background")) {
@@ -1353,6 +1358,7 @@ export class AgentManager {
               record.status = "error";
               record.error = err instanceof Error ? err.message : String(err);
               record.completedAt = Date.now();
+              this.onActivityChange?.();
               this.onComplete?.(record);
             }
           },
@@ -1366,6 +1372,7 @@ export class AgentManager {
 
     // Foreground resume: run inline and return the settled record.
     record.status = "running";
+    this.onActivityChange?.();
     record.startedAt = Date.now();
     record.completedAt = undefined;
     record.result = undefined;
@@ -1422,8 +1429,9 @@ export class AgentManager {
       this.abortOwnedChildren(id);
       return record.result ?? "";
     })();
-    record.promise = run;
+    this.trackRun(record, run);
     await run;
+    this.onActivityChange?.();
 
     return record;
   }
@@ -1514,6 +1522,7 @@ export class AgentManager {
       // Children of a resumed turn cut short must not outlive it.
       this.abortOwnedChildren(id);
       if (occupiesPoolSlot(record)) this.runningBackground--;
+      this.onActivityChange?.();
       try { this.onComplete?.(record); } catch { /* ignore completion side-effect errors */ }
       this.drainQueue();
     };
@@ -1690,6 +1699,7 @@ export class AgentManager {
       this.dequeue(q => q.id === id);
       record.status = "stopped";
       record.completedAt = Date.now();
+      this.onActivityChange?.();
       return true;
     }
 
@@ -1697,6 +1707,7 @@ export class AgentManager {
     record.abortController?.abort();
     record.status = "stopped";
     record.completedAt = Date.now();
+    this.onActivityChange?.();
     return true;
   }
 
@@ -1787,6 +1798,11 @@ export class AgentManager {
     this.tombstones.clear();
   }
 
+  /** Whether any agent is queued, running, or still settling after a stop. */
+  hasActivity(): boolean {
+    return this.startups.size > 0 || this.unsettled.size > 0 || this.hasRunning();
+  }
+
   /** Whether any agents are still running or queued. */
   hasRunning(): boolean {
     return [...this.agents.values()].some(
@@ -1816,6 +1832,7 @@ export class AgentManager {
         count++;
       }
     }
+    this.onActivityChange?.();
     return count;
   }
 
@@ -1870,7 +1887,7 @@ export class AgentManager {
   private trackRun(record: AgentRecord, promise: Promise<string>): void {
     record.promise = promise;
     this.unsettled.add(promise);
-    const done = () => { this.unsettled.delete(promise); };
+    const done = () => { this.unsettled.delete(promise); this.onActivityChange?.(); };
     promise.then(done, done);
   }
 

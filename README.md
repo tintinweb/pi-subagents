@@ -163,6 +163,8 @@ Restrictions:
 
 ## UI
 
+In an interactive Herdr terminal, active agents and workflows publish an independent OSC 7501 `pi-subagents` working record. It clears when the work finishes or the session shuts down; it does not overwrite Pi's root status. Noninteractive output is unchanged.
+
 The extension renders a persistent widget above the editor showing active agents. By default it shows background runs only (`widgetMode: background`) — foreground agents already render inline as the `Agent` tool result, so the widget would otherwise double-render them. Switch to `all` (every agent) or `off` (hide the widget) via `/agents → Settings → Widget`:
 
 ```
