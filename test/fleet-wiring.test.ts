@@ -19,8 +19,14 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
+vi.mock("../src/workflow/runtime.js", async () => {
+  const actual = await vi.importActual<typeof import("../src/workflow/runtime.js")>("../src/workflow/runtime.js");
+  return { ...actual, runWorkflow: vi.fn() };
+});
+
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { runWorkflow } from "../src/workflow/runtime.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -101,6 +107,220 @@ describe("FleetView wiring (real extension lifecycle)", () => {
     rmSync(tmpDir, { recursive: true, force: true });
     rmSync(agentDir, { recursive: true, force: true });
     vi.restoreAllMocks();
+  });
+
+  it("keeps separate Herdr records for independent extension instances", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    try {
+      const first = makePi();
+      const second = makePi();
+      subagentsExtension(first.pi);
+      subagentsExtension(second.pi);
+      const ctx = ctxWith(uiCtx());
+      await first.lifecycle.get("session_start")?.({}, ctx);
+      await second.lifecycle.get("session_start")?.({}, ctx);
+      const params = { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: true };
+      await first.tools.get("Agent").execute("first", params, undefined, undefined, ctx);
+      await second.tools.get("Agent").execute("second", params, undefined, undefined, ctx);
+      const ids = write.mock.calls.map(call => String(call[0]).match(/:id=([^\x1b]+)/)?.[1]);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).toMatch(/^[A-Za-z0-9_.+-]{1,32}$/);
+      expect(ids[1]).not.toBe(ids[0]);
+      await first.lifecycle.get("session_shutdown")?.({}, ctx);
+      await second.lifecycle.get("session_shutdown")?.({}, ctx);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not clear Herdr activity while an already-aborted spawn settles", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    let finish!: () => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => {
+      finish = () => resolve({ responseText: "done", session: { dispose: vi.fn() } as any, aborted: true, steered: false });
+    }));
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = ctxWith(uiCtx());
+      await lifecycle.get("session_start")?.({}, ctx);
+      const abort = new AbortController();
+      abort.abort();
+      const pending = tools.get("Agent").execute("spawn", { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: false }, abort.signal, undefined, ctx);
+      await flush();
+      expect(write.mock.calls.map(call => String(call[0]))).toHaveLength(1);
+      finish();
+      await pending;
+      await flush();
+      expect(write).toHaveBeenCalledTimes(2);
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports independent Herdr activity until the last agent finishes", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const finishes: Array<() => void> = [];
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => {
+      finishes.push(() => resolve({ responseText: "done", session: { dispose: vi.fn() } as any, aborted: false, steered: false }));
+    }));
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = ctxWith(uiCtx());
+      await lifecycle.get("session_start")?.({}, ctx);
+      for (const description of ["first", "second"]) {
+        await tools.get("Agent").execute(description, { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx);
+      }
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
+      expect(write.mock.calls.map(call => call[0])).toEqual([`\x1b]7501;state=working:id=${id}\x1b\\`]);
+      finishes[0]();
+      await flush();
+      expect(write).toHaveBeenCalledTimes(1);
+      finishes[1]();
+      await flush();
+      expect(write.mock.calls.map(call => call[0])).toEqual([
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
+      ]);
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("keeps activity until a running agent settles after a queued cancellation", async () => {
+    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, maxConcurrentForeground: 1 }));
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    let finish!: () => void;
+    vi.mocked(runAgent).mockClear();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => {
+      finish = () => resolve({ responseText: "done", session: { dispose: vi.fn() } as any, aborted: false, steered: false });
+    }));
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = ctxWith(uiCtx());
+      await lifecycle.get("session_start")?.({}, ctx);
+      const tool = tools.get("Agent");
+      const params = { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: false };
+      const first = tool.execute("first", params, undefined, undefined, ctx);
+      await flush();
+      const abort = new AbortController();
+      const second = tool.execute("second", params, abort.signal, undefined, ctx);
+      await flush();
+      abort.abort();
+      await second;
+      expect(runAgent).toHaveBeenCalledTimes(1);
+      expect(write).toHaveBeenCalledTimes(1);
+      finish();
+      await first;
+      await flush();
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
+      expect(write.mock.calls.map(call => call[0])).toEqual([
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
+      ]);
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("reports a workflow even before it starts an agent", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    let finish!: () => void;
+    vi.mocked(runWorkflow).mockImplementation(() => new Promise(resolve => {
+      finish = () => resolve({ status: "completed", meta: { name: "test", description: "test" }, agentCount: 0, replayedCount: 0, failures: [] } as any);
+    }));
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = ctxWith(uiCtx());
+      await lifecycle.get("session_start")?.({}, ctx);
+      await tools.get("SubagentWorkflow").execute("workflow", { script: 'export const meta = { name: "test", description: "test" };' }, undefined, undefined, ctx);
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
+      expect(write.mock.calls.map(call => call[0])).toEqual([`\x1b]7501;state=working:id=${id}\x1b\\`]);
+      finish();
+      await flush();
+      expect(write.mock.calls.map(call => call[0])).toEqual([
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
+      ]);
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("clears the record on shutdown while work remains", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = ctxWith(uiCtx());
+      await lifecycle.get("session_start")?.({}, ctx);
+      await tools.get("Agent").execute("spawn", { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx);
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
+      expect(write.mock.calls.map(call => call[0])).toEqual([
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
+      ]);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not write OSC reports in noninteractive mode", async () => {
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.mocked(runAgent).mockResolvedValue({ responseText: "done", session: { dispose: vi.fn() } as any, aborted: false, steered: false });
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = { ...ctxWith(uiCtx()), hasUI: false };
+      await lifecycle.get("session_start")?.({}, ctx);
+      await tools.get("Agent").execute("spawn", { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx);
+      await flush();
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("captures terminal input on tool_execution_start (fleet hooked into the UI)", async () => {

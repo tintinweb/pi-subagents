@@ -10,6 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -1113,6 +1114,10 @@ export default function (pi: ExtensionAPI) {
       );
     }
     sessionEnded = true;
+    if (herdrActive) {
+      process.stdout.write(`\x1b]7501;state=clear:id=${herdrId}\x1b\\`);
+      herdrActive = false;
+    }
     rpcHandle?.unsubSpawn();
     rpcHandle?.unsubStop();
     rpcHandle?.unsubPing();
@@ -2601,6 +2606,17 @@ Terse command-style prompts produce shallow, generic work.
    * background run.
    */
   const workflowTasks = new Map<string, WorkflowTask>();
+  const herdrId = `pi-subagents-${randomBytes(8).toString("hex")}`;
+  let herdrActive = false;
+  function updateHerdrActivity(): void {
+    if (sessionEnded || !currentCtx?.hasUI || !process.stdout.isTTY || !process.env.HC_TERMINAL_ID) return;
+    const active = manager.hasActivity()
+      || [...workflowTasks.values()].some(task => task.status === "running" || task.status === "paused");
+    if (active === herdrActive) return;
+    herdrActive = active;
+    process.stdout.write(`\x1b]7501;state=${active ? "working" : "clear"}:id=${herdrId}\x1b\\`);
+  }
+  manager.onActivityChange = updateHerdrActivity;
 
   /**
    * pi's renderer mode, as last seen on a TUI the fleet list was drawn into.
@@ -2709,6 +2725,7 @@ Terse command-style prompts produce shallow, generic work.
     } catch (err) {
       failWorkflowTask(task, err instanceof Error ? err.message : String(err));
     }
+    updateHerdrActivity();
     announce("subagents:workflow_settled", () => ({ ...toWorkflowInfo(task), ...workflowResult(task) }));
   }
 
@@ -2906,6 +2923,7 @@ Terse command-style prompts produce shallow, generic work.
         ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
       });
       workflowTasks.set(runId, task);
+      updateHerdrActivity();
       // The run's own row has to appear now, not when it settles. Its agents
       // are owned by it, so their lifecycle callbacks no longer refresh these
       // surfaces — nothing else would register the widget for a run whose
@@ -3073,6 +3091,7 @@ Terse command-style prompts produce shallow, generic work.
 
     const task = createWorkflowTask({ id: workflowRunId(), script, scriptPath: path, meta });
     workflowTasks.set(task.id, task);
+    updateHerdrActivity();
     widget.update();
     fleet.update();
     report(`Running workflow ${meta.name}…`, "info");

@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Herdr activity record.** Interactive Herdr terminals receive a separate working status per extension instance while subagents or workflows are active, cleared when they finish or the session shuts down. Pi's root status and noninteractive output are unchanged.
+
 ## [0.26.3] - 2026-11-23
 
 > **⚠️ Note — `pi -p` now stays open until background agents and workflows finish** ([#452](https://github.com/tintinweb/pi-subagents/pull/452)). A script may run longer than before: there is no time limit by default, so set `headlessWaitMinutes` to cap it. SDK hosts that bind extensions without a mode are treated as print mode and wait too.
