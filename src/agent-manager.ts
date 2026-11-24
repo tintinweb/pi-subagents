@@ -749,6 +749,7 @@ export class AgentManager {
    *   handle goes back.
    */
   private launch(id: string, record: AgentRecord, args: SpawnArgs, queuedPool: Pool | undefined): Promise<void> {
+    this.startups.set(id, Promise.resolve());
     const startup = this.startAgent(id, record, args).then(
       () => { this.startups.delete(id); this.onActivityChange?.(); },
       (err) => {

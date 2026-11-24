@@ -10,6 +10,7 @@
  *   /agents                 — Interactive agent management menu
  */
 
+import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -1114,7 +1115,7 @@ export default function (pi: ExtensionAPI) {
     }
     sessionEnded = true;
     if (herdrActive) {
-      process.stdout.write("\x1b]7501;state=clear:id=pi-subagents\x1b\\");
+      process.stdout.write(`\x1b]7501;state=clear:id=${herdrId}\x1b\\`);
       herdrActive = false;
     }
     rpcHandle?.unsubSpawn();
@@ -2605,6 +2606,7 @@ Terse command-style prompts produce shallow, generic work.
    * background run.
    */
   const workflowTasks = new Map<string, WorkflowTask>();
+  const herdrId = `pi-subagents-${randomBytes(8).toString("hex")}`;
   let herdrActive = false;
   function updateHerdrActivity(): void {
     if (sessionEnded || !currentCtx?.hasUI || !process.stdout.isTTY || !process.env.HC_TERMINAL_ID) return;
@@ -2612,7 +2614,7 @@ Terse command-style prompts produce shallow, generic work.
       || [...workflowTasks.values()].some(task => task.status === "running" || task.status === "paused");
     if (active === herdrActive) return;
     herdrActive = active;
-    process.stdout.write(`\x1b]7501;state=${active ? "working" : "clear"}:id=pi-subagents\x1b\\`);
+    process.stdout.write(`\x1b]7501;state=${active ? "working" : "clear"}:id=${herdrId}\x1b\\`);
   }
   manager.onActivityChange = updateHerdrActivity;
 

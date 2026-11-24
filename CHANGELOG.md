@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Herdr activity record.** Interactive Herdr terminals receive an independent working status while subagents or workflows are active, cleared when they finish or the session shuts down. Pi's root status and noninteractive output are unchanged.
+- **Herdr activity record.** Interactive Herdr terminals receive a separate working status per extension instance while subagents or workflows are active, cleared when they finish or the session shuts down. Pi's root status and noninteractive output are unchanged.
 
 ## [0.26.3] - 2026-11-23
 

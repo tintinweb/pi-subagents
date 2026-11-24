@@ -109,6 +109,67 @@ describe("FleetView wiring (real extension lifecycle)", () => {
     vi.restoreAllMocks();
   });
 
+  it("keeps separate Herdr records for independent extension instances", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}));
+    try {
+      const first = makePi();
+      const second = makePi();
+      subagentsExtension(first.pi);
+      subagentsExtension(second.pi);
+      const ctx = ctxWith(uiCtx());
+      await first.lifecycle.get("session_start")?.({}, ctx);
+      await second.lifecycle.get("session_start")?.({}, ctx);
+      const params = { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: true };
+      await first.tools.get("Agent").execute("first", params, undefined, undefined, ctx);
+      await second.tools.get("Agent").execute("second", params, undefined, undefined, ctx);
+      const ids = write.mock.calls.map(call => String(call[0]).match(/:id=([^\x1b]+)/)?.[1]);
+      expect(ids).toHaveLength(2);
+      expect(ids[0]).toMatch(/^[A-Za-z0-9_.+-]{1,32}$/);
+      expect(ids[1]).not.toBe(ids[0]);
+      await first.lifecycle.get("session_shutdown")?.({}, ctx);
+      await second.lifecycle.get("session_shutdown")?.({}, ctx);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("does not clear Herdr activity while an already-aborted spawn settles", async () => {
+    const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
+    vi.stubEnv("HC_TERMINAL_ID", "test-terminal");
+    const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    let finish!: () => void;
+    vi.mocked(runAgent).mockImplementation(() => new Promise(resolve => {
+      finish = () => resolve({ responseText: "done", session: { dispose: vi.fn() } as any, aborted: true, steered: false });
+    }));
+    try {
+      const { pi, tools, lifecycle } = makePi();
+      subagentsExtension(pi);
+      const ctx = ctxWith(uiCtx());
+      await lifecycle.get("session_start")?.({}, ctx);
+      const abort = new AbortController();
+      abort.abort();
+      const pending = tools.get("Agent").execute("spawn", { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: false }, abort.signal, undefined, ctx);
+      await flush();
+      expect(write.mock.calls.map(call => String(call[0]))).toHaveLength(1);
+      finish();
+      await pending;
+      await flush();
+      expect(write).toHaveBeenCalledTimes(2);
+      await lifecycle.get("session_shutdown")?.({}, ctx);
+    } finally {
+      if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
+      else Reflect.deleteProperty(process.stdout, "isTTY");
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("reports independent Herdr activity until the last agent finishes", async () => {
     const tty = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
     Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: true });
@@ -126,15 +187,16 @@ describe("FleetView wiring (real extension lifecycle)", () => {
       for (const description of ["first", "second"]) {
         await tools.get("Agent").execute(description, { prompt: "go", description, subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx);
       }
-      expect(write.mock.calls.map(call => call[0])).toEqual(["\x1b]7501;state=working:id=pi-subagents\x1b\\"]);
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
+      expect(write.mock.calls.map(call => call[0])).toEqual([`\x1b]7501;state=working:id=${id}\x1b\\`]);
       finishes[0]();
       await flush();
       expect(write).toHaveBeenCalledTimes(1);
       finishes[1]();
       await flush();
       expect(write.mock.calls.map(call => call[0])).toEqual([
-        "\x1b]7501;state=working:id=pi-subagents\x1b\\",
-        "\x1b]7501;state=clear:id=pi-subagents\x1b\\",
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
       ]);
       await lifecycle.get("session_shutdown")?.({}, ctx);
     } finally {
@@ -174,9 +236,10 @@ describe("FleetView wiring (real extension lifecycle)", () => {
       finish();
       await first;
       await flush();
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
       expect(write.mock.calls.map(call => call[0])).toEqual([
-        "\x1b]7501;state=working:id=pi-subagents\x1b\\",
-        "\x1b]7501;state=clear:id=pi-subagents\x1b\\",
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
       ]);
       await lifecycle.get("session_shutdown")?.({}, ctx);
     } finally {
@@ -201,12 +264,13 @@ describe("FleetView wiring (real extension lifecycle)", () => {
       const ctx = ctxWith(uiCtx());
       await lifecycle.get("session_start")?.({}, ctx);
       await tools.get("SubagentWorkflow").execute("workflow", { script: 'export const meta = { name: "test", description: "test" };' }, undefined, undefined, ctx);
-      expect(write.mock.calls.map(call => call[0])).toEqual(["\x1b]7501;state=working:id=pi-subagents\x1b\\"]);
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
+      expect(write.mock.calls.map(call => call[0])).toEqual([`\x1b]7501;state=working:id=${id}\x1b\\`]);
       finish();
       await flush();
       expect(write.mock.calls.map(call => call[0])).toEqual([
-        "\x1b]7501;state=working:id=pi-subagents\x1b\\",
-        "\x1b]7501;state=clear:id=pi-subagents\x1b\\",
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
       ]);
       await lifecycle.get("session_shutdown")?.({}, ctx);
     } finally {
@@ -229,9 +293,10 @@ describe("FleetView wiring (real extension lifecycle)", () => {
       await lifecycle.get("session_start")?.({}, ctx);
       await tools.get("Agent").execute("spawn", { prompt: "go", description: "work", subagent_type: "general-purpose", run_in_background: true }, undefined, undefined, ctx);
       await lifecycle.get("session_shutdown")?.({}, ctx);
+      const id = String(write.mock.calls[0][0]).match(/:id=([^\x1b]+)/)?.[1];
       expect(write.mock.calls.map(call => call[0])).toEqual([
-        "\x1b]7501;state=working:id=pi-subagents\x1b\\",
-        "\x1b]7501;state=clear:id=pi-subagents\x1b\\",
+        `\x1b]7501;state=working:id=${id}\x1b\\`,
+        `\x1b]7501;state=clear:id=${id}\x1b\\`,
       ]);
     } finally {
       if (tty) Object.defineProperty(process.stdout, "isTTY", tty);
