@@ -37,10 +37,20 @@
  * injection — there is nothing to inject over. So before the script runs, a
  * shim runs inside the realm: it replaces
  * `globalThis.Date` with a constructor whose zero-argument and call forms
- * throw, points `Date.prototype.constructor` at it, makes `Date.now` and
- * `Math.random` throw, and freezes the real constructor. A global rather than
+ * throw, points `Date.prototype.constructor` at it, and replaces
+ * `globalThis.Math` with a copy whose `random` throws. A global rather than
  * a lexical shadow, because a lexical `const Date` left `new globalThis.Date()`
  * reading the real clock.
+ *
+ * The globals are replaced rather than the builtins edited, because a realm is
+ * not obliged to let us edit them: JavaScriptCore — so every Bun process,
+ * including the compiled pi-bolt binary — hands a vm context `Math.random` and
+ * `Date.now` as non-writable *and* non-configurable, where an assignment throws
+ * `Attempted to assign to readonly property.` and takes the whole run down
+ * before the first agent starts. Editing the real builtins is still attempted,
+ * since it is what makes `new Date(0).constructor` throw, but only the global
+ * replacement is load-bearing, and a realm that refuses even that fails with a
+ * message that names the property instead of a raw engine TypeError.
  *
  * Determinism is enforced because a workflow's journal is replayed by prefix on
  * resume: a script that reads the clock produces a different prefix on the
@@ -53,24 +63,111 @@ const RANDOM_ERROR =
   "Math.random() is unavailable in workflow scripts (breaks resume). For N independent samples, include the index in the agent label or prompt.";
 
 /** Runs once per vm context, before any script is compiled into it. Messages match what Claude Code scripts see, for compatibility. */
-const DETERMINISM_SHIM = `(() => {
+export const DETERMINISM_SHIM = `(() => {
   "use strict";
   const NOW_ERROR = ${JSON.stringify(NOW_ERROR)};
   const RANDOM_ERROR = ${JSON.stringify(RANDOM_ERROR)};
-  Math.random = function random() { throw new Error(RANDOM_ERROR); };
+  // A realm does not always let us edit its own builtins. JavaScriptCore hands a
+  // vm context Math.random and Date.now as non-writable *and* non-configurable, so
+  // assigning over them throws "Attempted to assign to readonly property." and
+  // defineProperty cannot take the slot either; that is every realm under Bun,
+  // including the compiled pi-bolt binary. Replacing the Math and Date globals
+  // works everywhere, so the builtins are now best-effort and the globals are the
+  // guarantee. Both steps report through __wfDeterminism.
+  const RealMath = Math;
   const RealDate = Date;
-  RealDate.now = function now() { throw new Error(NOW_ERROR); };
+  // JSC reports these global slots as read-only until something inspects them;
+  // reading the descriptor materialises the slot so the write below can land.
+  Object.getOwnPropertyDescriptor(globalThis, "Math");
+  Object.getOwnPropertyDescriptor(globalThis, "Date");
+  function replaceSlot(target, key, value) {
+    try {
+      target[key] = value;
+      return true;
+    } catch (assignFailure) {
+      try {
+        Object.defineProperty(target, key, {
+          value: value,
+          writable: true,
+          configurable: true,
+          enumerable: false,
+        });
+        return true;
+      } catch (defineFailure) {
+        return false;
+      }
+    }
+  }
+  const ShimMath = {};
+  for (const key of Object.getOwnPropertyNames(RealMath)) {
+    if (key === "random") continue;
+    const desc = Object.getOwnPropertyDescriptor(RealMath, key);
+    if (desc) {
+      desc.enumerable = false;
+      try {
+        Object.defineProperty(ShimMath, key, desc);
+      } catch (copyFailure) {}
+    }
+  }
+  Object.defineProperty(ShimMath, "random", {
+    value: function random() {
+      throw new Error(RANDOM_ERROR);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
   function WorkflowDate(...args) {
     if (!new.target || args.length === 0) throw new Error(NOW_ERROR);
     return Reflect.construct(RealDate, args, new.target);
   }
-  WorkflowDate.now = RealDate.now;
-  WorkflowDate.parse = RealDate.parse;
-  WorkflowDate.UTC = RealDate.UTC;
   WorkflowDate.prototype = RealDate.prototype;
-  RealDate.prototype.constructor = WorkflowDate;
-  Object.freeze(RealDate);
-  globalThis.Date = WorkflowDate;
+  Object.defineProperty(WorkflowDate, "now", {
+    value: function now() {
+      throw new Error(NOW_ERROR);
+    },
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  Object.defineProperty(WorkflowDate, "parse", {
+    value: RealDate.parse,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  Object.defineProperty(WorkflowDate, "UTC", {
+    value: RealDate.UTC,
+    writable: true,
+    configurable: true,
+    enumerable: false,
+  });
+  const neuteredRealDate = replaceSlot(RealDate, "now", WorkflowDate.now);
+  const neuteredConstructor = replaceSlot(RealDate.prototype, "constructor", WorkflowDate);
+  try {
+    Object.freeze(RealDate);
+  } catch (freezeFailure) {}
+  const shimmedMath = replaceSlot(globalThis, "Math", ShimMath);
+  const shimmedDate = replaceSlot(globalThis, "Date", WorkflowDate);
+  Object.defineProperty(globalThis, "__wfDeterminism", {
+    value: {
+      math: shimmedMath,
+      date: shimmedDate,
+      realDate: neuteredRealDate,
+      realConstructor: neuteredConstructor,
+    },
+    enumerable: false,
+  });
+  if (!shimmedMath || !shimmedDate) {
+    const refused = [];
+    if (!shimmedMath) refused.push("Math");
+    if (!shimmedDate) refused.push("Date");
+    throw new Error(
+      "the workflow realm would not accept the determinism shim (" +
+        refused.join(" and ") +
+        "); a script that reads the clock cannot be replayed on resume",
+    );
+  }
 })()`;
 
 export const WORKER_SOURCE = `"use strict";

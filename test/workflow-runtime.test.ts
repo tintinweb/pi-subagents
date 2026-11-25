@@ -1,3 +1,4 @@
+import { createContext, runInContext } from "node:vm";
 import { describe, expect, it } from "vitest";
 import type { WorkflowJournalEntry } from "../src/workflow/journal.js";
 import { buildPhaseGroups, type WorkflowAgentEntry, type WorkflowEntry } from "../src/workflow/progress.js";
@@ -14,6 +15,7 @@ import {
   type WorkflowSpawnResult,
   workflowConcurrency,
 } from "../src/workflow/runtime.js";
+import { DETERMINISM_SHIM } from "../src/workflow/worker-source.js";
 
 const HEAD = 'export const meta = { name: "probe", description: "a test workflow" };\n';
 
@@ -406,6 +408,69 @@ describe("determinism shim", () => {
     expect(value.stamped).toBe(0);
     expect(value.isDate).toBe(true);
     expect(value.utc).toBe(86_400_000);
+  });
+
+  /**
+   * A realm shaped like the one JavaScriptCore hands a `vm` context — the slots
+   * the shim used to assign over are non-writable *and* non-configurable. V8 lets
+   * us lock them the same way, so the failure that took every pi-bolt workflow
+   * down before its first agent reproduces here.
+   */
+  function readOnlySlotRealm(): ReturnType<typeof createContext> {
+    const context = createContext({}, { name: "workflow", codeGeneration: { strings: false, wasm: false } });
+    runInContext(
+      [
+        "for (const pair of [[Math, 'random'], [Date, 'now'], [Date.prototype, 'constructor']]) {",
+        "  Object.defineProperty(pair[0], pair[1], { value: pair[0][pair[1]], writable: false, configurable: false });",
+        "}",
+      ].join("\n"),
+      context,
+    );
+    return context;
+  }
+
+  const readRealm = (context: ReturnType<typeof createContext>, source: string) => {
+    try {
+      return { value: runInContext(source, context) };
+    } catch (error) {
+      return { message: (error as Error).message };
+    }
+  };
+
+  it("installs where the realm's own builtins cannot be assigned", () => {
+    const context = readOnlySlotRealm();
+    // What the shim used to do. V8 words the refusal differently from JSC's
+    // `Attempted to assign to readonly property.`, and the error comes from the
+    // realm, so pin the message rather than the constructor.
+    expect(() => runInContext("(() => { 'use strict'; Math.random = function () {}; })()", context)).toThrow(
+      /Cannot assign to read only property/,
+    );
+    expect(() => runInContext(DETERMINISM_SHIM, context)).not.toThrow();
+
+    // The clock and the random read are still blocked, through the global too.
+    for (const source of [
+      "Date.now()",
+      "new Date()",
+      "Date()",
+      "globalThis.Date.now()",
+      "Math.random()",
+      "globalThis.Math.random()",
+    ]) {
+      expect(readRealm(context, source).message).toContain("unavailable in workflow scripts");
+    }
+    // Everything a script legitimately uses still works.
+    expect(readRealm(context, "Math.floor(2.9)")).toEqual({ value: 2 });
+    expect(readRealm(context, "Math.PI > 3")).toEqual({ value: true });
+    expect(readRealm(context, "new Date(0).getTime()")).toEqual({ value: 0 });
+    expect(readRealm(context, "new Date(0) instanceof Date")).toEqual({ value: true });
+    expect(readRealm(context, "Date.UTC(1970, 0, 2)")).toEqual({ value: 86_400_000 });
+    // It says so: the globals landed, the locked builtins did not.
+    expect(JSON.parse(runInContext("JSON.stringify(globalThis.__wfDeterminism)", context))).toEqual({
+      math: true,
+      date: true,
+      realDate: false,
+      realConstructor: false,
+    });
   });
 
   it("blocks code generation from strings", async () => {
