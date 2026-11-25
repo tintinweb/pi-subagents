@@ -142,6 +142,83 @@ describe("resolveModel", () => {
     });
   });
 
+  describe("provider fallback refuses a different model than the pin names", () => {
+    // A pinned provider that is registered but has no auth must not hand the
+    // caller a different model from an unrelated provider: the loose bare-id
+    // retry scored "glm-5.3-flash:cloud" as a substring match for "glm-5.3" and
+    // reported the substitution as a successful resolution.
+    const pinned = { id: "glm-5.3", name: "GLM 5.3", provider: "opencode-go" };
+    const flash = { id: "glm-5.3-flash:cloud", name: "GLM 5.3 Flash", provider: "ollama-cloud" };
+
+    it("errors instead of resolving a registered pin to another provider's model", () => {
+      const result = resolveModel("opencode-go/glm-5.3", makeRegistry([pinned, flash], [flash]));
+      expect(typeof result).toBe("string");
+      expect(result).toContain('Model not found: "opencode-go/glm-5.3"');
+      expect(result).toContain("registered but not available");
+      // The refused candidate is named, so the reader sees what nearly ran.
+      expect(result).toContain("ollama-cloud/glm-5.3-flash:cloud");
+    });
+
+    it("still accepts the same id under another provider", () => {
+      const gateway = { id: "glm-5.3", name: "GLM 5.3", provider: "ollama-cloud" };
+      expect(resolveModel("opencode-go/glm-5.3", makeRegistry([pinned, gateway], [gateway]))).toEqual(gateway);
+    });
+
+    it("still accepts a dated pin resolving to the same undated id under another provider", () => {
+      const gateway = { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "openrouter" };
+      expect(resolveModel("anthropic/claude-haiku-4-5-20251001", makeRegistry([gateway]))).toEqual(gateway);
+    });
+
+    it("still accepts a fuzzy name under another provider when the named provider is absent", () => {
+      const gateway = { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "openrouter" };
+      expect(resolveModel("anthropic/haiku", makeRegistry([gateway]))).toEqual(gateway);
+    });
+
+    it("does not claim another provider's model is a registered-but-unavailable pin", () => {
+      // "glm-5.3" is registered under a provider the caller never named, so the
+      // reason must report the refused candidate without asserting that the
+      // named provider holds the model.
+      const result = resolveModel("nowhere/glm-5.3", makeRegistry([pinned, flash], [flash]));
+      expect(typeof result).toBe("string");
+      expect(result).not.toContain("registered but not available");
+      expect(result).toContain("ollama-cloud/glm-5.3-flash:cloud");
+    });
+
+    it("holds the guard on a registry that exposes only find and getAvailable", () => {
+      // pi's own registry exposes getAll, but a registry that implements less
+      // must not throw, and the pin must still hold: find() reads the full
+      // catalog rather than the availability snapshot, so the qualified question
+      // the guard asks is answerable without getAll.
+      const registry = {
+        find: (provider: string, id: string) => [pinned, flash].find(m => m.provider === provider && m.id === id),
+        getAvailable: () => [flash],
+      } as unknown as ModelRegistry;
+      const result = resolveModel("opencode-go/glm-5.3", registry);
+      expect(typeof result).toBe("string");
+      expect(result).toContain("registered but not available");
+      expect(result).toContain("ollama-cloud/glm-5.3-flash:cloud");
+    });
+  });
+
+  describe("not-found reason names a pin whose provider has no auth", () => {
+    it("separates a registered-but-unavailable pin from a model nobody has", () => {
+      // opus and haiku have auth, sonnet does not.
+      const available = [MODELS[0], MODELS[2]];
+      const result = resolveModel("anthropic/claude-sonnet-4-6", makeRegistry(MODELS, available));
+      expect(typeof result).toBe("string");
+      expect(result).toContain('Model not found: "anthropic/claude-sonnet-4-6"');
+      expect(result).toContain("registered but not available");
+    });
+
+    it("keeps the bare message when no registry holds the pin", () => {
+      // The prefix and shape are an RPC reply-envelope contract (docs/rpc.md).
+      const result = resolveModel("anthropic/does-not-exist", makeRegistry(MODELS));
+      expect(result).toBe(
+        `Model not found: "anthropic/does-not-exist".\n\nAvailable models:\n${MODELS.map(m => `  ${m.provider}/${m.id}`).sort().join("\n")}`,
+      );
+    });
+  });
+
   describe("fuzzy match — name contains", () => {
     it("matches 'Opus 4.6' via model name", () => {
       const result = resolveModel("Opus 4.6", makeRegistry());

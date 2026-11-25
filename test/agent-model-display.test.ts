@@ -254,6 +254,39 @@ describe("Agent tool result — effective model", () => {
     expect(result.details.modelName).toBe("haiku 4.5 (asked anthropic/claude-opus-4-6)");
   });
 
+  it("inherits instead of running another provider's near-named model (#480)", async () => {
+    // The pin names a model its provider does carry, but with no auth configured
+    // for that provider it cannot run. The bare-id retry used to score
+    // "glm-5.3-flash:cloud" as a near match for "glm-5.3", so the agent ran the
+    // flash model and this surface reported the substitution as the model the
+    // agent ran with, which is indistinguishable from the pin having worked.
+    const registered = [
+      { provider: "opencode-go", id: "glm-5.3", name: "GLM 5.3" },
+      { provider: "ollama-cloud", id: "glm-5.3-flash:cloud", name: "GLM 5.3 Flash" },
+    ];
+    pinnedAgent("model: opencode-go/glm-5.3\n");
+    const tool = agentTool();
+    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
+    const context = ctx();
+    context.modelRegistry = {
+      find: (provider: string, id: string) => registered.find(m => m.provider === provider && m.id === id),
+      getAll: () => registered,
+      getAvailable: () => [registered[1]],
+    };
+
+    const result = await tool.execute(
+      "tc-5e",
+      { prompt: "go", description: "d", subagent_type: "pinned", run_in_background: true },
+      undefined,
+      undefined,
+      context,
+    );
+
+    // An unresolvable pin inherits the parent, which is what the README says it
+    // does; the flash model must not appear as though it had been chosen.
+    expect(result.details.modelName).toBe("opus 4.6");
+  });
+
   it("stays quiet when the caller's spelling names the model that won", async () => {
     // Model input is fuzzy: `"haiku"` and `"anthropic/claude-haiku-4-5"` are the
     // same model, and the frontmatter did not take anything away from the

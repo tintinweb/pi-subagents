@@ -99,7 +99,7 @@ Every failure reaches the caller as `{ success: false, error }`, where `error` i
 |---|---|
 | `No active session` | spawn handler, `src/cross-extension-rpc.ts` — called before the first bound `session_start`, or in a session that excludes pi-subagents |
 | `Model override "<label>" provided but ctx.modelRegistry is unavailable` | spawn handler, `src/cross-extension-rpc.ts` |
-| `Model not found: "<input>".` + available models | `resolveModel`, `src/model-resolver.ts` |
+| `Model not found: "<input>".` + reason + available models | `resolveModel`, `src/model-resolver.ts`. The reason names a pin that is registered but has no provider auth, and/or the different-model candidate the cross-provider retry refused to substitute |
 | `Model not in scope: "<input>".` + allowed models | `checkModelScope`, `src/model-scope.ts` — only with `scopeModels` on, and checked against the *resolved* model |
 | `Unknown or disabled agent type: "<raw>". Available: <list>.` | `resolveSpawnTypeIn`, `src/agent-types.ts` — only under `fallbackSubagent: none` |
 | `No agent type given. Available: <list>.` | `resolveSpawnTypeIn` — same condition |
