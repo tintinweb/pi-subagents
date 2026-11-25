@@ -164,6 +164,31 @@ describe("resolveModel", () => {
       expect(resolveModel("opencode-go/glm-5.3", makeRegistry([pinned, gateway], [gateway]))).toEqual(gateway);
     });
 
+    it("still accepts a gateway-path pin onto the vendor's bare id", () => {
+      // Gateway catalogs namespace ids by vendor (OpenRouter serves Claude as
+      // "anthropic/claude-sonnet-4"), so the same model reaches the check with a
+      // vendor prefix on one side only.
+      const vendor = { id: "claude-sonnet-4", name: "Claude Sonnet 4", provider: "anthropic" };
+      const gateway = {
+        id: "anthropic/claude-sonnet-4",
+        name: "Anthropic: Claude Sonnet 4",
+        provider: "openrouter",
+      };
+      expect(resolveModel("openrouter/anthropic/claude-sonnet-4", makeRegistry([gateway, vendor], [vendor]))).toEqual(
+        vendor,
+      );
+    });
+
+    it("still accepts a vendor pin onto the gateway's vendor-prefixed id", () => {
+      const gateway = {
+        id: "anthropic/claude-sonnet-4.6",
+        name: "Anthropic: Claude Sonnet 4.6",
+        provider: "openrouter",
+      };
+      const vendor = { id: "claude-sonnet-4-6", name: "Claude Sonnet 4.6", provider: "anthropic" };
+      expect(resolveModel("anthropic/claude-sonnet-4-6", makeRegistry([vendor, gateway], [gateway]))).toEqual(gateway);
+    });
+
     it("still accepts a dated pin resolving to the same undated id under another provider", () => {
       const gateway = { id: "claude-haiku-4-5", name: "Claude Haiku", provider: "openrouter" };
       expect(resolveModel("anthropic/claude-haiku-4-5-20251001", makeRegistry([gateway]))).toEqual(gateway);
@@ -332,6 +357,18 @@ describe("resolveModel", () => {
       expect(typeof result).toBe("string");
       expect(result).toContain("Model not found");
     });
+  });
+});
+
+describe("fuzzy tier keeps its own tolerance (residual of #480)", () => {
+  it("resolves a provider-qualified pin onto a same-provider lookalike", () => {
+    // The same-model guard sits in the cross-provider retry only. A pin whose
+    // named provider IS available goes through the fuzzy tier, which accepts a
+    // lookalike id rather than failing. Pinned here so the documented
+    // precedence stays honest about where the guard does and does not apply.
+    const mini = { id: "gpt-4o-mini", name: "GPT 4o mini", provider: "openai" };
+    const exact = { id: "gpt-4o", name: "GPT 4o", provider: "openai" };
+    expect(resolveModel("openai/gpt-4o", makeRegistry([exact, mini], [mini]))).toEqual(mini);
   });
 });
 

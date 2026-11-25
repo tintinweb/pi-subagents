@@ -34,9 +34,16 @@ export function describeModel(
 
 /**
  * True when two model ids name the same model: case-insensitive, `.`/`-`
- * interchangeable, and a trailing `-YYYYMMDD` date stamp ignored — the same
- * tolerance the fuzzy tiers apply, so the strict provider-fallback check accepts
- * exactly the matches those tiers promise and refuses everything else.
+ * interchangeable, a trailing `-YYYYMMDD` date stamp ignored, and a vendor
+ * namespace tolerated on either side. Gateway catalogs carry the vendor inside
+ * the id (OpenRouter serves Claude as "anthropic/claude-sonnet-4"), so one model
+ * can reach this check as "claude-sonnet-4" on one side and
+ * "anthropic/claude-sonnet-4" on the other. A version suffix is not a namespace:
+ * "glm-5.3" and "glm-5.3-flash" stay distinct, and so do `:cloud`-style tags.
+ *
+ * Narrower than the fuzzy tiers on purpose — those also match on display name
+ * and on their all-parts rule. This answers only "is this the same model?", never
+ * "is this a close enough name?".
  *
  * One function, because both the provider-fallback acceptance check and the
  * not-found reason must agree on what "the same model" means, or the reason
@@ -44,7 +51,12 @@ export function describeModel(
  */
 function sameModelId(a: string, b: string): boolean {
   const norm = (s: string) => s.toLowerCase().replace(/\./g, "-").replace(/-\d{8}$/, "");
-  return norm(a) === norm(b);
+  const na = norm(a);
+  const nb = norm(b);
+  if (na === nb) return true;
+  // Last path segment, so a vendor-qualified catalog id matches the bare id the
+  // same model carries on its own provider.
+  return na.slice(na.lastIndexOf("/") + 1) === nb.slice(nb.lastIndexOf("/") + 1);
 }
 
 /**
@@ -151,14 +163,18 @@ export function resolveModel(
     }
   }
 
-  // 4. No match — say why, then list available models. A pin whose provider is
-  // configured but has no auth, and a model no registry has, were otherwise the
-  // same message, and only the first is fixable by configuring auth. The prefix
-  // is load-bearing: RPC consumers match on 'Model not found: "<input>".'
-  // (docs/rpc.md), so the reason is appended and never restructured.
+  // 4. No match — say why, then list available models. A pin the registry knows
+  // but this session cannot run, and a model no registry has, were otherwise the
+  // same message. The check is a catalog read, so it cannot tell missing auth
+  // apart from auth configured after the session's availability snapshot was
+  // taken, and the reason names both. The prefix is load-bearing: RPC consumers
+  // match on 'Model not found: "<input>".' (docs/rpc.md), so the reason is
+  // appended and never restructured.
   const reasons: string[] = [];
   if (slashIdx !== -1 && namedProviderCarries(namedProvider, namedId)) {
-    reasons.push(`"${input}" is registered but not available: no provider with auth configured serves it.`);
+    reasons.push(
+      `"${input}" is registered but not available: no provider with auth configured serves it, or auth was configured after this session started.`,
+    );
   }
   if (refused) {
     reasons.push(`A different model, "${refused.provider}/${refused.id}", is available and is not a substitute.`);
