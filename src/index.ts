@@ -20,7 +20,7 @@ import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
 import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
-import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
+import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, resolveResumeTurnLimit, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { formatAgentTypeList, getAgentConfig, getAvailableTypes, getConfig, getFallbackSubagent, getModelLabelFromConfig, getToolDescriptionMode, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent, setToolDescriptionMode } from "./agent-types.js";
 import { getCacheRetention, setCacheRetention } from "./cache-retention.js";
 import { inChildSessionContext } from "./child-context.js";
@@ -1381,7 +1381,7 @@ export default function (pi: ExtensionAPI) {
    * was spawned with, else the default (#368).
    */
   function resumeTurnLimit(record: AgentRecord, explicit?: number): number | undefined {
-    return normalizeMaxTurns(getAgentConfig(record.type)?.maxTurns ?? explicit ?? record.invocation?.maxTurns ?? getDefaultMaxTurns());
+    return resolveResumeTurnLimit(getAgentConfig(record.type)?.maxTurns, explicit, record.invocation?.maxTurns);
   }
 
   /**
@@ -1433,7 +1433,10 @@ export default function (pi: ExtensionAPI) {
     // run_in_background in that same turn keep going.
     const record = await manager.resume(id, prompt, undefined, {
       isBackground: true,
+      // Already resolved by resumeTurnLimit. `undefined` is unlimited and must
+      // not be filled back in from the spawn budget.
       maxTurns: opts.maxTurns,
+      maxTurnsResolved: true,
       onTurnEnd: bgCallbacks.onTurnEnd,
       onToolActivity: bgCallbacks.onToolActivity,
       onAssistantUsage: bgCallbacks.onAssistantUsage,
@@ -2265,6 +2268,7 @@ Terse command-style prompts produce shallow, generic work.
         try {
           record = await manager.resume(params.resume, params.prompt, signal, {
             maxTurns: resumeMaxTurns,
+            maxTurnsResolved: true,
             onTurnEnd: resumeCallbacks.onTurnEnd,
             onToolActivity: resumeCallbacks.onToolActivity,
           });
