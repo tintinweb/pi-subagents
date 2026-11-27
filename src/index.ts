@@ -19,7 +19,7 @@ import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
-import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
+import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, findLostAgentEntries, reopenTarget } from "./agent-record-entry.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { formatAgentTypeList, getAgentConfig, getAvailableTypes, getConfig, getFallbackSubagent, getModelLabelFromConfig, getToolDescriptionMode, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent, setToolDescriptionMode } from "./agent-types.js";
 import { getCacheRetention, setCacheRetention } from "./cache-retention.js";
@@ -122,6 +122,9 @@ export function renderRunningAgentStatus(
 /** How long a foreground `Agent` call runs before its row offers ctrl+b. */
 const BACKGROUND_HINT_DELAY_MS = 2000;
 
+/** Above this many lost agents, one summary replaces the per-agent notices (Claude Code's cap). */
+const LOST_AGENT_NOTICE_LIMIT = 20;
+
 /** Format an agent's lifetime token total, or "" when zero. */
 function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
   const t = getLifetimeTotal(o.lifetimeUsage);
@@ -211,7 +214,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number, showC
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status, record.stopReason)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}${costXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
@@ -617,6 +620,15 @@ export default function (pi: ExtensionAPI) {
     });
   }, (record, message) => {
     pi.events.emit("subagents:steered", { ...toSubagentInfo(record), message });
+  }, (record) => {
+    // A `running` record, so an agent the process loses before it settles still
+    // leaves something behind: the next session reports it and resume can reopen
+    // it (findLostAgentEntries). The settle record supersedes this one. Written
+    // once the session file is known, since that is what makes it reopenable.
+    if (!record.isBackground || !isTopLevelAgent(record)) return;
+    try {
+      pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
+    } catch { /* stale `pi` after a session replacement */ }
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -713,13 +725,78 @@ export default function (pi: ExtensionAPI) {
    * is gone. The record lasts as long as the session file, so it states when
    * the run finished: a days-old result must not read as current (#436).
    */
-  const formatSavedAgentRecord = (saved: AgentRecordEntryData): string =>
-    `Agent: ${saved.id}\n` +
-    `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
+  const formatSavedAgentRecord = (entry: AgentRecordEntryData): string => {
+    // A `running` entry with no live record is an agent the previous session
+    // lost before it settled (see findLostAgentEntries): it is not running now.
+    const saved: AgentRecordEntryData = entry.status === "running" ? { ...entry, status: "stopped", stopReason: "session_end" } : entry;
+    return `Agent: ${saved.id}\n` +
+    `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status, saved.stopReason)} | Duration: ${saved.completedAt ? formatDuration(saved.startedAt, saved.completedAt) : "unknown"}\n` +
     (saved.completedAt ? `Finished: ${new Date(saved.completedAt).toISOString().slice(0, 16)}Z (${formatAge(saved.completedAt)} ago)\n` : "") +
     `Description: ${saved.description}\n` +
     `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
     (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
+  };
+
+  /**
+   * Tell the model about the background agents the previous session lost, as
+   * Claude Code does when a session is resumed: one `stopped` task notification
+   * per agent, or one summary above {@link LOST_AGENT_NOTICE_LIMIT}. Delivered
+   * with the next user turn rather than waking the session, and marked as sent
+   * so reopening the session again stays quiet. Nothing is resumed here: the
+   * notice says how, and the model decides.
+   */
+  const reportLostAgents = (ctx: ExtensionContext): void => {
+    const lost = findLostAgentEntries(ctx.sessionManager.getBranch(), (id) => manager.getRecord(id) !== undefined);
+    if (lost.length === 0) return;
+    const notices = lost.map((entry) => {
+      const reopen = reopenTarget(entry.type, entry.sessionFile, entry.worktreeLost);
+      const note = reopen.ok
+        ? "No completion record was found for it in the previous session. It may have been stopped, or it may have been running when the previous session ended — either way its transcript is saved, so its progress is not lost. Resume it by calling the Agent tool with `resume` set to its id, and ask for a status report before assuming the task landed."
+        : `It was running when the previous session ended and did not complete. It cannot be resumed — ${reopen.reason}.`;
+      return { entry, note };
+    });
+    const summary = (description: string) => `Background agent "${description}" didn't finish before the previous session ended`;
+    const content = notices.length > LOST_AGENT_NOTICE_LIMIT
+      ? [
+          `<task-notification>`,
+          `<status>stopped</status>`,
+          `<summary>${notices.length} background agents didn't finish before the previous session ended</summary>`,
+          `<note>No completion record was found for them in the previous session. They may have been stopped, or they may have been running when the previous session ended. To resume one, call the Agent tool with \`resume\` set to its id.</note>`,
+          `<agents>`,
+          ...notices.map(({ entry }) => `${entry.id}: ${escapeXml(entry.description)}`),
+          `</agents>`,
+          `</task-notification>`,
+        ].join("\n")
+      : notices
+          .map(({ entry, note }) => [
+            `<task-notification>`,
+            `<task-id>${entry.id}</task-id>`,
+            `<status>stopped</status>`,
+            `<summary>${escapeXml(summary(entry.description))}</summary>`,
+            `<note>${escapeXml(note)}</note>`,
+            `</task-notification>`,
+          ].join("\n"))
+          .join("\n\n");
+    const [first, ...others] = notices.map(({ entry, note }): NotificationDetails => ({
+      id: entry.id,
+      description: entry.description,
+      status: "stopped",
+      toolUses: 0,
+      turnCount: 0,
+      totalTokens: 0,
+      durationMs: 0,
+      resultPreview: `${summary(entry.description)}. ${note}`,
+    }));
+    try {
+      pi.sendMessage<NotificationDetails>(
+        { customType: "subagent-notification", content, display: true, details: { ...first, ...(others.length > 0 && { others }) } },
+        { deliverAs: "nextTurn" },
+      );
+      for (const { entry } of notices) {
+        pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, { ...entry, status: "stopped", stopReason: "session_end", lostNoticeSent: true });
+      }
+    } catch { /* stale `pi` after a session replacement */ }
+  };
 
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
@@ -789,6 +866,7 @@ export default function (pi: ExtensionAPI) {
       watchHandoffKey(ctx.ui);
     }
     manager.clearCompleted(true);
+    reportLostAgents(ctx);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
     if (!rpcHandle) {
@@ -1135,7 +1213,9 @@ export default function (pi: ExtensionAPI) {
     for (const task of workflowTasks.values()) task.abortController.abort();
     workflowTasks.clear();
     workflowRuns.clear();
-    manager.abortAll();
+    // Marked so a stop that does reach the session reads as lost, not as the
+    // user's: the next session reports it (findLostAgentEntries).
+    manager.abortAll("session_end");
     // Activation-owned UI and group state (#256): `session_shutdown` also runs for
     // reload and session replacement, where the Node process survives, so a live
     // widget render interval or a pending group-join timeout from this activation

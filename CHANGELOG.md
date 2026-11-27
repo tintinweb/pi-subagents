@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The model is told about background agents the previous session lost.** If pi crashes, quits, reloads or switches sessions while a top-level background agent runs, the next session reports each such agent once, with your next message, and says whether `Agent({ resume })` can reopen it from its saved session. Nothing restarts on its own, as in Claude Code. An agent stopped by the session ending also no longer reads as "STOPPED BY THE USER". Extensions reading `subagents:record` entries now also see `status: "running"` entries and should read the latest entry per id ([docs/rpc.md](docs/rpc.md)).
+
 ### Fixed
 - **Workflow children use the agent file as it is now** ([#483](https://github.com/tintinweb/pi-subagents/issues/483) — thanks [@woksin](https://github.com/woksin)). After an `agents/<name>.md` was edited mid-session, `SubagentWorkflow` children kept the definition loaded at session start, such as its old `model:`, until `/reload`, while `Agent` calls already used the new one. Each workflow run now reloads agent files when it starts.
 

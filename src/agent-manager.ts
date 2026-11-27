@@ -399,6 +399,12 @@ export class AgentManager {
   private cleanupInterval: ReturnType<typeof setInterval>;
   private onComplete?: OnAgentComplete;
   private onStart?: OnAgentStart;
+  /**
+   * A run's session exists and `record.sessionFile` is known: after session
+   * creation for a spawn, at start for a resume, which reuses its session, and
+   * when a foreground run that has its session is handed to the background.
+   */
+  private onSessionReady?: OnAgentStart;
   private onCompact?: OnAgentCompact;
   private onUsage?: OnAgentUsage;
   private onSteered?: OnAgentSteered;
@@ -462,9 +468,11 @@ export class AgentManager {
     onCompact?: OnAgentCompact,
     onUsage?: OnAgentUsage,
     onSteered?: OnAgentSteered,
+    onSessionReady?: OnAgentStart,
   ) {
     this.onComplete = onComplete;
     this.onStart = onStart;
+    this.onSessionReady = onSessionReady;
     this.onCompact = onCompact;
     this.onUsage = onUsage;
     this.onSteered = onSteered;
@@ -977,6 +985,7 @@ export class AgentManager {
           record.pendingSteers = undefined;
         }
         options.onSessionCreated?.(session);
+        this.onSessionReady?.(record);
       },
     })
       .then(async ({ responseText, session, aborted, steered, failure, structuredJson, structuredRetried }) => {
@@ -1294,6 +1303,9 @@ export class AgentManager {
     record.blocking = false;
     record.isBackground = true;
     record.resultConsumed = false;
+    // Now a background run, so it gets the record a background spawn writes at
+    // session creation. Without a session yet, that creation still lies ahead.
+    if (record.session) this.onSessionReady?.(record);
     // A freed foreground slot may have unblocked a queued blocking spawn.
     this.drainQueue();
     return true;
@@ -1483,6 +1495,7 @@ export class AgentManager {
     record.startedAt = Date.now();
     if (occupiesPoolSlot(record)) this.runningBackground++;
     this.onStart?.(record);
+    this.onSessionReady?.(record);
 
     // Fresh abort controller so /agents stop and steering target THIS run rather
     // than the previous one's settled controller.
@@ -1794,8 +1807,8 @@ export class AgentManager {
     );
   }
 
-  /** Abort all running and queued agents immediately. */
-  abortAll(): number {
+  /** Abort all running and queued agents immediately; `reason` is stamped on each as `stopReason`. */
+  abortAll(reason?: AgentRecord["stopReason"]): number {
     let count = 0;
     // Clear queued agents first
     for (const queued of this.queue) {
@@ -1803,6 +1816,7 @@ export class AgentManager {
       if (record) {
         record.status = "stopped";
         record.completedAt = Date.now();
+        record.stopReason = reason;
         count++;
       }
     }
@@ -1813,6 +1827,7 @@ export class AgentManager {
         record.abortController?.abort();
         record.status = "stopped";
         record.completedAt = Date.now();
+        record.stopReason = reason;
         count++;
       }
     }
