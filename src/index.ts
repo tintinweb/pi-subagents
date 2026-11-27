@@ -759,7 +759,7 @@ export default function (pi: ExtensionAPI) {
     const content = notices.length > LOST_AGENT_NOTICE_LIMIT
       ? [
           `<task-notification>`,
-          `<status>stopped</status>`,
+          `<status>${getStatusLabel("stopped")}</status>`,
           `<summary>${notices.length} background agents didn't finish before the previous session ended</summary>`,
           `<note>No completion record was found for them in the previous session. They may have been stopped, or they may have been running when the previous session ended. To resume one, call the Agent tool with \`resume\` set to its id.</note>`,
           `<agents>`,
@@ -771,7 +771,7 @@ export default function (pi: ExtensionAPI) {
           .map(({ entry, note }) => [
             `<task-notification>`,
             `<task-id>${entry.id}</task-id>`,
-            `<status>stopped</status>`,
+            `<status>${getStatusLabel("stopped")}</status>`,
             `<summary>${escapeXml(summary(entry.description))}</summary>`,
             `<note>${escapeXml(note)}</note>`,
             `</task-notification>`,

@@ -130,7 +130,7 @@ describe("a background agent the previous session lost", () => {
     const [message, options] = notices[0];
     expect(options).toEqual({ deliverAs: "nextTurn" });
     expect(message.content).toContain(`<task-id>${id}</task-id>`);
-    expect(message.content).toContain("<status>stopped</status>");
+    expect(message.content).toContain("<status>Stopped</status>");
     expect(message.content).toContain(`Background agent "Audit the parser" didn't finish before the previous session ended`);
     expect(message.content).toContain("Resume it by calling the Agent tool with `resume` set to its id");
     expect(message.details).toMatchObject({ id, status: "stopped" });
@@ -225,6 +225,7 @@ describe("a background agent the previous session lost", () => {
     const notices = lostNotices(session.pi);
     expect(notices).toHaveLength(1);
     expect(notices[0][0].content).toContain("21 background agents didn't finish before the previous session ended");
+    expect(notices[0][0].content).toContain("<status>Stopped</status>");
     expect(notices[0][0].content).toContain("agent-20: task 20");
     expect(notices[0][0].content).not.toContain("<task-id>");
   });
