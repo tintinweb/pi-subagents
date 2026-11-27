@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { serializeAgentFile } from "../src/agent-file-toggle.js";
 import { BUILTIN_TOOL_NAMES } from "../src/agent-types.js";
 import { loadCustomAgents } from "../src/custom-agents.js";
+import { DEFAULT_AGENTS } from "../src/default-agents.js";
 import { MAX_PACKAGE_RESOURCE_BYTES } from "../src/package-resources.js";
 import type { AgentConfig } from "../src/types.js";
 
@@ -1111,6 +1112,25 @@ Prompt.`);
       expect(loadCustomAgents(tmpDir).get("cc")!.disallowedTools).toEqual(["Write", "write", "Glob", "find"]);
     });
 
+    it("reads no_context_files and Claude Code's omitClaudeMd spelling", () => {
+      writeAgent("snake", `---
+no_context_files: true
+---
+Prompt.`);
+      writeAgent("camel", `---
+omitClaudeMd: true
+---
+Prompt.`);
+      writeAgent("unset", `---
+description: x
+---
+Prompt.`);
+      const agents = loadCustomAgents(tmpDir);
+      expect(agents.get("snake")!.noContextFiles).toBe(true);
+      expect(agents.get("camel")!.noContextFiles).toBe(true);
+      expect(agents.get("unset")!.noContextFiles).toBeUndefined();
+    });
+
     it("keeps the exact deny entry next to the built-in it maps to", () => {
       // An extension tool named `glob` must stay denied, not turn into a deny of `find`.
       writeAgent("cc", `---
@@ -1217,6 +1237,10 @@ Prompt.`);
     // explicit `false` was dropped. Harmless while foreground was the default
     // and omission meant the same thing — but with `backgroundByDefault` on,
     // dropping it flips the ejected agent to background.
+    it.each(["Explore", "Plan"])("an ejected %s keeps running without the context files", (type) => {
+      expect(roundTrip(DEFAULT_AGENTS.get(type)!).noContextFiles).toBe(true);
+    });
+
     it("preserves an explicit run_in_background: false instead of dropping it", () => {
       expect(roundTrip({ runInBackground: false }).runInBackground).toBe(false);
     });

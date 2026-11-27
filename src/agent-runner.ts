@@ -18,6 +18,7 @@ import {
   type ExtensionAPI,
   getAgentDir,
   type InlineExtension,
+  loadProjectContextFiles,
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
@@ -992,6 +993,24 @@ export async function runAgent(
 
   const agentDir = getAgentDir();
 
+  // Context files (global and project AGENTS.md/CLAUDE.md): a replace-mode agent
+  // gets the parent session's, as a Claude Code subagent gets CLAUDE.md, unless it
+  // sets `no_context_files` (Explore and Plan do) or pi was started with
+  // `--no-context-files` — mirroring the CLI as the extension loader below does
+  // for `--no-extensions` and `--no-mcp`. `isolated` limits tools only. They are
+  // found from `configCwd` when set, else the caller's cwd — not the agent's own
+  // cwd: a worktree copy under tmpdir would miss the files above the repo root and
+  // any uncommitted or untracked AGENTS.md, and a `cwd` target is a directory the
+  // user never opened. `configCwd` is the parent project for a `cwd` spawn and for
+  // a nested spawn under one (a nested spawn's `ctx` is the child's own); under a
+  // worktree child it is that copy, so a grandchild there gets the copy's
+  // committed files. pi renders them as its own `project_context` section after
+  // systemPromptOverride. An append-mode agent already has them inside the parent
+  // prompt it inherits, so it loads none. APPEND_SYSTEM.md stays suppressed for
+  // every agent.
+  const contextFiles = agentConfig?.promptMode === "replace" && agentConfig.noContextFiles !== true
+    && !process.argv.some((a) => a === "--no-context-files" || a === "-nc");
+
   // Extension loading:
   // - true  → all default-discovered extensions
   // - false → none (noExtensions)
@@ -1000,11 +1019,6 @@ export async function runAgent(
   //   "*" keeps all default-discovered extensions. Excluded extensions never
   //   bind handlers or register tools (their factory still runs once).
   //
-  // Suppress AGENTS.md/CLAUDE.md and APPEND_SYSTEM.md — upstream's
-  // buildSystemPrompt() re-appends both AFTER systemPromptOverride, which
-  // would defeat prompt_mode: replace and isolated: true. Parent context, if
-  // wanted, reaches the subagent via prompt_mode: append (parentSystemPrompt
-  // is embedded in systemPromptOverride) or inherit_context (conversation).
   // `ext:` selectors from the `tools:` CSV narrow which extension tools surface to
   // the LLM. They do NOT control loading — `extensions:` is the sole authority for
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
@@ -1097,7 +1111,12 @@ export async function runAgent(
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
+    // The loader would search from configCwd (the worktree copy for a worktree
+    // spawn), so it loads none and the override supplies the parent project's.
     noContextFiles: true,
+    agentsFilesOverride: contextFiles
+      ? () => ({ agentsFiles: loadProjectContextFiles({ cwd: options.configCwd ?? ctx.cwd, agentDir }) })
+      : undefined,
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });

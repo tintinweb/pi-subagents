@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **⚠️ Note — custom subagents now get your AGENTS.md / CLAUDE.md**. A `replace`-mode agent, the default for custom agents, now receives the parent session's global and project context files, so its system prompt grows by their size. Set `no_context_files: true` on an agent that should run without them. An Explore or Plan you ejected earlier lacks this setting; add `no_context_files: true` to keep it running without them.
+
+### Changed
+- **Custom subagents follow your AGENTS.md / CLAUDE.md, as in Claude Code**. A `replace`-mode agent used to run with none of them, so an agent file copied from Claude Code lost the project's instructions. It now gets the same files as the session that spawned it, also when it works in a worktree or another `cwd`. Turn them off per agent with `no_context_files: true` (Claude Code's `omitClaudeMd` also works), or for every subagent by starting pi with `--no-context-files`. Explore and Plan run without them, as in Claude Code, and `append`-mode agents such as `general-purpose` are unchanged.
+
 ## [0.26.3] - 2026-11-23
 
 > **⚠️ Note — `pi -p` now stays open until background agents and workflows finish** ([#452](https://github.com/tintinweb/pi-subagents/pull/452)). A script may run longer than before: there is no time limit by default, so set `headlessWaitMinutes` to cap it. SDK hosts that bind extensions without a mode are treated as print mode and wait too.

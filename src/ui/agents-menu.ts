@@ -441,6 +441,7 @@ inherit_context: <true to fork parent conversation into agent so it sees chat hi
 run_in_background: <pin this agent to background (true) or foreground (false). Omit to follow the backgroundByDefault setting, which is background>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
+no_context_files: <true to run without your AGENTS.md / CLAUDE.md files. Default: false>
 memory: <"user" (global), "project" (per-project), or "local" (gitignored per-project) for persistent memory. Omit for none>${
       // Offering the field on a project that turned worktrees off would bake a
       // request that is refused at spawn time into a file that outlives the

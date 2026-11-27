@@ -410,19 +410,17 @@ describe("agent-runner final output capture", () => {
     expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("modelRuntime");
   });
 
-  it("suppresses AGENTS.md/CLAUDE.md/APPEND_SYSTEM.md for subagents", async () => {
+  it("suppresses APPEND_SYSTEM.md for subagents", async () => {
     const { session } = createSession("ISOLATED");
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "Say ISOLATED", { pi });
 
-    // noContextFiles skips AGENTS.md/CLAUDE.md at the loader source;
     // appendSystemPromptOverride suppresses APPEND_SYSTEM.md (no flag equivalent).
+    // Which agents get AGENTS.md/CLAUDE.md is covered against the real loader in
+    // agent-runner-e2e.test.ts ("context files in replace mode").
     expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(
-      expect.objectContaining({
-        noContextFiles: true,
-        appendSystemPromptOverride: expect.any(Function),
-      }),
+      expect.objectContaining({ appendSystemPromptOverride: expect.any(Function) }),
     );
     // The override returns an empty list so any loaded sources are discarded.
     const ctorArgs = defaultResourceLoaderCtor.mock.calls[0][0];

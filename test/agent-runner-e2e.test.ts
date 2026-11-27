@@ -346,6 +346,149 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
       expect(child).not.toContain("demo-skill");
       expect(child).toContain("PROJECT RULE: say hi.");
     });
+
+    /** The prompt the real runtime builds for agent type `type`, against a parent prompt without context files. */
+    async function promptFor(
+      type: string,
+      cfg?: Partial<AgentConfig>,
+      dirs: { ctxCwd?: string; runCwd?: string; configCwd?: string } = {},
+    ): Promise<string> {
+      if (cfg) {
+        registerAgents(
+          new Map([
+            [
+              type,
+              {
+                name: type,
+                description: type,
+                builtinToolNames: BUILTINS,
+                extensions: false,
+                skills: false,
+                systemPrompt: "Custom body.",
+                promptMode: "replace",
+                ...cfg,
+              } as AgentConfig,
+            ],
+          ]),
+        );
+      } else {
+        registerAgents(new Map());
+      }
+      const model = faux.getModel();
+      const modelRegistry: any = {
+        find: () => model,
+        getAll: () => [model],
+        getAvailable: () => [model],
+        hasConfiguredAuth: () => true,
+        isUsingOAuth: () => false,
+        registerProvider: () => {},
+        unregisterProvider: () => {},
+      };
+      const ctx: any = {
+        cwd: dirs.ctxCwd ?? cwd,
+        getSystemPrompt: () => "PARENT",
+        isProjectTrusted: () => true,
+        model,
+        modelRegistry,
+      };
+      let prompt = "";
+      try {
+        await runAgent(ctx, type, "go", {
+          pi: makePi(),
+          model,
+          ...(dirs.runCwd !== undefined && { cwd: dirs.runCwd }),
+          ...(dirs.configCwd !== undefined && { configCwd: dirs.configCwd }),
+          onSessionCreated: (s) => {
+            prompt = s.systemPrompt;
+          },
+        });
+      } catch {
+        // Only the prompt built at construction matters.
+      }
+      return prompt;
+    }
+
+    describe("context files in replace mode", () => {
+      beforeEach(() => {
+        writeFileSync(join(home, "AGENTS.md"), "GLOBAL RULE: be brief.\n");
+      });
+
+      it("a replace-mode custom agent gets the global and project context files once", async () => {
+        const child = await promptFor("custom", {});
+        expect(child).toContain("Custom body.");
+        expect(count(child, "GLOBAL RULE: be brief.")).toBe(1);
+        expect(count(child, "PROJECT RULE: say hi.")).toBe(1);
+      });
+
+      it("noContextFiles: true leaves both out", async () => {
+        const child = await promptFor("custom", { noContextFiles: true });
+        expect(child).toContain("Custom body.");
+        expect(child).not.toContain("GLOBAL RULE");
+        expect(child).not.toContain("PROJECT RULE");
+      });
+
+      it.each(["--no-context-files", "-nc"])("starting pi with %s leaves both out", async (flag) => {
+        process.argv.push(flag);
+        let child: string;
+        try {
+          child = await promptFor("custom", {});
+        } finally {
+          process.argv.pop();
+        }
+        expect(child).toContain("Custom body.");
+        expect(child).not.toContain("GLOBAL RULE");
+        expect(child).not.toContain("PROJECT RULE");
+      });
+
+      it("isolated: true limits tools only and keeps both", async () => {
+        const child = await promptFor("custom", { isolated: true });
+        expect(count(child, "GLOBAL RULE: be brief.")).toBe(1);
+        expect(count(child, "PROJECT RULE: say hi.")).toBe(1);
+      });
+
+      it("an agent working in another directory (a worktree copy) gets the parent's files, not that directory's", async () => {
+        // Under tmpdir like a managed worktree, so walking up from it never reaches `cwd`.
+        const copy = mkdtempSync(join(tmpdir(), "subagents-e2e-copy-"));
+        writeFileSync(join(copy, "AGENTS.md"), "COPY RULE: stale.\n");
+        try {
+          // Set the way a worktree spawn sets it: cwd only, no configCwd.
+          const child = await promptFor("custom", {}, { runCwd: copy });
+          expect(count(child, "GLOBAL RULE: be brief.")).toBe(1);
+          expect(count(child, "PROJECT RULE: say hi.")).toBe(1);
+          expect(child).not.toContain("COPY RULE");
+        } finally {
+          rmSync(copy, { recursive: true, force: true });
+        }
+      });
+
+      it("a nested agent under a cwd-spawned child gets the project's files, not the child's target directory's", async () => {
+        // A nested spawn's ctx is the child's own, so ctx.cwd is the child's target;
+        // nested-tools forwards the parent project as configCwd.
+        const target = mkdtempSync(join(tmpdir(), "subagents-e2e-target-"));
+        writeFileSync(join(target, "AGENTS.md"), "TARGET RULE: injected.\n");
+        try {
+          const child = await promptFor("custom", {}, { ctxCwd: target, configCwd: cwd });
+          expect(count(child, "GLOBAL RULE: be brief.")).toBe(1);
+          expect(count(child, "PROJECT RULE: say hi.")).toBe(1);
+          expect(child).not.toContain("TARGET RULE");
+        } finally {
+          rmSync(target, { recursive: true, force: true });
+        }
+      });
+
+      it.each(["Explore", "Plan"])("the built-in %s runs without them, as in Claude Code", async (type) => {
+        const child = await promptFor(type);
+        expect(child).toContain("READ-ONLY MODE");
+        expect(child).not.toContain("GLOBAL RULE");
+        expect(child).not.toContain("PROJECT RULE");
+      });
+
+      it("an append-mode agent does not load them on top of the inherited parent prompt", async () => {
+        const child = await childPrompt(await realParentPrompt(), false);
+        expect(count(child, "GLOBAL RULE: be brief.")).toBe(1);
+        expect(count(child, "PROJECT RULE: say hi.")).toBe(1);
+      });
+    });
   });
 
   // pi's built-in MCP starts each stdio server in `.pi/mcp.json` when a session
