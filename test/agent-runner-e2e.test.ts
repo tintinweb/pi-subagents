@@ -348,7 +348,11 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
     });
 
     /** The prompt the real runtime builds for agent type `type`, against a parent prompt without context files. */
-    async function promptFor(type: string, cfg?: Partial<AgentConfig>, runCwd?: string): Promise<string> {
+    async function promptFor(
+      type: string,
+      cfg?: Partial<AgentConfig>,
+      dirs: { ctxCwd?: string; runCwd?: string; configCwd?: string } = {},
+    ): Promise<string> {
       if (cfg) {
         registerAgents(
           new Map([
@@ -380,14 +384,20 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
         registerProvider: () => {},
         unregisterProvider: () => {},
       };
-      const ctx: any = { cwd, getSystemPrompt: () => "PARENT", isProjectTrusted: () => true, model, modelRegistry };
+      const ctx: any = {
+        cwd: dirs.ctxCwd ?? cwd,
+        getSystemPrompt: () => "PARENT",
+        isProjectTrusted: () => true,
+        model,
+        modelRegistry,
+      };
       let prompt = "";
       try {
         await runAgent(ctx, type, "go", {
           pi: makePi(),
           model,
-          // Set the way a worktree spawn sets it: cwd only, no configCwd.
-          ...(runCwd !== undefined && { cwd: runCwd }),
+          ...(dirs.runCwd !== undefined && { cwd: dirs.runCwd }),
+          ...(dirs.configCwd !== undefined && { configCwd: dirs.configCwd }),
           onSessionCreated: (s) => {
             prompt = s.systemPrompt;
           },
@@ -441,12 +451,28 @@ describe("agent-runner end-to-end (real pi-mono session + real extension)", () =
         const copy = mkdtempSync(join(tmpdir(), "subagents-e2e-copy-"));
         writeFileSync(join(copy, "AGENTS.md"), "COPY RULE: stale.\n");
         try {
-          const child = await promptFor("custom", {}, copy);
+          // Set the way a worktree spawn sets it: cwd only, no configCwd.
+          const child = await promptFor("custom", {}, { runCwd: copy });
           expect(count(child, "GLOBAL RULE: be brief.")).toBe(1);
           expect(count(child, "PROJECT RULE: say hi.")).toBe(1);
           expect(child).not.toContain("COPY RULE");
         } finally {
           rmSync(copy, { recursive: true, force: true });
+        }
+      });
+
+      it("a nested agent under a cwd-spawned child gets the project's files, not the child's target directory's", async () => {
+        // A nested spawn's ctx is the child's own, so ctx.cwd is the child's target;
+        // nested-tools forwards the parent project as configCwd.
+        const target = mkdtempSync(join(tmpdir(), "subagents-e2e-target-"));
+        writeFileSync(join(target, "AGENTS.md"), "TARGET RULE: injected.\n");
+        try {
+          const child = await promptFor("custom", {}, { ctxCwd: target, configCwd: cwd });
+          expect(count(child, "GLOBAL RULE: be brief.")).toBe(1);
+          expect(count(child, "PROJECT RULE: say hi.")).toBe(1);
+          expect(child).not.toContain("TARGET RULE");
+        } finally {
+          rmSync(target, { recursive: true, force: true });
         }
       });
 

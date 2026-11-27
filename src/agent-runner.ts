@@ -998,9 +998,13 @@ export async function runAgent(
   // sets `no_context_files` (Explore and Plan do) or pi was started with
   // `--no-context-files` — mirroring the CLI as the extension loader below does
   // for `--no-extensions` and `--no-mcp`. `isolated` limits tools only. They are
-  // found from the parent's cwd, not the agent's: a worktree copy under tmpdir
-  // would miss the files above the repo root and any uncommitted or untracked
-  // AGENTS.md. pi renders them as its own `project_context` section after
+  // found from `configCwd` when set, else the caller's cwd — not the agent's own
+  // cwd: a worktree copy under tmpdir would miss the files above the repo root and
+  // any uncommitted or untracked AGENTS.md, and a `cwd` target is a directory the
+  // user never opened. `configCwd` is the parent project for a `cwd` spawn and for
+  // a nested spawn under one (a nested spawn's `ctx` is the child's own); under a
+  // worktree child it is that copy, so a grandchild there gets the copy's
+  // committed files. pi renders them as its own `project_context` section after
   // systemPromptOverride. An append-mode agent already has them inside the parent
   // prompt it inherits, so it loads none. APPEND_SYSTEM.md stays suppressed for
   // every agent.
@@ -1108,10 +1112,10 @@ export async function runAgent(
     noPromptTemplates: true,
     noThemes: true,
     // The loader would search from configCwd (the worktree copy for a worktree
-    // spawn), so it loads none and the override supplies the parent's.
+    // spawn), so it loads none and the override supplies the parent project's.
     noContextFiles: true,
     agentsFilesOverride: contextFiles
-      ? () => ({ agentsFiles: loadProjectContextFiles({ cwd: ctx.cwd, agentDir }) })
+      ? () => ({ agentsFiles: loadProjectContextFiles({ cwd: options.configCwd ?? ctx.cwd, agentDir }) })
       : undefined,
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
