@@ -2678,6 +2678,9 @@ Terse command-style prompts produce shallow, generic work.
     // fires per tool call and message per agent, too hot for the bus.
     announce("subagents:workflow_started", () => ({ ...toWorkflowInfo(task), ...workflowArgs(task) }));
     try {
+      // Pick up agent files edited mid-session, as the Agent tool and RPC spawns do
+      // (#483). Once per run rather than per child, so a fan-out costs one sweep.
+      reloadCustomAgents();
       const result = await runWorkflow({
         script: task.script,
         args: task.args,

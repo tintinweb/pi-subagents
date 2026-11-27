@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentManager } from "../src/agent-manager.js";
+import { AgentManager } from "../src/agent-manager.js";
 import { SUBAGENT_TOOL_NAMES } from "../src/agent-runner.js";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { NOTIFICATION_HOLD_MS } from "../src/completion-outbox.js";
@@ -1191,6 +1191,59 @@ describe("SubagentWorkflow tool — script vs scriptPath vs name", () => {
     const sent = await awaitNotification(startedTaskId(result));
     expect(String(sent[0].content)).toContain("control characters");
     expect(sent[0].details).toMatchObject({ status: "error" });
+  });
+});
+
+describe("SubagentWorkflow — agent files edited mid-session (#483)", () => {
+  const modelA = { id: "model-a", name: "A", provider: "anthropic" };
+  const modelB = { id: "model-b", name: "B", provider: "anthropic" };
+  const scout = (model: string) => `---\ndescription: scouts\nmodel: ${model}\n---\nbody`;
+  let hermetic: Hermetic;
+  let booted: ReturnType<typeof makePi>;
+
+  beforeEach(() => {
+    hermetic = hermeticDir({
+      settings: { schedulingEnabled: false, workflowsEnabled: true },
+      agentFiles: { scout: scout("anthropic/model-a") },
+    });
+    booted = makePi();
+    subagentsExtension(booted.pi);
+  });
+
+  afterEach(async () => {
+    await flush();
+    hermetic.restore();
+    vi.restoreAllMocks();
+  });
+
+  it("spawns children from the agent file as it is now, not as it was at boot", async () => {
+    const spawnAndWait = vi
+      .spyOn(AgentManager.prototype, "spawnAndWait")
+      .mockImplementation(async (_pi, _ctx, _type, _prompt, _options, onSpawned) => {
+        onSpawned?.("agent-1");
+        return { id: "agent-1", record: record() };
+      });
+    writeFileSync(join(hermetic.dir, ".pi", "agents", "scout.md"), scout("anthropic/model-b"));
+
+    const models = [modelA, modelB];
+    const script = `${inlineScript}await agent("go", { agentType: "scout" });\n`;
+    await booted.tools.get("SubagentWorkflow").execute(
+      "tc-483",
+      { script },
+      undefined,
+      undefined,
+      ctx({
+        cwd: hermetic.dir,
+        modelRegistry: {
+          find: vi.fn((provider: string, id: string) => models.find(m => m.provider === provider && m.id === id)),
+          getAvailable: vi.fn(() => models),
+        },
+      }),
+    );
+
+    await vi.waitFor(() => expect(spawnAndWait).toHaveBeenCalled(), { timeout: 10_000 });
+    expect(spawnAndWait.mock.calls[0][2]).toBe("scout");
+    expect((spawnAndWait.mock.calls[0][4] as any).model).toBe(modelB);
   });
 });
 

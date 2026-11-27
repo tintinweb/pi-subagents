@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Workflow children use the agent file as it is now** ([#483](https://github.com/tintinweb/pi-subagents/issues/483) — thanks [@woksin](https://github.com/woksin)). After an `agents/<name>.md` was edited mid-session, `SubagentWorkflow` children kept the definition loaded at session start, such as its old `model:`, until `/reload`, while `Agent` calls already used the new one. Each workflow run now reloads agent files when it starts.
+
 ## [0.26.3] - 2026-11-23
 
 > **⚠️ Note — `pi -p` now stays open until background agents and workflows finish** ([#452](https://github.com/tintinweb/pi-subagents/pull/452)). A script may run longer than before: there is no time limit by default, so set `headlessWaitMinutes` to cap it. SDK hosts that bind extensions without a mode are treated as print mode and wait too.
