@@ -271,6 +271,8 @@ export function serializeAgentFile(cfg: AgentConfig): string {
     fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
   }
   fmFields.push(`prompt_mode: ${cfg.promptMode}`);
+  // An ejected Explore or Plan must keep running without the context files.
+  if (cfg.noContextFiles) fmFields.push("no_context_files: true");
   if (cfg.extensions === false) fmFields.push("extensions: false");
   else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
   if (cfg.excludeExtensions?.length) fmFields.push(`exclude_extensions: ${cfg.excludeExtensions.join(", ")}`);

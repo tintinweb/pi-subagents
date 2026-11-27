@@ -73,6 +73,8 @@ Use Bash ONLY for read-only operations: ls, git status, git log, git diff, find,
 - Do not use emojis
 - Be thorough and precise`,
       promptMode: "replace",
+      // Claude Code runs Explore and Plan without CLAUDE.md.
+      noContextFiles: true,
       isDefault: true,
     },
   ],
@@ -126,6 +128,7 @@ You are STRICTLY PROHIBITED from:
 List 3-5 files most critical for implementing this plan:
 - /absolute/path/to/file.ts - [Brief reason]`,
       promptMode: "replace",
+      noContextFiles: true,
       isDefault: true,
     },
   ],

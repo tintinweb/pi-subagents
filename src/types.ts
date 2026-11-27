@@ -81,6 +81,13 @@ export interface AgentConfig {
   allowedSubagents?: "all" | string[];
   systemPrompt: string;
   promptMode: "replace" | "append";
+  /**
+   * Run without the global and project context files (`AGENTS.md`, `CLAUDE.md`)
+   * that a `replace`-mode agent otherwise gets — pi's `--no-context-files` for one
+   * agent, and Claude Code's `omitClaudeMd`. An `append`-mode agent already has
+   * them inside the parent prompt it inherits.
+   */
+  noContextFiles?: boolean;
   /** Default for spawn: fork parent conversation. undefined = caller decides. */
   inheritContext?: boolean;
   /** Default for spawn: run in background. undefined = caller decides. */
