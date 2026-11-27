@@ -134,6 +134,8 @@ describe("a background agent the previous session lost", () => {
     expect(message.content).toContain(`Background agent "Audit the parser" didn't finish before the previous session ended`);
     expect(message.content).toContain("Resume it by calling the Agent tool with `resume` set to its id");
     expect(message.details).toMatchObject({ id, status: "stopped" });
+    // The row's collapsed preview is its first line: whether it can be resumed.
+    expect(message.details.resultPreview.split("\n")[0]).toBe("lost when the previous session ended — resume with Agent({ resume })");
     expect(records(branch).at(-1)).toMatchObject({ id, status: "stopped", stopReason: "session_end", lostNoticeSent: true });
   });
 
@@ -179,6 +181,7 @@ describe("a background agent the previous session lost", () => {
     const [message] = lostNotices(second.pi)[0];
     expect(message.content).toContain("It cannot be resumed — its session is gone.");
     expect(message.content).not.toContain("Resume it by calling");
+    expect(message.details.resultPreview.split("\n")[0]).toBe("lost when the previous session ended — cannot be resumed: its session is gone");
   });
 
   it("can be reopened with Agent({ resume }) under the same id", async () => {

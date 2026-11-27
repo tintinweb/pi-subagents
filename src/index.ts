@@ -753,7 +753,12 @@ export default function (pi: ExtensionAPI) {
       const note = reopen.ok
         ? "No completion record was found for it in the previous session. It may have been stopped, or it may have been running when the previous session ended — either way its transcript is saved, so its progress is not lost. Resume it by calling the Agent tool with `resume` set to its id, and ask for a status report before assuming the task landed."
         : `It was running when the previous session ended and did not complete. It cannot be resumed — ${reopen.reason}.`;
-      return { entry, note };
+      // The row's collapsed preview is its first line, cut at 80 characters, so
+      // that line says what the user needs at a glance: can it be resumed.
+      const headline = reopen.ok
+        ? "lost when the previous session ended — resume with Agent({ resume })"
+        : `lost when the previous session ended — cannot be resumed: ${reopen.reason}`;
+      return { entry, note, headline };
     });
     const summary = (description: string) => `Background agent "${description}" didn't finish before the previous session ended`;
     const content = notices.length > LOST_AGENT_NOTICE_LIMIT
@@ -777,7 +782,7 @@ export default function (pi: ExtensionAPI) {
             `</task-notification>`,
           ].join("\n"))
           .join("\n\n");
-    const [first, ...others] = notices.map(({ entry, note }): NotificationDetails => ({
+    const [first, ...others] = notices.map(({ entry, note, headline }): NotificationDetails => ({
       id: entry.id,
       description: entry.description,
       status: "stopped",
@@ -785,7 +790,7 @@ export default function (pi: ExtensionAPI) {
       turnCount: 0,
       totalTokens: 0,
       durationMs: 0,
-      resultPreview: `${summary(entry.description)}. ${note}`,
+      resultPreview: `${headline}\n${summary(entry.description)}. ${note}`,
     }));
     try {
       pi.sendMessage<NotificationDetails>(
