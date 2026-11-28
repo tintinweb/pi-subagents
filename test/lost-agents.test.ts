@@ -10,7 +10,7 @@
  * on a plain local resume. Nothing is resumed automatically; the notice says
  * how, and `Agent({ resume })` reopens the saved session under the same id.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -57,11 +57,15 @@ function stubSession(file: string | undefined) {
   return { dispose: vi.fn(), messages: [], subscribe: vi.fn(() => () => {}), sessionManager: { getSessionFile: () => file } } as any;
 }
 
-/** A run that creates its session and then works until it is aborted. */
+/**
+ * A run that creates its session and then works until it is aborted. The
+ * session arrives a microtask later, as a real run's does, after the Agent tool
+ * has set the transcript path on the record.
+ */
 function runUntilAborted(file: string | undefined) {
   vi.mocked(runAgent).mockImplementation((_ctx, _type, _prompt, options: any) => {
     const session = stubSession(file);
-    options.onSessionCreated?.(session);
+    queueMicrotask(() => options.onSessionCreated?.(session));
     return new Promise((resolve) => {
       options.signal?.addEventListener("abort", () => resolve({ responseText: "", session, aborted: true, steered: false }));
     });
@@ -253,6 +257,54 @@ describe("a background agent the previous session lost", () => {
     expect(running.completedAt).toBeUndefined();
   });
 
+  it("points at the agent's transcript while it is still on disk", async () => {
+    writeFileSync(join(hermetic!.dir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: true }));
+    const branch: any[] = [];
+    const { id } = await startBackground(branch);
+    const outputFile = records(branch)[0].outputFile as string;
+    expect(outputFile).toMatch(new RegExp(`${id}\\.output$`));
+    expect(existsSync(outputFile)).toBe(true);
+    crash();
+
+    const second = boot(branch);
+    await second.start();
+
+    const [message] = lostNotices(second.pi)[0];
+    expect(message.content).toContain(`<task-id>${id}</task-id>\n<output-file>${outputFile}</output-file>\n<status>`);
+    expect(message.content).toContain("or check its output file for partial work, before assuming the task landed.");
+    expect(message.details.outputFile).toBe(outputFile);
+  });
+
+  it("leaves the transcript out once it is gone", async () => {
+    writeFileSync(join(hermetic!.dir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: true }));
+    const branch: any[] = [];
+    await startBackground(branch);
+    rmSync(records(branch)[0].outputFile);
+    crash();
+
+    const second = boot(branch);
+    await second.start();
+
+    const [message] = lostNotices(second.pi)[0];
+    expect(message.content).not.toContain("<output-file>");
+    expect(message.content).not.toContain("output file");
+    expect(message.details.outputFile).toBeUndefined();
+  });
+
+  it("offers the transcript for partial work when the agent cannot be resumed", async () => {
+    writeFileSync(join(hermetic!.dir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, outputTranscript: true }));
+    const branch: any[] = [];
+    await startBackground(branch);
+    crash();
+    rmSync(sessionFile);
+
+    const second = boot(branch);
+    await second.start();
+
+    const [message] = lostNotices(second.pi)[0];
+    expect(message.content).toContain("It cannot be resumed — its session is gone. Check its output file for partial work.");
+  });
+
   it("writes no running record for a foreground agent", async () => {
     const branch: any[] = [];
     settleWith("DONE", sessionFile);
@@ -303,6 +355,22 @@ describe("AgentManager", () => {
 
     expect(manager.getRecord(userStopped)?.stopReason).toBeUndefined();
     expect(manager.getRecord(shutdown)?.stopReason).toBe("session_end");
+    manager.dispose();
+  });
+
+  it("restores this session's names, the newer agent keeping a shared one", () => {
+    const manager = new AgentManager();
+    const saved = (data: Record<string, unknown>) => ({ type: "Explore", description: "d", status: "completed", startedAt: 0, ...data }) as any;
+
+    manager.restoreTombstones([
+      saved({ id: "newer", handle: "explore", sessionFile, completedAt: 20 }),
+      saved({ id: "older", handle: "explore", sessionFile, completedAt: 10 }),
+      saved({ id: "lost", handle: "plan", sessionFile }),
+      saved({ id: "unsaved", handle: "general" }),
+      saved({ id: "nameless", sessionFile }),
+    ]);
+
+    expect(manager.listTombstones().map((t) => [t.handle, t.id])).toEqual([["explore", "newer"], ["plan", "lost"]]);
     manager.dispose();
   });
 

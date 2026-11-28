@@ -270,7 +270,7 @@ Two things to weigh against `direct`: the clone re-sends the whole conversation,
 
 **Named agents.** The `Agent` tool takes an optional `name`, so the orchestrator can call one `auth-audit` instead of leaving you to tell `@explore-2` from `@explore-3`. A name is *additive*: the type-derived handle is still assigned, so `@explore` keeps reaching that agent rather than starting a second one beside it. Both names share one namespace — an alias can never shadow a live handle or the reverse — and the popup shows one row per agent, under its alias, with the type moved into the description. `steer_subagent` and `get_subagent_result` accept a handle too, so you and the model address agents the same way.
 
-**Resuming much later.** Because subagent sessions are persisted by default ([`rememberAgents`](#persistent-settings)), a handle keeps working after the agent's in-memory record is evicted: `@explore anything else?` reopens the conversation from disk. Only the *definition* is re-resolved, so a continuation runs under the agent type's current prompt and tools, not the ones the first run used. The model and thinking level are the ones the session recorded; if that model can no longer be used, pi falls back to its default and warns. If the type has since been deleted or disabled, the resume is refused rather than falling back to another agent — re-enable it and the handle works again. Names from an evicted agent stay reserved, so a later Explore becomes `explore-2` rather than shadowing something you can still reach; the 100 most recent are kept, and all of them are forgotten on `/new` and session switch. A resumed agent takes those names back, so `@explore` keeps meaning the same conversation. An agent whose session was only ever in memory leaves nothing to reopen, and the mention starts a fresh one instead; if the session file has since been deleted, the mention says so and frees the handle rather than silently sending your message to a new agent.
+**Resuming much later.** Because subagent sessions are persisted by default ([`rememberAgents`](#persistent-settings)), a handle keeps working after the agent's in-memory record is evicted: `@explore anything else?` reopens the conversation from disk, under the agent's own id. It also survives `/reload`, a restart and reopening the session, since session start rebuilds the names from the session's saved records. Only the *definition* is re-resolved, so a continuation runs under the agent type's current prompt and tools, not the ones the first run used. The model and thinking level are the ones the session recorded; if that model can no longer be used, pi falls back to its default and warns. If the type has since been deleted or disabled, the resume is refused rather than falling back to another agent — re-enable it and the handle works again. Names from an evicted agent stay reserved, so a later Explore becomes `explore-2` rather than shadowing something you can still reach; the 100 most recent are kept. `/new` starts with none, and switching sessions brings back the names of the session you switch to. A resumed agent takes those names back, so `@explore` keeps meaning the same conversation. An agent whose session was only ever in memory leaves nothing to reopen, and the mention starts a fresh one instead; if the session file has since been deleted, the mention says so and frees the handle rather than silently sending your message to a new agent.
 
 The grammar mirrors Claude Code's, and is deliberately narrow so nothing gets swallowed by accident:
 
@@ -1275,7 +1275,7 @@ src/
   completion-outbox.ts # Deliver completion notifications at the parent's next boundary, coalesced
   group-join.ts       # `group` join mode: one notification per turn's batch, with timeout
   status-note.ts      # Honest status note + salvaged partial output for non-normal outcomes
-  agent-record-entry.ts # The `subagents:record` session entry a finished agent leaves; get_subagent_result's fallback, and what resume reopens an evicted agent from
+  agent-record-entry.ts # The `subagents:record` session entry a top-level agent leaves; get_subagent_result's fallback, what resume and `@handle` reopen from, and what the lost-agent notice reads
   usage.ts            # Token usage shapes, accumulators, session-stats readers
   subagent-info.ts    # `SubagentInfo`: the agent fields every lifecycle event carries
 
@@ -1310,6 +1310,7 @@ src/
     agent-detail.ts   # A child's transcript folded into the inspector's Prompt/Activity/Outcome (pure)
     host.ts           # WorkflowHost adapter over AgentManager
     task.ts           # local_workflow task record and batched progress updates
+    entry.ts          # Session entries a workflow leaves: the flag run's card, and the run record resumeFromRunId and the lost-run notice read
     tool-description.ts # Model-facing description carrying the orchestration patterns
   ui/
     agent-widget.ts       # Persistent widget: spinners, activity, status icons, theming

@@ -22,7 +22,7 @@ import { statSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { AgentSession, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { worktreeLost } from "./agent-record-entry.js";
+import { type AgentRecordEntryData, worktreeLost } from "./agent-record-entry.js";
 import { resumeAgent, runAgent, type ToolActivity } from "./agent-runner.js";
 import { getAgentConfig } from "./agent-types.js";
 import { assignHandle, handleBase } from "./mention.js";
@@ -1622,8 +1622,8 @@ export class AgentManager {
    * its holder and the reopened agent gets a fresh one.
    *
    * `id` is the agent being reopened, when it keeps its own: its tombstone is
-   * the one holding the name, legitimately. The `@handle` path keeps no id and
-   * reopens exactly the tombstone that holds the name, so it skips that check.
+   * the one holding the name, legitimately. Every reopen passes it, `@handle`
+   * included, so one conversation keeps one id.
    */
   private reclaimable(name: string | undefined, id: string | undefined): string | undefined {
     if (name === undefined) return undefined;
@@ -1748,8 +1748,48 @@ export class AgentManager {
       completedAt: record.completedAt ?? Date.now(),
       worktreeLost: worktreeLost(record) || undefined,
     });
-    // Bound the memory a long session can accumulate. Oldest first, since the
-    // agent someone still wants to reach is the one they used most recently.
+    this.capTombstones();
+  }
+
+  /**
+   * Re-learn the names this session's saved agents held, from their
+   * `subagents:record` entries. Tombstones live in memory, so a reload or a
+   * restart starts without them, and `clearCompleted` drops them at every
+   * session boundary; this runs right after it, on the session now open. So
+   * `@explore` reaches the agent this session called that, its names stay
+   * reserved, and a reload changes neither. Claude Code likewise rebuilds its
+   * agent-name registry from the transcript when a session is resumed.
+   *
+   * An agent live in this process keeps its record instead. One without a
+   * handle or a session file has nothing to be reached by or to reopen. When
+   * two agents held the same name, the newer one keeps it.
+   */
+  restoreTombstones(entries: readonly AgentRecordEntryData[]): void {
+    const restorable = entries
+      .filter((entry) => entry.handle !== undefined && entry.sessionFile !== undefined && !this.agents.has(entry.id))
+      .map((entry) => ({ entry, at: entry.completedAt ?? entry.startedAt }))
+      .sort((a, b) => a.at - b.at);
+    for (const { entry, at } of restorable) {
+      const handle = entry.handle as string;
+      this.tombstones.set(handle, {
+        handle,
+        alias: entry.alias,
+        id: entry.id,
+        type: entry.type,
+        description: entry.description,
+        sessionFile: entry.sessionFile as string,
+        completedAt: at,
+        worktreeLost: entry.worktreeLost,
+      });
+    }
+    this.capTombstones();
+  }
+
+  /**
+   * Bound the memory a long session can accumulate. Oldest first, since the
+   * agent someone still wants to reach is the one they used most recently.
+   */
+  private capTombstones(): void {
     while (this.tombstones.size > MAX_TOMBSTONES) {
       const oldest = [...this.tombstones.values()].reduce((a, b) => (a.completedAt <= b.completedAt ? a : b));
       this.tombstones.delete(oldest.handle);
@@ -1796,7 +1836,8 @@ export class AgentManager {
     // results the LLM has yet to read — it does not make the sweep partial in
     // the sense that matters here. A new session means new handles, or
     // `@explore` would silently reach an agent the user never started. Claude
-    // Code resets its registry on `/clear` for the same reason.
+    // Code resets its registry on `/clear` for the same reason. The session
+    // now open gets its own agents' names back from `restoreTombstones`.
     this.tombstones.clear();
   }
 

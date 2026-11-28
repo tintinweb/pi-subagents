@@ -16,7 +16,9 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { escapeXml } from "../xml.js";
+import type { WorkflowRunEntryData } from "./entry.js";
 import type { WorkflowJournalEntry } from "./journal.js";
 import type { WorkflowMeta } from "./meta.js";
 import { activePhaseLabel, collapse, elapsedMs, stats, type WorkflowEntry, type WorkflowRunStatus } from "./progress.js";
@@ -96,6 +98,8 @@ export interface WorkflowTask {
   error?: string;
   /** The run's failure lines, for the notification's `<failures>`. */
   failures?: string[];
+  /** `session_end`: killed by the session shutting down, not by the user. */
+  stopReason?: "session_end";
 }
 
 export function createWorkflowTask(init: {
@@ -257,7 +261,25 @@ export function workflowResultText(task: WorkflowTask): string {
 }
 
 /**
- * Resolve a `resumeFromRunId` against the runs this session has seen.
+ * Whether a run known only from its saved record can be resumed, and whether
+ * a resume would replay anything. Its journal is created by the first agent
+ * call that settles and sits in the OS temp dir, so a missing file means that
+ * nothing settled or that the file was cleared: either way a resume runs every
+ * agent live, which the tool's result already says. Only a run that never had
+ * a journal is refused, as a live one is. `reason` completes "cannot be
+ * resumed —".
+ */
+export function savedRunResumable(
+  saved: Pick<WorkflowRunEntryData, "journalPath">,
+): { ok: true; journalPath: string; replayable: boolean } | { ok: false; reason: string } {
+  if (saved.journalPath === undefined) return { ok: false, reason: "it has no journal to resume from" };
+  return { ok: true, journalPath: saved.journalPath, replayable: existsSync(saved.journalPath) };
+}
+
+/**
+ * Resolve a `resumeFromRunId` against the runs this session has seen: the
+ * runs live in this process first, then the session's saved records of
+ * earlier ones (`saved`, latest per run), which outlast a reload or a restart.
  *
  * Same-session only, and deliberately so: the journal lives beside the
  * session's task files, and a run id from another session would silently find
@@ -268,6 +290,7 @@ export function workflowResultText(task: WorkflowTask): string {
 export function resolveResumeTarget(
   runId: string | undefined,
   tasks: ReadonlyMap<string, WorkflowTask>,
+  saved: readonly WorkflowRunEntryData[] = [],
 ):
   | undefined
   | { ok: true; runId: string; journalPath: string; scriptPath: string }
@@ -277,7 +300,13 @@ export function resolveResumeTarget(
 
   const prior = tasks.get(id);
   if (prior === undefined) {
-    const known = [...tasks.keys()];
+    const record = saved.find((entry) => entry.runId === id);
+    if (record !== undefined) {
+      const resumable = savedRunResumable(record);
+      if (!resumable.ok) return { ok: false, message: `Workflow "${id}" cannot be resumed — ${resumable.reason}.` };
+      return { ok: true, runId: id, journalPath: resumable.journalPath, scriptPath: record.scriptPath ?? "" };
+    }
+    const known = [...new Set([...tasks.keys(), ...saved.map((entry) => entry.runId)])];
     return {
       ok: false,
       message:
