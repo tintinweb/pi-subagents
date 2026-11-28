@@ -1119,7 +1119,8 @@ describe("resuming an evicted agent by name", () => {
     // `@explore`, so the name the user just typed still points at the corpse.
     const { lifecycle, tools } = boot();
     finishedRun(fakeSession());
-    await evict(await spawnBackground(tools));
+    const id = await spawnBackground(tools);
+    await evict(id);
     await flush();
     vi.mocked(runAgent).mockClear();
     heldRun(fakeSession());
@@ -1130,6 +1131,8 @@ describe("resuming an evicted agent by name", () => {
     const manager = (globalThis as any)[Symbol.for("pi-subagents:manager")];
     const resumedId = (vi.mocked(runAgent).mock.calls[0][3] as any).agentId;
     expect(manager.getRecord(resumedId).handle).toBe("explore");
+    // And its id: one conversation, one id, as `Agent({ resume })` keeps it.
+    expect(resumedId).toBe(id);
   });
 
   it("stops resolving to the tombstone once the resume has taken the name", async () => {
@@ -1452,5 +1455,108 @@ describe("handles as tool arguments", () => {
     );
 
     expect(textOf(r)).toContain("Agent not found");
+  });
+});
+
+describe("reaching a saved agent by name after a reload or restart", () => {
+  // Tombstones live in memory, so a reload or a restart used to forget every
+  // name: `@explore` stopped reaching the agent this session called that, and a
+  // new Explore could take the name. Session start now rebuilds them from the
+  // session's saved records, as Claude Code rebuilds its agent-name registry
+  // when a session is resumed.
+  const sessionPath = () => join(process.cwd(), "explore-session.jsonl");
+
+  /** Boot with `appendEntry` landing on `branch`, as pi's session does. */
+  function bootOn(branch: any[]) {
+    const b = makePi();
+    b.pi.appendEntry = vi.fn((customType: string, data: unknown) => branch.push({ type: "custom", customType, data }));
+    subagentsExtension(b.pi);
+    booted = b.lifecycle;
+    return b;
+  }
+
+  const branchCtx = (branch: any[]) => ctx({ sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => branch) } });
+
+  /** A first activation runs an Explore to completion; then pi reloads. */
+  async function finishedThenReloaded(branch: any[]) {
+    hermetic = hermeticDir({ settings: { outputTranscript: false } });
+    writeFileSync(sessionPath(), "");
+    const session = fakeSession({ sessionManager: { getSessionFile: () => sessionPath() } });
+    vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, opts: any) => {
+      opts.onSessionCreated?.(session);
+      return { responseText: "first answer", session, aborted: false, steered: false, failure: undefined } as any;
+    });
+    const first = bootOn(branch);
+    const id = await spawnBackground(first.tools);
+    await flush();
+    await first.lifecycle.get("session_shutdown")?.({ type: "session_shutdown", reason: "reload" });
+    delete (globalThis as any)[Symbol.for("pi-subagents:manager")];
+
+    const second = bootOn(branch);
+    await second.lifecycle.get("session_start")?.({ type: "session_start", reason: "reload" }, branchCtx(branch));
+    vi.mocked(runAgent).mockClear();
+    return { id, second };
+  }
+
+  it("reopens the agent's conversation under its own id", async () => {
+    const branch: any[] = [];
+    const { id, second } = await finishedThenReloaded(branch);
+    heldRun(fakeSession());
+
+    const uiCtx = ctx();
+    const result = await second.lifecycle.get("input")({ type: "input", text: "@explore anything else?", source: "interactive" }, uiCtx);
+    await flush();
+
+    expect(result).toEqual({ action: "handled" });
+    expect(vi.mocked(runAgent)).toHaveBeenCalledWith(
+      expect.anything(),
+      "Explore",
+      "anything else?",
+      expect.objectContaining({ resumeSessionFile: sessionPath(), agentId: id }),
+    );
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Resuming @explore", "info");
+  });
+
+  it("keeps the name reserved, so a new Explore is numbered", async () => {
+    const branch: any[] = [];
+    const { second } = await finishedThenReloaded(branch);
+    heldRun(fakeSession());
+
+    await spawnBackground(second.tools);
+    await flush();
+
+    const manager = (globalThis as any)[Symbol.for("pi-subagents:manager")];
+    const handles = (vi.mocked(runAgent).mock.calls as any[]).map((call) => manager.getRecord(call[3].agentId)?.handle);
+    expect(handles).toEqual(["explore-2"]);
+  });
+
+  it("reports a session that is gone once, then lets the name go", async () => {
+    const branch: any[] = [];
+    const { second } = await finishedThenReloaded(branch);
+    unlinkSync(sessionPath());
+
+    const uiCtx = ctx();
+    const first = await second.lifecycle.get("input")({ type: "input", text: "@explore anything else?", source: "interactive" }, uiCtx);
+    const again = await send(second.lifecycle, "@explore anything else?");
+
+    expect(first).toEqual({ action: "handled" });
+    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Could not resume @explore — its session is gone.", "warning");
+    // The name is free again, so the mention names the type and starts one.
+    expect(again).toEqual({ action: "handled" });
+    expect(vi.mocked(runMentionClone)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.anything(), expect.objectContaining({ resumeSessionFile: sessionPath() }));
+  });
+
+  it("knows no names in a new session", async () => {
+    const branch: any[] = [];
+    const { second } = await finishedThenReloaded(branch);
+    // `/new`: the same activation, a session with nothing in it.
+    await second.lifecycle.get("session_start")?.({ type: "session_start", reason: "new" }, branchCtx([]));
+
+    await send(second.lifecycle, "@explore anything else?");
+    await flush();
+
+    expect(vi.mocked(runMentionClone)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(runAgent)).not.toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.anything(), expect.objectContaining({ resumeSessionFile: sessionPath() }));
   });
 });

@@ -17,12 +17,15 @@ import type { AgentRecord } from "./types.js";
  *
  * `stopped` (a human aborted it) is deliberately distinct from `aborted` (the
  * turn limit was hit) — the parent should treat human intervention differently
- * from a budget cutoff.
+ * from a budget cutoff. A `stopped` agent whose `stopReason` is `session_end`
+ * was stopped by the session shutting down, not by a human.
  */
-export function getStatusNote(status: string): string {
+export function getStatusNote(status: string, stopReason?: AgentRecord["stopReason"]): string {
   switch (status) {
     case "stopped":
-      return " (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)";
+      return stopReason === "session_end"
+        ? " (stopped when the previous session ended, before completion — output is partial; the task was NOT finished)"
+        : " (STOPPED BY THE USER before completion — output is partial; the task was NOT finished)";
     case "aborted":
       return " (aborted — hit the turn limit before completion; output may be incomplete)";
     case "steered":

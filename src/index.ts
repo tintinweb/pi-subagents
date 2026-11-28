@@ -19,7 +19,7 @@ import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
-import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, reopenTarget } from "./agent-record-entry.js";
+import { AGENT_RECORD_ENTRY_TYPE, type AgentRecordEntryData, agentRecordEntryData, findAgentRecordEntry, findLostAgentEntries, latestAgentRecordEntries, reopenTarget } from "./agent-record-entry.js";
 import { getAgentConversation, getDefaultMaxTurns, getGraceTurns, getRememberAgents, normalizeMaxTurns, resolveEffectiveMaxTurns, SUBAGENT_TOOL_NAMES, setDefaultMaxTurns, setGraceTurns, setRememberAgents, steerAgent } from "./agent-runner.js";
 import { formatAgentTypeList, getAgentConfig, getAvailableTypes, getConfig, getFallbackSubagent, getModelLabelFromConfig, getToolDescriptionMode, isDefaultsDisabled, NO_FALLBACK, registerAgents, resolveSpawnType, resolveType, setDefaultsDisabled, setFallbackSubagent, setToolDescriptionMode } from "./agent-types.js";
 import { getCacheRetention, setCacheRetention } from "./cache-retention.js";
@@ -87,14 +87,14 @@ import { WorkflowCardRedraws } from "./ui/workflow-card-redraw.js";
 import { openWorkflowFromFleet, type WorkflowMenuDeps } from "./ui/workflow-menu.js";
 import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type LifetimeUsage, PendingUsagePool, toReportedUsage } from "./usage.js";
 import { decideWorkflowCollision, FOREIGN_WORKFLOW_TOOL_NAMES } from "./workflow/collisions.js";
-import { WORKFLOW_ENTRY_TYPE, type WorkflowEntryData, workflowEntryData } from "./workflow/entry.js";
+import { findLostWorkflowRuns, latestWorkflowRunEntries, WORKFLOW_ENTRY_TYPE, WORKFLOW_RUN_ENTRY_TYPE, type WorkflowEntryData, type WorkflowRunEntryData, workflowEntryData, workflowRunEntryData } from "./workflow/entry.js";
 import { createWorkflowHost } from "./workflow/host.js";
 import { appendJournal, readJournal, type WorkflowJournalEntry } from "./workflow/journal.js";
 import { extractMeta, type WorkflowMeta, workflowCallName } from "./workflow/meta.js";
 import { elapsedMs } from "./workflow/progress.js";
 import { runWorkflow } from "./workflow/runtime.js";
 import { resolveWorkflowScript } from "./workflow/saved.js";
-import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
+import { completeWorkflowTask, createWorkflowTask, failWorkflowTask, formatWorkflowNotification, resolveResumeTarget, savedRunResumable, updateWorkflowProgressBatch, type WorkflowTask, workflowResultText, workflowRunId } from "./workflow/task.js";
 import { workflowToolDescription } from "./workflow/tool-description.js";
 import { toWorkflowDetail, toWorkflowInfo, workflowArgs, workflowResult } from "./workflow-info.js";
 import { isWorktreeIsolationEnabled, setWorktreeIsolationEnabled } from "./worktree.js";
@@ -121,6 +121,9 @@ export function renderRunningAgentStatus(
 
 /** How long a foreground `Agent` call runs before its row offers ctrl+b. */
 const BACKGROUND_HINT_DELAY_MS = 2000;
+
+/** Above this many lost agents, one summary replaces the per-agent notices (Claude Code's cap). */
+const LOST_AGENT_NOTICE_LIMIT = 20;
 
 /** Format an agent's lifetime token total, or "" when zero. */
 function formatLifetimeTokens(o: { lifetimeUsage: LifetimeUsage }): string {
@@ -211,7 +214,7 @@ function formatTaskNotification(record: AgentRecord, resultMaxLen: number, showC
     record.toolCallId ? `<tool-use-id>${escapeXml(record.toolCallId)}</tool-use-id>` : null,
     record.outputFile ? `<output-file>${escapeXml(record.outputFile)}</output-file>` : null,
     `<status>${escapeXml(status)}</status>`,
-    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status)}</summary>`,
+    `<summary>Agent "${escapeXml(record.description)}" ${record.status}${getStatusNote(record.status, record.stopReason)}</summary>`,
     `<result>${escapeXml(resultPreview)}</result>`,
     `<usage><total_tokens>${totalTokens}</total_tokens><tool_uses>${record.toolUses}</tool_uses>${ctxXml}${compactXml}${costXml}<duration_ms>${durationMs}</duration_ms></usage>`,
     `</task-notification>`,
@@ -617,6 +620,15 @@ export default function (pi: ExtensionAPI) {
     });
   }, (record, message) => {
     pi.events.emit("subagents:steered", { ...toSubagentInfo(record), message });
+  }, (record) => {
+    // A `running` record, so an agent the process loses before it settles still
+    // leaves something behind: the next session reports it and resume can reopen
+    // it (findLostAgentEntries). The settle record supersedes this one. Written
+    // once the session file is known, since that is what makes it reopenable.
+    if (!record.isBackground || !isTopLevelAgent(record)) return;
+    try {
+      pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, agentRecordEntryData(record));
+    } catch { /* stale `pi` after a session replacement */ }
   });
 
   // Expose manager via Symbol.for() global registry for cross-package access.
@@ -713,13 +725,142 @@ export default function (pi: ExtensionAPI) {
    * is gone. The record lasts as long as the session file, so it states when
    * the run finished: a days-old result must not read as current (#436).
    */
-  const formatSavedAgentRecord = (saved: AgentRecordEntryData): string =>
-    `Agent: ${saved.id}\n` +
-    `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status)} | Duration: ${formatDuration(saved.startedAt, saved.completedAt)}\n` +
+  const formatSavedAgentRecord = (entry: AgentRecordEntryData): string => {
+    // A `running` entry with no live record is an agent the previous session
+    // lost before it settled (see findLostAgentEntries): it is not running now.
+    const saved: AgentRecordEntryData = entry.status === "running" ? { ...entry, status: "stopped", stopReason: "session_end" } : entry;
+    return `Agent: ${saved.id}\n` +
+    `Type: ${getDisplayName(saved.type)} | Status: ${saved.status}${getStatusNote(saved.status, saved.stopReason)} | Duration: ${saved.completedAt ? formatDuration(saved.startedAt, saved.completedAt) : "unknown"}\n` +
     (saved.completedAt ? `Finished: ${new Date(saved.completedAt).toISOString().slice(0, 16)}Z (${formatAge(saved.completedAt)} ago)\n` : "") +
     `Description: ${saved.description}\n` +
     `(From the session's saved record: the live record has been cleaned up, so its stats and conversation are gone.)\n\n` +
     (saved.status === "error" ? `Error: ${saved.error}${partialOutputSuffix(saved)}` : saved.result?.trim() || "No output.");
+  };
+
+  /**
+   * Tell the model about the background agents and workflow runs the previous
+   * session lost, as Claude Code does when a session is resumed: one `stopped`
+   * task notification each, or one summary per kind above
+   * {@link LOST_AGENT_NOTICE_LIMIT}, all in one message. Delivered with the
+   * next user turn rather than waking the session, and marked as sent so
+   * reopening the session again stays quiet. Nothing is resumed here: the
+   * notice says how, and the model decides.
+   */
+  const reportLostWork = (ctx: ExtensionContext): void => {
+    const branch = ctx.sessionManager.getBranch();
+    const lostAgents = findLostAgentEntries(branch, (id) => manager.getRecord(id) !== undefined);
+    // With workflows off there is no SubagentWorkflow to resume with. The runs
+    // stay unmarked, so they are reported once workflows are back on.
+    const lostRuns = isWorkflowsEnabled() ? findLostWorkflowRuns(branch, (runId) => workflowTasks.has(runId)) : [];
+    if (lostAgents.length === 0 && lostRuns.length === 0) return;
+    const stopped = getStatusLabel("stopped");
+    const lostDetails = (id: string, description: string, headline: string, text: string, outputFile?: string): NotificationDetails => ({
+      id,
+      description,
+      status: "stopped",
+      outputFile,
+      toolUses: 0,
+      turnCount: 0,
+      totalTokens: 0,
+      durationMs: 0,
+      // The row's collapsed preview is its first line, cut at 80 characters, so
+      // that line says what the user needs at a glance: can it be resumed.
+      resultPreview: `${headline}\n${text}`,
+    });
+
+    const agents = lostAgents.map((entry) => {
+      const reopen = reopenTarget(entry.type, entry.sessionFile, entry.worktreeLost);
+      // The `.output` transcript lives in the OS temp dir, so it is offered only
+      // while it is still there. It is often all that is left of an agent that
+      // cannot be resumed, and a cheaper look at progress than a resume.
+      const outputFile = entry.outputFile !== undefined && existsSync(entry.outputFile) ? entry.outputFile : undefined;
+      const summary = `Background agent "${entry.description}" didn't finish before the previous session ended`;
+      const note = reopen.ok
+        ? "No completion record was found for it in the previous session. It may have been stopped, or it may have been running when the previous session ended — either way its transcript is saved, so its progress is not lost. " +
+          (outputFile
+            ? "Resume it by calling the Agent tool with `resume` set to its id, or check its output file for partial work, before assuming the task landed."
+            : "Resume it by calling the Agent tool with `resume` set to its id, and ask for a status report before assuming the task landed.")
+        : `It was running when the previous session ended and did not complete. It cannot be resumed — ${reopen.reason}.` +
+          (outputFile ? " Check its output file for partial work." : "");
+      const headline = reopen.ok
+        ? "lost when the previous session ended — resume with Agent({ resume })"
+        : `lost when the previous session ended — cannot be resumed: ${reopen.reason}`;
+      return {
+        id: entry.id,
+        description: entry.description,
+        xml: [
+          `<task-notification>`,
+          `<task-id>${entry.id}</task-id>`,
+          outputFile ? `<output-file>${escapeXml(outputFile)}</output-file>` : null,
+          `<status>${stopped}</status>`,
+          `<summary>${escapeXml(summary)}</summary>`,
+          `<note>${escapeXml(note)}</note>`,
+          `</task-notification>`,
+        ].filter(Boolean).join("\n"),
+        details: lostDetails(entry.id, entry.description, headline, `${summary}. ${note}`, outputFile),
+        markSent: () =>
+          pi.appendEntry<AgentRecordEntryData>(AGENT_RECORD_ENTRY_TYPE, { ...entry, status: "stopped", stopReason: "session_end", lostNoticeSent: true }),
+      };
+    });
+
+    const runs = lostRuns.map((entry) => {
+      const resumable = savedRunResumable(entry);
+      const summary = `Background workflow "${entry.name}" (run ${entry.runId}) didn't finish before the previous session ended`;
+      const note = !resumable.ok
+        ? `It was running when the previous session ended and did not complete. It cannot be resumed — ${resumable.reason}.`
+        : resumable.replayable
+          ? "No completion record was found for it in the previous session. It may have been stopped, or it may have been running when the previous session ended. To pick up where it left off, call SubagentWorkflow with `resumeFromRunId` set to its run id and the same args, if it had any; agent() calls return cached results up to the first one that failed, no longer matches or never started."
+          : "It was running when the previous session ended and did not complete. Nothing of it can be replayed — no agent() call had finished, or its journal is gone — so running it again starts over.";
+      const headline = !resumable.ok
+        ? `lost when the previous session ended — cannot be resumed: ${resumable.reason}`
+        : resumable.replayable
+          ? "lost when the previous session ended — resume with resumeFromRunId"
+          : "lost when the previous session ended — nothing to replay";
+      return {
+        id: entry.runId,
+        description: entry.name,
+        xml: [
+          `<task-notification>`,
+          `<task-id>${entry.runId}</task-id>`,
+          `<status>${stopped}</status>`,
+          `<summary>${escapeXml(summary)}</summary>`,
+          `<note>${escapeXml(note)}</note>`,
+          `</task-notification>`,
+        ].join("\n"),
+        details: lostDetails(entry.runId, `Workflow ${entry.name}`, headline, `${summary}. ${note}`),
+        markSent: () =>
+          pi.appendEntry<WorkflowRunEntryData>(WORKFLOW_RUN_ENTRY_TYPE, { ...entry, status: "killed", stopReason: "session_end", lostNoticeSent: true }),
+      };
+    });
+
+    /** One notice per item, or one summary of them all above the cap (Claude Code's). */
+    const block = (items: typeof agents, kind: string, howToResume: string): string | undefined => {
+      if (items.length === 0) return undefined;
+      if (items.length <= LOST_AGENT_NOTICE_LIMIT) return items.map((item) => item.xml).join("\n\n");
+      return [
+        `<task-notification>`,
+        `<status>${stopped}</status>`,
+        `<summary>${items.length} background ${kind} didn't finish before the previous session ended</summary>`,
+        `<note>No completion record was found for them in the previous session. They may have been stopped, or they may have been running when the previous session ended. ${howToResume}</note>`,
+        `<${kind}>`,
+        ...items.map((item) => `${item.id}: ${escapeXml(item.description)}`),
+        `</${kind}>`,
+        `</task-notification>`,
+      ].join("\n");
+    };
+    const content = [
+      block(agents, "agents", "To resume one, call the Agent tool with `resume` set to its id."),
+      block(runs, "workflows", "To resume one, call SubagentWorkflow with `resumeFromRunId` set to its run id and the same args, if it had any."),
+    ].filter(Boolean).join("\n\n");
+    const [first, ...others] = [...agents, ...runs].map((item) => item.details);
+    try {
+      pi.sendMessage<NotificationDetails>(
+        { customType: "subagent-notification", content, display: true, details: { ...first, ...(others.length > 0 && { others }) } },
+        { deliverAs: "nextTurn" },
+      );
+      for (const item of [...agents, ...runs]) item.markSent();
+    } catch { /* stale `pi` after a session replacement */ }
+  };
 
   const registryEntry = {
     waitForAll: () => manager.waitForAll(),
@@ -789,6 +930,9 @@ export default function (pi: ExtensionAPI) {
       watchHandoffKey(ctx.ui);
     }
     manager.clearCompleted(true);
+    // This session's own agents, by name, so `@handle` and `get_subagent_result`
+    // reach them after a reload or a restart as they did before it.
+    manager.restoreTombstones(latestAgentRecordEntries(ctx.sessionManager.getBranch()));
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
     if (!rpcHandle) {
@@ -867,6 +1011,9 @@ export default function (pi: ExtensionAPI) {
     // extension factory has run, so this is the earliest point the real value
     // exists. Detached inside — a workflow must not hold up session startup.
     resolveWorkflowCollisions(ctx);
+    // After the collision check, which can turn workflows off for the session:
+    // the notice must not point the model at a tool it does not have.
+    reportLostWork(ctx);
     runWorkflowFlag(ctx);
   });
 
@@ -1002,7 +1149,9 @@ export default function (pi: ExtensionAPI) {
         // exception — both come from a tombstone this extension wrote.
         const id = spawnResolved(pi, ctx, reopen.type, mention.message, {
           description: entry.description,
-          reclaim: { handle: entry.handle, alias: entry.alias },
+          // The same id, as `Agent({ resume })` keeps it: one conversation, one
+          // id, so the id the model holds still names this continuation.
+          reclaim: { id: entry.id, handle: entry.handle, alias: entry.alias },
           resumeSessionFile: entry.sessionFile,
           isBackground: true,
         });
@@ -1132,10 +1281,17 @@ export default function (pi: ExtensionAPI) {
     scheduler.stop();
     // Before abortAll, and not folded into it: a workflow owns a worker thread
     // as well as its children, and only its own signal terminates that.
-    for (const task of workflowTasks.values()) task.abortController.abort();
+    for (const task of workflowTasks.values()) {
+      // Marked like the agents below, so a run's settle record that does
+      // reach the session reads as lost, not as a user's kill.
+      task.stopReason = "session_end";
+      task.abortController.abort();
+    }
     workflowTasks.clear();
     workflowRuns.clear();
-    manager.abortAll();
+    // Marked so a stop that does reach the session reads as lost, not as the
+    // user's: the next session reports it (findLostAgentEntries).
+    manager.abortAll("session_end");
     // Activation-owned UI and group state (#256): `session_shutdown` also runs for
     // reload and session replacement, where the Node process survives, so a live
     // widget render interval or a pending group-join timeout from this activation
@@ -2733,6 +2889,17 @@ Terse command-style prompts produce shallow, generic work.
    * agent uses — the completion outbox, which delivers at the parent's next
    * boundary — rendered by the existing `subagent-notification` renderer.
    */
+  /**
+   * Save a `SubagentWorkflow` run's record: `running` when it starts, final
+   * when it settles. What `resumeFromRunId` and the lost-run notice read once
+   * the in-memory run is gone (see {@link WORKFLOW_RUN_ENTRY_TYPE}).
+   */
+  function saveWorkflowRun(task: WorkflowTask) {
+    try {
+      pi.appendEntry<WorkflowRunEntryData>(WORKFLOW_RUN_ENTRY_TYPE, workflowRunEntryData(task));
+    } catch { /* stale `pi` after a session replacement */ }
+  }
+
   function notifyWorkflowFinished(task: WorkflowTask) {
     redrawWorkflowSurfaces(task);
     const result = workflowResultText(task);
@@ -2853,7 +3020,9 @@ Terse command-style prompts produce shallow, generic work.
     },
 
     execute: async (toolCallId, params, _signal, _onUpdate, ctx) => {
-      const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks);
+      // The session's saved records too: a run from before a reload or a
+      // restart is no longer in memory, but its journal still is on disk.
+      const resumeFrom = resolveResumeTarget(params.resumeFromRunId, workflowTasks, latestWorkflowRunEntries(ctx.sessionManager.getBranch()));
       if (resumeFrom !== undefined && !resumeFrom.ok) return textResult(resumeFrom.message);
 
       // A resume with no source of its own re-runs what that run ran. The
@@ -2909,6 +3078,7 @@ Terse command-style prompts produce shallow, generic work.
         ...(replay !== undefined && replay.length > 0 ? { replay, resumedFrom: resumeFrom!.runId } : {}),
       });
       workflowTasks.set(runId, task);
+      saveWorkflowRun(task);
       // The run's own row has to appear now, not when it settles. Its agents
       // are owned by it, so their lifecycle callbacks no longer refresh these
       // surfaces — nothing else would register the widget for a run whose
@@ -2918,7 +3088,10 @@ Terse command-style prompts produce shallow, generic work.
 
       // Background, like Claude Code: the id comes back now and the run keeps
       // going without the tool call.
-      trackWorkflowRun(runWorkflowTask(ctx, task).then(() => notifyWorkflowFinished(task)));
+      trackWorkflowRun(runWorkflowTask(ctx, task).then(() => {
+        saveWorkflowRun(task);
+        notifyWorkflowFinished(task);
+      }));
 
       return {
         content: [{

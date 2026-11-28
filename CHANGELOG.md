@@ -7,7 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The model is told about background agents and workflow runs the previous session lost.** If pi crashes, quits, reloads or switches sessions while a top-level background agent or a `SubagentWorkflow` run is going, the next session reports each one once, with your next message. The notice says how to continue it, with `Agent({ resume })` or `resumeFromRunId`, and points at the agent's transcript while it is still on disk. Nothing restarts on its own, as in Claude Code. An agent stopped by the session ending also no longer reads as "STOPPED BY THE USER". Extensions reading `subagents:record` entries now also see `status: "running"` entries and should read the latest entry per id; workflow runs get their own `subagents:workflow-run` entry ([docs/rpc.md](docs/rpc.md)).
+
 ### Fixed
+- **`@handle` keeps working after `/reload`, a restart or reopening the session.** Agent names were kept only in memory, so after a reload `@explore` no longer reached the agent this session called that, and a new Explore could take the name. Session start now rebuilds the names from the session's saved records. A reopened agent also keeps its id now, as with `Agent({ resume })`, instead of getting a new one.
+- **`resumeFromRunId` works after `/reload` or a restart.** It only knew runs still in memory and answered `No workflow run "<id>" in this session`, although the run's journal was still on disk. It now also finds runs from the session's saved records.
 - **Workflow children use the agent file as it is now** ([#483](https://github.com/tintinweb/pi-subagents/issues/483) — thanks [@woksin](https://github.com/woksin)). After an `agents/<name>.md` was edited mid-session, `SubagentWorkflow` children kept the definition loaded at session start, such as its old `model:`, until `/reload`, while `Agent` calls already used the new one. Each workflow run now reloads agent files when it starts.
 
 ## [0.26.3] - 2026-11-23

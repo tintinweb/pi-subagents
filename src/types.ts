@@ -207,6 +207,12 @@ export interface AgentRecord {
   toolUses: number;
   startedAt: number;
   completedAt?: number;
+  /**
+   * Why a `stopped` agent stopped, when it was not the user: `session_end` marks
+   * one stopped by the session shutting down. Its saved record then still counts
+   * as lost, and the next session tells the model about it.
+   */
+  stopReason?: "session_end";
   session?: AgentSession;
   abortController?: AbortController;
   promise?: Promise<string>;

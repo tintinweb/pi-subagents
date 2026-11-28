@@ -11,6 +11,11 @@
  * It is also what lets `Agent({ resume })` reopen an evicted agent: the entry
  * names the session file the conversation lives in, so the id the model holds
  * still leads somewhere after eviction, a reload or a restart.
+ *
+ * A top-level background agent also appends one when its session is created,
+ * with `status: "running"`. Its settle entry supersedes it; if the process dies
+ * first, or the shutdown stop never lands, that entry is what the next session
+ * finds — see {@link findLostAgentEntries}.
  */
 
 import { existsSync } from "node:fs";
@@ -37,11 +42,20 @@ export interface AgentRecordEntryData {
    * `persist_session: false`), which leaves nothing to come back to.
    */
   sessionFile?: string;
+  /**
+   * The agent's `.output` transcript, when it writes one. It sits in the OS
+   * temp dir, so it can be gone while the session file is not.
+   */
+  outputFile?: string;
   /** Names to give back to the reopened agent, as the `@handle` path does. */
   handle?: string;
   alias?: string;
   /** Set when the agent's work lived in a worktree that is now gone — see {@link worktreeLost}. */
   worktreeLost?: boolean;
+  /** `session_end`: stopped by the session shutting down, not by the user. */
+  stopReason?: AgentRecord["stopReason"];
+  /** The model was told this agent was lost; a later session does not tell it again. */
+  lostNoticeSent?: boolean;
 }
 
 /**
@@ -69,9 +83,11 @@ export function agentRecordEntryData(record: AgentRecord): AgentRecordEntryData 
     startedAt: record.startedAt,
     completedAt: record.completedAt,
     sessionFile: record.sessionFile,
+    outputFile: record.outputFile,
     handle: record.handle,
     alias: record.alias,
     worktreeLost: worktreeLost(record) || undefined,
+    stopReason: record.stopReason,
   };
 }
 
@@ -109,6 +125,57 @@ export function findAgentRecordEntry(ctx: ExtensionContext, id: string, matchHan
     }
   }
   return named;
+}
+
+/** The fields of a session entry these readers look at. */
+type SessionEntryLike = { type: string; customType?: string; data?: unknown };
+
+/**
+ * The latest saved record of each agent on the branch, oldest agent first. A
+ * resumed agent appends an entry on every finish, so only its last one counts.
+ */
+export function latestAgentRecordEntries(entries: readonly SessionEntryLike[]): AgentRecordEntryData[] {
+  return latestEntriesById(entries, AGENT_RECORD_ENTRY_TYPE, isAgentRecordEntryData, (data) => data.id);
+}
+
+/**
+ * The latest entry of `customType` for each key on the branch, in order of
+ * each key's first entry. Shared with the workflow run records, which are
+ * superseded the same way.
+ */
+export function latestEntriesById<T>(
+  entries: readonly SessionEntryLike[],
+  customType: string,
+  isData: (data: unknown) => data is T,
+  keyOf: (data: T) => string,
+): T[] {
+  const latest = new Map<string, T>();
+  for (const entry of entries) {
+    if (entry.type !== "custom" || entry.customType !== customType) continue;
+    if (!isData(entry.data)) continue;
+    latest.set(keyOf(entry.data), entry.data);
+  }
+  return [...latest.values()];
+}
+
+/**
+ * Agents a previous session lost: the latest entry of each id on the branch
+ * says it was still `running` (the process died before it settled, or its
+ * shutdown stop never landed), or `stopped` by the session ending. A user's
+ * stop is not a loss, and an agent live in this process is not lost. One the
+ * model was already told about (`lostNoticeSent`) is left out, so reopening a
+ * session does not repeat the notice. Oldest first.
+ */
+export function findLostAgentEntries(
+  entries: readonly SessionEntryLike[],
+  isLive: (id: string) => boolean,
+): AgentRecordEntryData[] {
+  return latestAgentRecordEntries(entries).filter(
+    (data) =>
+      !data.lostNoticeSent &&
+      (data.status === "running" || (data.status === "stopped" && data.stopReason === "session_end")) &&
+      !isLive(data.id),
+  );
 }
 
 /**
